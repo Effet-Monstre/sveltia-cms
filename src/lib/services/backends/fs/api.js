@@ -60,6 +60,17 @@ const fetchFiles = async () => {
  */
 const commitChanges = async (changes) => saveChanges(rootDirHandle, changes);
 
+export const fetchBlob = async (asset) => {
+  const { path } = asset;
+  console.log(asset, path);
+
+  const { file } = await (
+    await fetch(`/api/entries/blob?entry[handle]=${encodeURIComponent(path)}`)
+  ).json();
+
+  return (await fetch(file)).blob();
+};
+
 /**
  * @type {BackendService}
  */
@@ -71,5 +82,6 @@ export default {
   signIn,
   signOut,
   fetchFiles,
+  fetchBlob,
   commitChanges,
 };

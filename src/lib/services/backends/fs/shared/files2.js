@@ -159,13 +159,17 @@ const scanDir = async (dirHandle, context) => {
  * @param {FileListItem} fileListItem File list item.
  * @returns {Promise<BaseFileListItemProps>} Normalized file list item.
  */
-const normalizeFileListItem = async ({ file, path }) => ({
-  file,
-  path: path.normalize(),
-  name: file.name.normalize(),
-  size: file.size,
-  sha: await getGitHash(file),
-});
+const normalizeFileListItem = async ({ file, path }) => {
+  return file
+    ? {
+        file,
+        path: path.normalize(),
+        name: file.name.normalize(),
+        size: file.size,
+        sha: await getGitHash(file),
+      }
+    : { path: path.normalize(), sha: 'sha', name: 'name', size: 10 };
+};
 
 /**
  * Retrieve all files under the static directory.
@@ -251,7 +255,7 @@ export const loadFiles = async (rootDirHandle) => {
 
   const files = await Promise.all(
     allFiles
-      .map(({ handle, content, data }) => {
+      .map(({ handle, content, file }) => {
         if (content) {
           return {
             file: new File([JSON.stringify(content)], handle),
@@ -266,7 +270,8 @@ export const loadFiles = async (rootDirHandle) => {
         // };
 
         return {
-          file: new File([dataURLToBlob(data.blob)], handle),
+          //file: new File([dataURLToBlob(data.blob)], handle),
+          //blobURL: file,
           path: handle,
         };
       })
@@ -314,18 +319,25 @@ const moveFile = async ({ rootDirHandle, previousPath, path }) => {
 
  */
 
-const apiWrite = async (path, data) => {
+const apiWrite = async (path, { file, content }) => {
+  const formData = new FormData();
+
+  console.log('file', file);
+  console.log('content', content);
+
+  formData.append('entry[handle]', path);
+
+  if (file) {
+    formData.append('entry[file]', file);
+  }
+
+  if (content) {
+    formData.append('entry[content]', content);
+  }
+
   await fetch('/api/entries', {
     method: 'POST',
-    body: JSON.stringify({
-      entry: {
-        handle: path,
-        ...data,
-      },
-    }),
-    headers: {
-      'Content-Type': 'application/json',
-    },
+    body: formData,
   });
 };
 
@@ -375,9 +387,9 @@ function fileToBase64(file) {
 const writeFile = async ({ rootDirHandle, fileHandle, path, data }) => {
   try {
     if (typeof data == 'string') {
-      await apiWrite(path, { content: JSON.parse(data) });
+      await apiWrite(path, { content: data });
     } else {
-      await apiWrite(path, { data: { blob: await fileToBase64(data) } });
+      await apiWrite(path, { file: data });
     }
   } catch {}
   return new File([data], path);

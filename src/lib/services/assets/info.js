@@ -40,6 +40,8 @@ const requestedAssetPaths = new Set();
 export const getAssetBlob = async (asset, retryCount = 0) => {
   const { file, blobURL, name, path } = asset;
 
+  console.log('asset', asset);
+
   if (blobURL) {
     return fetch(blobURL).then((r) => r.blob());
   }
