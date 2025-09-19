@@ -12,38 +12,44 @@
 
   let htmlContent = $state(null);
 
+  const convertToNestedObject = (flatObj) => {
+    const result = {};
+
+    for (const [key, value] of Object.entries(flatObj)) {
+      // Split the key by dots to get the path
+      const keys = key.split('.');
+      let current = result;
+
+      // Navigate/create the nested structure
+      for (let i = 0; i < keys.length - 1; i++) {
+        const currentKey = keys[i];
+
+        // Check if the next key is a number (array index)
+        const nextKey = keys[i + 1];
+        const isNextKeyArrayIndex = /^\d+$/.test(nextKey);
+
+        // If current key doesn't exist, create it
+        if (!(currentKey in current)) {
+          current[currentKey] = isNextKeyArrayIndex ? [] : {};
+        }
+
+        current = current[currentKey];
+      }
+
+      // Set the final value
+      const finalKey = keys[keys.length - 1];
+      current[finalKey] = value;
+    }
+
+    return result;
+  };
+
   const getCurrentValue = () => {
     const currentValue = $entryDraft?.currentValues[locale] || {};
 
-    const obj = {};
+    const obj = convertToNestedObject(currentValue);
 
-    for (const key in currentValue) {
-      const parts = key.split('.');
-
-      let current = obj;
-      let currentKey = parts[0];
-
-      for (let i = 1; i < parts.length - 1; i++) {
-        const part = parts[i];
-
-        if (!isNaN(+part)) {
-          current[currentKey] ||= [];
-
-          if (+part > current[currentKey].length) {
-            current[currentKey].push({});
-          }
-
-          currentKey = +part;
-          current = current[currentKey];
-        } else {
-          current[currentKey] ||= {};
-          current = current[currentKey];
-          currentKey = part;
-        }
-      }
-
-      current[currentKey] = currentValue[key];
-    }
+    console.log(obj);
 
     return { value: obj, locale };
   };
@@ -71,7 +77,7 @@
   $effect(() => {
     //const iframeDoc = iFrameRef.contentDocument || iFrameRef.contentWindow.document;
 
-    console.log('hello', htmlContent);
+    //console.log('hello', htmlContent);
 
     //iframeDoc.body.innerHtml = htmlContent;
 
