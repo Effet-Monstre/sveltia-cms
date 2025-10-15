@@ -109,8 +109,6 @@
 
     if (currentValue) {
       frames.push({ frameRef: undefined, id: idx++, content: await out(currentValue) });
-
-      // htmlContent = await out(currentValue);
     }
   });
 
@@ -145,11 +143,10 @@
 
         value.addEventListener('load', () => {
           const iframeDoc = value.contentDocument || value.contentWindow.document;
+          iframeDoc.documentElement.style.scrollBehavior = 'auto';
 
           iframeDoc.addEventListener('scroll', () => {
             scrollY = iframeDoc.documentElement.scrollTop;
-
-            console.log('scroll', scrollY);
           });
 
           const frame = frames.find((x) => x.id == key);
@@ -166,29 +163,13 @@
 
           frame.loaded = true;
 
-          const iframeWindow = value.contentWindow;
-
-          console.log('scrollTo', +scrollY || 0);
-
-          iframeWindow.scrollTo(0, +scrollY || 0);
+          iframeDoc.documentElement.scrollTop = +scrollY || 0;
         });
 
         frame.loading = true;
       }
     }
   });
-
-  // $effect(() => {
-  //   //const iframeDoc = iFrameRef.contentDocument || iFrameRef.contentWindow.document;
-
-  //   //console.log('hello', htmlContent);
-
-  //   //iframeDoc.body.innerHtml = htmlContent;
-
-  //   //iFrameRef.src = 'data:text/html,' + encodeURIComponent(htmlContent);
-
-  //   iFrameRef.srcdoc = htmlContent;
-  // });
 </script>
 
 <div bind:this={mainRef} style="width:100%; height:100%; position:relative;">
