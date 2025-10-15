@@ -1,5 +1,5 @@
 /coverage
-/package
+#/package
 /.vite
 node_modules
 *.log
