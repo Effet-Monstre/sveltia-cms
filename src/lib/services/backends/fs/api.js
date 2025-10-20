@@ -62,9 +62,10 @@ const commitChanges = async (changes) => saveChanges(rootDirHandle, changes);
 
 export const fetchBlob = async (asset) => {
   const { path } = asset;
-  console.log(asset, path);
 
-  const { file_url } = await (
+  const {
+    entry: { file_url },
+  } = await (
     await fetch(`/admin/entries/show?handle=${encodeURIComponent(path)}`, {
       headers: {
         'X-CSRF-Token': document.querySelector('meta[name=csrf-token]').content,
@@ -72,7 +73,11 @@ export const fetchBlob = async (asset) => {
     })
   ).json();
 
-  return (await fetch(file_url)).blob();
+  const blob = await (await fetch(file_url)).blob();
+
+  asset.size = blob.size;
+
+  return blob;
 };
 
 /**

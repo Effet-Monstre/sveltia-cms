@@ -160,6 +160,9 @@ const scanDir = async (dirHandle, context) => {
  * @returns {Promise<BaseFileListItemProps>} Normalized file list item.
  */
 const normalizeFileListItem = async ({ file, path }) => {
+  const pathChunks = path.split('/');
+  const fileName = pathChunks[pathChunks.length - 1];
+
   return file
     ? {
         file,
@@ -168,7 +171,7 @@ const normalizeFileListItem = async ({ file, path }) => {
         size: file.size,
         sha: await getGitHash(file),
       }
-    : { path: path.normalize(), sha: 'sha', name: 'name', size: 10 };
+    : { path: path.normalize(), sha: 'sha', name: fileName, size: 10 };
 };
 
 /**
@@ -322,9 +325,6 @@ const moveFile = async ({ rootDirHandle, previousPath, path }) => {
 const apiWrite = async (path, { file, content }) => {
   const formData = new FormData();
 
-  console.log('file', file);
-  console.log('content', content);
-
   formData.append('entry[handle]', path);
 
   if (file) {
@@ -358,8 +358,6 @@ const apiDelete = async (path) => {
 };
 
 const apiAll = async () => {
-  console.log('in44');
-
   const response = await fetch('/admin/entries', {
     headers: {
       'X-CSRF-Token': document.querySelector('meta[name=csrf-token]').content,
@@ -367,8 +365,6 @@ const apiAll = async () => {
   });
 
   const data = await response.json();
-
-  console.log(data);
 
   return data.entries;
 };
@@ -444,8 +440,6 @@ const deleteEmptyParentDirs = async (rootDirHandle, pathSegments) => {
  */
 const deleteFile = async ({ rootDirHandle, path }) => {
   const { dirname: dirPath = '', basename: fileName } = getPathInfo(stripSlashes(path));
-
-  console.log(dirPath, fileName, path);
 
   await apiDelete(path);
 

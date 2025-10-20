@@ -233,8 +233,6 @@ export const loadFiles = async (rootDirHandle) => {
 
   const { entries, errors } = await prepareEntries(entryFiles);
 
-  console.log(entries, assetFiles);
-
   allEntries.set(entries);
   allAssets.set(parseAssetFiles(assetFiles));
   gitConfigFiles.set(configFiles);
@@ -281,7 +279,6 @@ const writeFile = async ({ rootDirHandle, fileHandle, path, data }) => {
   const writer = await fileHandle.createWritable?.();
 
   try {
-    console.log(data);
     await writer?.write(data);
   } catch {
     // Can throw if the file has just been moved/renamed without any change, and then the `data` is

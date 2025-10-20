@@ -40,8 +40,6 @@ const requestedAssetPaths = new Set();
 export const getAssetBlob = async (asset, retryCount = 0) => {
   const { file, blobURL, name, path } = asset;
 
-  console.log('asset', asset);
-
   if (blobURL) {
     return fetch(blobURL).then((r) => r.blob());
   }
@@ -71,12 +69,8 @@ export const getAssetBlob = async (asset, retryCount = 0) => {
     blob = new Blob([_blob], { type: mime.getType(name) ?? _blob.type });
   }
 
-  console.log('in44', asset.blobURL);
-
   // Cache the URL
   asset.blobURL = URL.createObjectURL(blob);
-
-  console.log('in45', asset.blobURL);
 
   requestedAssetPaths.delete(path);
 
