@@ -16,6 +16,7 @@
   import { dataLoaded } from '$lib/services/contents';
   import { user } from '$lib/services/user';
   import { initUserEnvDetection } from '$lib/services/user/env';
+  import { signInManually } from '$lib/services/user/auth';
 
   /**
    * @import { SiteConfig } from '$lib/types/public';
@@ -43,6 +44,15 @@
 
   onMount(() => {
     initUserEnvDetection();
+  });
+
+  const configuredBackendName = $derived(/** @type {string} */ ($siteConfig?.backend?.name));
+
+  $effect(() => {
+    if (!configuredBackendName) {
+      return;
+    }
+    signInManually(configuredBackendName);
   });
 
   // Fix the position of the custom mount element if needed
