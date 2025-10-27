@@ -47,6 +47,19 @@
           $state.snapshot($entryDraft.currentValues[locale])[keyPath]) ||
       (translate && (!getSourceLanguage(locale) || !getTargetLanguage(otherLocale)))}
     onclick={() => {
+      if (!$entryDraft?.currentValues?.[locale] || !$entryDraft?.currentValues?.[otherLocale]) {
+        return;
+      }
+
+      if (!keyPath) {
+        $entryDraft.currentValues[locale] = JSON.parse(
+          JSON.stringify($entryDraft?.currentValues?.[otherLocale]),
+        );
+        return;
+      }
+
+      return;
+
       copyFromLocale({
         sourceLocale: otherLocale,
         targetLocale: locale,

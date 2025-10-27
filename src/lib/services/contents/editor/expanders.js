@@ -26,7 +26,7 @@ import { getField } from '$lib/services/contents/entry/fields';
  * @param {boolean | 'auto'} [args.collapsed] The `collapsed` option value.
  * @returns {boolean} Whether th expander should be expanded.
  */
-export const getInitialExpanderState = ({ key, locale, collapsed = false }) => {
+export const getInitialExpanderState = ({ key, locale, collapsed = true }) => {
   const _draft = get(entryDraft);
   const currentState = _draft?.expanderStates?._[key];
 

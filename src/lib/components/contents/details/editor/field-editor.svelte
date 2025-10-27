@@ -197,10 +197,10 @@
         <div class="required" aria-label={$_('required')}>*</div>
       {/if}
       <Spacer flex />
-      {#if canCopy && ['markdown', 'string', 'text', 'list', 'object'].includes(widgetName)}
+      {#if false && canCopy && ['markdown', 'string', 'text', 'list', 'object'].includes(widgetName)}
         <TranslateButton size="small" {locale} {otherLocales} {keyPath} />
       {/if}
-      {#if canCopy || canRevert}
+      {#if false && (canCopy || canRevert)}
         <MenuButton
           variant="ghost"
           size="small"

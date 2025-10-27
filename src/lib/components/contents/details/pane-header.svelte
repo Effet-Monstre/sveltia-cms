@@ -84,7 +84,7 @@
     <Spacer flex />
     {#if $thisPane?.mode === 'edit'}
       {@const localeLabel = getLocaleLabel($thisPane.locale)}
-      {#if canCopy}
+      {#if false && canCopy}
         <TranslateButton locale={$thisPane.locale} {otherLocales} />
       {/if}
       <MenuButton
@@ -98,13 +98,15 @@
             {#if canCopy && $thisPane?.locale}
               <CopyMenuItems locale={$thisPane.locale} {otherLocales} />
             {/if}
-            <MenuItem
-              label={$_('revert_changes')}
-              disabled={!canRevert}
-              onclick={() => {
-                revertChanges({ locale: $thisPane?.locale });
-              }}
-            />
+            {#if false}
+              <MenuItem
+                label={$_('revert_changes')}
+                disabled={!canRevert}
+                onclick={() => {
+                  revertChanges({ locale: $thisPane?.locale });
+                }}
+              />
+            {/if}
             {#if !saveAllLocales && $thisPane?.locale}
               <Divider />
               <MenuItem

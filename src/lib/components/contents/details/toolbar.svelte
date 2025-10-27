@@ -245,13 +245,15 @@
             showEditSlugDialog = true;
           }}
         />
-        <MenuItem
-          label={$_('revert_all_changes')}
-          disabled={!modified}
-          onclick={() => {
-            revertChanges();
-          }}
-        />
+        {#if false}
+          <MenuItem
+            label={$_('revert_all_changes')}
+            disabled={!modified}
+            onclick={() => {
+              revertChanges();
+            }}
+          />
+        {/if}
         {#if !($isSmallScreen || $isMediumScreen)}
           <Divider />
           <MenuItemCheckbox
