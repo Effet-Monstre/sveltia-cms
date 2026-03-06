@@ -11,7 +11,10 @@ import {
   customPreviewTemplateRegistry,
 } from '$lib/services/contents/editor';
 import { customComponentRegistry } from '$lib/services/contents/fields/rich-text/components/definitions';
-import { customFileFormatRegistry } from '$lib/services/contents/file/config';
+import {
+  customFileFormatRegistry,
+  customPreviewRenderers,
+} from '$lib/services/contents/file/config';
 
 import App from './components/app.svelte';
 
