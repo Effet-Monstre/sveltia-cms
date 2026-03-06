@@ -25,7 +25,6 @@ export const getFillSlugOptions = ({ draft }) => {
   } = collectionFile ?? collection;
 
   return {
-    // eslint-disable-next-line object-shorthand
     collection: /** @type {InternalEntryCollection} */ (collection),
     content: {
       ...currentValues[defaultLocale],
@@ -60,7 +59,10 @@ export const getLocalizedSlug = ({ draft, locale, localizingKeyPaths }) => {
 
   const _slug = currentSlugs?.[locale] ?? currentSlugs?._;
 
-  if (isNew) {
+  // When creating a new entry or enabling a locale for an existing entry, we need to fill the slug
+  // template to generate the initial slug for the new locale. For other cases, we keep the existing
+  // slug to avoid changing URLs unexpectedly.
+  if (isNew || !draft.originalLocales[locale]) {
     return fillTemplate(slugTemplate, {
       collection,
       locale,
@@ -140,7 +142,7 @@ export const getLocalizedSlugs = ({ draft, defaultLocaleSlug }) => {
  * @param {LocaleSlugMap | undefined} args.localizedSlugs Localized slug map.
  * @param {FillTemplateOptions} args.fillSlugOptions Arguments for {@link fillTemplate}.
  * @returns {string | undefined} Canonical slug.
- * @see https://github.com/sveltia/sveltia-cms#localizing-entry-slugs
+ * @see https://sveltiacms.app/en/docs/i18n#localizing-entry-slugs
  * @see https://gohugo.io/content-management/multilingual/#bypassing-default-linking
  */
 export const getCanonicalSlug = ({ draft, defaultLocaleSlug, localizedSlugs, fillSlugOptions }) => {

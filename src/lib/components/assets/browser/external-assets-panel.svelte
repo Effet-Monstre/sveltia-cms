@@ -9,7 +9,7 @@
     Button,
     EmptyState,
     InfiniteScroll,
-    PasswordInput,
+    SecretInput,
     TextInput,
     Toast,
   } from '@sveltia/ui';
@@ -51,7 +51,7 @@
   /** @type {Props} */
   let {
     /* eslint-disable prefer-const */
-    kind = 'image',
+    kind,
     fieldConfig = undefined,
     multiple = false,
     searchTerms = '',
@@ -77,7 +77,9 @@
     upload,
   } = $derived(serviceProps);
 
-  const viewType = $derived($selectAssetsView?.type);
+  // Use the grid view for Picsum as it doesn’t provide description for the assets, and the list
+  // view relies on the description to show asset information.
+  const viewType = $derived(serviceId === 'picsum' ? 'grid' : $selectAssetsView?.type);
 
   const input = $state({ userName: '', password: '' });
   let hasConfig = $state(true);
@@ -210,7 +212,7 @@
 
       apiKey = $prefs.apiKeys?.[serviceId] ?? '';
       [userName, password] = ($prefs.logins?.[serviceId] ?? '').split(' ');
-      hasAuthInfo = !!apiKey || !!password;
+      hasAuthInfo = authType === 'none' || !!apiKey || !!password;
       listedAssets = null;
     })();
   });
@@ -262,7 +264,7 @@
     </EmptyState>
   {:else if !listedAssets}
     <EmptyState>
-      <span role="alert">{$_('searching')}</span>
+      <span role="alert">{$_(searchTerms ? 'searching' : 'loading')}</span>
     </EmptyState>
   {:else if !listedAssets.length}
     <EmptyState>
@@ -335,7 +337,7 @@
         />
       </div>
       <div role="none" class="input-outer">
-        <PasswordInput
+        <SecretInput
           aria-label={$_('password')}
           disabled={authState === 'requested'}
           bind:value={input.password}

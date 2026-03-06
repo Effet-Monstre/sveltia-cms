@@ -148,7 +148,14 @@ export const getAssetByRelativePathAndCollection = ({ path, entry, collection, f
   }
 
   const { entryFolder } = entryFilePath.match(/(?<entryFolder>.+?)(?:\/[^/]+)?$/)?.groups ?? {};
-  const resolvedPath = resolvePath(createPath([entryFolder, mediaFolder, path]));
+
+  // Strip the `media_folder` prefix from the stored path before joining with `mediaFolder`, to
+  // avoid duplication when the stored value already includes the media folder (e.g.
+  // `images/photo.jpg`).
+  const localPath =
+    mediaFolder && path.startsWith(`${mediaFolder}/`) ? path.slice(mediaFolder.length + 1) : path;
+
+  const resolvedPath = resolvePath(createPath([entryFolder, mediaFolder, localPath]));
 
   return get(allAssets).find((asset) => asset.path === resolvedPath);
 };
@@ -263,6 +270,14 @@ export const getAssetByAbsolutePath = ({ path, entry, collectionName, fileName }
 };
 
 /**
+ * Check if a path is a relative path. A path starting with `@`, like `@assets/images/...` is a
+ * special case, considered as an absolute path.
+ * @param {string} path Path to check.
+ * @returns {boolean} `true` if the path is relative.
+ */
+export const isRelativePath = (path) => !/^[/@]/.test(path);
+
+/**
  * Get an asset by a public path typically stored as an image field value.
  * @param {object} args Arguments.
  * @param {string} args.value Saved absolute path or relative path.
@@ -276,9 +291,8 @@ export const getAssetByPath = ({ value, entry, collectionName, fileName }) => {
   // Remove potential fragment before decoding
   const path = decodeFilePath(value.split('#')[0]);
 
-  // Handle a relative path. A path starting with `@`, like `@assets/images/...` is a special case,
-  // considered as an absolute path.
-  if (!/^[/@]/.test(path)) {
+  // Handle a relative path
+  if (isRelativePath(path)) {
     return getAssetByRelativePath({ path, entry });
   }
 

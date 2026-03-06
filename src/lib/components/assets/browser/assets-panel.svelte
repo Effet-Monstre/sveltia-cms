@@ -46,7 +46,10 @@
   } = $props();
 
   const filteredAssets = $derived(
-    searchTerms ? assets.filter(({ name }) => normalize(name).includes(searchTerms)) : assets,
+    (searchTerms ? assets.filter(({ name }) => normalize(name).includes(searchTerms)) : assets)
+      // Remove duplicates based on asset path to avoid Svelte key conflicts
+      // @todo better handle duplicates at the source
+      .filter((asset, index, arr) => arr.findIndex((other) => other.path === asset.path) === index),
   );
 
   /**
@@ -105,7 +108,7 @@
               {#if !$isSmallScreen || viewType === 'list'}
                 <span role="none" class="name">
                   <TruncatedText lines={2}>
-                    {#each pathArray as segment, index}
+                    {#each pathArray as segment, index (`${segment}-${index}`)}
                       {#if index === pathArray.length - 1}
                         <!-- File name -->
                         <strong>{@render getLabel(segment)}</strong>

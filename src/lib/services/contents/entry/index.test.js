@@ -91,10 +91,11 @@ describe('Test getEntryPreviewURL()', () => {
         i18nSingleFile: true,
         i18nMultiFile: false,
         i18nMultiFolder: false,
-        i18nRootMultiFolder: false,
+        i18nMultiRootFolder: false,
       },
       canonicalSlug: { key: 'translationKey', value: '{{slug}}' },
-      omitDefaultLocaleFromFileName: false,
+      omitDefaultLocaleFromFilePath: false,
+      omitDefaultLocaleFromPreviewPath: false,
     },
     _thumbnailFieldNames: [],
   };
@@ -321,7 +322,6 @@ describe('Test getEntryPreviewURL()', () => {
       preview_path: '/{{year}}/{{month}}/{{slug}}',
       preview_path_date_field: 'publishDate',
       fields: [
-        ...(mockCollection.fields || []),
         {
           name: 'publishDate',
           widget: 'datetime',
@@ -453,7 +453,7 @@ describe('Test getEntryPreviewURL()', () => {
 
     vi.mocked(isCollectionIndexFile).mockReturnValue(true);
     vi.mocked(getIndexFile).mockReturnValue({
-      fields: mockCollection.fields,
+      fields: [],
     });
 
     // Mock fillTemplate
@@ -507,10 +507,11 @@ describe('Test getEntryPreviewURL()', () => {
           i18nSingleFile: true,
           i18nMultiFile: false,
           i18nMultiFolder: false,
-          i18nRootMultiFolder: false,
+          i18nMultiRootFolder: false,
         },
         canonicalSlug: { key: 'translationKey', value: '{{slug}}' },
-        omitDefaultLocaleFromFileName: false,
+        omitDefaultLocaleFromFilePath: false,
+        omitDefaultLocaleFromPreviewPath: false,
       },
     };
 
@@ -629,6 +630,164 @@ describe('Test getEntryPreviewURL()', () => {
 
     expect(result).toBeUndefined();
   });
+
+  test('omits locale from preview path when omitDefaultLocaleFromPreviewPath is true and locale is default', async () => {
+    // @ts-ignore
+    (await import('$lib/services/config')).cmsConfig = writable({
+      show_preview_links: true,
+      _baseURL: 'https://example.com',
+    });
+
+    const collectionWithLocaleInPath = {
+      ...mockCollection,
+      preview_path: '/{{locale}}/posts/{{slug}}',
+      _i18n: {
+        ...mockCollection._i18n,
+        defaultLocale: 'en',
+        omitDefaultLocaleFromPreviewPath: true,
+      },
+    };
+
+    // Mock index file functions
+    const { isCollectionIndexFile } = await import('$lib/services/contents/collection/index-file');
+
+    vi.mocked(isCollectionIndexFile).mockReturnValue(false);
+
+    // Mock fillTemplate
+    const { fillTemplate } = await import('$lib/services/common/template');
+
+    vi.mocked(fillTemplate).mockReturnValue('posts/test-entry');
+
+    const result = getEntryPreviewURL(mockEntry, 'en', collectionWithLocaleInPath);
+
+    // Verify that fillTemplate was called with the modified template (locale segment removed)
+    expect(fillTemplate).toHaveBeenCalledWith(
+      '/posts/{{slug}}',
+      expect.objectContaining({
+        type: 'preview_path',
+        locale: 'en',
+      }),
+    );
+    expect(result).toBe('https://example.com/posts/test-entry');
+  });
+
+  test('removes locale segment with dot separator from preview path', async () => {
+    // @ts-ignore
+    (await import('$lib/services/config')).cmsConfig = writable({
+      show_preview_links: true,
+      _baseURL: 'https://example.com',
+    });
+
+    const collectionWithDotLocaleInPath = {
+      ...mockCollection,
+      preview_path: '/posts/{{locale}}.{{slug}}',
+      _i18n: {
+        ...mockCollection._i18n,
+        defaultLocale: 'en',
+        omitDefaultLocaleFromPreviewPath: true,
+      },
+    };
+
+    // Mock index file functions
+    const { isCollectionIndexFile } = await import('$lib/services/contents/collection/index-file');
+
+    vi.mocked(isCollectionIndexFile).mockReturnValue(false);
+
+    // Mock fillTemplate
+    const { fillTemplate } = await import('$lib/services/common/template');
+
+    vi.mocked(fillTemplate).mockReturnValue('test-entry');
+
+    const result = getEntryPreviewURL(mockEntry, 'en', collectionWithDotLocaleInPath);
+
+    // Verify that fillTemplate was called with the modified template (locale. segment removed)
+    expect(fillTemplate).toHaveBeenCalledWith(
+      '/posts/{{slug}}',
+      expect.objectContaining({
+        type: 'preview_path',
+      }),
+    );
+    expect(result).toBe('https://example.com/test-entry');
+  });
+
+  test('preserves locale in preview path for non-default locales even when omitDefaultLocaleFromPreviewPath is true', async () => {
+    // @ts-ignore
+    (await import('$lib/services/config')).cmsConfig = writable({
+      show_preview_links: true,
+      _baseURL: 'https://example.com',
+    });
+
+    const collectionWithLocaleInPath = {
+      ...mockCollection,
+      preview_path: '/{{locale}}/posts/{{slug}}',
+      _i18n: {
+        ...mockCollection._i18n,
+        defaultLocale: 'en',
+        omitDefaultLocaleFromPreviewPath: true,
+      },
+    };
+
+    // Mock index file functions
+    const { isCollectionIndexFile } = await import('$lib/services/contents/collection/index-file');
+
+    vi.mocked(isCollectionIndexFile).mockReturnValue(false);
+
+    // Mock fillTemplate
+    const { fillTemplate } = await import('$lib/services/common/template');
+
+    vi.mocked(fillTemplate).mockReturnValue('ja/posts/テスト-エントリ');
+
+    const result = getEntryPreviewURL(mockEntry, 'ja', collectionWithLocaleInPath);
+
+    // Verify fillTemplate called with original template (non-default locale preserves locale)
+    expect(fillTemplate).toHaveBeenCalledWith(
+      '/{{locale}}/posts/{{slug}}',
+      expect.objectContaining({
+        type: 'preview_path',
+        locale: 'ja',
+      }),
+    );
+    expect(result).toBe('https://example.com/ja/posts/テスト-エントリ');
+  });
+
+  test('does not remove locale from preview path when omitDefaultLocaleFromPreviewPath is false', async () => {
+    // @ts-ignore
+    (await import('$lib/services/config')).cmsConfig = writable({
+      show_preview_links: true,
+      _baseURL: 'https://example.com',
+    });
+
+    const collectionWithLocaleInPath = {
+      ...mockCollection,
+      preview_path: '/{{locale}}/posts/{{slug}}',
+      _i18n: {
+        ...mockCollection._i18n,
+        defaultLocale: 'en',
+        omitDefaultLocaleFromPreviewPath: false,
+      },
+    };
+
+    // Mock index file functions
+    const { isCollectionIndexFile } = await import('$lib/services/contents/collection/index-file');
+
+    vi.mocked(isCollectionIndexFile).mockReturnValue(false);
+
+    // Mock fillTemplate
+    const { fillTemplate } = await import('$lib/services/common/template');
+
+    vi.mocked(fillTemplate).mockReturnValue('en/posts/test-entry');
+
+    const result = getEntryPreviewURL(mockEntry, 'en', collectionWithLocaleInPath);
+
+    // Verify fillTemplate called with original template (omitDefaultLocaleFromPreviewPath: false)
+    expect(fillTemplate).toHaveBeenCalledWith(
+      '/{{locale}}/posts/{{slug}}',
+      expect.objectContaining({
+        type: 'preview_path',
+      }),
+    );
+    expect(result).toBe('https://example.com/en/posts/test-entry');
+  });
 });
 
 describe('Test getAssociatedCollections()', () => {
@@ -681,10 +840,11 @@ describe('Test getAssociatedCollections()', () => {
           i18nSingleFile: true,
           i18nMultiFile: false,
           i18nMultiFolder: false,
-          i18nRootMultiFolder: false,
+          i18nMultiRootFolder: false,
         },
         canonicalSlug: { key: 'translationKey', value: '{{slug}}' },
-        omitDefaultLocaleFromFileName: false,
+        omitDefaultLocaleFromFilePath: false,
+        omitDefaultLocaleFromPreviewPath: false,
       },
       _thumbnailFieldNames: [],
     };
@@ -820,6 +980,83 @@ describe('Test extractDateTime()', () => {
     ];
 
     const content = {
+      date: '2024-01-15T10:30:00Z',
+    };
+
+    const result = extractDateTime({
+      fields,
+      content,
+    });
+
+    expect(result).toEqual(
+      expect.objectContaining({
+        year: '2024',
+        month: '01',
+        day: '15',
+        hour: '10',
+        minute: '30',
+        second: '00',
+      }),
+    );
+  });
+
+  test('should handle date value that does not match format (fallback parsing)', () => {
+    const fields = [{ name: 'date', widget: 'datetime', format: 'YYYY-MM-DDTHH:mm:ss' }];
+
+    const content = {
+      // Value is ISO datetime but format expects space instead of T
+      date: '2024-01-15T10:30:00',
+    };
+
+    const result = extractDateTime({
+      fields,
+      content,
+    });
+
+    // Should still extract datetime via fallback native Date parsing
+    expect(result).toEqual(
+      expect.objectContaining({
+        year: '2024',
+        month: '01',
+        day: '15',
+        hour: '10',
+        minute: '30',
+        second: '00',
+      }),
+    );
+  });
+
+  test('should return undefined when fallback parsing also fails', () => {
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const fields = [{ name: 'date', widget: 'datetime', format: 'YYYY-MM-DDTHH:mm:ss' }];
+
+    const content = {
+      // Completely invalid date string that neither day.js nor native Date can parse
+      date: 'not-a-valid-date-at-all',
+    };
+
+    const result = extractDateTime({
+      fields,
+      content,
+    });
+
+    // Should return undefined when date cannot be parsed
+    expect(result).toBeUndefined();
+    consoleSpy.mockRestore();
+  });
+
+  test('should extract datetime with UTC when format mismatch falls back to native parsing', () => {
+    const fields = [
+      {
+        name: 'date',
+        widget: 'datetime',
+        format: 'YYYY-MM-DD HH:mm:ss',
+        picker_utc: true,
+      },
+    ];
+
+    const content = {
+      // ISO datetime with Z doesn't match space-separated format
       date: '2024-01-15T10:30:00Z',
     };
 

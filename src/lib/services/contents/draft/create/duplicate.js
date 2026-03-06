@@ -3,8 +3,8 @@ import { get } from 'svelte/store';
 import { entryDraft } from '$lib/services/contents/draft';
 import { showDuplicateToast } from '$lib/services/contents/editor';
 import { getField } from '$lib/services/contents/entry/fields';
-import { getDefaultValueMap as getHiddenFieldDefaultValueMap } from '$lib/services/contents/widgets/hidden/defaults';
-import { getInitialValue as getInitialUuidValue } from '$lib/services/contents/widgets/uuid/helper';
+import { getDefaultValueMap as getHiddenFieldDefaultValueMap } from '$lib/services/contents/fields/hidden/defaults';
+import { getInitialValue as getInitialUuidValue } from '$lib/services/contents/fields/uuid/helper';
 
 /**
  * @import { EntryDraft } from '$lib/types/private';
@@ -63,10 +63,10 @@ export const duplicateDraft = () => {
           Object.assign(
             valueMap,
             getHiddenFieldDefaultValueMap({
-              // eslint-disable-next-line object-shorthand
               fieldConfig: /** @type {HiddenField} */ (fieldConfig),
               keyPath,
               locale,
+              defaultLocale,
             }),
           );
         }

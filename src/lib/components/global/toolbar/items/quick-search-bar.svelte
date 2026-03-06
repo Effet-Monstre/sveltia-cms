@@ -58,6 +58,9 @@
         // @todo Implement quick search dropdown.
         navigate(/** @type {HTMLInputElement} */ (target).value.trim());
       }}
+      onClear={() => {
+        navigate('');
+      }}
     />
   {/if}
 </div>

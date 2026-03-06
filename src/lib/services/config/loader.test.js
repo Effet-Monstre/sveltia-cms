@@ -3,7 +3,44 @@
 
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 
-import { fetchCmsConfig, fetchFile, getConfigPath } from './loader';
+import { fetchCmsConfig, fetchFile, getConfigPath, verifyLinksAreSecure } from './loader';
+
+vi.mock('svelte-i18n', () => ({
+  _: {
+    subscribe: vi.fn((callback) => {
+      callback((key, options) => {
+        // Return a predictable string based on the key
+        if (key === 'config.error.fetch_failed_with_manual_init') {
+          return 'Fetch failed (manual init)';
+        }
+
+        if (key === 'config.error.fetch_failed') {
+          return 'Fetch failed';
+        }
+
+        if (key === 'config.error.fetch_failed_not_ok') {
+          return `Fetch failed with status ${options?.values?.status || '???'}`;
+        }
+
+        if (key === 'config.error.parse_failed') {
+          return 'Parse failed';
+        }
+
+        if (key === 'config.error.parse_failed_unsupported_type') {
+          return 'Unsupported type';
+        }
+
+        if (key === 'config.error.parse_failed_invalid_object') {
+          return 'Invalid object';
+        }
+
+        return key;
+      });
+
+      return () => {};
+    }),
+  },
+}));
 
 // Mock dependencies
 global.fetch = vi.fn();
@@ -13,6 +50,8 @@ global.document = {
 global.window = {
   location: {
     pathname: '/admin/',
+    origin: 'https://example.com',
+    href: 'https://example.com/admin/',
   },
 };
 
@@ -51,6 +90,120 @@ describe('config/loader', () => {
     });
   });
 
+  describe('verifyLinksAreSecure', () => {
+    beforeEach(() => {
+      global.window = {
+        location: {
+          pathname: '/admin/',
+          origin: 'https://example.com',
+          href: 'https://example.com/admin/',
+        },
+      };
+    });
+
+    test('should return true for HTTPS URLs', () => {
+      const links = [
+        { href: 'https://example.com/config.yml' },
+        { href: 'https://cdn.example.com/config.json' },
+      ];
+
+      expect(verifyLinksAreSecure(links)).toBe(true);
+    });
+
+    test('should return true for localhost URLs', () => {
+      const links = [
+        { href: 'http://localhost/config.yml' },
+        { href: 'http://localhost:3000/config.json' },
+      ];
+
+      expect(verifyLinksAreSecure(links)).toBe(true);
+    });
+
+    test('should return true for 127.0.0.1 URLs', () => {
+      const links = [
+        { href: 'http://127.0.0.1/config.yml' },
+        { href: 'http://127.0.0.1:8080/config' },
+      ];
+
+      expect(verifyLinksAreSecure(links)).toBe(true);
+    });
+
+    test('should return false for HTTP URLs with non-loopback domains', () => {
+      const links = [{ href: 'http://example.com/config.yml' }];
+
+      expect(verifyLinksAreSecure(links)).toBe(false);
+    });
+
+    test('should return false for mixed secure and insecure URLs', () => {
+      const links = [
+        { href: 'https://example.com/config.yml' },
+        { href: 'http://example.com/config.json' },
+      ];
+
+      expect(verifyLinksAreSecure(links)).toBe(false);
+    });
+
+    test('should return true for empty array', () => {
+      expect(verifyLinksAreSecure([])).toBe(true);
+    });
+
+    test('should return true for relative URLs that resolve to HTTPS', () => {
+      global.window.location.origin = 'https://example.com';
+
+      const links = [{ href: 'relative/path/config.yml' }];
+
+      expect(verifyLinksAreSecure(links)).toBe(true);
+    });
+
+    test('should return true for relative HTTPS URLs from secure origin', () => {
+      global.window.location.origin = 'https://secure.example.com';
+
+      const links = [{ href: '/config.yml' }, { href: './config/base.yml' }];
+
+      expect(verifyLinksAreSecure(links)).toBe(true);
+    });
+
+    test('should return true for relative URLs from localhost origin', () => {
+      global.window.location.origin = 'http://localhost:3000';
+
+      const links = [{ href: '/config.yml' }];
+
+      expect(verifyLinksAreSecure(links)).toBe(true);
+    });
+
+    test('should return false for relative URLs from insecure HTTP origin', () => {
+      global.window.location.origin = 'http://insecure-domain.com';
+
+      const links = [{ href: '/config.yml' }];
+
+      expect(verifyLinksAreSecure(links)).toBe(false);
+    });
+
+    test('should handle multiple links with mixed types', () => {
+      const links = [
+        { href: 'https://example.com/config.yml', type: 'application/yaml' },
+        { href: 'http://localhost:3000/config.json', type: 'application/json' },
+      ];
+
+      expect(verifyLinksAreSecure(links)).toBe(true);
+    });
+
+    test('should return true for HTTP links from HTTP origin when host is localhost', () => {
+      global.window.location.origin = 'http://localhost:8080';
+
+      const links = [{ href: 'http://localhost:8080/config.yml' }];
+
+      expect(verifyLinksAreSecure(links)).toBe(true);
+    });
+
+    test('should return false for links with invalid URLs that throw during parsing (line 144)', () => {
+      // 'http://' with no host causes new URL() to throw a TypeError
+      const links = [{ href: 'http://' }];
+
+      expect(verifyLinksAreSecure(links)).toBe(false);
+    });
+  });
+
   describe('fetchCmsConfig', () => {
     test('should fetch config from default path when no link elements', async () => {
       document.querySelectorAll.mockReturnValue([]);
@@ -63,7 +216,9 @@ describe('config/loader', () => {
 
       const result = await fetchCmsConfig();
 
-      expect(fetch).toHaveBeenCalledWith('/admin/config.yml');
+      expect(fetch).toHaveBeenCalledWith(
+        expect.objectContaining({ pathname: '/admin/config.yml' }),
+      );
       expect(result).toEqual({ collections: [{ name: 'posts' }] });
     });
 
@@ -80,7 +235,9 @@ describe('config/loader', () => {
 
       const result = await fetchCmsConfig();
 
-      expect(fetch).toHaveBeenCalledWith('custom-config.yml');
+      expect(fetch).toHaveBeenCalledWith(
+        expect.objectContaining({ pathname: '/admin/custom-config.yml' }),
+      );
       expect(result).toEqual({ backend: { name: 'github' } });
     });
 
@@ -241,6 +398,32 @@ backend:
       expect(result.backend.media_folder).toBe('static/images');
       expect(result.backend.name).toBe('github');
     });
+
+    test('should use correct error message when manualInit is false', async () => {
+      document.querySelectorAll.mockReturnValue([]);
+
+      fetch.mockRejectedValue(new Error('Network error'));
+
+      try {
+        await fetchCmsConfig({ manualInit: false });
+        expect.fail('Should have thrown an error');
+      } catch (error) {
+        expect(error.message).toBe('Fetch failed');
+      }
+    });
+
+    test('should use correct error message when manualInit is true', async () => {
+      document.querySelectorAll.mockReturnValue([]);
+
+      fetch.mockRejectedValue(new Error('Network error'));
+
+      try {
+        await fetchCmsConfig({ manualInit: true });
+        expect.fail('Should have thrown an error');
+      } catch (error) {
+        expect(error.message).toBe('Fetch failed (manual init)');
+      }
+    });
   });
 
   describe('fetchFile', () => {
@@ -253,7 +436,7 @@ backend:
 
       const result = await fetchFile({ href: '/config.yml', type: 'application/yaml' });
 
-      expect(fetch).toHaveBeenCalledWith('/config.yml');
+      expect(fetch).toHaveBeenCalledWith(expect.objectContaining({ pathname: '/config.yml' }));
       expect(result).toEqual({ backend: { name: 'github' }, collections: [{ name: 'posts' }] });
     });
 
@@ -266,8 +449,31 @@ backend:
 
       const result = await fetchFile({ href: '/config.json', type: 'application/json' });
 
-      expect(fetch).toHaveBeenCalledWith('/config.json');
+      expect(fetch).toHaveBeenCalledWith(expect.objectContaining({ pathname: '/config.json' }));
       expect(result).toEqual({ backend: { name: 'gitlab' }, media_folder: 'static' });
+    });
+
+    test('should append a cache-busting timestamp parameter to the URL', async () => {
+      fetch.mockResolvedValue({
+        ok: true,
+        status: 200,
+        text: () => Promise.resolve('test: value'),
+      });
+
+      const before = Date.now();
+
+      await fetchFile({ href: '/config.yml' });
+
+      const after = Date.now();
+      const calledUrl = /** @type {URL} */ (fetch.mock.calls[0][0]);
+
+      expect(calledUrl).toBeInstanceOf(URL);
+      expect(calledUrl.searchParams.has('_')).toBe(true);
+
+      const ts = Number(calledUrl.searchParams.get('_'));
+
+      expect(ts).toBeGreaterThanOrEqual(before);
+      expect(ts).toBeLessThanOrEqual(after);
     });
 
     test('should use default type application/yaml', async () => {
@@ -376,7 +582,7 @@ folder = "content/pages"
 
       const result = await fetchFile({ href: '/config.toml', type: 'application/toml' });
 
-      expect(fetch).toHaveBeenCalledWith('/config.toml');
+      expect(fetch).toHaveBeenCalledWith(expect.objectContaining({ pathname: '/config.toml' }));
       expect(result).toEqual({
         backend: { name: 'github', repo: 'test/repo' },
         collections: [
@@ -430,6 +636,100 @@ collections:
           },
         ],
       });
+    });
+
+    test('should use correct error message when manualInit is false and fetch fails', async () => {
+      fetch.mockRejectedValue(new Error('Network error'));
+
+      try {
+        await fetchFile({ href: '/config.yml' }, { manualInit: false });
+        expect.fail('Should have thrown an error');
+      } catch (error) {
+        expect(error.message).toBe('Fetch failed');
+      }
+    });
+
+    test('should use correct error message when manualInit is true and fetch fails', async () => {
+      fetch.mockRejectedValue(new Error('Network error'));
+
+      try {
+        await fetchFile({ href: '/config.yml' }, { manualInit: true });
+        expect.fail('Should have thrown an error');
+      } catch (error) {
+        expect(error.message).toBe('Fetch failed (manual init)');
+      }
+    });
+
+    test('should pass manualInit option to fetchFile when called from fetchCmsConfig', async () => {
+      document.querySelectorAll.mockReturnValue([]);
+
+      fetch.mockRejectedValue(new Error('Network error'));
+
+      try {
+        await fetchCmsConfig({ manualInit: true });
+        expect.fail('Should have thrown an error');
+      } catch (error) {
+        expect(error.message).toBe('Fetch failed (manual init)');
+      }
+    });
+
+    test('should use correct error message when manualInit is false and response is not ok', async () => {
+      fetch.mockResolvedValue({
+        ok: false,
+        status: 404,
+      });
+
+      try {
+        await fetchFile({ href: '/config.yml' }, { manualInit: false });
+        expect.fail('Should have thrown an error');
+      } catch (error) {
+        expect(error.message).toBe('Fetch failed');
+      }
+    });
+
+    test('should use correct error message when manualInit is true and response is not ok', async () => {
+      fetch.mockResolvedValue({
+        ok: false,
+        status: 404,
+      });
+
+      try {
+        await fetchFile({ href: '/config.yml' }, { manualInit: true });
+        expect.fail('Should have thrown an error');
+      } catch (error) {
+        expect(error.message).toBe('Fetch failed (manual init)');
+      }
+    });
+  });
+
+  describe('fetchCmsConfig insecure URL handling (line 167)', () => {
+    beforeEach(() => {
+      global.window = {
+        location: {
+          pathname: '/admin/',
+          origin: 'https://example.com',
+          href: 'https://example.com/admin/',
+        },
+      };
+    });
+
+    test('should throw error when a single link is on an insecure HTTP URL (line 167)', async () => {
+      const mockLinks = [{ href: 'http://insecure-domain.com/config.yml' }];
+
+      document.querySelectorAll.mockReturnValue(mockLinks);
+
+      await expect(fetchCmsConfig()).rejects.toThrow('config.error.insecure_url');
+    });
+
+    test('should throw error with plural message when multiple insecure links', async () => {
+      const mockLinks = [
+        { href: 'http://insecure-domain.com/config.yml' },
+        { href: 'http://insecure-domain.com/extra.yml' },
+      ];
+
+      document.querySelectorAll.mockReturnValue(mockLinks);
+
+      await expect(fetchCmsConfig()).rejects.toThrow('config.error.insecure_urls');
     });
   });
 });
