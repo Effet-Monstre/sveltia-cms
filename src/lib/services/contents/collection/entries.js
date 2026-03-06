@@ -12,12 +12,7 @@ import { getRegex } from '$lib/services/utils/misc';
 
 /**
  * @import { Writable } from 'svelte/store';
- * @import {
- * Entry,
- * FlattenedEntryContent,
- * InternalCollection,
- * InternalCollectionFile,
- * } from '$lib/types/private';
+ * @import { Entry, FlattenedEntryContent, InternalCollectionFile } from '$lib/types/private';
  * @import { FieldKeyPath } from '$lib/types/public';
  */
 
@@ -36,6 +31,7 @@ export const selectedEntries = writable([]);
  * @param {string} collectionName Collection name.
  * @returns {Entry[]} Entries.
  * @see https://decapcms.org/docs/collection-folder/#filtered-folder-collections
+ * @see https://sveltiacms.app/en/docs/collections/entries#filtering-entries
  */
 export const getEntriesByCollection = (collectionName) => {
   const collection = getCollection(collectionName);
@@ -76,27 +72,6 @@ export const getEntriesByCollection = (collectionName) => {
 };
 
 /**
- * Check if entry creation is allowed in the collection.
- * @param {InternalCollection | undefined} collection Collection.
- * @returns {boolean} Result.
- */
-export const canCreateEntry = (collection) => {
-  if (!collection) {
-    return false;
-  }
-
-  const { _type } = collection;
-
-  if (_type !== 'entry') {
-    return true;
-  }
-
-  const { create = false, limit = Infinity } = collection;
-
-  return create && getEntriesByCollection(collection.name).length < limit;
-};
-
-/**
  * Check if the field contains the asset.
  * @param {object} args Arguments.
  * @param {string} args.assetURL Asset’s public or blob URL.
@@ -132,9 +107,9 @@ export const hasAsset = async ({
 
   const isBlobURL = assetURL.startsWith('blob:');
   const getURLArgs = { entry, collectionName, fileName };
-  const { widget: widgetName = 'string' } = field;
+  const { widget: fieldType = 'string' } = field;
 
-  if (['image', 'file'].includes(widgetName)) {
+  if (['image', 'file'].includes(fieldType)) {
     const match = isBlobURL
       ? (await getMediaFieldURL({ ...getURLArgs, value })) === assetURL
       : value === assetURL;
@@ -147,7 +122,7 @@ export const hasAsset = async ({
   }
 
   // Search images in markdown body
-  if (widgetName === 'markdown') {
+  if (['richtext', 'markdown'].includes(fieldType)) {
     const matches = [...value.matchAll(MARKDOWN_IMAGE_REGEX)];
 
     if (matches.length) {

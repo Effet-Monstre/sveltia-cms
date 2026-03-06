@@ -82,6 +82,7 @@ describe('contents/draft/create/index', () => {
           canPreview: true,
           fields: collection.fields,
           originalEntry: undefined,
+          defaultLocale: 'en',
           originalLocales: { en: true, ja: false },
           currentLocales: { en: true, ja: false },
           originalSlugs: {},
@@ -126,6 +127,7 @@ describe('contents/draft/create/index', () => {
           isNew: false,
           id: 'entry-123',
           originalEntry,
+          defaultLocale: 'en',
           originalLocales: { en: true, ja: true },
           currentLocales: { en: true, ja: true },
           originalSlugs: { en: 'test-post', ja: 'test-post' },
@@ -165,6 +167,7 @@ describe('contents/draft/create/index', () => {
           collectionName: 'pages',
           fileName: 'about',
           fields: collectionFile.fields,
+          defaultLocale: 'en',
         }),
       );
     });
@@ -243,6 +246,7 @@ describe('contents/draft/create/index', () => {
 
       expect(entryDraft.set).toHaveBeenCalledWith(
         expect.objectContaining({
+          defaultLocale: 'en',
           originalLocales: { en: true, fr: true, ja: false },
           currentLocales: { en: true, fr: true, ja: false },
         }),
@@ -268,6 +272,7 @@ describe('contents/draft/create/index', () => {
         expect.objectContaining({
           draft: { collectionName: 'posts', fileName: undefined, isIndexFile: false },
           locale: 'en',
+          target: expect.any(Object),
         }),
       );
     });
@@ -289,7 +294,12 @@ describe('contents/draft/create/index', () => {
 
       createDraft({ collection, dynamicValues });
 
-      expect(getDefaultValues).toHaveBeenCalledWith(collection.fields, 'en', dynamicValues);
+      expect(getDefaultValues).toHaveBeenCalledWith({
+        fields: collection.fields,
+        locale: 'en',
+        defaultLocale: 'en',
+        dynamicValues,
+      });
     });
 
     it('should set slugEditor for entry collection with {{fields._slug}} template', () => {
@@ -311,6 +321,7 @@ describe('contents/draft/create/index', () => {
 
       expect(entryDraft.set).toHaveBeenCalledWith(
         expect.objectContaining({
+          defaultLocale: 'en',
           slugEditor: { en: true, ja: 'readonly' },
         }),
       );
@@ -335,6 +346,7 @@ describe('contents/draft/create/index', () => {
 
       expect(entryDraft.set).toHaveBeenCalledWith(
         expect.objectContaining({
+          defaultLocale: 'en',
           slugEditor: { en: true, ja: true },
         }),
       );
@@ -365,6 +377,7 @@ describe('contents/draft/create/index', () => {
 
       expect(entryDraft.set).toHaveBeenCalledWith(
         expect.objectContaining({
+          defaultLocale: 'en',
           slugEditor: { en: false },
         }),
       );
@@ -398,6 +411,7 @@ describe('contents/draft/create/index', () => {
 
       expect(entryDraft.set).toHaveBeenCalledWith(
         expect.objectContaining({
+          defaultLocale: 'en',
           slugEditor: { en: false },
         }),
       );
@@ -429,6 +443,7 @@ describe('contents/draft/create/index', () => {
         expect.objectContaining({
           isIndexFile: true,
           fields: indexFile.fields,
+          defaultLocale: 'en',
           canPreview: false,
         }),
       );
@@ -462,6 +477,55 @@ describe('contents/draft/create/index', () => {
         fileName: undefined,
         slug: 'test-slug',
       });
+    });
+
+    it('should handle extra values', () => {
+      const collection = {
+        name: 'posts',
+        _type: 'entry',
+        fields: [],
+        _i18n: {
+          allLocales: ['en', 'ja'],
+          initialLocales: ['en'],
+          defaultLocale: 'en',
+          canonicalSlug: { key: 'translationKey' },
+        },
+      };
+
+      const extraValues = {
+        en: { richTextField: '<p>Rich content</p>' },
+        ja: { richTextField: '<p>リッチコンテンツ</p>' },
+      };
+
+      createDraft({ collection, extraValues });
+
+      expect(entryDraft.set).toHaveBeenCalledWith(
+        expect.objectContaining({
+          extraValues,
+        }),
+      );
+    });
+
+    it('should use default extra values when not provided', () => {
+      const collection = {
+        name: 'posts',
+        _type: 'entry',
+        fields: [],
+        _i18n: {
+          allLocales: ['en', 'ja'],
+          initialLocales: ['en'],
+          defaultLocale: 'en',
+          canonicalSlug: { key: 'translationKey' },
+        },
+      };
+
+      createDraft({ collection });
+
+      expect(entryDraft.set).toHaveBeenCalledWith(
+        expect.objectContaining({
+          extraValues: { en: {}, ja: {} },
+        }),
+      );
     });
 
     it('should handle expander states', () => {
@@ -538,6 +602,7 @@ describe('contents/draft/create/index', () => {
 
       expect(entryDraft.set).toHaveBeenCalledWith(
         expect.objectContaining({
+          defaultLocale: 'en',
           originalSlugs: { _: 'test-post' },
           currentSlugs: { _: 'test-post' },
         }),

@@ -13,9 +13,6 @@ vi.mock('$lib/services/config', () => ({
 vi.mock('$lib/services/contents/draft/save/key-path', () => ({
   createKeyPathList: vi.fn((fields) => fields.map((/** @type {any} */ f) => f.name)),
 }));
-vi.mock('$lib/services/contents/widgets/list/helper', () => ({
-  hasRootListField: vi.fn((fields) => fields.length === 1 && fields[0].widget === 'list'),
-}));
 vi.mock('svelte/store', async () => {
   const actual = await vi.importActual('svelte/store');
 
@@ -34,6 +31,16 @@ const { isFieldRequired, getField } = vi.hoisted(() => ({
   }),
 }));
 
+const { hasRootField } = vi.hoisted(() => ({
+  hasRootField: vi.fn(
+    (fields, fieldType) =>
+      fields.length === 1 &&
+      fields[0].widget === fieldType &&
+      'root' in fields[0] &&
+      fields[0].root === true,
+  ),
+}));
+
 const { parseDateTimeConfig } = vi.hoisted(() => ({
   parseDateTimeConfig: vi.fn(
     /**
@@ -47,9 +54,10 @@ const { parseDateTimeConfig } = vi.hoisted(() => ({
 vi.mock('$lib/services/contents/entry/fields', () => ({
   isFieldRequired,
   getField,
+  hasRootField,
 }));
 
-vi.mock('$lib/services/contents/widgets/date-time/helper', () => ({
+vi.mock('$lib/services/contents/fields/date-time/helper', () => ({
   parseDateTimeConfig,
 }));
 
@@ -522,7 +530,7 @@ describe('Test copyProperty()', () => {
   });
 
   describe('TOML date conversion', () => {
-    test('converts ISO 8601 datetime string to TomlDate when isTomlOutput is true and field widget is datetime with no format', async () => {
+    test('converts ISO 8601 datetime string to TomlDate when isTomlOutput is true and field type is datetime with no format', async () => {
       const { TomlDate: TomlDateClass } = await vi.importActual('smol-toml');
       /** @type {FlattenedEntryContent} */
       const sortedMap = {};
@@ -602,7 +610,7 @@ describe('Test copyProperty()', () => {
         field: { name: 'publishDate', widget: 'string', required: false },
       });
 
-      // The date should remain as a string because widget is not 'datetime'
+      // The date should remain as a string because field type is not 'datetime'
       expect(sortedMap.publishDate).toBe('2024-01-15T10:30:00Z');
       expect(typeof sortedMap.publishDate).toBe('string');
     });
@@ -915,6 +923,7 @@ describe('Test serializeContent()', () => {
         {
           name: 'tags',
           widget: 'list',
+          root: true,
           fields: [{ name: 'name', widget: 'string' }],
         },
       ],
@@ -1030,6 +1039,7 @@ describe('Test serializeContent()', () => {
         {
           name: 'tags',
           widget: 'list',
+          root: true,
           fields: [{ name: 'name', widget: 'string' }],
         },
       ],
@@ -1259,6 +1269,7 @@ describe('Test serializeContent()', () => {
           {
             name: 'items',
             widget: 'list',
+            root: true,
             fields: [{ name: 'title', widget: 'string' }],
           },
         ],
@@ -1290,6 +1301,7 @@ describe('Test serializeContent()', () => {
           {
             name: 'items',
             widget: 'list',
+            root: true,
             fields: [{ name: 'title', widget: 'string' }],
           },
         ],
@@ -1387,6 +1399,7 @@ describe('Test serializeContent()', () => {
           {
             name: 'tags',
             widget: 'list',
+            root: true,
             fields: [{ name: 'name', widget: 'string' }],
           },
         ],
@@ -1419,6 +1432,7 @@ describe('Test serializeContent()', () => {
           {
             name: 'items',
             widget: 'list',
+            root: true,
             fields: [{ name: 'title', widget: 'string' }],
           },
         ],
@@ -1433,6 +1447,69 @@ describe('Test serializeContent()', () => {
 
       // Should return array extracted from first field (items) due to root list special case
       expect(result).toEqual([{ title: 'Item 1' }]);
+    });
+  });
+
+  describe('root keyvalue field with TOML handling', () => {
+    test('returns root keyvalue field object when hasRootKeyValueField is true', () => {
+      /** @type {any} */
+      const draft = {
+        collectionName: 'pages',
+        collection: {
+          _file: { format: 'json' },
+          _i18n: {
+            canonicalSlug: { key: '' },
+          },
+        },
+        fields: [
+          {
+            name: 'pairs',
+            widget: 'keyvalue',
+            root: true,
+          },
+        ],
+        isIndexFile: false,
+      };
+
+      const valueMap = {
+        'pairs.key1': 'value1',
+        'pairs.key2': 'value2',
+      };
+
+      const result = serializeContent({ draft, locale: 'en', valueMap });
+
+      // With root keyvalue field, should return the object directly
+      expect(result).toEqual({
+        key1: 'value1',
+        key2: 'value2',
+      });
+    });
+
+    test('returns root keyvalue field object with empty fallback when object is undefined', () => {
+      /** @type {any} */
+      const draft = {
+        collectionName: 'pages',
+        collection: {
+          _file: { format: 'json' },
+          _i18n: {
+            canonicalSlug: { key: '' },
+          },
+        },
+        fields: [
+          {
+            name: 'pairs',
+            widget: 'keyvalue',
+            root: true,
+          },
+        ],
+        isIndexFile: false,
+      };
+
+      const valueMap = {};
+      const result = serializeContent({ draft, locale: 'en', valueMap });
+
+      // Should return empty object for root keyvalue field with no content
+      expect(result).toEqual({});
     });
   });
 });

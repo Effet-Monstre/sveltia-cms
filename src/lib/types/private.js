@@ -7,6 +7,8 @@
  * Collection,
  * CollectionDivider,
  * CollectionFile,
+ * DateTimeFieldProps,
+ * DateTimeInputType,
  * EntryCollection,
  * Field,
  * FieldKeyPath,
@@ -29,7 +31,7 @@
 /**
  * A variant of {@link FieldKeyPath} that can include type information for fields with variable
  * types. The syntax uses angle brackets to enclose the type, e.g. `blocks.*<image>.src` (for a
- * variable type List field; a list index is replaced with an asterisk) or `widget<button>.label`
+ * variable type List field; a list index is replaced with an asterisk) or `field<button>.label`
  * (for a variable type Object field).
  * @typedef {string} TypedFieldKeyPath
  */
@@ -99,8 +101,8 @@
  * @property {string} [branch] Branch name, e.g. `master` or `main`.
  * @property {string} [repoURL] The repository’s web-accessible URL that can be linked from the CMS
  * UI to the backend service. Git backends only.
- * @property {string} [newPatURL] URL of the page where the user can create a personal access token
- * (PAT). Git backends only.
+ * @property {string} [tokenPageURL] URL of the page where the user can create a personal access
+ * token (PAT). Git backends only.
  * @property {string} [treeBaseURL] Repository’s tree base URL with a branch name. It’s the same as
  * `baseURL` when the default branch is used. Git backends only.
  * @property {string} [blobBaseURL] Repository’s blob base URL with a branch name. Git backends
@@ -204,9 +206,9 @@
  * @property {() => Promise<void>} fetchFiles Function to fetch files.
  * @property {(asset: Asset) => Promise<Blob>} [fetchBlob] Function to fetch an asset as a Blob. Git
  * backends only.
- * @property {(changes: FileChange[], options: CommitOptions) => Promise<CommitResults>
- * } commitChanges Function to save file changes, including additions and deletions, and return the
- * commit hash and a map of committed files.
+ * @property {(changes: FileChange[], options: CommitOptions) =>
+ * Promise<CommitResults>} commitChanges Function to save file changes, including additions and
+ * deletions, and return the commit hash and a map of committed files.
  * @property {() => Promise<Response>} [triggerDeployment] Function to manually trigger a new
  * deployment on any connected CI/CD provider. GitHub only.
  */
@@ -237,10 +239,11 @@
  * @property {string} serviceURL Service URL.
  * @property {boolean} showServiceLink Whether to show a link to the service in the media library.
  * @property {boolean} hotlinking Whether to hotlink files.
- * @property {'api_key' | 'password' | 'widget'} authType Authentication type. `api_key` means the
- * service requires an API key (or API secret, depending on the service) for user authentication.
- * `password` means the service requires username/password for authentication. `widget` means the
- * service provides its own widget for file selection, and authentication is handled by the widget.
+ * @property {'api_key' | 'none' | 'password' | 'widget'} authType Authentication type. `api_key`
+ * means the service requires an API key (or API secret, depending on the service) for user
+ * authentication. `none` means the service requires no authentication. `password` means the service
+ * requires username/password for authentication. `widget` means the service provides its own widget
+ * for file selection, and authentication is handled by the widget.
  * @property {string} [developerURL] URL of the page that provides the API/developer service.
  * @property {string} [apiKeyURL] URL of the page that provides an API key.
  * @property {RegExp} [apiKeyPattern] API key pattern.
@@ -249,12 +252,12 @@
  * @property {() => Promise<boolean>} [init] Function to initialize the service.
  * @property {(userName: string, password: string) => Promise<boolean>} [signIn] Function to sign in
  * to the service.
- * @property {(query: string, options: MediaLibraryFetchOptions) => Promise<ExternalAsset[]>
- * } [search] Function to search files.
+ * @property {(query: string, options: MediaLibraryFetchOptions) =>
+ * Promise<ExternalAsset[]>} [search] Function to search files.
  * @property {(options: MediaLibraryFetchOptions) => Promise<ExternalAsset[]>} [list] Function to
  * list files. For stock asset services, it should return popular or curated images.
- * @property {(files: File[], options: MediaLibraryFetchOptions) => Promise<ExternalAsset[]>
- * } [upload] Function to upload files to the cloud storage service.
+ * @property {(files: File[], options: MediaLibraryFetchOptions) =>
+ * Promise<ExternalAsset[]>} [upload] Function to upload files to the cloud storage service.
  */
 
 /**
@@ -299,8 +302,8 @@
 
 /**
  * Git commit type.
- * @typedef {'create' | 'update' | 'delete' | 'uploadMedia' | 'deleteMedia' | 'openAuthoring'
- * } CommitType
+ * @typedef {'create' | 'update' | 'delete' | 'uploadMedia' | 'deleteMedia' |
+ * 'openAuthoring'} CommitType
  */
 
 /**
@@ -368,8 +371,8 @@
  * and the value is the corresponding file path. File/singleton collection only.
  * @property {string} [folderPath] Folder path. Entry collection only.
  * @property {Record<InternalLocaleCode, string>} [folderPathMap] Folder path map. Entry collection
- * only. Paths in `folderPathMap` are prefixed with a locale if the `multiple_folders_i18n_root`
- * i18n structure is used, while `folderPath` is a bare collection `folder` path.
+ * only. Paths in `folderPathMap` are prefixed with a locale if the `multiple_root_folders` i18n
+ * structure is used, while `folderPath` is a bare collection `folder` path.
  */
 
 /**
@@ -403,6 +406,7 @@
  * @property {boolean} hasTemplateTags Whether the `internalPath` contains template tags like
  * `/assets/images/{{slug}}`, which require special handling like `entryRelative`.
  * @see https://decapcms.org/docs/collection-folder/#media-and-public-folder
+ * @see https://sveltiacms.app/en/docs/media/internal#configuring-folder-paths
  */
 
 /**
@@ -439,8 +443,8 @@
  * @property {boolean} i18nSingleFile Whether the i18n structure is a single file.
  * @property {boolean} i18nMultiFile Whether the i18n structure is multiple files.
  * @property {boolean} i18nMultiFolder Whether the i18n structure is multiple folders.
- * @property {boolean} i18nRootMultiFolder Whether the i18n structure is multiple folders with the
- * locale in the root.
+ * @property {boolean} i18nMultiRootFolder Whether the i18n structure is multiple folders with the
+ * locale under the repository root.
  */
 
 /**
@@ -458,8 +462,10 @@
  * @property {I18nFileStructure} structure File structure.
  * @property {I18nFileStructureMap} structureMap I18n structure map.
  * @property {{ key: string, value: string }} canonicalSlug See `canonical_slug` above.
- * @property {boolean} omitDefaultLocaleFromFileName Whether to exclude the default locale from
- * entry filenames.
+ * @property {boolean} omitDefaultLocaleFromFilePath Whether to exclude the default locale from
+ * entry file paths.
+ * @property {boolean} omitDefaultLocaleFromPreviewPath Whether to exclude the default locale from
+ * preview URL paths.
  */
 
 /**
@@ -487,8 +493,8 @@
 
 /**
  * An entry collection definition.
- * @typedef {EntryCollection & EntryCollectionExtraProps & CollectionExtraProps
- * } InternalEntryCollection
+ * @typedef {EntryCollection & EntryCollectionExtraProps &
+ * CollectionExtraProps} InternalEntryCollection
  */
 
 /**
@@ -501,8 +507,8 @@
 
 /**
  * A file/singleton collection definition.
- * @typedef {FileCollection & FileCollectionExtraProps & CollectionExtraProps
- * } InternalFileCollection
+ * @typedef {FileCollection & FileCollectionExtraProps &
+ * CollectionExtraProps} InternalFileCollection
  */
 
 /**
@@ -648,6 +654,7 @@
  * @property {Field[]} fields Field definition for the collection or collection file. If index file
  * inclusion is enabled and the draft is the index file, it will be the index file’s fields.
  * @property {Entry} [originalEntry] Original entry or `undefined` if it’s a new entry draft.
+ * @property {InternalLocaleCode} defaultLocale Default locale code.
  * @property {LocaleStateMap} originalLocales Original locale state at the time of draft creation.
  * @property {LocaleStateMap} currentLocales Current locale state.
  * @property {LocaleSlugMap} originalSlugs Key is a locale code, value is the original slug.
@@ -657,7 +664,7 @@
  * @property {LocaleContentMap} currentValues Key is a locale code, value is a flattened, proxified
  * object containing all the current field values while editing.
  * @property {LocaleContentMap} extraValues Key is a locale code, value is a flattened object
- * containing field values in Markdown editor components.
+ * containing field values in rich text editor components.
  * @property {EntryFileMap} files Files to be uploaded.
  * @property {LocaleValidityMap} validities Key is a locale code, value is a flattened object
  * containing validation results of all the current field values while editing.
@@ -839,6 +846,7 @@
  * @property {string} [key] Target field name.
  * @property {SortOrder} [order] Sort order.
  * @see https://decapcms.org/docs/configuration-options/#sortable_fields
+ * @see https://sveltiacms.app/en/docs/collections/entries#sorting
  */
 
 /**
@@ -847,6 +855,7 @@
  * @property {FieldKeyPath} field Target field name.
  * @property {string | RegExp | boolean} pattern Regular expression matching pattern or exact value.
  * @see https://decapcms.org/docs/configuration-options/#view_filters
+ * @see https://sveltiacms.app/en/docs/collections/entries#filtering
  */
 
 /**
@@ -856,6 +865,7 @@
  * @property {string | RegExp | boolean} [pattern] Regular expression matching pattern or exact
  * value.
  * @see https://decapcms.org/docs/configuration-options/#view_groups
+ * @see https://sveltiacms.app/en/docs/collections/entries#grouping
  */
 
 /**
@@ -879,6 +889,8 @@
  * @typedef {object} EntryEditorPane
  * @property {'edit' | 'preview'} mode Mode.
  * @property {InternalLocaleCode} locale Locale.
+ * @property {number} [width] Percentage width of the pane in the editor layout. The sum of the
+ * widths of all panes should be 100.
  */
 
 /**
@@ -920,27 +932,27 @@
 
 /**
  * Key to store the current values in the {@link EntryDraft}. Usually `currentValues`, but can be
- * `extraValues` to store extra values for a Markdown editor component.
+ * `extraValues` to store extra values for a rich text editor component.
  * @typedef {'currentValues' | 'extraValues'} DraftValueStoreKey
  */
 
 /**
  * Context for a field, which may change the behavior of the editor/preview.
- * @typedef {'markdown-editor-component' | 'single-subfield-list-widget'} WidgetContext
+ * @typedef {'rich-text-editor-component' | 'single-subfield-list-field'} FieldContext
  */
 
 /**
  * Context for a field editor.
  * @typedef {object} FieldEditorContext
- * @property {WidgetContext} [widgetContext] Where the field is rendered.
+ * @property {FieldContext} [fieldContext] Where the field is rendered.
  * @property {DraftValueStoreKey} valueStoreKey Key to store the values in {@link EntryDraft}.
  * @property {Writable<Component>} [extraHint] Component to render an extra hint in the field
  * editor.
  */
 
 /**
- * Common properties to be passed to a field widget’s editor component.
- * @typedef {object} WidgetEditorProps
+ * Common properties to be passed to a field’s editor component.
+ * @typedef {object} FieldEditorProps
  * @property {InternalLocaleCode} locale Current pane’s locale.
  * @property {FieldKeyPath} keyPath Field key path.
  * @property {TypedFieldKeyPath} typedKeyPath Typed field key path.
@@ -952,8 +964,8 @@
  */
 
 /**
- * Common properties to be passed to a field widget’s preview component.
- * @typedef {object} WidgetPreviewProps
+ * Common properties to be passed to a field’s preview component.
+ * @typedef {object} FieldPreviewProps
  * @property {InternalLocaleCode} locale Current pane’s locale.
  * @property {FieldKeyPath} keyPath Field key path.
  * @property {TypedFieldKeyPath} typedKeyPath Typed field key path.
@@ -961,6 +973,10 @@
 
 /**
  * @typedef {object} DateTimeFieldNormalizedProps
+ * @property {DateTimeInputType} type The `type` HTML attribute value.
+ * @property {string | undefined} min The `min` HTML attribute value.
+ * @property {string | undefined} max The `max` HTML attribute value.
+ * @property {number | 'any' | undefined} step The `step` HTML attribute value.
  * @property {string | undefined} format Same as {@link DateTimeFieldProps.format}. If it’s missing,
  * {@link DateTimeFieldProps.date_format} and {@link DateTimeFieldProps.time_format} will be used
  * instead. If these options are also missing, the value will be `undefined`, which makes the output
@@ -996,8 +1012,18 @@
  * @property {Field} fieldConfig Field configuration.
  * @property {FieldKeyPath} keyPath Field key path, e.g. `author.name`.
  * @property {LocaleCode} locale Locale code.
+ * @property {InternalLocaleCode} defaultLocale Default locale of the entry draft.
  * @property {string} [dynamicValue] Dynamic default value parsed from the URL query string.
  * @see https://decapcms.org/docs/dynamic-default-values/
+ * @see https://sveltiacms.app/en/docs/ui/content-editor#dynamic-default-values
+ */
+
+/**
+ * Arguments for the validation function of a field.
+ * @typedef {object} ValidateFieldFuncArgs
+ * @property {Field} fieldConfig Field configuration.
+ * @property {InternalLocaleCode} locale Current locale.
+ * @property {any} value Current value.
  */
 
 /**
@@ -1056,9 +1082,9 @@
  * @typedef {object} GetFieldArgs
  * @property {string} collectionName Collection name.
  * @property {string} [fileName] Collection file name. File/singleton collection only.
- * @property {string} [componentName] Markdown editor component name.
+ * @property {string} [componentName] Rich text editor component name.
  * @property {FlattenedEntryContent} [valueMap] Object holding current entry values. This is
- * required when working with list/object widget variable types.
+ * required when working with list/object field variable types.
  * @property {FieldKeyPath | TypedFieldKeyPath} keyPath Field key path or typed key path.
  * @property {boolean} [isIndexFile] Whether the corresponding entry is the collection’s special
  * index file used specifically in Hugo.

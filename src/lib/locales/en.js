@@ -71,12 +71,13 @@ export const strings = {
   clipboard_error: 'There was an error while copying data.',
 
   // Entrance
-  welcome_to_sveltia_cms: 'Welcome to Sveltia CMS',
+  welcome_message: 'Welcome to {name}',
+  powered_by: 'Powered by {name}',
   loading_cms_config: 'Loading CMS Configuration…',
   loading_site_data: 'Loading Site Data…',
   loading_site_data_error: 'There was an error while loading site data.',
   sign_in_with_x: 'Sign In with {service}',
-  sign_in_with_x_using_pat: 'Sign In with {service} Using PAT',
+  sign_in_with_x_using_token: 'Sign In with {service} Using Token',
   sign_in_using_pat_title: 'Sign In Using Personal Access Token',
   sign_in_using_pat_description:
     'Enter your token below. It must have read/write access to the repository content.',
@@ -147,11 +148,13 @@ export const strings = {
   keyboard_shortcuts: 'Keyboard Shortcuts',
   documentation: 'Documentation',
   release_notes: 'Release Notes',
+  announcements: 'Announcements',
   version_x: 'Version {version}',
   report_issue: 'Report Issue',
   share_feedback: 'Share Feedback',
   get_help: 'Get Help',
   join_discord: 'Join Us on Discord',
+  bluesky: 'Follow Us on Bluesky',
 
   // Update notification
   update_available: 'The latest version of Sveltia CMS is available.',
@@ -232,10 +235,15 @@ export const strings = {
   hide_info: 'Hide Info',
   all_assets: 'All Assets',
   global_assets: 'Global Assets',
+  entry_not_found: 'Entry not found.',
   creating_entries_disabled_by_admin:
     'Creating new entries in this collection is disabled by the administrator.',
-  creating_entries_disabled_by_limit:
-    'You cannot add new entries to this collection because it has reached its limit of {limit} entries.',
+  creating_entries_disabled_by_quota:
+    'You cannot add new entries to this collection because it has reached its limit of {quota} entries.',
+  creating_entries_nearing_quota_singular:
+    'This collection is nearing its limit of {quota} entries. You can only create {remaining} more entry.',
+  creating_entries_nearing_quota_plural:
+    'This collection is nearing its limit of {quota} entries. You can only create {remaining} more entries.',
   back_to_collection: 'Back to Collection',
   collection_list: 'Collection List',
   back_to_collection_list: 'Back to Collection List',
@@ -293,33 +301,35 @@ export const strings = {
   delete_assets: 'Delete Assets',
   delete_selected_asset: 'Delete Selected Asset',
   delete_selected_assets: 'Delete Selected Assets',
-  confirm_deleting_this_asset: 'Are you sure to delete this asset?',
-  confirm_deleting_selected_asset: 'Are you sure to delete the selected asset?',
-  confirm_deleting_selected_assets: 'Are you sure to delete the selected {count} assets?',
-  confirm_deleting_all_assets: 'Are you sure to delete all the assets?',
+  confirm_deleting_this_asset: 'Are you sure you want to delete this asset?',
+  confirm_deleting_selected_asset: 'Are you sure you want to delete the selected asset?',
+  confirm_deleting_selected_assets: 'Are you sure you want to delete the selected {count} assets?',
+  confirm_deleting_all_assets: 'Are you sure you want to delete all the assets?',
   delete_entry: 'Delete Entry',
   delete_entries: 'Delete Entries',
   delete_selected_entry: 'Delete Selected Entry',
   delete_selected_entries: 'Delete Selected Entries',
-  confirm_deleting_this_entry: 'Are you sure to delete this entry?',
+  confirm_deleting_this_entry: 'Are you sure you want to delete this entry?',
   confirm_deleting_this_entry_with_assets:
-    'Are you sure to delete this entry and associated assets?',
-  confirm_deleting_selected_entry: 'Are you sure to delete the selected entry?',
+    'Are you sure you want to delete this entry and associated assets?',
+  confirm_deleting_selected_entry: 'Are you sure you want to delete the selected entry?',
   confirm_deleting_selected_entry_with_assets:
-    'Are you sure to delete the selected entry and associated assets?',
-  confirm_deleting_selected_entries: 'Are you sure to delete the selected {count} entries?',
+    'Are you sure you want to delete the selected entry and associated assets?',
+  confirm_deleting_selected_entries:
+    'Are you sure you want to delete the selected {count} entries?',
   confirm_deleting_selected_entries_with_assets:
-    'Are you sure to delete the selected {count} entries and associated assets?',
-  confirm_deleting_all_entries: 'Are you sure to delete all the entries?',
+    'Are you sure you want to delete the selected {count} entries and associated assets?',
+  confirm_deleting_all_entries: 'Are you sure you want to delete all the entries?',
   confirm_deleting_all_entries_with_assets:
-    'Are you sure to delete all the entries and associated assets?',
+    'Are you sure you want to delete all the entries and associated assets?',
   processing_file: 'Processing a file. This may take a while.',
   processing_files: 'Processing files. This may take a while.',
   uploading_files: 'Uploading Files',
-  confirm_replacing_file: 'Are you sure to replace “{name}” with the following file?',
-  confirm_uploading_file: 'Are you sure to save the following file to the “{folder}” folder?',
+  confirm_replacing_file: 'Are you sure you want to replace “{name}” with the following file?',
+  confirm_uploading_file:
+    'Are you sure you want to save the following file to the “{folder}” folder?',
   confirm_uploading_files:
-    'Are you sure to save the following {count} files to the “{folder}” folder?',
+    'Are you sure you want to save the following {count} files to the “{folder}” folder?',
   oversized_files: 'Oversized Files',
   warning_oversized_file:
     'This file cannot be uploaded because it exceeds the maximum size of {size}. Please reduce the size or select a different file.',
@@ -399,7 +409,7 @@ export const strings = {
   x_field: '“{field}” Field',
   show_field_options: 'Show Field Options',
   field_options: 'Field Options',
-  unsupported_widget_x: 'Unsupported widget: {name}',
+  unsupported_field_type_x: 'Unsupported field type: {name}',
   enable_x_locale: 'Enable {locale}',
   reenable_x_locale: 'Reenable {locale}',
   disable_x_locale: 'Disable {locale}',
@@ -421,7 +431,7 @@ export const strings = {
   revert_all_changes: 'Revert All Changes',
   edit_slug: 'Edit Slug',
   edit_slug_warning:
-    'Changing the slug may break internal and external links to the entry. Currently, Sveltia CMS does not update references created with the Relation widget, so you’ll need to manually update such references along with other links.',
+    'Changing the slug may break internal and external links to the entry. Currently, Sveltia CMS does not update references created with Relation fields, so you’ll need to manually update such references along with other links.',
   edit_slug_error: {
     empty: 'The slug cannot be empty.',
     duplicate: 'This slug is used for another entry.',
@@ -448,14 +458,20 @@ export const strings = {
   validation: {
     value_missing: 'This field is required.',
     range_underflow: {
-      number: 'Value must be greater than or equal to {min}.',
+      'datetime-local': 'The date/time must be at or after {min}.',
+      date: 'The date must be on or after {min}.',
+      time: 'The time must be at or after {min}.',
+      number: 'The value must be greater than or equal to {min}.',
       select_many: 'You have to select at least {min} items.',
       select_one: 'You have to select at least {min} item.',
       add_many: 'You have to add at least {min} items.',
       add_one: 'You have to add at least {min} item.',
     },
     range_overflow: {
-      number: 'Value must be less than or equal to {max}.',
+      'datetime-local': 'The date/time must be at or before {max}.',
+      date: 'The date must be on or before {max}.',
+      time: 'The time must be at or before {max}.',
+      number: 'The value must be less than or equal to {max}.',
       select_many: 'You cannot select more than {max} items.',
       select_one: 'You cannot select more than {max} item.',
       add_many: 'You cannot add more than {max} items.',
@@ -500,7 +516,7 @@ export const strings = {
   location: 'Location',
   map_lat_lng: 'Map showing latitude {latitude}, longitude {longitude}',
 
-  // Widgets
+  // Fields
   select_file: 'Select File',
   select_image: 'Select Image',
   replace_file: 'Replace File',
@@ -641,8 +657,12 @@ export const strings = {
     },
     error: {
       no_secure_context: 'Sveltia CMS only works with HTTPS or localhost URLs.',
+      insecure_url: 'The configuration file URL must use HTTPS protocol or a localhost address.',
+      insecure_urls: 'The configuration file URLs must use HTTPS protocol or localhost addresses.',
       fetch_failed: 'The configuration file could not be retrieved.',
       fetch_failed_not_ok: 'HTTP response returned with status {status}.',
+      fetch_failed_with_manual_init:
+        'The configuration file could not be retrieved. To prevent the `config.yml` file from loading, add [`load_config_file: false`](https://sveltiacms.app/en/docs/api/initialization#providing-a-full-configuration) to the configuration object passed to `CMS.init()`.',
       parse_failed: 'The configuration file could not be parsed.',
       parse_failed_invalid_object: 'The configuration file is not a valid JavaScript object.',
       parse_failed_unsupported_type:
@@ -650,18 +670,27 @@ export const strings = {
       no_collection: 'Collections are not defined.',
       missing_backend: 'The backend is not defined.',
       missing_backend_name: 'The backend name is not defined.',
-      unsupported_backend: 'The configured “{name}” backend is not supported.',
+      unsupported_known_backend:
+        'The {name} backend is [not supported](https://sveltiacms.app/en/docs/migration/netlify-decap-cms#features-not-to-be-implemented) in Sveltia CMS.',
+      unsupported_custom_backend:
+        'Custom backends are [not supported](https://sveltiacms.app/en/docs/migration/netlify-decap-cms#features-not-to-be-implemented) in Sveltia CMS.',
+      unsupported_backend_suggestion:
+        'Use one of the [supported backends](https://sveltiacms.app/en/docs/backends#supported-backends) instead.',
       missing_repository: 'The repository is not defined.',
       invalid_repository:
         'The configured repository is invalid. It must be in “owner/repo” format.',
-      oauth_implicit_flow: 'The configured authentication method (implicit flow) is not supported.',
+      oauth_implicit_flow:
+        'The configured authentication method (implicit flow) is not supported in Sveltia CMS. Use PKCE authorization instead.',
+      github_pkce_unsupported:
+        'PKCE authorization with GitHub is not yet supported in Sveltia CMS due to GitHub’s limitations.',
       oauth_no_app_id: 'OAuth application ID is not defined.',
       missing_media_folder: 'The media folder is not defined.',
       invalid_media_folder: 'The configured media folder is invalid. It must be a string.',
       invalid_public_folder: 'The configured public folder is invalid. It must be a string.',
       public_folder_relative_path:
         'The configured public folder is invalid. It must be an absolute path starting with “/”.',
-      public_folder_absolute_url: 'An absolute URL for the public folder option is not supported.',
+      public_folder_absolute_url:
+        'An absolute URL for the public folder option is not supported in Sveltia CMS.',
       invalid_collection_no_options:
         'The collection must have either the `folder`, `files` or `divider` option defined.',
       invalid_collection_multiple_options:
@@ -692,14 +721,16 @@ export const strings = {
         'The variable type name `{name}` is invalid. It must not contain special characters.',
       duplicate_variable_type:
         'Variable type names must be unique, but `{name}` is used more than once.',
-      date_widget:
-        'The deprecated `date` widget is not supported in Sveltia CMS. Use the `datetime` widget with the `time_format:false` option instead.',
+      date_field_type:
+        'The deprecated Date field type is not supported in Sveltia CMS. Use the DateTime field type with the `time_format:false` option instead.',
       unsupported_deprecated_option:
         'The deprecated `{prop}` option is not supported in Sveltia CMS. Use the `{newProp}` option instead.',
       allow_multiple:
         'The `allow_multiple` option is not supported in Sveltia CMS. Use the `multiple` option instead, which defaults to `false`.',
       invalid_list_field:
         'The List field cannot have the `field`, `fields` and `types` options together.',
+      invalid_list_variable_type:
+        'The List field’s variable type is invalid. The `widget` option is set to `{widget}` but it must be `object`.',
       invalid_object_field:
         'The Object field cannot have the `fields` and `types` options together.',
       object_field_missing_fields:
@@ -721,6 +752,8 @@ export const strings = {
       unsupported_ignored_option:
         'The `{prop}` option is not supported in Sveltia CMS. It will be ignored.',
     },
+    compatibility_link:
+      'See the compatibility notes for details: https://sveltiacms.app/en/docs/migration/netlify-decap-cms#features-not-to-be-implemented',
   },
 
   // Backends
@@ -783,11 +816,15 @@ export const strings = {
     },
     i18n: {
       title: 'Internationalization',
-      default_translator: {
-        title: 'Default Translation Service',
-        select_service: 'Select Service',
-      },
-      translator: {
+      translators: {
+        default: {
+          title: 'Default Translation Service',
+          select_service: 'Select Service',
+        },
+        api_keys: {
+          title: 'Translation Service API Keys',
+          description: 'Manage API keys for <a>translation services</a>.',
+        },
         field_label: '{service} Key',
         description:
           'Sign up for <a {homeHref}>{service}</a> and enter <a {apiKeyHref}>your API Key</a> here to enable quick translation of text entry fields.',
@@ -796,15 +833,21 @@ export const strings = {
     media: {
       title: 'Media',
       stock_photos: {
-        title: '{service} Free Images',
+        api_keys: {
+          title: 'Stock Photo Service API Keys',
+          description: 'Manage API keys for <a>stock photo services</a>.',
+        },
         field_label: '{service} API Key',
         description:
           'Sign up for <a {homeHref}>{service} API</a> and enter <a {apiKeyHref}>your API Key</a> here to insert free stock photos to image entry fields.',
         credit: 'Photos provided by {service}',
       },
       cloud_storage: {
+        api_keys: {
+          title: 'Cloud Storage Service API Keys',
+          description: 'Manage API keys for <a>cloud storage services</a>.',
+        },
         field_label: '{service} API Key',
-        description: 'Enter your {service} API key to enable uploading assets to {service}.',
       },
       libraries_disabled: 'External media libraries are disabled by the administrator.',
     },

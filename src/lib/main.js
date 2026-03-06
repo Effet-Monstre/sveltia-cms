@@ -1,13 +1,20 @@
+/* eslint-disable no-console */
+
+import { isObject } from '@sveltia/utils/object';
 import createClass from 'create-react-class';
 import { createElement } from 'react';
 import { mount } from 'svelte';
 
-import { customPreviewStyleRegistry } from '$lib/services/contents/editor';
+import { eventHookRegistry, SUPPORTED_EVENT_TYPES } from '$lib/services/contents/draft/events';
+import {
+  customPreviewStyleRegistry,
+  customPreviewTemplateRegistry,
+} from '$lib/services/contents/editor';
+import { customComponentRegistry } from '$lib/services/contents/fields/rich-text/components/definitions';
 import {
   customFileFormatRegistry,
   customPreviewRenderers,
 } from '$lib/services/contents/file/config';
-import { customComponentRegistry } from '$lib/services/contents/widgets/markdown/components/definitions';
 
 import App from './components/app.svelte';
 
@@ -16,10 +23,10 @@ import App from './components/app.svelte';
  * @import {
  * AppEventListener,
  * CmsConfig,
+ * CustomFieldControlProps,
+ * CustomFieldPreviewProps,
+ * CustomFieldSchema,
  * CustomPreviewTemplateProps,
- * CustomWidgetControlProps,
- * CustomWidgetPreviewProps,
- * CustomWidgetSchema,
  * EditorComponentDefinition,
  * FileFormatter,
  * FileParser,
@@ -53,7 +60,9 @@ const unsupportedFuncNames = [
   'resolveWidget',
 ];
 
-const COMPATIBILITY_URL = 'https://github.com/sveltia/sveltia-cms#compatibility';
+const COMPATIBILITY_URL =
+  'https://sveltiacms.app/en/docs/migration/netlify-decap-cms#features-not-to-be-implemented';
+
 let initialized = false;
 
 /**
@@ -61,9 +70,15 @@ let initialized = false;
  * @param {object} [options] Options.
  * @param {CmsConfig} [options.config] Configuration to be merged with `config.yml`. Include
  * `load_config_file: false` to prevent the configuration file from being loaded.
+ * @throws {TypeError} If `config` is not an object or undefined.
  * @see https://decapcms.org/docs/manual-initialization/
+ * @see https://sveltiacms.app/en/docs/api/initialization
  */
 const init = async ({ config } = {}) => {
+  if (config !== undefined && !isObject(config)) {
+    throw new TypeError('The `config` option for `CMS.init()` must be an object');
+  }
+
   if (initialized) {
     return;
   }
@@ -72,7 +87,9 @@ const init = async ({ config } = {}) => {
 
   if (document.readyState === 'loading' && !document.querySelector('#nc-root')) {
     // A custom mount element (`<div id="nc-root">`) could appear after the CMS `<script>`, so just
-    // wait until the page content is loaded. https://decapcms.org/docs/custom-mounting/
+    // wait until the page content is loaded.
+    // @see https://decapcms.org/docs/custom-mounting/
+    // @see https://sveltiacms.app/en/docs/customization#custom-mount-element
     await new Promise((resolve) => {
       window.addEventListener('DOMContentLoaded', () => resolve(undefined), { once: true });
     });
@@ -91,21 +108,79 @@ const init = async ({ config } = {}) => {
  * @param {string} extension File extension.
  * @param {{ fromFile?: FileParser, toFile?: FileFormatter }} methods Parser and/or formatter
  * methods. Async functions can be used.
+ * @throws {TypeError} If `name` or `extension` is not a string, or if `methods` is not an object.
+ * @throws {Error} If at least one of `fromFile` or `toFile` is not provided.
  * @see https://decapcms.org/docs/custom-formatters/
+ * @see https://sveltiacms.app/en/docs/api/file-formats
  */
-const registerCustomFormat = (name, extension, { fromFile, toFile }) => {
+const registerCustomFormat = (name, extension, { fromFile, toFile } = {}) => {
+  if (typeof name !== 'string') {
+    throw new TypeError('The `name` option for `CMS.registerCustomFormat()` must be a string');
+  }
+
+  if (typeof extension !== 'string') {
+    throw new TypeError('The `extension` option for `CMS.registerCustomFormat()` must be a string');
+  }
+
+  if (typeof fromFile !== 'function' && typeof toFile !== 'function') {
+    throw new Error(
+      'At least one of `fromFile` or `toFile` must be provided to `CMS.registerCustomFormat()`',
+    );
+  }
+
+  if (typeof fromFile !== 'undefined' && typeof fromFile !== 'function') {
+    throw new TypeError(
+      'The `fromFile` option for `CMS.registerCustomFormat()` must be a function',
+    );
+  }
+
+  if (typeof toFile !== 'undefined' && typeof toFile !== 'function') {
+    throw new TypeError('The `toFile` option for `CMS.registerCustomFormat()` must be a function');
+  }
+
   customFileFormatRegistry.set(name, { extension, parser: fromFile, formatter: toFile });
 };
 
 /**
  * Register a custom component.
  * @param {EditorComponentDefinition} definition Component definition.
+ * @throws {TypeError} If `definition` is not an object, or if required properties are invalid.
  * @see https://decapcms.org/docs/custom-widgets/#registereditorcomponent
+ * @see https://sveltiacms.app/en/docs/api/editor-components
  */
 const registerEditorComponent = (definition) => {
+  if (!definition || typeof definition !== 'object') {
+    throw new TypeError(
+      'The `definition` option for `CMS.registerEditorComponent()` must be an object',
+    );
+  }
+
+  if (typeof definition.id !== 'string') {
+    throw new TypeError('The `definition.id` must be a string');
+  }
+
+  if (typeof definition.label !== 'string') {
+    throw new TypeError('The `definition.label` must be a string');
+  }
+
+  if (typeof definition.pattern !== 'object' || !(definition.pattern instanceof RegExp)) {
+    throw new TypeError('The `definition.pattern` must be a RegExp');
+  }
+
+  if (typeof definition.toBlock !== 'function') {
+    throw new TypeError('The `definition.toBlock` must be a function');
+  }
+
+  if (typeof definition.toPreview !== 'function') {
+    throw new TypeError('The `definition.toPreview` must be a function');
+  }
+
+  if (!Array.isArray(definition.fields)) {
+    throw new TypeError('The `definition.fields` must be an array');
+  }
+
   customComponentRegistry.set(definition.id, definition);
 
-  // eslint-disable-next-line no-console
   console.warn('Preview for custom editor components are not yet supported in Sveltia CMS.');
 };
 
@@ -121,12 +196,32 @@ const registerCustomPreviewRenderer = (name, fn) => {
 /**
  * Register an event listener.
  * @param {AppEventListener} eventListener Event listener.
+ * @throws {TypeError} If the event listener is not an object, or is missing required properties.
+ * @throws {RangeError} If the event listener name is not supported.
  * @see https://decapcms.org/docs/registering-events/
+ * @see https://sveltiacms.app/en/docs/api/events
  */
 const registerEventListener = (eventListener) => {
-  // eslint-disable-next-line no-console
-  console.warn('Event hooks are not yet supported in Sveltia CMS.');
-  void [eventListener];
+  if (!isObject(eventListener)) {
+    throw new TypeError('The event listener must be an object');
+  }
+
+  const { name, handler } = eventListener;
+
+  if (typeof name !== 'string' || typeof handler !== 'function') {
+    throw new TypeError(
+      'The event listener must have a string `name` property and a function `handler` property',
+    );
+  }
+
+  if (!SUPPORTED_EVENT_TYPES.includes(name)) {
+    throw new RangeError(
+      `Unsupported event listener name "${name}". ` +
+        `Supported names are: ${SUPPORTED_EVENT_TYPES.join(', ')}`,
+    );
+  }
+
+  eventHookRegistry.add(eventListener);
 };
 
 /**
@@ -136,6 +231,7 @@ const registerEventListener = (eventListener) => {
  * @param {boolean} [options.raw] Whether to use a CSS string.
  * @throws {TypeError} If `style` is not a string, or `raw` is not a boolean.
  * @see https://decapcms.org/docs/customization/#registerpreviewstyle
+ * @see https://sveltiacms.app/en/docs/api/preview-styles
  */
 const registerPreviewStyle = (style, { raw = false } = {}) => {
   if (typeof style !== 'string') {
@@ -155,25 +251,37 @@ const registerPreviewStyle = (style, { raw = false } = {}) => {
  * Register a custom preview template.
  * @param {string} name Template name.
  * @param {ComponentType<CustomPreviewTemplateProps>} component React component.
+ * @throws {TypeError} If `name` is not a string or `component` is not a function.
  * @see https://decapcms.org/docs/customization/#registerpreviewtemplate
+ * @see https://sveltiacms.app/en/docs/api/preview-templates
  */
 const registerPreviewTemplate = (name, component) => {
-  // eslint-disable-next-line no-console
   console.warn('Custom preview templates are not yet supported in Sveltia CMS.');
-  void [name, component];
+
+  if (typeof name !== 'string') {
+    throw new TypeError('The `name` option for `CMS.registerPreviewTemplate()` must be a string');
+  }
+
+  if (typeof component !== 'function') {
+    throw new TypeError(
+      'The `component` option for `CMS.registerPreviewTemplate()` must be a function',
+    );
+  }
+
+  customPreviewTemplateRegistry.set(name, component);
 };
 
 /**
- * Register a custom widget.
- * @param {string} name Widget name.
- * @param {ComponentType<CustomWidgetControlProps> | string} control Component for the edit pane.
- * @param {ComponentType<CustomWidgetPreviewProps>} [preview] Component for the preview pane.
- * @param {CustomWidgetSchema} [schema] Field schema.
+ * Register a custom field type (widget).
+ * @param {string} name Field type name.
+ * @param {ComponentType<CustomFieldControlProps> | string} control Component for the edit pane.
+ * @param {ComponentType<CustomFieldPreviewProps>} [preview] Component for the preview pane.
+ * @param {CustomFieldSchema} [schema] Field schema.
  * @see https://decapcms.org/docs/custom-widgets/
+ * @see https://sveltiacms.app/en/docs/api/field-types
  */
-const registerWidget = (name, control, preview, schema) => {
-  // eslint-disable-next-line no-console
-  console.warn('Custom widgets are not yet supported in Sveltia CMS.');
+const registerFieldType = (name, control, preview, schema) => {
+  console.warn('Custom field types (widgets) are not yet supported in Sveltia CMS.');
   void [name, control, preview, schema];
 };
 
@@ -184,9 +292,10 @@ const CMS = new Proxy(
     registerCustomPreviewRenderer,
     registerEditorComponent,
     registerEventListener,
+    registerFieldType,
     registerPreviewStyle,
     registerPreviewTemplate,
-    registerWidget,
+    registerWidget: registerFieldType, // alias for backward compatibility with Netlify/Decap CMS
   },
   {
     // eslint-disable-next-line jsdoc/require-jsdoc
@@ -204,7 +313,6 @@ const CMS = new Proxy(
       }
 
       if (message) {
-        // eslint-disable-next-line no-console
         console.warn(`${message} See %s for compatibility information.`, key, COMPATIBILITY_URL);
 
         // eslint-disable-next-line jsdoc/require-description
@@ -223,21 +331,43 @@ export { init };
 window.CMS = CMS;
 window.initCMS = init;
 
-// Expose React APIs for custom widgets, custom preview templates and custom editor components
+// Expose React APIs for custom field types, custom preview templates and custom editor components
 // @see https://decapcms.org/docs/custom-widgets/
 // @see https://decapcms.org/docs/customization/
+// @see https://sveltiacms.app/en/docs/api/field-types
+// @see https://sveltiacms.app/en/docs/api/preview-templates
 window.createClass = createClass;
 window.createElement = createElement;
 window.h = createElement;
 
+const cssLinkElement = document.querySelector('link[rel="stylesheet"][href$="/sveltia-cms.css"]');
+
+// Warn if an invalid stylesheet is included. Claude tends to add it when setting up Sveltia CMS.
+if (cssLinkElement) {
+  console.warn(
+    'Sveltia CMS does not require a stylesheet. Remove the invalid `<link>` tag referencing ' +
+      '`sveltia-cms.css` to avoid unnecessary network requests.',
+  );
+}
+
+const scriptElement = /** @type {HTMLScriptElement | null} */ (
+  document.querySelector('script[src$="/sveltia-cms.js"]')
+);
+
+// Warn if the CMS script comes with `type="module"`. Earlier versions of Sveltia CMS were built and
+// shipped as ES modules. Therefore, some users may have added the attribute to the script tag.
+// Additionally, Claude tends to add it due to outdated/inaccurate knowledge. We recommend removing
+// the attribute from the CMS script tag to avoid unexpected behavior.
+if (scriptElement?.type === 'module') {
+  console.warn(
+    'The Sveltia CMS script is not an ES module. Remove the "type="module" attribute from the ' +
+      '`<script>` tag to avoid unexpected behavior when using the JavaScript API.',
+  );
+}
+
 // Automatically initialize the CMS if manual initialization is not requested AND the script is NOT
 // a module; We can’t just use `document.currentScript` for module detection because the earlier
 // versions of Sveltia CMS were built and shipped as modules
-if (
-  !window.CMS_MANUAL_INIT &&
-  (!!document.currentScript ||
-    !!document.querySelector('script[src$="/sveltia-cms.js"]') ||
-    import.meta.env.DEV)
-) {
+if (!window.CMS_MANUAL_INIT && (document.currentScript || scriptElement || import.meta.env.DEV)) {
   init();
 }

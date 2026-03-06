@@ -4,7 +4,7 @@ import dayjsCustomParseFormat from 'dayjs/plugin/customParseFormat';
 import dayjsLocalizedFormat from 'dayjs/plugin/localizedFormat';
 import dayjsUTC from 'dayjs/plugin/utc';
 
-import { parseDateTimeConfig } from '$lib/services/contents/widgets/date-time/helper';
+import { parseDateTimeConfig } from '$lib/services/contents/fields/date-time/helper';
 
 /**
  * @import { DateTimeField, Field } from '$lib/types/public';
@@ -127,6 +127,7 @@ export const applyTruncateTransformation = (value, { max, ellipsis = '…' }) =>
  * @param {string} args.transformation Transformation, e.g `upper`, `truncate(10)`.
  * @returns {string} Transformed value.
  * @see https://decapcms.org/docs/summary-strings/
+ * @see https://sveltiacms.app/en/docs/string-transformations
  */
 export const applyTransformation = ({ fieldConfig, value, transformation }) => {
   if (transformation === 'upper') {

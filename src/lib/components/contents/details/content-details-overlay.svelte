@@ -1,5 +1,14 @@
 <script>
-  import { Alert, Button, EmptyState, Group, Toast } from '@sveltia/ui';
+  import {
+    Alert,
+    Button,
+    EmptyState,
+    Group,
+    ResizableHandle,
+    ResizablePane,
+    ResizablePaneGroup,
+    Toast,
+  } from '@sveltia/ui';
   import { onMount, tick, untrack } from 'svelte';
   import { _ } from 'svelte-i18n';
 
@@ -8,7 +17,7 @@
   import PaneHeader from '$lib/components/contents/details/pane-header.svelte';
   import Toolbar from '$lib/components/contents/details/toolbar.svelte';
   import { goto } from '$lib/services/app/navigation';
-  import { canCreateEntry } from '$lib/services/contents/collection/entries';
+  import { collectionState } from '$lib/services/contents/collection/view';
   import { entryDraft } from '$lib/services/contents/draft';
   import {
     resetBackupToastState,
@@ -17,6 +26,7 @@
   import {
     editorFirstPane,
     editorSecondPane,
+    MIN_PANE_SIZE,
     showContentOverlay,
     showDuplicateToast,
   } from '$lib/services/contents/editor';
@@ -25,7 +35,20 @@
   import { DEFAULT_I18N_CONFIG } from '$lib/services/contents/i18n/config';
   import { isMediumScreen, isSmallScreen } from '$lib/services/user/env';
 
+  /**
+   * @typedef {object} Props
+   * @property {string | undefined} [editorLocale] The locale to open the editor in.
+   */
+
+  /** @type {Props} */
+  let {
+    /* eslint-disable prefer-const */
+    editorLocale = undefined,
+    /* eslint-enable prefer-const */
+  } = $props();
+
   let restoring = false;
+  let switching = false;
 
   let hidden = $state(true);
   /** @type {HTMLElement | undefined} */
@@ -35,9 +58,9 @@
   /** @type {HTMLElement | undefined} */
   let secondPaneContentArea = $state();
 
+  const notFound = $derived($entryDraft === undefined);
   const isNew = $derived($entryDraft?.isNew ?? true);
   const collection = $derived($entryDraft?.collection);
-  const entryCollection = $derived(collection?._type === 'entry' ? collection : undefined);
   const collectionFile = $derived($entryDraft?.collectionFile);
   const { showPreview } = $derived($entryEditorSettings ?? {});
   const { i18nEnabled, allLocales, defaultLocale } = $derived(
@@ -47,17 +70,43 @@
   const paneStateKey = $derived(
     collectionFile?.name ? [collection?.name, collectionFile.name].join('|') : collection?.name,
   );
-  const canCreate = $derived(entryCollection?.create ?? false);
-  const limit = $derived(entryCollection?.limit ?? Infinity);
-  const createDisabled = $derived(!canCreateEntry(collection));
+  const { canCreate, quota, creationDisabled } = $derived($collectionState);
+
+  const [firstPaneSize, secondPaneSize, minPaneSize] = $derived.by(() => {
+    if (!$editorFirstPane && !$editorSecondPane) {
+      return [0, 0, 0];
+    }
+
+    if (!$editorFirstPane || !$editorSecondPane) {
+      return [$editorFirstPane ? 100 : 0, $editorSecondPane ? 100 : 0, 0];
+    }
+
+    if (
+      typeof $editorFirstPane.width === 'number' &&
+      typeof $editorSecondPane.width === 'number' &&
+      $editorFirstPane.width >= MIN_PANE_SIZE &&
+      $editorSecondPane.width >= MIN_PANE_SIZE &&
+      $editorFirstPane.width + $editorSecondPane.width === 100
+    ) {
+      return [$editorFirstPane.width, $editorSecondPane.width, MIN_PANE_SIZE];
+    }
+
+    return [50, 50, MIN_PANE_SIZE];
+  });
 
   /**
    * Restore the pane state from IndexedDB.
    * @returns {Promise<boolean>} Whether the panes are restored.
    */
   const restorePanes = async () => {
-    const [_editorFirstPane, _editorSecondPane] =
+    let [_editorFirstPane, _editorSecondPane] =
       $entryEditorSettings?.paneStates?.[paneStateKey ?? ''] ?? [];
+
+    // Override the locale if specified
+    if (editorLocale) {
+      _editorFirstPane = { mode: 'edit', locale: editorLocale };
+      _editorSecondPane = { mode: 'preview', locale: editorLocale };
+    }
 
     if (
       restoring ||
@@ -66,7 +115,10 @@
       (!!_editorFirstPane.locale && !allLocales.includes(_editorFirstPane.locale)) ||
       (!!_editorSecondPane.locale && !allLocales.includes(_editorSecondPane.locale)) ||
       ((!showPreview || !canPreview) &&
-        (_editorFirstPane.mode === 'preview' || _editorSecondPane.mode === 'preview'))
+        (_editorFirstPane.mode === 'preview' || _editorSecondPane.mode === 'preview')) ||
+      // If there are only 2 locales and the first pane is not in the default locale, don’t restore
+      // the panes so that the default locale is always shown in the first pane
+      (allLocales.length === 2 && _editorFirstPane.locale !== defaultLocale)
     ) {
       return false;
     }
@@ -74,13 +126,9 @@
     restoring = true;
     await tick();
     $editorFirstPane = _editorFirstPane;
-    $editorSecondPane = _editorSecondPane;
+    $editorSecondPane = $isSmallScreen || $isMediumScreen ? null : _editorSecondPane;
     await tick();
     restoring = false;
-
-    if ($isSmallScreen || $isMediumScreen) {
-      $editorSecondPane = null;
-    }
 
     return true;
   };
@@ -89,11 +137,15 @@
    * Hide the preview pane if it’s disabled by the user or the collection/file.
    */
   const switchPanes = async () => {
-    if (!$entryDraft) {
+    if (!$entryDraft || switching) {
       return;
     }
 
+    switching = true;
+
     if (await restorePanes()) {
+      switching = false;
+
       return;
     }
 
@@ -110,6 +162,8 @@
     } else {
       $editorSecondPane = { mode: 'preview', locale: $editorFirstPane.locale };
     }
+
+    switching = false;
   };
 
   /**
@@ -142,13 +196,10 @@
     }
   };
 
-  onMount(() => {
-    wrapper?.addEventListener('transitionend', () => {
-      if (!$showContentOverlay) {
-        hidden = true;
-        $entryDraft = null;
-      }
-    });
+  onMount(() => () => {
+    if (!$showContentOverlay) {
+      $entryDraft = null;
+    }
   });
 
   $effect(() => {
@@ -186,25 +237,76 @@
   });
 </script>
 
+{#snippet firstPane()}
+  {#if $editorFirstPane}
+    {@const { locale, mode } = $editorFirstPane}
+    <div class="pane-wrapper">
+      <Group
+        class="pane"
+        aria-label={$_(mode === 'edit' ? 'edit_x_locale' : 'preview_x_locale', {
+          values: { locale: getLocaleLabel(locale) ?? locale },
+        })}
+        data-locale={locale}
+        data-mode={mode}
+      >
+        <PaneHeader id="first-pane-header" thisPane={editorFirstPane} thatPane={editorSecondPane} />
+        <PaneBody
+          id="first-pane-body"
+          thisPane={editorFirstPane}
+          bind:thisPaneContentArea={firstPaneContentArea}
+          bind:thatPaneContentArea={secondPaneContentArea}
+        />
+      </Group>
+    </div>
+  {/if}
+{/snippet}
+
+{#snippet secondPane()}
+  {#if $editorSecondPane}
+    {@const { locale, mode } = $editorSecondPane}
+    <div class="pane-wrapper">
+      <Group
+        aria-label={$_(mode === 'edit' ? 'edit_x_locale' : 'preview_x_locale', {
+          values: { locale: getLocaleLabel(locale) ?? locale },
+        })}
+        data-locale={locale}
+        data-mode={mode}
+      >
+        <PaneHeader
+          id="second-pane-header"
+          thisPane={editorSecondPane}
+          thatPane={editorFirstPane}
+        />
+        <PaneBody
+          id="second-pane-body"
+          thisPane={editorSecondPane}
+          bind:thisPaneContentArea={secondPaneContentArea}
+          bind:thatPaneContentArea={firstPaneContentArea}
+        />
+      </Group>
+    </div>
+  {/if}
+{/snippet}
+
 <div
   role="group"
   class="wrapper content-editor"
-  {hidden}
-  inert={!$showContentOverlay}
   aria-label={$_('content_editor')}
   bind:this={wrapper}
 >
   {#key $entryDraft?.id}
-    <Toolbar disabled={isNew && createDisabled} />
-    {#if !$entryDraft}
+    <Toolbar disabled={isNew && creationDisabled} />
+    {#if $entryDraft === null}
       <!-- Hide the content after saving a draft -->
-    {:else if isNew && createDisabled}
+    {:else if notFound || (isNew && creationDisabled)}
       <EmptyState>
         <div role="none">
-          {#if !canCreate}
+          {#if notFound}
+            {$_('entry_not_found')}
+          {:else if !canCreate}
             {$_('creating_entries_disabled_by_admin')}
           {:else}
-            {$_('creating_entries_disabled_by_limit', { values: { limit } })}
+            {$_('creating_entries_disabled_by_quota', { values: { quota } })}
           {/if}
         </div>
         <div role="none">
@@ -222,57 +324,31 @@
         </div>
       </EmptyState>
     {:else}
-      <div role="none" class="cols">
-        {#if collection}
-          {#if $editorFirstPane}
-            <!-- Somehow we need a fallback object or we’ll get a property destructuring error -->
-            {@const { locale, mode } = $editorFirstPane ?? {}}
-            <Group
-              class="pane"
-              aria-label={$_(mode === 'edit' ? 'edit_x_locale' : 'preview_x_locale', {
-                values: { locale: getLocaleLabel(locale) ?? locale },
-              })}
-              data-locale={locale}
-              data-mode={mode}
+      {#key collection}
+        {#if $editorFirstPane && $editorSecondPane}
+          {#if firstPaneSize && secondPaneSize}
+            <ResizablePaneGroup
+              onResize={({ sizes }) => {
+                if ($editorFirstPane && $editorSecondPane) {
+                  [$editorFirstPane.width, $editorSecondPane.width] = sizes;
+                }
+              }}
             >
-              <PaneHeader
-                id="first-pane-header"
-                thisPane={editorFirstPane}
-                thatPane={editorSecondPane}
-              />
-              <PaneBody
-                id="first-pane-body"
-                thisPane={editorFirstPane}
-                bind:thisPaneContentArea={firstPaneContentArea}
-                bind:thatPaneContentArea={secondPaneContentArea}
-              />
-            </Group>
+              <ResizablePane defaultSize={firstPaneSize} minSize={minPaneSize}>
+                {@render firstPane()}
+              </ResizablePane>
+              <ResizableHandle />
+              <ResizablePane defaultSize={secondPaneSize} minSize={minPaneSize}>
+                {@render secondPane()}
+              </ResizablePane>
+            </ResizablePaneGroup>
           {/if}
-          {#if $editorSecondPane}
-            <!-- Ditto -->
-            {@const { locale, mode } = $editorSecondPane ?? {}}
-            <Group
-              aria-label={$_(mode === 'edit' ? 'edit_x_locale' : 'preview_x_locale', {
-                values: { locale: getLocaleLabel(locale) ?? locale },
-              })}
-              data-locale={locale}
-              data-mode={mode}
-            >
-              <PaneHeader
-                id="second-pane-header"
-                thisPane={editorSecondPane}
-                thatPane={editorFirstPane}
-              />
-              <PaneBody
-                id="second-pane-body"
-                thisPane={editorSecondPane}
-                bind:thisPaneContentArea={secondPaneContentArea}
-                bind:thatPaneContentArea={firstPaneContentArea}
-              />
-            </Group>
-          {/if}
+        {:else if $editorFirstPane}
+          {@render firstPane()}
+        {:else if $editorSecondPane}
+          {@render secondPane()}
         {/if}
-      </div>
+      {/key}
     {/if}
   {/key}
 </div>
@@ -293,43 +369,27 @@
     display: flex;
     flex-direction: column;
     background-color: var(--sui-secondary-background-color);
-    transition: filter 250ms;
 
-    &[hidden] {
-      display: none;
+    :global {
+      .sui.resizable-pane-group {
+        background-color: var(--sui-secondary-background-color); // same as toolbar
+      }
+
+      .sui.resizable-pane {
+        background-color: var(--sui-primary-background-color);
+      }
     }
+  }
 
-    &[inert] {
-      filter: opacity(0);
-    }
+  .pane-wrapper {
+    display: contents;
 
-    .cols {
-      flex: auto;
-      overflow: hidden;
-      display: flex;
-      gap: 4px;
-      background-color: var(--sui-secondary-background-color); // same as toolbar
-
-      :global {
-        & > div {
-          display: flex;
-          flex-direction: column;
-          min-width: 480px;
-          background-color: var(--sui-primary-background-color);
-          transition: all 500ms;
-
-          &[data-mode='edit'] {
-            flex: 1 1;
-          }
-
-          &[data-mode='preview'] {
-            flex: 2 1;
-          }
-
-          @media (width < 768px) {
-            min-width: auto;
-          }
-        }
+    :global {
+      & > .group {
+        height: 100%;
+        overflow: hidden;
+        display: flex;
+        flex-direction: column;
       }
     }
   }

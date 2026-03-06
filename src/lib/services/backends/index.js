@@ -17,6 +17,7 @@ import api from '$lib/services/backends/fs/api';
  * List of all the supported backend services.
  * @type {Record<string, BackendService>}
  * @see https://decapcms.org/docs/backends-overview/
+ * @see https://sveltiacms.app/en/docs/backends
  */
 export const allBackendServices = {
   github,
@@ -25,6 +26,18 @@ export const allBackendServices = {
   local,
   'test-repo': test,
   api,
+};
+
+/**
+ * List of backend services that are implemented in Netlify/Decap CMS but are not supported in
+ * Sveltia CMS for performance and/or deprecation reasons.
+ * @type {Record<string, { label: string }>}
+ * @see https://sveltiacms.app/en/docs/migration/netlify-decap-cms#features-not-to-be-implemented
+ */
+export const unsupportedBackends = {
+  azure: { label: 'Azure DevOps' },
+  bitbucket: { label: 'Bitbucket' },
+  'git-gateway': { label: 'Git Gateway' },
 };
 
 /**

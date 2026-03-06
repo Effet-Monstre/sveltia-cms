@@ -5,16 +5,19 @@ declare namespace CMS {
     export { registerCustomPreviewRenderer };
     export { registerEditorComponent };
     export { registerEventListener };
+    export { registerFieldType };
     export { registerPreviewStyle };
     export { registerPreviewTemplate };
-    export { registerWidget };
+    export { registerFieldType as registerWidget };
 }
 /**
  * Initialize the CMS, optionally with the given CMS configuration.
  * @param {object} [options] Options.
  * @param {CmsConfig} [options.config] Configuration to be merged with `config.yml`. Include
  * `load_config_file: false` to prevent the configuration file from being loaded.
+ * @throws {TypeError} If `config` is not an object or undefined.
  * @see https://decapcms.org/docs/manual-initialization/
+ * @see https://sveltiacms.app/en/docs/api/initialization
  */
 export function init({ config }?: {
     config?: CmsConfig;
@@ -26,9 +29,12 @@ export function init({ config }?: {
  * @param {string} extension File extension.
  * @param {{ fromFile?: FileParser, toFile?: FileFormatter }} methods Parser and/or formatter
  * methods. Async functions can be used.
+ * @throws {TypeError} If `name` or `extension` is not a string, or if `methods` is not an object.
+ * @throws {Error} If at least one of `fromFile` or `toFile` is not provided.
  * @see https://decapcms.org/docs/custom-formatters/
+ * @see https://sveltiacms.app/en/docs/api/file-formats
  */
-declare function registerCustomFormat(name: string, extension: string, { fromFile, toFile }: {
+declare function registerCustomFormat(name: string, extension: string, { fromFile, toFile }?: {
     fromFile?: FileParser;
     toFile?: FileFormatter;
 }): void;
@@ -41,15 +47,30 @@ declare function registerCustomPreviewRenderer(name: string, fn: any): void;
 /**
  * Register a custom component.
  * @param {EditorComponentDefinition} definition Component definition.
+ * @throws {TypeError} If `definition` is not an object, or if required properties are invalid.
  * @see https://decapcms.org/docs/custom-widgets/#registereditorcomponent
+ * @see https://sveltiacms.app/en/docs/api/editor-components
  */
 declare function registerEditorComponent(definition: EditorComponentDefinition): void;
 /**
  * Register an event listener.
  * @param {AppEventListener} eventListener Event listener.
+ * @throws {TypeError} If the event listener is not an object, or is missing required properties.
+ * @throws {RangeError} If the event listener name is not supported.
  * @see https://decapcms.org/docs/registering-events/
+ * @see https://sveltiacms.app/en/docs/api/events
  */
 declare function registerEventListener(eventListener: AppEventListener): void;
+/**
+ * Register a custom field type (widget).
+ * @param {string} name Field type name.
+ * @param {ComponentType<CustomFieldControlProps> | string} control Component for the edit pane.
+ * @param {ComponentType<CustomFieldPreviewProps>} [preview] Component for the preview pane.
+ * @param {CustomFieldSchema} [schema] Field schema.
+ * @see https://decapcms.org/docs/custom-widgets/
+ * @see https://sveltiacms.app/en/docs/api/field-types
+ */
+declare function registerFieldType(name: string, control: ComponentType<CustomFieldControlProps> | string, preview?: ComponentType<CustomFieldPreviewProps>, schema?: CustomFieldSchema): void;
 /**
  * Register a custom preview stylesheet.
  * @param {string} style URL, file path or raw CSS string.
@@ -57,6 +78,7 @@ declare function registerEventListener(eventListener: AppEventListener): void;
  * @param {boolean} [options.raw] Whether to use a CSS string.
  * @throws {TypeError} If `style` is not a string, or `raw` is not a boolean.
  * @see https://decapcms.org/docs/customization/#registerpreviewstyle
+ * @see https://sveltiacms.app/en/docs/api/preview-styles
  */
 declare function registerPreviewStyle(style: string, { raw }?: {
     raw?: boolean;
@@ -65,26 +87,19 @@ declare function registerPreviewStyle(style: string, { raw }?: {
  * Register a custom preview template.
  * @param {string} name Template name.
  * @param {ComponentType<CustomPreviewTemplateProps>} component React component.
+ * @throws {TypeError} If `name` is not a string or `component` is not a function.
  * @see https://decapcms.org/docs/customization/#registerpreviewtemplate
+ * @see https://sveltiacms.app/en/docs/api/preview-templates
  */
 declare function registerPreviewTemplate(name: string, component: ComponentType<CustomPreviewTemplateProps>): void;
-/**
- * Register a custom widget.
- * @param {string} name Widget name.
- * @param {ComponentType<CustomWidgetControlProps> | string} control Component for the edit pane.
- * @param {ComponentType<CustomWidgetPreviewProps>} [preview] Component for the preview pane.
- * @param {CustomWidgetSchema} [schema] Field schema.
- * @see https://decapcms.org/docs/custom-widgets/
- */
-declare function registerWidget(name: string, control: ComponentType<CustomWidgetControlProps> | string, preview?: ComponentType<CustomWidgetPreviewProps>, schema?: CustomWidgetSchema): void;
 import type { CmsConfig } from './types/public';
 import type { FileParser } from './types/public';
 import type { FileFormatter } from './types/public';
 import type { EditorComponentDefinition } from './types/public';
 import type { AppEventListener } from './types/public';
-import type { CustomPreviewTemplateProps } from './types/public';
+import type { CustomFieldControlProps } from './types/public';
 import type { ComponentType } from 'react';
-import type { CustomWidgetControlProps } from './types/public';
-import type { CustomWidgetPreviewProps } from './types/public';
-import type { CustomWidgetSchema } from './types/public';
-export type { CmsConfig };
+import type { CustomFieldPreviewProps } from './types/public';
+import type { CustomFieldSchema } from './types/public';
+import type { CustomPreviewTemplateProps } from './types/public';
+export type * from './types/public';

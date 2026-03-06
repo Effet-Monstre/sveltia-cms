@@ -14,6 +14,7 @@
   } from '@sveltia/ui';
   import { getHash } from '@sveltia/utils/crypto';
   import { getPathInfo } from '@sveltia/utils/file';
+  import { escapeRegExp } from '@sveltia/utils/string';
   import equal from 'fast-deep-equal';
   import { _ } from 'svelte-i18n';
 
@@ -26,7 +27,7 @@
   import {
     convertFileItemToAsset,
     getUnsavedAssets,
-  } from '$lib/services/contents/widgets/file/process';
+  } from '$lib/services/contents/fields/file/process';
   import { allCloudStorageServices } from '$lib/services/integrations/media-libraries/cloud';
   import {
     allStockAssetProviders,
@@ -72,6 +73,7 @@
     open = $bindable(false),
     multiple = false,
     kind,
+    // svelte-ignore state_referenced_locally
     accept = kind === 'image' ? SUPPORTED_IMAGE_TYPES.join(',') : undefined,
     canEnterURL = true,
     entryDraft,
@@ -97,6 +99,19 @@
   /** @type {ExternalAssetsPanel | undefined} */
   let externalAssetsPanel = $state();
 
+  /**
+   * Sort services by their label in alphabetical order.
+   * @param {[string, { serviceLabel: string }]} a First service entry.
+   * @param {[string, { serviceLabel: string }]} b Second service entry.
+   * @returns {number} Sorting order value.
+   */
+  const sortServicesByName = (a, b) => {
+    const nameA = a[1].serviceLabel.toLowerCase();
+    const nameB = b[1].serviceLabel.toLowerCase();
+
+    return nameA.localeCompare(nameB);
+  };
+
   const title = $derived(
     kind === 'image' ? $_('assets_dialog.title.image') : $_('assets_dialog.title.file'),
   );
@@ -118,13 +133,23 @@
   const targetFolderPath = $derived.by(() => {
     const { originalEntry } = $entryDraft ?? {};
 
-    if (selectedFolder?.entryRelative && originalEntry) {
+    if (!selectedFolder?.entryRelative) {
+      return selectedFolder?.internalPath;
+    }
+
+    if (originalEntry) {
       // @todo FIXME: This only works with `media_folder: ""`
       return getPathInfo(Object.values(originalEntry.locales)[0].path).dirname;
     }
 
-    return selectedFolder?.internalPath;
+    // Append a placeholder because the complete path is not determined until the entry is saved
+    return `${selectedFolder?.internalPath}/-`;
   });
+  const targetFolderPathRegex = $derived(
+    targetFolderPath !== undefined
+      ? new RegExp(`^${escapeRegExp(targetFolderPath)}(?:\\/|$)`)
+      : null,
+  );
   const listedAssets = $derived(
     [...$allAssets, ...unsavedAssets]
       .filter((asset) => !kind || kind === asset.kind)
@@ -135,27 +160,28 @@
   const enabledStockAssetProviderEntries = $derived.by(() => {
     const { providers = [] } = getStockAssetMediaLibraryOptions({ fieldConfig });
 
-    return Object.entries(allStockAssetProviders).filter(
-      ([serviceId, { hotlinking }]) =>
-        providers.includes(/** @type {StockAssetProviderName} */ (serviceId)) &&
-        // When hotlinking is not required, files are downloaded and then uploaded to the
-        // repository, so the default library has to be configured.
-        (hotlinking || isDefaultLibraryEnabled),
-    );
+    return Object.entries(allStockAssetProviders)
+      .filter(
+        ([serviceId, { hotlinking }]) =>
+          providers.includes(/** @type {StockAssetProviderName} */ (serviceId)) &&
+          // When hotlinking is not required, files are downloaded and then uploaded to the
+          // repository, so the default library has to be configured.
+          (hotlinking || isDefaultLibraryEnabled),
+      )
+      .sort(sortServicesByName);
   });
   const isEnabledMediaService = $derived(
-    enabledStockAssetProviderEntries
-      .map(([serviceId]) => serviceId)
-      .includes(/** @type {StockAssetProviderName} */ (libraryName)) &&
-      !!$prefs?.apiKeys?.[libraryName],
+    enabledStockAssetProviderEntries.some(
+      ([serviceId, { authType }]) =>
+        serviceId === libraryName && (authType === 'none' || !!$prefs?.apiKeys?.[libraryName]),
+    ),
   );
   const enabledCloudServiceEntries = $derived(
     Object.entries(allCloudStorageServices).filter(([, { isEnabled }]) => isEnabled?.() ?? true),
   );
-  const enabledExternalServiceEntries = $derived([
-    ...enabledCloudServiceEntries,
-    ...enabledStockAssetProviderEntries,
-  ]);
+  const enabledExternalServiceEntries = $derived(
+    [...enabledCloudServiceEntries, ...enabledStockAssetProviderEntries].sort(sortServicesByName),
+  );
   const isCloudLibrary = $derived(
     enabledCloudServiceEntries.map(([serviceId]) => serviceId).includes(libraryName),
   );
@@ -165,6 +191,33 @@
       .includes(/** @type {any} */ (libraryName)),
   );
   const Selector = $derived($isSmallScreen ? Select : Listbox);
+
+  /**
+   * Check if an asset is in the selected folder.
+   * @param {Asset} asset Asset to check.
+   * @returns {boolean} `true` if the asset is in the selected folder.
+   */
+  const isAssetInSelectedFolder = (asset) => {
+    if (
+      selectedFolder === undefined ||
+      asset.folder?.internalPath !== selectedFolder.internalPath ||
+      asset.folder?.entryRelative !== selectedFolder.entryRelative
+    ) {
+      return false;
+    }
+
+    if (!selectedFolder.entryRelative) {
+      return true;
+    }
+
+    const { dirname } = getPathInfo(asset.path);
+
+    if (dirname === undefined || !targetFolderPathRegex) {
+      return false;
+    }
+
+    return targetFolderPathRegex.test(dirname);
+  };
 
   /**
    * Check if an asset with the same hash and folder already exists in the unsaved assets.
@@ -278,7 +331,7 @@
 </script>
 
 {#snippet headerItems()}
-  {#if isDefaultLibrary || (isCloudLibrary && libraryName !== 'cloudinary') || isStockLibrary}
+  {#if isDefaultLibrary || (isCloudLibrary && libraryName !== 'cloudinary') || (isStockLibrary && libraryName !== 'picsum')}
     {#if $selectAssetsView}
       <ViewSwitcher
         currentView={(() => /** @type {Writable<SelectAssetsView>} */ (selectAssetsView))()}
@@ -309,7 +362,7 @@
 
 <Dialog
   {title}
-  size={'x-large'}
+  size="x-large"
   okLabel={$_('insert')}
   okDisabled={!selectedResources.length}
   keepContent={true}
@@ -395,13 +448,7 @@
         <InternalAssetsPanel
           {accept}
           {multiple}
-          assets={listedAssets.filter(
-            (asset) =>
-              equal(asset.folder, selectedFolder) &&
-              (selectedFolder.entryRelative
-                ? getPathInfo(asset.path).dirname === targetFolderPath
-                : true),
-          )}
+          assets={listedAssets.filter(isAssetInSelectedFolder)}
           bind:selectedResources
           {searchTerms}
           basePath={selectedFolder.internalPath}
@@ -440,6 +487,14 @@
             {multiple}
             hidden={libraryName !== 'cloudinary'}
             onSelect={(resources) => {
+              // Check if the dialog is open to prevent selected resources from being inserted to
+              // other fields. This is required because `CloudinaryPanel` uses messaging to
+              // communicate with the embedded iframe, which is shared by all fields using the
+              // Cloudinary media storage.
+              if (!open) {
+                return;
+              }
+
               // Close the dialog after selection
               selectedResources = resources;
               onOk();
@@ -481,6 +536,8 @@
     display: flex;
     gap: 16px;
     height: 60dvh;
+    max-height: 800px;
+    --tile-padding: 4px;
 
     @media (width < 768px) {
       flex-direction: column;
