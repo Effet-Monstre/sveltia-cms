@@ -585,6 +585,7 @@ export const strings = {
   now: 'Now',
   editor_components: {
     image: 'Image',
+    table: 'Table',
     src: 'Source',
     alt: 'Alt Text',
     title: 'Title',

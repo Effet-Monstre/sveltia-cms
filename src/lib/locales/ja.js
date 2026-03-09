@@ -592,6 +592,7 @@ export const strings = {
   now: '現在時刻',
   editor_components: {
     image: '画像',
+    table: 'テーブル',
     src: 'ソース',
     alt: '代替テキスト',
     title: 'タイトル',

@@ -9,11 +9,17 @@
   import { getDateTimeParts } from '@sveltia/utils/datetime';
   import { sleep } from '@sveltia/utils/misc';
   import {
+    $createTableNodeWithDimensions as createTableNodeWithDimensions,
+    TableNode,
+  } from '@lexical/table';
+  import {
     $createParagraphNode as createParagraphNode,
     getNearestEditorFromDOMNode,
     $insertNodes as insertNodes,
   } from 'lexical';
   import { getContext, untrack } from 'svelte';
+  import { get } from 'svelte/store';
+  import { _ } from 'svelte-i18n';
 
   import { entryDraft } from '$lib/services/contents/draft';
   import {
@@ -75,6 +81,20 @@
 
   let cleanupTimeout = 0;
 
+  /**
+   * A no-op Markdown transformer passed as part of the table `TextEditorComponent`. The actual
+   * TABLE transformer is already registered globally inside `@sveltia/ui`'s Lexical core; this
+   * placeholder prevents a second registration while satisfying the `TextEditorComponent` type.
+   * @type {import('@lexical/markdown').ElementTransformer}
+   */
+  const NOOP_TABLE_TRANSFORMER = {
+    type: 'element',
+    dependencies: [],
+    export: () => null,
+    regExp: /(?!)/,
+    replace: () => {},
+  };
+
   const {
     // Field type-specific options
     modes: _modes = [...DEFAULT_MODES],
@@ -103,14 +123,29 @@
     }
 
     return _editorComponents
-      .map((name) =>
-        getComponentDef(name === 'image' && linkedImagesEnabled ? 'linked-image' : name),
-      )
-      .filter((def) => !!def)
-      .map(
-        (def) =>
-          /** @type {import('@sveltia/ui').TextEditorComponent} */ (new EditorComponent(def)),
-      );
+      .map((name) => {
+        if (name === 'table') {
+          // Tables use native Lexical nodes already registered in @sveltia/ui's core; create the
+          // component object directly rather than going through EditorComponent/CustomNode.
+          return /** @type {import('@sveltia/ui').TextEditorComponent} */ ({
+            id: 'table',
+            label: get(_)('editor_components.table'),
+            icon: 'table',
+            node: TableNode,
+            createNode: () => createTableNodeWithDimensions(3, 3, true),
+            transformer: NOOP_TABLE_TRANSFORMER,
+          });
+        }
+
+        const def = getComponentDef(
+          name === 'image' && linkedImagesEnabled ? 'linked-image' : name,
+        );
+
+        return def
+          ? /** @type {import('@sveltia/ui').TextEditorComponent} */ (new EditorComponent(def))
+          : null;
+      })
+      .filter((c) => !!c);
   });
   const imageComponent = $derived(
     components.find(({ id }) => id === 'image' || id === 'linked-image'),

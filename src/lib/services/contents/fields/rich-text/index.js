@@ -77,4 +77,4 @@ export const BUTTON_NAME_MAP = {
  * for consistency with the Netlify/Decap CMS API.
  * @type {RichTextEditorComponentName[]}
  */
-export const BUILTIN_COMPONENTS = ['code-block', 'image'];
+export const BUILTIN_COMPONENTS = ['code-block', 'image', 'table'];

@@ -649,7 +649,7 @@
 
 /**
  * Built-in editor component name for the rich text editor.
- * @typedef {'code-block' | 'image'} RichTextEditorComponentName
+ * @typedef {'code-block' | 'image' | 'table'} RichTextEditorComponentName
  * @see https://decapcms.org/docs/widgets/#Markdown
  * @see https://sveltiacms.app/en/docs/fields/richtext
  */
