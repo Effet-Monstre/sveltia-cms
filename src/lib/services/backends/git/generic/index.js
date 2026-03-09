@@ -6,7 +6,7 @@ import { REPOSITORY_INFO_PLACEHOLDER } from '$lib/services/backends/git/shared/r
 import { getGitHash } from '$lib/services/utils/file';
 
 /**
- * @import { Asset, BaseFileListItem, BaseFileListItemProps, RepositoryContentsMap } from '$lib/types/private';
+ * @import { BaseFileListItem, BaseFileListItemProps, RepositoryContentsMap } from '$lib/types/private';
  */
 
 /**
@@ -73,7 +73,7 @@ import { getGitHash } from '$lib/services/utils/file';
  * ensures the adapter's `getFileList` is only called once per `fetchFiles()` invocation.
  *
  * @param {GenericGitAdapter} adapter The adapter object.
- * @returns {object} A `BackendService`-compatible backend.
+ * @returns {import('$lib/types/private').BackendService} A `BackendService`-compatible backend.
  */
 export const createGitBackend = (adapter) => {
   /** @type {import('$lib/types/private').RepositoryInfo} */
@@ -233,6 +233,8 @@ export const createGitBackend = (adapter) => {
     });
   };
 
+  const { fetchBlob: adapterFetchBlob, commitChanges: adapterCommitChanges } = adapter;
+
   return {
     isGit: true,
     name: adapter.name,
@@ -244,18 +246,11 @@ export const createGitBackend = (adapter) => {
     /** No-op: generic backends do not require authentication. */
     signOut: async () => {},
     fetchFiles,
-    /**
-     * Fetch a binary asset blob. Only available if the adapter implements `fetchBlob`.
-     * @param {Asset} asset
-     * @returns {Promise<Blob>}
-     */
-    fetchBlob: adapter.fetchBlob ? (asset) => adapter.fetchBlob(asset.path) : undefined,
-    /**
-     * Commit file changes. Only available if the adapter implements `commitChanges`.
-     * @type {Function}
-     */
-    commitChanges: adapter.commitChanges
-      ? (changes, options) => adapter.commitChanges(changes, options)
+    /** Fetch a binary asset blob. Only available if the adapter implements `fetchBlob`. */
+    fetchBlob: adapterFetchBlob ? (asset) => adapterFetchBlob(asset.path) : undefined,
+    /** Commit file changes. Only available if the adapter implements `commitChanges`. */
+    commitChanges: adapterCommitChanges
+      ? (changes, options) => adapterCommitChanges(changes, options)
       : () => {
           throw new Error(`commitChanges is not implemented by adapter '${adapter.name}'`);
         },

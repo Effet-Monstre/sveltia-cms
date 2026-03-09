@@ -6,6 +6,7 @@ declare namespace CMS {
     export { registerEditorComponent };
     export { registerEventListener };
     export { registerFieldType };
+    export { registerGitBackend };
     export { registerPreviewStyle };
     export { registerPreviewTemplate };
     export { registerFieldType as registerWidget };
@@ -71,6 +72,20 @@ declare function registerEventListener(eventListener: AppEventListener): void;
  * @see https://sveltiacms.app/en/docs/api/field-types
  */
 declare function registerFieldType(name: string, control: ComponentType<CustomFieldControlProps> | string, preview?: ComponentType<CustomFieldPreviewProps>, schema?: CustomFieldSchema): void;
+/**
+ * Register a custom Git-compatible backend from a minimal adapter object.
+ *
+ * The adapter is wrapped by {@link createGitBackend} which handles IndexedDB caching, per-file SHA
+ * comparison, and all shared orchestration. Only `getFileList` and `fetchBlobs` are required.
+ *
+ * Must be called before `CMS.init()` so the backend name is recognized when the site configuration
+ * is parsed.
+ * @param {import('$lib/services/backends/git/generic').GenericGitAdapter} adapter Adapter object.
+ * @throws {TypeError} If `adapter.name` or `adapter.label` is not a string.
+ * @throws {TypeError} If `adapter.getFileList` or `adapter.fetchBlobs` is not a function.
+ * @see https://sveltiacms.app/en/docs/api/backends
+ */
+declare function registerGitBackend(adapter: any): void;
 /**
  * Register a custom preview stylesheet.
  * @param {string} style URL, file path or raw CSS string.

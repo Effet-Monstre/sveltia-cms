@@ -51,6 +51,16 @@ export const validBackendNames = /** @type {BackendName[]} */ (
 );
 
 /**
+ * Register a custom backend service. Must be called before the CMS is initialized so the backend
+ * name is recognized when the site configuration is parsed.
+ * @param {string} name Backend name. Must match the `backend.name` value in the CMS config.
+ * @param {BackendService} service Backend service object.
+ */
+export const registerBackend = (name, service) => {
+  allBackendServices[name] = service;
+};
+
+/**
  * List of all the Git backend services.
  * @type {Record<string, BackendService>}
  */

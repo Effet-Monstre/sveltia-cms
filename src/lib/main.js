@@ -15,6 +15,8 @@ import {
   customFileFormatRegistry,
   customPreviewRenderers,
 } from '$lib/services/contents/file/config';
+import { registerBackend } from '$lib/services/backends';
+import { createGitBackend } from '$lib/services/backends/git/generic';
 
 import App from './components/app.svelte';
 
@@ -285,6 +287,43 @@ const registerFieldType = (name, control, preview, schema) => {
   void [name, control, preview, schema];
 };
 
+/**
+ * Register a custom Git-compatible backend from a minimal adapter object.
+ *
+ * The adapter is wrapped by {@link createGitBackend} which handles IndexedDB caching, per-file SHA
+ * comparison, and all shared orchestration. Only `getFileList` and `fetchBlobs` are required.
+ *
+ * Must be called before `CMS.init()` so the backend name is recognized when the site configuration
+ * is parsed.
+ * @param {import('$lib/services/backends/git/generic').GenericGitAdapter} adapter Adapter object.
+ * @throws {TypeError} If `adapter.name` or `adapter.label` is not a string.
+ * @throws {TypeError} If `adapter.getFileList` or `adapter.fetchBlobs` is not a function.
+ * @see https://sveltiacms.app/en/docs/api/backends
+ */
+const registerGitBackend = (adapter) => {
+  if (!adapter || typeof adapter !== 'object') {
+    throw new TypeError('The adapter passed to `CMS.registerGitBackend()` must be an object');
+  }
+
+  if (typeof adapter.name !== 'string') {
+    throw new TypeError('`adapter.name` must be a string');
+  }
+
+  if (typeof adapter.label !== 'string') {
+    throw new TypeError('`adapter.label` must be a string');
+  }
+
+  if (typeof adapter.getFileList !== 'function') {
+    throw new TypeError('`adapter.getFileList` must be a function');
+  }
+
+  if (typeof adapter.fetchBlobs !== 'function') {
+    throw new TypeError('`adapter.fetchBlobs` must be a function');
+  }
+
+  registerBackend(adapter.name, createGitBackend(adapter));
+};
+
 const CMS = new Proxy(
   {
     init,
@@ -293,6 +332,7 @@ const CMS = new Proxy(
     registerEditorComponent,
     registerEventListener,
     registerFieldType,
+    registerGitBackend,
     registerPreviewStyle,
     registerPreviewTemplate,
     registerWidget: registerFieldType, // alias for backward compatibility with Netlify/Decap CMS
