@@ -429,6 +429,9 @@ export const strings = {
   translate_from_x: 'Translate from {locale}',
   revert_changes: 'Revert Changes',
   revert_all_changes: 'Revert All Changes',
+  insert_table: 'Insert Table',
+  table_rows: 'Rows',
+  table_cols: 'Columns',
   edit_slug: 'Edit Slug',
   edit_slug_warning:
     'Changing the slug may break internal and external links to the entry. Currently, Sveltia CMS does not update references created with Relation fields, so you’ll need to manually update such references along with other links.',

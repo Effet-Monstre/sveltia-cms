@@ -431,6 +431,9 @@ export const strings = {
   translate_from_x: '{locale} から翻訳',
   revert_changes: '変更を取り消す',
   revert_all_changes: 'すべての変更を取り消す',
+  insert_table: 'テーブルを挿入',
+  table_rows: '行数',
+  table_cols: '列数',
   edit_slug: 'スラッグを編集',
   edit_slug_warning:
     'スラッグを変更すると、エントリーへの内部・外部リンクが壊れる可能性があります。現在のところ、Sveltia CMS は Relation フィールドで作成された参照を更新しないため、そのような参照は他のリンクとともに手動で更新する必要があります。',

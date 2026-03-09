@@ -14,6 +14,7 @@
   } from '@lexical/table';
   import {
     $createParagraphNode as createParagraphNode,
+    $getNodeByKey as getNodeByKey,
     getNearestEditorFromDOMNode,
     $insertNodes as insertNodes,
   } from 'lexical';
@@ -22,6 +23,7 @@
   import { _ } from 'svelte-i18n';
 
   import { entryDraft } from '$lib/services/contents/draft';
+  import InsertTableDialog from '$lib/components/contents/details/fields/rich-text/insert-table-dialog.svelte';
   import {
     BUILTIN_COMPONENTS,
     BUTTON_NAME_MAP,
@@ -81,6 +83,16 @@
 
   let cleanupTimeout = 0;
 
+  /** Whether the insert-table dialog is open. */
+  let showTableDialog = $state(false);
+
+  /**
+   * Key of the placeholder paragraph node inserted when the user triggers "Insert Table". The
+   * dialog replaces or removes this placeholder once the user confirms or cancels.
+   * @type {string | null}
+   */
+  let pendingTablePlaceholderKey = $state(null);
+
   /**
    * A no-op Markdown transformer passed as part of the table `TextEditorComponent`. The actual
    * TABLE transformer is already registered globally inside `@sveltia/ui`'s Lexical core; this
@@ -93,6 +105,45 @@
     export: () => null,
     regExp: /(?!)/,
     replace: () => {},
+  };
+
+  /**
+   * Replace the pending placeholder paragraph with a real table node of the given dimensions.
+   * @param {number} rows Number of rows.
+   * @param {number} cols Number of columns.
+   */
+  const onTableConfirm = (rows, cols) => {
+    const outer = /** @type {HTMLElement | null} */ (wrapper?.querySelector('.lexical-root'));
+    const editor = getNearestEditorFromDOMNode(outer);
+
+    editor?.update(() => {
+      const placeholder = pendingTablePlaceholderKey
+        ? getNodeByKey(pendingTablePlaceholderKey)
+        : null;
+
+      if (placeholder) {
+        placeholder.replace(createTableNodeWithDimensions(rows, cols, true));
+      } else {
+        insertNodes([createTableNodeWithDimensions(rows, cols, true)]);
+      }
+
+      pendingTablePlaceholderKey = null;
+    });
+  };
+
+  /**
+   * Remove the pending placeholder paragraph when the user cancels the insert-table dialog.
+   */
+  const onTableCancel = () => {
+    const outer = /** @type {HTMLElement | null} */ (wrapper?.querySelector('.lexical-root'));
+    const editor = getNearestEditorFromDOMNode(outer);
+
+    editor?.update(() => {
+      if (pendingTablePlaceholderKey) {
+        getNodeByKey(pendingTablePlaceholderKey)?.remove();
+        pendingTablePlaceholderKey = null;
+      }
+    });
   };
 
   const {
@@ -132,7 +183,14 @@
             label: get(_)('editor_components.table'),
             icon: 'table',
             node: TableNode,
-            createNode: () => createTableNodeWithDimensions(3, 3, true),
+            createNode: () => {
+              // Insert a placeholder paragraph, then open the dialog. The dialog's confirm/cancel
+              // handlers will replace or remove this placeholder node.
+              const placeholder = createParagraphNode();
+              pendingTablePlaceholderKey = placeholder.getKey();
+              showTableDialog = true;
+              return placeholder;
+            },
             transformer: NOOP_TABLE_TRANSFORMER,
           });
         }
@@ -447,6 +505,12 @@
     {/key}
   {/await}
 </div>
+
+<InsertTableDialog
+  bind:open={showTableDialog}
+  onConfirm={onTableConfirm}
+  onCancel={onTableCancel}
+/>
 
 <style lang="scss">
   .wrapper {
