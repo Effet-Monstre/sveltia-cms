@@ -38,17 +38,17 @@ import { getGitHash } from '$lib/services/utils/file';
  * be a plain string (raw text) or an object with `text` and optional `size`.
  *
  * **Optional:**
- * @property {((path: string) => Promise<Blob>) | undefined} fetchBlob
+ * @property {(path: string) => Promise<Blob>} [fetchBlob]
  * Fetches binary asset content on demand. If absent, `BackendService.fetchBlob` is `undefined`
  * and binary assets cannot be loaded.
- * @property {(() => Promise<string>) | undefined} getCommitHash
+ * @property {() => Promise<string>} [getCommitHash]
  * Returns a string representing the current state (e.g. a commit SHA or ETag). Used as the
  * IndexedDB cache invalidation key. If absent, a pseudo-hash is derived from the file list —
  * which means cache only invalidates when files are added/removed, not when content changes
  * without path changes. Adapters that cannot provide per-file SHAs should implement this.
- * @property {(() => Promise<string>) | undefined} getDefaultBranch
+ * @property {() => Promise<string>} [getDefaultBranch]
  * Returns the default branch name. Defaults to `'main'` if absent.
- * @property {((changes: any[], options: any) => Promise<any>) | undefined} commitChanges
+ * @property {(changes: any[], options: any) => Promise<any>} [commitChanges]
  * Implements write support. If absent, `commitChanges` throws a "not implemented" error.
  */
 
@@ -236,13 +236,14 @@ export const createGitBackend = (adapter) => {
   const { fetchBlob: adapterFetchBlob, commitChanges: adapterCommitChanges } = adapter;
 
   return {
-    isGit: true,
+    isGit: false,
     name: adapter.name,
     label: adapter.label,
     repository,
     init,
     /** No-op: generic backends do not require authentication. */
-    signIn: async () => {},
+    // @ts-ignore
+    signIn: async () => ({ backendName: adapter.name }),
     /** No-op: generic backends do not require authentication. */
     signOut: async () => {},
     fetchFiles,

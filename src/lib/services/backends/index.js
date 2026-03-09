@@ -5,7 +5,7 @@ import test from '$lib/services/backends/fs/test';
 import gitea from '$lib/services/backends/git/gitea';
 import github from '$lib/services/backends/git/github';
 import gitlab from '$lib/services/backends/git/gitlab';
-import api from '$lib/services/backends/fs/api';
+import api from '$lib/services/backends/fs/api/index';
 
 /**
  * @import { Readable, Writable } from 'svelte/store';
