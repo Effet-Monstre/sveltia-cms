@@ -6,7 +6,7 @@ import { getBlob, getGitHash } from '$lib/services/utils/file';
  */
 
 /**
- * @typedef {{ handle: string, content?: any }} ApiEntry
+ * @typedef {{ handle: string, content?: any, version?: number, published_at?: string | null }} ApiEntry
  */
 
 /**
@@ -16,6 +16,23 @@ import { getBlob, getGitHash } from '$lib/services/utils/file';
 const getCsrfToken = () =>
   /** @type {HTMLMetaElement | null} */ (document.querySelector('meta[name=csrf-token]'))
     ?.content ?? '';
+
+/**
+ * Read the cms-handle and cms-version meta tags injected by CmsController#internal.
+ * Returns null when not present (normal CMS mode — no version pinning).
+ * @returns {{ handle: string, version: number } | null}
+ */
+const getPinnedVersion = () => {
+  const handleMeta  = /** @type {HTMLMetaElement | null} */ (document.querySelector('meta[name=cms-handle]'));
+  const versionMeta = /** @type {HTMLMetaElement | null} */ (document.querySelector('meta[name=cms-version]'));
+
+  if (!handleMeta?.content || !versionMeta?.content) return null;
+
+  return {
+    handle:  handleMeta.content,
+    version: parseInt(versionMeta.content, 10),
+  };
+};
 
 /**
  * Serialize entry content to a text string, or return `undefined` for binary-only entries.
@@ -28,7 +45,7 @@ const contentToText = (content) => {
 };
 
 /**
- * Fetch all entries from the API.
+ * Fetch all entries from the API (latest draft or published per handle).
  * @returns {Promise<ApiEntry[]>}
  */
 const apiAll = async () => {
@@ -42,17 +59,38 @@ const apiAll = async () => {
 };
 
 /**
+ * Fetch a specific version of an entry.
+ * @param {string} handle
+ * @param {number} version
+ * @returns {Promise<ApiEntry | null>}
+ */
+const apiGetVersion = async (handle, version) => {
+  const response = await fetch(
+    `/admin/entries/show?handle=${encodeURIComponent(handle)}&version=${version}`,
+    { headers: { 'X-CSRF-Token': getCsrfToken() } },
+  );
+
+  if (!response.ok) return null;
+  const { entry } = await response.json();
+  return entry;
+};
+
+/**
  * Write a file to the API (create or update).
+ * Appends `entry[version]` to the FormData when `version` is provided so the controller
+ * writes to that specific version row (pinned-version mode).
  * @param {string} path File path (handle).
  * @param {{ file?: Blob, content?: string }} data File data.
+ * @param {number | undefined} version Optional version number.
  */
-const apiWrite = async (path, { file, content }) => {
+const apiWrite = async (path, { file, content }, version) => {
   const formData = new FormData();
 
   formData.append('entry[handle]', path);
 
   if (file) formData.append('entry[file]', file);
   if (content !== undefined) formData.append('entry[content]', content);
+  if (version !== undefined) formData.append('entry[version]', String(version));
 
   await fetch('/admin/entries', {
     method: 'POST',
@@ -63,7 +101,7 @@ const apiWrite = async (path, { file, content }) => {
 
 /**
  * Delete a file from the API.
- * @param {string} path File path (handle).
+ * @param {string} path Asset path (handle).
  */
 const apiDelete = async (path) => {
   await fetch('/admin/entries', {
@@ -86,12 +124,21 @@ export default createGitBackend({
   label: 'API',
 
   /**
-   * Fetch the complete file list from the API. Inline content (when present) is used to compute
-   * a per-file SHA so the generic adapter can skip unchanged files on subsequent loads.
-   * Binary-only entries (assets) return no SHA and are fetched on demand via `fetchBlob`.
+   * Fetch the file list from the API.
+   *
+   * Normal mode: returns one entry per handle (latest draft or published).
+   * Pinned-version mode: when cms-handle + cms-version meta tags are present, fetches only
+   * that specific version and presents it as the sole file to Sveltia.
    */
   async getFileList() {
-    _entries = await apiAll();
+    const pinned = getPinnedVersion();
+
+    if (pinned) {
+      const entry = await apiGetVersion(pinned.handle, pinned.version);
+      _entries = entry ? [entry] : [];
+    } else {
+      _entries = await apiAll();
+    }
 
     return Promise.all(
       _entries.map(async ({ handle, content }) => {
@@ -99,9 +146,6 @@ export default createGitBackend({
 
         return {
           path: handle,
-          // Providing a real SHA enables per-file IndexedDB caching: only files whose SHA changed
-          // will be re-parsed on the next load. Assets have no inline content → no SHA → fetched
-          // on demand, cached with an empty SHA placeholder.
           sha: text !== undefined ? await getGitHash(text) : undefined,
         };
       }),
@@ -110,7 +154,6 @@ export default createGitBackend({
 
   /**
    * Return the text content for the given paths from the already-fetched entry list.
-   * Since `apiAll` returns content inline, no second network request is needed.
    * @param {string[]} paths
    */
   async fetchBlobs(paths) {
@@ -125,15 +168,19 @@ export default createGitBackend({
   },
 
   /**
-   * Fetch a binary asset blob on demand. Resolves the asset URL from the API then fetches it.
+   * Fetch a binary asset blob on demand.
+   * In pinned-version mode, appends &version=N to the show URL for the pinned handle.
    * @param {string} path Asset path (handle).
    * @returns {Promise<Blob>}
    */
   async fetchBlob(path) {
-    const response = await fetch(
-      `/admin/entries/show?handle=${encodeURIComponent(path)}`,
-      { headers: { 'X-CSRF-Token': getCsrfToken() } },
-    );
+    const pinned  = getPinnedVersion();
+    const version = pinned?.handle === path ? pinned.version : undefined;
+    const url     = version
+      ? `/admin/entries/show?handle=${encodeURIComponent(path)}&version=${version}`
+      : `/admin/entries/show?handle=${encodeURIComponent(path)}`;
+
+    const response = await fetch(url, { headers: { 'X-CSRF-Token': getCsrfToken() } });
 
     const { entry: { file_url } } = await response.json();
 
@@ -142,10 +189,14 @@ export default createGitBackend({
 
   /**
    * Persist file changes via the API and return commit results with computed SHAs.
+   * In pinned-version mode, the version number is forwarded to the controller so the
+   * correct version row is updated.
    * @param {import('$lib/types/private').FileChange[]} changes
    * @returns {Promise<CommitResults>}
    */
   async commitChanges(changes) {
+    const pinned = getPinnedVersion();
+
     const results = await Promise.all(
       changes.map(async ({ action, path, previousPath, data }) => {
         if (action === 'delete') {
@@ -156,8 +207,13 @@ export default createGitBackend({
 
         if (data !== undefined) {
           const isText = typeof data === 'string';
+          const version = (pinned && pinned.handle === path) ? pinned.version : undefined;
 
-          await apiWrite(path, isText ? { content: data } : { file: /** @type {Blob} */ (data) });
+          await apiWrite(
+            path,
+            isText ? { content: data } : { file: /** @type {Blob} */ (data) },
+            version,
+          );
 
           // For moves, delete the old path after writing the new one
           if (action === 'move' && previousPath) {
