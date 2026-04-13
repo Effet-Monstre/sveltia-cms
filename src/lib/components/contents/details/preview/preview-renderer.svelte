@@ -1,5 +1,5 @@
 <script>
-  import { _ } from 'svelte-i18n';
+  import { _ } from '@sveltia/i18n';
   import { entryDraft } from '$lib/services/contents/draft';
   import { onMount } from 'svelte';
 
