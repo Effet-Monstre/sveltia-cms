@@ -6,6 +6,7 @@ import { getEntriesByCollection } from '$lib/services/contents/collection/entrie
 import { isCollectionIndexFile } from '$lib/services/contents/collection/index-file';
 import { getField, getFieldDisplayValue } from '$lib/services/contents/entry/fields';
 import { getEntrySummaryFromContent } from '$lib/services/contents/entry/summary';
+import { getOrCreate } from '$lib/services/utils/cache';
 
 /**
  * @import {
@@ -57,6 +58,28 @@ import { getEntrySummaryFromContent } from '$lib/services/contents/entry/summary
  * @type {Map<string, RelationOption[]>}
  */
 export const optionCacheMap = new Map();
+
+/**
+ * `WeakMap` used to assign stable numeric identities to objects for cheap cache key building,
+ * avoiding the need to `JSON.stringify` large objects like `fieldConfig` or `refEntries` arrays.
+ * @type {WeakMap<object, number>}
+ */
+const objectIdentityMap = new WeakMap();
+let nextObjectId = 0;
+
+/**
+ * Get a stable numeric identity for the given object (by reference).
+ * @param {object} obj Object.
+ * @returns {number} Numeric identity.
+ */
+const getObjectId = (obj) => {
+  if (!objectIdentityMap.has(obj)) {
+    objectIdentityMap.set(obj, nextObjectId);
+    nextObjectId += 1;
+  }
+
+  return /** @type {number} */ (objectIdentityMap.get(obj));
+};
 
 /**
  * Enclose the given field name in brackets if it doesn’t contain any brackets.
@@ -345,6 +368,12 @@ export const analyzeListFields = (allFieldNames, getFieldArgs) => {
 };
 
 /**
+ * Cache of pre-compiled regexes for {@link processSingleSubfieldList}, keyed by base field name.
+ * @type {Map<string, RegExp>}
+ */
+const singleSubfieldRegexCache = new Map();
+
+/**
  * Process single subfield list fields (e.g., `skills.*`).
  * @internal
  * @param {object} params Parameters.
@@ -367,14 +396,20 @@ export const processSingleSubfieldList = ({
   fallbackContext,
 }) => {
   const { _displayField, _valueField, _searchField } = templates;
-  const regex = new RegExp(`^${escapeRegExp(baseFieldName)}\\.\\d+$`);
+
+  const regex = getOrCreate(
+    singleSubfieldRegexCache,
+    baseFieldName,
+    () => new RegExp(`^${escapeRegExp(baseFieldName)}.\\d+$`),
+  );
 
   const items = Object.entries(content)
     .filter(([k]) => regex.test(k))
     .map(([k, v]) => {
-      const indexMatch = k.match(/\.(\d+)$/);
+      // The filter above guarantees the regex matches, so `indexMatch` is always non-null
+      const indexMatch = /** @type {RegExpMatchArray} */ (k.match(/\.(\d+)$/));
 
-      return { index: parseInt(indexMatch?.[1] || '0', 10), value: v };
+      return { index: parseInt(indexMatch[1], 10), value: v };
     })
     .sort((a, b) => a.index - b.index);
 
@@ -416,6 +451,12 @@ export const processSingleSubfieldList = ({
  * @type {RegExp}
  */
 const COMPLEX_LIST_FIELD_REGEX = /^(.+)\.\*\.(.+)$/;
+/**
+ * Cache of index-matching regexes for {@link processComplexListField}, keyed by
+ * `"${baseFieldName}:${subKey}"`.
+ * @type {Map<string, RegExp>}
+ */
+const complexListIndexRegexCache = new Map();
 
 /**
  * Get the subfield match from group entries.
@@ -462,20 +503,24 @@ export const processComplexListField = ({
     return [];
   }
 
-  const regex = new RegExp(
-    `^${escapeRegExp(baseFieldNameForList)}\\.\\d+\\.${escapeRegExp(subKey)}$`,
-  );
+  const cacheKey = `${baseFieldNameForList}:${subKey}`;
+
+  const indexRegex = getOrCreate(complexListIndexRegexCache, cacheKey, () => {
+    const escapedBase = escapeRegExp(baseFieldNameForList);
+    const escapedSub = escapeRegExp(subKey);
+
+    // indexRegex subsumes the old filter-only `regex` (same semantics; `[0-9]+` ≡ `\d+` in JS
+    // without the `u` flag), so one regex construction per call is saved.
+    return new RegExp(`^${escapedBase}.([0-9]+).${escapedSub}$`);
+  });
 
   const listValues = Object.entries(content)
-    .filter(([k]) => regex.test(k))
+    .filter(([k]) => indexRegex.test(k))
     .map(([k, v]) => {
-      const escapedBase = escapeRegExp(baseFieldNameForList);
-      const escapedSub = escapeRegExp(subKey);
-      const pattern = `^${escapedBase}\\.([0-9]+)\\.${escapedSub}$`;
-      const indexRegex = new RegExp(pattern);
-      const indexMatch = k.match(indexRegex);
+      // The filter above guarantees `indexRegex` matches, so `indexMatch` is always non-null
+      const indexMatch = /** @type {RegExpMatchArray} */ (k.match(indexRegex));
 
-      return { index: parseInt(indexMatch?.[1] || '0', 10), value: v };
+      return { index: parseInt(indexMatch[1], 10), value: v };
     })
     .sort((a, b) => a.index - b.index);
 
@@ -682,7 +727,9 @@ export const processEntry = ({
  * @returns {RelationOption[]} Options.
  */
 export const getOptions = (locale, fieldConfig, refEntries) => {
-  const cacheKey = JSON.stringify({ locale, fieldConfig, refEntries });
+  // Use object identity for `fieldConfig` and `refEntries` instead of `JSON.stringify`, which would
+  // serialize the entire entries array (potentially hundreds of entries × many fields).
+  const cacheKey = `${locale}|${getObjectId(fieldConfig)}|${getObjectId(refEntries)}`;
   const cache = optionCacheMap.get(cacheKey);
 
   if (cache) {
@@ -709,7 +756,7 @@ export const getOptions = (locale, fieldConfig, refEntries) => {
   const filteredEntries = filterAndPrepareEntries(refEntries, locale, fileName, entryFilters);
 
   const options = filteredEntries
-    .map(({ refEntry, content }) =>
+    .flatMap(({ refEntry, content }) =>
       processEntry({
         refEntry,
         content,
@@ -724,7 +771,6 @@ export const getOptions = (locale, fieldConfig, refEntries) => {
         defaultLocale,
       }),
     )
-    .flat(1)
     .sort((a, b) => compare(a.label, b.label));
 
   optionCacheMap.set(cacheKey, options);

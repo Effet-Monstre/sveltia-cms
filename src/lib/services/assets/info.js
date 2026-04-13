@@ -9,21 +9,19 @@ import { getAssetByPath, isRelativePath } from '$lib/services/assets';
 import { getAssetFoldersByPath, globalAssetFolder } from '$lib/services/assets/folders';
 import { backend } from '$lib/services/backends';
 import { cmsConfig } from '$lib/services/config';
-import { getEntriesByAssetURL } from '$lib/services/contents/collection/entries';
 import { allCloudStorageServices } from '$lib/services/integrations/media-libraries/cloud';
 import { getMergedLibraryOptions } from '$lib/services/integrations/media-libraries/cloud/cloudinary';
-import { createPathRegEx, encodeFilePath } from '$lib/services/utils/file';
-import { getMediaMetadata } from '$lib/services/utils/media';
+import { createPath, createPathRegEx, encodeFilePath } from '$lib/services/utils/file';
 import { transformImage } from '$lib/services/utils/media/image/transform';
 import { renderPDF } from '$lib/services/utils/media/pdf';
 
 /**
  * @import {
  * Asset,
- * AssetDetails,
  * Entry,
  * InternalCmsConfig,
  * InternalImageTransformationOptions,
+ * TypedFieldKeyPath,
  * } from '$lib/types/private';
  * @import { MediaField } from '$lib/types/public';
  */
@@ -102,6 +100,16 @@ export const getAssetBlobURL = async (asset) => {
 /** @type {IndexedDB | null | undefined} */
 let thumbnailDB = undefined;
 
+/* v8 ignore next */
+/**
+ * Reset the thumbnail database. This is used in tests to reset the state of the thumbnail database
+ * between tests.
+ * @internal
+ */
+export const _resetThumbnailDB = () => {
+  thumbnailDB = undefined;
+};
+
 /**
  * Get a thumbnail image for the given asset.
  * @param {Asset} asset Asset.
@@ -172,9 +180,12 @@ export const getAssetPublicURL = (
   // Try to determine an entry-relative path if the asset is in the same folder as the entry, or a
   // sub-folder of it
   if (entryRelative) {
-    if (pathOnly && entry) {
+    if (pathOnly) {
       const assetFolderPath = getPathInfo(asset.path).dirname;
-      const entryFolderPath = getPathInfo(Object.values(entry.locales)[0].path).dirname;
+
+      const entryFolderPath = entry
+        ? getPathInfo(Object.values(entry.locales)[0].path).dirname
+        : undefined;
 
       if (assetFolderPath !== undefined && entryFolderPath !== undefined) {
         // If the asset is in the same folder as the entry, return the file name only
@@ -184,7 +195,17 @@ export const getAssetPublicURL = (
 
         // Return the path relative to the entry’s folder, e.g. `images/photo.jpg`, or `undefined`
         // if the path cannot be determined
-        return asset.path.match(new RegExp(`^(?:${escapeRegExp(entryFolderPath)})/(.+)$`))?.[1];
+        const prefix = `${entryFolderPath}/`;
+
+        return asset.path.startsWith(prefix) ? asset.path.slice(prefix.length) : undefined;
+      }
+
+      const { internalPath, internalSubPath } = asset.folder;
+
+      // Resolve simple entry-relative paths like `images/photo.jpg` if the asset is in the same
+      // folder as the entry
+      if (asset.path === createPath([internalPath, internalSubPath, asset.name])) {
+        return asset.path.slice(/** @type {string} */ (internalPath).length + 1);
       }
     }
 
@@ -252,6 +273,7 @@ export const getAssetBaseURL = (fieldConfig) => {
  * @param {string} args.collectionName Collection name.
  * @param {string} [args.fileName] Collection file name. File/singleton collection only.
  * @param {MediaField} [args.fieldConfig] Field configuration.
+ * @param {TypedFieldKeyPath} [args.typedKeyPath] Field key path for field-level media folders.
  * @param {boolean} [args.thumbnail] Whether to use a thumbnail of the image.
  * @returns {Promise<string | undefined>} Blob URL or public URL that can be used in the app UI.
  */
@@ -261,6 +283,7 @@ export const getMediaFieldURL = async ({
   collectionName,
   fileName,
   fieldConfig,
+  typedKeyPath,
   thumbnail = false,
 }) => {
   if (!value) {
@@ -281,7 +304,7 @@ export const getMediaFieldURL = async ({
     }
   }
 
-  const asset = getAssetByPath({ value, entry, collectionName, fileName });
+  const asset = getAssetByPath({ value, entry, collectionName, fileName, typedKeyPath });
 
   if (!asset) {
     return undefined;
@@ -291,37 +314,4 @@ export const getMediaFieldURL = async ({
     (thumbnail ? await getAssetThumbnailURL(asset) : await getAssetBlobURL(asset)) ??
     getAssetPublicURL(asset)
   );
-};
-
-/** @type {AssetDetails} */
-export const defaultAssetDetails = {
-  publicURL: undefined,
-  repoBlobURL: undefined,
-  dimensions: undefined,
-  duration: undefined,
-  usedEntries: [],
-};
-
-/**
- * Get the given asset’s extra info.
- * @param {Asset} asset Asset.
- * @returns {Promise<AssetDetails>} Details.
- */
-export const getAssetDetails = async (asset) => {
-  const { kind, path } = asset;
-  const { blobBaseURL } = get(backend)?.repository ?? {};
-  const blobURL = await getAssetBlobURL(asset);
-  const url = getAssetPublicURL(asset, { allowSpecial: true, pathOnly: true }) ?? blobURL;
-  let metaData = {};
-
-  if (['image', 'video', 'audio'].includes(kind) && blobURL) {
-    metaData = await getMediaMetadata(asset, blobURL, kind);
-  }
-
-  return {
-    ...metaData,
-    publicURL: getAssetPublicURL(asset),
-    repoBlobURL: blobBaseURL ? `${blobBaseURL}/${path}` : undefined,
-    usedEntries: url ? await getEntriesByAssetURL(url) : [],
-  };
 };

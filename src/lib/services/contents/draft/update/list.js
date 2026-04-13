@@ -3,6 +3,7 @@ import { flatten, unflatten } from 'flat';
 import { get } from 'svelte/store';
 
 import { entryDraft, i18nAutoDupEnabled } from '$lib/services/contents/draft';
+import { getOrCreate } from '$lib/services/utils/cache';
 
 /**
  * @import { Writable } from 'svelte/store';
@@ -31,6 +32,12 @@ export const updateObject = (obj, newProps) => {
 };
 
 /**
+ * Cache of pre-compiled regexes keyed by field key path.
+ * @type {Map<FieldKeyPath, RegExp>}
+ */
+const itemListRegexCache = new Map();
+
+/**
  * Traverse the given object by decoding dot-notated key path.
  * @internal
  * @param {Record<string, any>} obj Original object.
@@ -38,7 +45,11 @@ export const updateObject = (obj, newProps) => {
  * @returns {[values: any, remainder: any]} Unflatten values and flatten remainder.
  */
 export const getItemList = (obj, keyPath) => {
-  const regex = new RegExp(`^${escapeRegExp(keyPath)}\\b(?!#)`);
+  const regex = getOrCreate(
+    itemListRegexCache,
+    keyPath,
+    () => new RegExp(`^${escapeRegExp(keyPath)}\\b(?!#)`),
+  );
 
   const filtered = Object.entries(obj)
     .filter(([k]) => regex.test(k))

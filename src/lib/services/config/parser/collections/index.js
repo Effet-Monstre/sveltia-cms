@@ -1,7 +1,6 @@
 /* eslint-disable camelcase */
 
-import { get } from 'svelte/store';
-import { _ } from 'svelte-i18n';
+import { _ } from '@sveltia/i18n';
 
 import { warnDeprecation } from '$lib/services/config/deprecations';
 import { parseCollectionFiles } from '$lib/services/config/parser/collection-files';
@@ -27,7 +26,9 @@ import {
  * @type {UnsupportedOption[]}
  */
 const UNSUPPORTED_OPTIONS = [
+  // @todo Remove this warning when Sveltia CMS adds support for nested collections.
   { type: 'warning', prop: 'nested', strKey: 'nested_collections_unsupported' },
+  // Deprecated camelCase option in Netlify/Decap CMS config, should be converted to snake_case.
   { prop: 'sortableFields', newProp: 'sortable_fields' },
 ];
 
@@ -58,6 +59,10 @@ export const parseEntryCollection = (context, collectors) => {
   }
 
   checkUnsupportedOptions({ UNSUPPORTED_OPTIONS, config: collection, context, collectors });
+
+  if (!fields?.length) {
+    addMessage({ strKey: 'collection_no_fields', context, collectors });
+  }
 
   parseFields(fields, context, collectors);
 
@@ -133,10 +138,9 @@ export const parseCollection = ({ cmsConfig, collection }, collectors) => {
 export const parseCollections = (cmsConfig, collectors) => {
   const { collections, singletons } = cmsConfig;
   const { errors } = collectors;
-  const $_ = get(_);
 
   if (!Array.isArray(collections) && !Array.isArray(singletons)) {
-    errors.add($_('config.error.no_collection'));
+    errors.add(_('config.error.no_collection'));
 
     return;
   }
@@ -159,8 +163,8 @@ export const parseCollections = (cmsConfig, collectors) => {
     /** @type {InternalSingletonCollection} */
     const collection = {
       name: '_singletons',
-      label: $_('singletons'),
-      label_singular: $_('singleton'),
+      label: _('singletons'),
+      label_singular: _('singleton'),
       files: singletons,
     };
 

@@ -7,9 +7,9 @@
   @see https://sveltiacms.app/en/docs/fields/image
 -->
 <script>
+  import { _ } from '@sveltia/i18n';
   import { AlertDialog, ConfirmationDialog, TextArea } from '@sveltia/ui';
   import { flushSync, getContext } from 'svelte';
-  import { _ } from 'svelte-i18n';
 
   import SelectAssetsDialog from '$lib/components/assets/browser/select-assets-dialog.svelte';
   import DropZone from '$lib/components/assets/shared/drop-zone.svelte';
@@ -68,6 +68,8 @@
   /** @type {DropZone | undefined} */
   let dropZone = $state();
   let processing = $state(false);
+  /** @type {string[]} */
+  let oversizedFileNames = $state([]);
 
   const {
     widget: fieldType,
@@ -106,6 +108,7 @@
     showRemoveButton,
     collectionName,
     fileName,
+    typedKeyPath,
     entry,
   });
   const enabledCloudServiceEntries = $derived(
@@ -139,6 +142,7 @@
 
     resetSelection();
     processing = true;
+    oversizedFileNames = [];
 
     const resources = await Promise.all(
       selectedResources.map((resource) =>
@@ -148,8 +152,6 @@
 
     /** @type {string[]} */
     const credits = [];
-    /** @type {string[]} */
-    const oversizedFileNames = [];
 
     const lastIndex = multiple
       ? (Object.keys($entryDraft.currentValues[locale])
@@ -268,6 +270,9 @@
     {multiple}
     bind:showSelectAssetsDialog
     bind:replaceMode
+    onFilePaste={(file) => {
+      onResourcesSelect([{ file, folder: targetFolder }]);
+    }}
   />
 {/snippet}
 
@@ -339,19 +344,21 @@
   onSelect={onResourcesSelect}
 />
 
-<AlertDialog bind:open={showSizeLimitDialog} title={$_('assets_dialog.large_file.title')}>
-  {$_('warning_oversized_file', { values: { size: formatSize(maxSize) } })}
+<AlertDialog bind:open={showSizeLimitDialog} title={_('assets_dialog.large_file.title')}>
+  {_('warning_oversized_files', {
+    values: { count: oversizedFileNames.length, size: formatSize(maxSize) },
+  })}
 </AlertDialog>
 
 <ConfirmationDialog
   bind:open={showPhotoCreditDialog}
-  title={$_('assets_dialog.photo_credit.title')}
-  okLabel={$_('copy')}
+  title={_('assets_dialog.photo_credit.title')}
+  okLabel={_('copy')}
   onOk={() => {
     navigator.clipboard.writeText(photoCredit);
   }}
 >
-  <div role="none">{$_('assets_dialog.photo_credit.description')}</div>
+  <div role="none">{_('assets_dialog.photo_credit.description')}</div>
   <div role="none">
     <TextArea
       flex

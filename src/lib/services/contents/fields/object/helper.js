@@ -4,11 +4,18 @@ import {
   getFieldDisplayValue,
   getVisibleFieldDisplayValue,
 } from '$lib/services/contents/entry/fields';
+import { getOrCreate } from '$lib/services/utils/cache';
 
 /**
  * @import { FlattenedEntryContent, GetFieldArgs, InternalLocaleCode } from '$lib/types/private';
  * @import { FieldKeyPath } from '$lib/types/public';
  */
+
+/**
+ * Cache of pre-compiled regexes keyed by field key path.
+ * @type {Map<FieldKeyPath, RegExp>}
+ */
+const objectSummaryRegexCache = new Map();
 
 /**
  * Format the summary template of an Object field.
@@ -36,13 +43,13 @@ export const formatSummary = ({
   const getFieldArgs = { collectionName, fileName, keyPath: '', valueMap, isIndexFile };
 
   if (!summaryTemplate) {
-    return getVisibleFieldDisplayValue({
-      valueMap,
-      locale,
+    const keyPathRegex = getOrCreate(
+      objectSummaryRegexCache,
       keyPath,
-      keyPathRegex: new RegExp(`^${escapeRegExp(keyPath)}\\.`),
-      getFieldArgs,
-    });
+      () => new RegExp(`^${escapeRegExp(keyPath)}\\.`),
+    );
+
+    return getVisibleFieldDisplayValue({ valueMap, locale, keyPath, keyPathRegex, getFieldArgs });
   }
 
   return summaryTemplate.replaceAll(/{{(.+?)}}/g, (_match, /** @type {string} */ placeholder) => {

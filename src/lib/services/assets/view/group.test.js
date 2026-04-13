@@ -1,3 +1,5 @@
+/* eslint-disable jsdoc/require-jsdoc */
+
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { groupAssets } from './group';
@@ -11,8 +13,8 @@ vi.mock('svelte/store', () => ({
   get: vi.fn(),
 }));
 
-vi.mock('svelte-i18n', () => ({
-  _: {},
+vi.mock('@sveltia/i18n', () => ({
+  _: (/** @type {string} */ key) => (key === 'other' ? 'Other' : key),
 }));
 
 vi.mock('$lib/services/utils/misc', () => ({
@@ -41,13 +43,13 @@ describe('assets/view/group', () => {
     getRegexMock = /** @type {any} */ (vi.mocked(getRegex));
 
     // Default compare implementation for sorting
-    compareMock.mockImplementation((a, b) => {
+    compareMock.mockImplementation((/** @type {string} */ a, /** @type {string} */ b) => {
       if (String(a) < String(b)) return -1;
       if (String(a) > String(b)) return 1;
       return 0;
     });
 
-    // Mock svelte-i18n properly - get(_) should return a function that returns the translation
+    // Mock get() for currentView store — _ is called directly via @sveltia/i18n mock
     getMock.mockReturnValue(() => 'Other');
 
     // Mock getRegex to return null by default (when no pattern)
@@ -325,8 +327,8 @@ describe('assets/view/group', () => {
       const result = groupAssets(assetsWithUndefined, { field: 'category', pattern: undefined });
 
       expect(result).toEqual({
+        Other: [assetsWithUndefined[1]],
         photos: [assetsWithUndefined[0]],
-        undefined: [assetsWithUndefined[1]],
       });
     });
 

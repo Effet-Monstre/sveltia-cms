@@ -23,7 +23,6 @@ vi.mock('@sveltia/utils/storage', () => {
    * @param {string} _storeName Store name.
    * @returns {MockIndexedDB} Mock instance.
    */
-  // eslint-disable-next-line no-unused-vars
   function IndexedDBConstructor(_dbName, _storeName) {
     return new MockIndexedDB();
   }
@@ -46,7 +45,7 @@ vi.mock('svelte/store', () => ({
       callback({});
       return vi.fn();
     }),
-    update: vi.fn(),
+    update: vi.fn((updater) => updater({})),
   })),
 }));
 
@@ -592,6 +591,23 @@ describe('assets/view/settings', () => {
       vi.doUnmock('$lib/services/backends');
       vi.doUnmock('svelte/store');
       void freshInitSettings;
+    });
+
+    it('should handle undefined repository (line 25 ?? {} branch)', async () => {
+      const backendService = {
+        isGit: false,
+        name: 'local',
+        label: 'Local',
+        repository: undefined, // triggers `repository ?? {}`
+        init: vi.fn(),
+        signIn: vi.fn(),
+        signOut: vi.fn(),
+        fetchFiles: vi.fn(),
+        commitChanges: vi.fn(),
+      };
+
+      // Should complete without error; databaseName is undefined → no IndexedDB
+      await initSettings(backendService);
     });
   });
 });

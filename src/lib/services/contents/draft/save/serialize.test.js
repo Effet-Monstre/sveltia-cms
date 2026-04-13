@@ -61,10 +61,6 @@ vi.mock('$lib/services/contents/fields/date-time/helper', () => ({
   parseDateTimeConfig,
 }));
 
-vi.mock('$lib/services/utils/date', () => ({
-  FULL_DATE_TIME_REGEX: /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/,
-}));
-
 /**
  * @import { FlattenedEntryContent } from '$lib/types/private';
  * @import { Field } from '$lib/types/public';
@@ -199,6 +195,43 @@ describe('Test copyProperty()', () => {
     expect(unsortedMap).not.toHaveProperty('organizers.0.name');
     expect(unsortedMap).not.toHaveProperty('organizers.1.name');
     expect(unsortedMap).not.toHaveProperty('program.speakers.0.bio');
+  });
+
+  test('skips internal original key path tracking added to list items', () => {
+    /** @type {FlattenedEntryContent} */
+    const sortedMap = {};
+
+    /** @type {FlattenedEntryContent} */
+    const unsortedMap = {
+      title: 'My Post',
+      'organizers.0.__sc_item_original_key_path': 'organizers.1',
+      'organizers.0.name': 'Jane Smith',
+      'organizers.1.__sc_item_original_key_path': 'organizers.0',
+      'organizers.1.name': 'John Doe',
+    };
+
+    const args = {
+      locale: 'en',
+      unsortedMap,
+      sortedMap,
+      isTomlOutput: false,
+      omitEmptyOptionalFields: false,
+    };
+
+    copyProperty({ ...args, key: 'title' });
+    copyProperty({ ...args, key: 'organizers.0.name' });
+    copyProperty({ ...args, key: 'organizers.1.name' });
+    copyProperty({ ...args, key: 'organizers.0.__sc_item_original_key_path' });
+    copyProperty({ ...args, key: 'organizers.1.__sc_item_original_key_path' });
+
+    expect(sortedMap).toEqual({
+      title: 'My Post',
+      'organizers.0.name': 'Jane Smith',
+      'organizers.1.name': 'John Doe',
+    });
+
+    expect(unsortedMap).not.toHaveProperty('organizers.0.__sc_item_original_key_path');
+    expect(unsortedMap).not.toHaveProperty('organizers.1.__sc_item_original_key_path');
   });
 
   describe('empty value handling with omitEmptyOptionalFields', () => {
@@ -527,6 +560,70 @@ describe('Test copyProperty()', () => {
         parent: {},
       });
     });
+
+    test('omits optional object with only empty children (typed list item scenario)', () => {
+      isFieldRequired.mockReturnValue(false);
+
+      /** @type {FlattenedEntryContent} */
+      const sortedMap = {};
+
+      /** @type {FlattenedEntryContent} */
+      const unsortedMap = {
+        'list.0.optionalObject': null,
+        'list.0.optionalObject.foo': '',
+      };
+
+      const args = {
+        locale: 'en',
+        unsortedMap,
+        sortedMap,
+        isTomlOutput: false,
+        omitEmptyOptionalFields: true,
+      };
+
+      copyProperty({
+        ...args,
+        key: 'list.0.optionalObject',
+        field: { name: 'optionalObject', widget: 'object', required: false },
+      });
+
+      // Parent and its empty children should all be omitted
+      expect(sortedMap).toEqual({});
+      // Children should also be removed from unsortedMap
+      expect(unsortedMap).not.toHaveProperty('list.0.optionalObject.foo');
+    });
+
+    test('preserves optional object when at least one child is non-empty', () => {
+      isFieldRequired.mockReturnValue(false);
+
+      /** @type {FlattenedEntryContent} */
+      const sortedMap = {};
+
+      /** @type {FlattenedEntryContent} */
+      const unsortedMap = {
+        'list.0.optionalObject': null,
+        'list.0.optionalObject.foo': 'has value',
+      };
+
+      const args = {
+        locale: 'en',
+        unsortedMap,
+        sortedMap,
+        isTomlOutput: false,
+        omitEmptyOptionalFields: true,
+      };
+
+      copyProperty({
+        ...args,
+        key: 'list.0.optionalObject',
+        field: { name: 'optionalObject', widget: 'object', required: false },
+      });
+
+      // Parent should be preserved because child has a non-empty value
+      expect(sortedMap).toEqual({
+        'list.0.optionalObject': null,
+      });
+    });
   });
 
   describe('TOML date conversion', () => {
@@ -615,7 +712,7 @@ describe('Test copyProperty()', () => {
       expect(typeof sortedMap.publishDate).toBe('string');
     });
 
-    test('does not convert string that does not match date regex to TomlDate', () => {
+    test('sets invalid date to undefined when string does not match date format', () => {
       /** @type {FlattenedEntryContent} */
       const sortedMap = {};
 
@@ -638,9 +735,8 @@ describe('Test copyProperty()', () => {
         field: { name: 'title', widget: 'datetime', required: false },
       });
 
-      // The string should remain as-is because it does not match the date regex
-      expect(sortedMap.title).toBe('Some random string');
-      expect(typeof sortedMap.title).toBe('string');
+      // Invalid date strings result in undefined to prevent serialization errors
+      expect(sortedMap.title).toBeUndefined();
     });
 
     test('does not convert date when datetime format is configured', () => {
@@ -1511,5 +1607,132 @@ describe('Test serializeContent()', () => {
       // Should return empty object for root keyvalue field with no content
       expect(result).toEqual({});
     });
+  });
+
+  test('omits empty optional object fields inside typed list items', async () => {
+    const { get } = await import('svelte/store');
+
+    vi.mocked(get).mockReturnValueOnce({
+      output: { omit_empty_optional_fields: true },
+    });
+
+    const { createKeyPathList } = await import('$lib/services/contents/draft/save/key-path');
+
+    vi.mocked(createKeyPathList).mockReturnValueOnce([
+      'list',
+      'list.*.type',
+      'list.*.title',
+      'list.*.optionalObject',
+      'list.*.optionalObject.foo',
+    ]);
+
+    // Simulate real getField behaviour: wildcard paths into typed lists return undefined because
+    // the type cannot be resolved from valueMap when the index is `*`.
+    const optionalObjectField = {
+      name: 'optionalObject',
+      widget: 'object',
+      required: false,
+      fields: [{ name: 'foo', widget: 'string' }],
+    };
+
+    getField.mockImplementation(
+      // @ts-ignore — mock intentionally returns undefined for wildcard paths
+      (/** @type {any} */ { keyPath }) => {
+        if (keyPath === 'list') {
+          return { name: 'list', widget: 'list' };
+        }
+
+        // Wildcard paths cannot resolve the type → return undefined (matches real behaviour)
+        if (keyPath.includes('*')) {
+          return undefined;
+        }
+
+        // Concrete paths resolve fine
+        if (/^list\.\d+\.type$/.test(keyPath)) {
+          return { name: 'type', widget: 'string' };
+        }
+
+        if (/^list\.\d+\.title$/.test(keyPath)) {
+          return { name: 'title', widget: 'string' };
+        }
+
+        if (/^list\.\d+\.optionalObject\.foo$/.test(keyPath)) {
+          return { name: 'foo', widget: 'string' };
+        }
+
+        if (/^list\.\d+\.optionalObject$/.test(keyPath)) {
+          return optionalObjectField;
+        }
+
+        return { name: keyPath, widget: 'string' };
+      },
+    );
+
+    isFieldRequired.mockImplementation(
+      (/** @type {any} */ { fieldConfig }) => fieldConfig.required !== false,
+    );
+
+    /** @type {any} */
+    const draft = {
+      collectionName: 'posts',
+      collection: {
+        _file: { format: 'json' },
+        _i18n: { canonicalSlug: { key: '' } },
+      },
+      fields: [
+        {
+          name: 'list',
+          widget: 'list',
+          types: [
+            {
+              name: 'my-type',
+              fields: [{ name: 'title', widget: 'string' }, optionalObjectField],
+            },
+          ],
+        },
+      ],
+      isIndexFile: false,
+    };
+
+    const valueMap = {
+      'list.0.type': 'my-type',
+      'list.0.title': 'Item without optional object',
+      'list.0.optionalObject': null,
+      'list.0.optionalObject.foo': '',
+    };
+
+    const result = serializeContent({ draft, locale: 'en', valueMap });
+
+    // The empty optional object and its empty children should be omitted
+    expect(result).toEqual({
+      list: [{ type: 'my-type', title: 'Item without optional object' }],
+    });
+  });
+});
+
+describe('wildcardKeyPathRegexCache (within serializeContent)', () => {
+  test('should produce consistent ordering across two serialize calls for the same wildcard field', () => {
+    // serializeContent calls finalizeContent which builds and caches the wildcard regex.
+    // Running it twice exercises the cache-hit path.
+    const draft = /** @type {any} */ ({
+      collection: {
+        _file: { format: 'yaml-frontmatter' },
+        _i18n: { canonicalSlug: { key: 'slug' } },
+      },
+      collectionName: 'blog',
+      collectionFile: null,
+      fields: [
+        // A list field whose keyPath ends up containing a wildcard after createKeyPathList
+        // expansion
+        { name: 'tags.*', widget: 'string' },
+      ],
+      isIndexFile: false,
+    });
+
+    const valueMap = { 'tags.0': 'js', 'tags.1': 'svelte' };
+    const result1 = serializeContent({ draft, locale: 'en', valueMap: { ...valueMap } });
+    const result2 = serializeContent({ draft, locale: 'en', valueMap: { ...valueMap } });
+
+    expect(result1).toEqual(result2);
   });
 });

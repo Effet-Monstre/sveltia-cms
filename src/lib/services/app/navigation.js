@@ -61,13 +61,22 @@ export const parseLocation = (href = window.location.href) => {
 };
 
 /**
+ * Currently active view transition, if any. Used to prevent nested transitions from aborting the
+ * active one, which would cause “Transition was skipped” errors in the browser console.
+ * @type {ViewTransition | null}
+ */
+let activeTransition = null;
+
+/**
  * Start page transition, if possible, after updating the content.
  * @param {ViewTransitionType} transitionType View transition type.
  * @param {() => void} updateContent Function to trigger a content update.
  * @see https://developer.chrome.com/docs/web-platform/view-transitions/same-document
  */
 export const startViewTransition = (transitionType, updateContent) => {
-  if (!document.startViewTransition) {
+  // Fall back to a direct update if the View Transitions API is unavailable, or if a transition is
+  // already running (e.g. a redirect `goto()` inside `navigate()`), to avoid aborting it.
+  if (!document.startViewTransition || activeTransition) {
     updateContent();
     return;
   }
@@ -90,7 +99,10 @@ export const startViewTransition = (transitionType, updateContent) => {
   // and will throw a `TypeError` if provided.
   // @see https://developer.mozilla.org/en-US/docs/Web/API/Document/startViewTransition
   try {
-    document.startViewTransition(options);
+    activeTransition = document.startViewTransition(options);
+    activeTransition.finished.finally(() => {
+      activeTransition = null;
+    });
   } catch {
     updateContent();
   }
@@ -146,6 +158,13 @@ export const goto = async (
   path,
   { state = {}, replaceState = false, notifyChange = true, transitionType = 'unknown' } = {},
 ) => {
+  const { path: currentPath } = parseLocation();
+
+  // If we're already on this page AND not updating state, don't navigate or trigger a transition
+  if (currentPath === path && !Object.keys(state).length && !replaceState) {
+    return;
+  }
+
   const { origin, pathname, hash } = window.location;
   const oldURL = `${origin}${pathname}${hash}`;
   const newURL = `${origin}${pathname}#${path}`;

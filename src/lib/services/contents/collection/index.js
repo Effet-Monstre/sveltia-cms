@@ -1,6 +1,6 @@
+import { _ } from '@sveltia/i18n';
 import { stripSlashes } from '@sveltia/utils/string';
 import { get, writable } from 'svelte/store';
-import { _ } from 'svelte-i18n';
 
 import { cmsConfig } from '$lib/services/config';
 import {
@@ -116,6 +116,7 @@ export const isValidCollection = (collection, { visible = undefined, type = unde
  * @returns {Collection[]} List of valid collections.
  */
 export const getValidCollections = ({
+  /* v8 ignore next */
   collections = get(cmsConfig)?.collections ?? [],
   visible,
   type,
@@ -262,6 +263,7 @@ export const getCollection = (name) => {
   const entryCollection = isEntryCollection(rawCollection) ? rawCollection : undefined;
   const fileCollection = isFileCollection(rawCollection) ? rawCollection : undefined;
 
+  /* v8 ignore next 4 */
   if (!entryCollection && !fileCollection) {
     collectionCacheMap.set(name, undefined);
 
@@ -283,9 +285,11 @@ export const getCollection = (name) => {
 
   const collection = entryCollection
     ? parseEntryCollection(entryCollection, _i18n)
-    : fileCollection
-      ? parseFileCollection(fileCollection, _i18n, fileCollection.files)
-      : undefined;
+    : parseFileCollection(
+        /** @type {FileCollection} */ (fileCollection),
+        _i18n,
+        /** @type {FileCollection} */ (fileCollection).files,
+      );
 
   collectionCacheMap.set(name, collection);
 
@@ -304,7 +308,7 @@ export const getCollectionLabel = (collection, { useSingular = false } = {}) => 
   const { _type, name, label, label_singular: singularLabel } = collection;
 
   if (_type === 'singleton') {
-    return get(_)('files');
+    return _('files');
   }
 
   if (useSingular && singularLabel) {

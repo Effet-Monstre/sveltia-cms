@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'vitest';
 
-import { allCloudStorageServices } from './index.js';
+import { allCloudStorageServices } from '.';
 
 describe('Cloud storage services', () => {
   test('should export allCloudStorageServices', () => {
@@ -9,7 +9,7 @@ describe('Cloud storage services', () => {
   });
 
   test('should be an empty object', () => {
-    expect(Object.keys(allCloudStorageServices)).toHaveLength(2);
+    expect(Object.keys(allCloudStorageServices)).toHaveLength(5);
   });
 
   test('should include cloudinary service', () => {

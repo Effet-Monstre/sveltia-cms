@@ -6,22 +6,39 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createCustomNodeClass } from './custom-node.js';
 
 // Set up DOM globals for tests
+const makeMockElement = (tagName) => ({
+  tagName: tagName.toUpperCase(),
+  setAttribute: vi.fn(),
+  getAttribute: vi.fn(),
+  classList: {
+    add: vi.fn(),
+    remove: vi.fn(),
+    contains: vi.fn(),
+  },
+  appendChild: vi.fn(),
+  removeChild: vi.fn(),
+  focus: vi.fn(),
+  closest: vi.fn(() => null),
+  addEventListener: vi.fn(),
+  removeEventListener: vi.fn(),
+  parentElement: null,
+  isConnected: true,
+});
+
 Object.defineProperty(globalThis, 'document', {
   value: {
-    createElement: vi.fn((tagName) => ({
-      tagName: tagName.toUpperCase(),
-      setAttribute: vi.fn(),
-      getAttribute: vi.fn(),
-      classList: {
-        add: vi.fn(),
-        remove: vi.fn(),
-        contains: vi.fn(),
-      },
-      appendChild: vi.fn(),
-      removeChild: vi.fn(),
-      focus: vi.fn(),
-    })),
+    createElement: vi.fn((tagName) => makeMockElement(tagName)),
+    activeElement: null,
+    body: { contains: vi.fn(() => true) },
   },
+  writable: true,
+});
+
+Object.defineProperty(globalThis, 'MutationObserver', {
+  value: vi.fn(() => ({
+    observe: vi.fn(),
+    disconnect: vi.fn(),
+  })),
   writable: true,
 });
 
@@ -287,6 +304,17 @@ describe('createCustomNodeClass', () => {
       });
     });
 
+    it('should export JSON with empty props when __props is undefined', () => {
+      const CustomNode = createCustomNodeClass(mockComponentDef);
+      const node = new CustomNode();
+      const exported = node.exportJSON();
+
+      expect(exported).toEqual({
+        type: 'test-component',
+        version: 1,
+      });
+    });
+
     it('should have updateFromJSON method', () => {
       const CustomNode = createCustomNodeClass(mockComponentDef);
       const node = new CustomNode();
@@ -484,6 +512,29 @@ describe('createCustomNodeClass', () => {
       const importDOM = CustomNode.importDOM();
 
       expect(importDOM).toBeDefined();
+      expect(Object.keys(importDOM).length).toBe(0);
+    });
+
+    it('should handle when toPreview returns a non-string value', () => {
+      const componentWithObjectPreview = {
+        ...mockComponentDef,
+        /**
+         * Convert properties to preview format.
+         * @returns {{ element: string }} Preview object.
+         */
+        toPreview: () => ({ element: 'div' }),
+        /**
+         * Convert properties to block format.
+         * @returns {string} Block string.
+         */
+        toBlock: () => '<div>Block</div>',
+      };
+
+      const CustomNode = createCustomNodeClass(componentWithObjectPreview);
+      const importDOM = CustomNode.importDOM();
+
+      expect(importDOM).toBeDefined();
+      // tagName is undefined when preview is not a string, so no DOM conversion registered
       expect(Object.keys(importDOM).length).toBe(0);
     });
   });
@@ -1265,6 +1316,88 @@ describe('createCustomNodeClass', () => {
         expect(mockSelection.removeAllRanges).not.toHaveBeenCalled();
         expect(mockSelection.addRange).not.toHaveBeenCalled();
       });
+    });
+  });
+
+  describe('MutationObserver cleanup', () => {
+    it('should call cleanup when the wrapper is removed from the DOM', async () => {
+      const { mount, unmount } = await import('svelte');
+
+      vi.clearAllMocks();
+
+      let capturedComponent;
+
+      vi.mocked(mount).mockImplementation(() => {
+        capturedComponent = {
+          getElement: vi.fn(() => ({
+            closest: vi.fn(() => null),
+            addEventListener: vi.fn(),
+            parentElement: { nodeType: 1 },
+            isConnected: false, // already disconnected when observer fires
+            focus: vi.fn(),
+          })),
+          destroy: vi.fn(),
+        };
+
+        return capturedComponent;
+      });
+
+      let observerCallback;
+
+      globalThis.MutationObserver = vi.fn(function MockMutationObserver(callback) {
+        observerCallback = callback;
+        this.observe = vi.fn();
+        this.disconnect = vi.fn();
+      });
+
+      const CustomNode = createCustomNodeClass(mockComponentDef);
+      const node = new CustomNode({ title: 'Test' });
+
+      node.createDOM();
+
+      // Fire the MutationObserver callback — wrapper is not connected
+      expect(observerCallback).toBeDefined();
+      observerCallback();
+
+      expect(unmount).toHaveBeenCalledWith(capturedComponent);
+    });
+
+    it('should not call cleanup when the wrapper is still connected', async () => {
+      const { mount, unmount } = await import('svelte');
+
+      vi.clearAllMocks();
+
+      vi.mocked(mount).mockImplementation(() => ({
+        getElement: vi.fn(() => ({
+          closest: vi.fn(() => null),
+          addEventListener: vi.fn(),
+          parentElement: { nodeType: 1 },
+          isConnected: true, // still in the DOM
+          focus: vi.fn(),
+        })),
+        destroy: vi.fn(),
+      }));
+
+      let observerCallback;
+      const mockObserverInstance = { observe: vi.fn(), disconnect: vi.fn() };
+
+      globalThis.MutationObserver = vi.fn(function MockMutationObserver(callback) {
+        observerCallback = callback;
+        this.observe = mockObserverInstance.observe;
+        this.disconnect = mockObserverInstance.disconnect;
+      });
+
+      const CustomNode = createCustomNodeClass(mockComponentDef);
+      const node = new CustomNode({ title: 'Test' });
+
+      node.createDOM();
+
+      // Fire the MutationObserver callback — wrapper is still connected
+      expect(observerCallback).toBeDefined();
+      observerCallback();
+
+      expect(unmount).not.toHaveBeenCalled();
+      expect(mockObserverInstance.disconnect).not.toHaveBeenCalled();
     });
   });
 

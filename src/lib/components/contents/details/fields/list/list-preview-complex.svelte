@@ -52,10 +52,7 @@
       Object.fromEntries(
         Object.entries($state.snapshot($entryDraft?.currentValues[locale]) ?? {})
           .filter(([_keyPath]) => keyPathRegex.test(_keyPath))
-          .map(([_keyPath, value]) => [
-            _keyPath.replace(new RegExp(`^${escapeRegExp(keyPath)}`), fieldName),
-            value,
-          ]),
+          .map(([_keyPath, value]) => [`${fieldName}${_keyPath.slice(keyPath.length)}`, value]),
       ),
     )[fieldName] ?? [],
   );

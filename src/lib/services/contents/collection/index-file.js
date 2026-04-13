@@ -1,26 +1,11 @@
-import { get } from 'svelte/store';
-import { _ } from 'svelte-i18n';
+import { _ } from '@sveltia/i18n';
 
 import { isEntryCollection } from '$lib/services/contents/collection';
-import { getEntriesByCollection } from '$lib/services/contents/collection/entries';
 
 /**
  * @import { Entry, InternalCollection } from '$lib/types/private';
  * @import { Collection, CollectionIndexFile } from '$lib/types/public';
  */
-
-/**
- * Get the localized label for the index file. Use `try-catch` to handle cases where svelte-i18n is
- * not initialized during automated tests.
- * @returns {string} Localized label for the index file.
- */
-export const getLocalizedLabel = () => {
-  try {
-    return get(_)('index_file');
-  } catch {
-    return 'Index File';
-  }
-};
 
 /**
  * Get the collection’s index file configuration. This function returns the index file configuration
@@ -49,7 +34,7 @@ export const getIndexFile = (collection) => {
 
   return {
     name: file.name ?? '_index',
-    label: file.label ?? getLocalizedLabel(),
+    label: file.label ?? _('index_file'),
     icon: file.icon ?? 'home',
     // The following properties are inherited from the collection file, collection or global config
     fields: file.fields,
@@ -72,19 +57,4 @@ export const isCollectionIndexFile = (collection, entry) => {
   }
 
   return entry.slug === indexFile.name;
-};
-
-/**
- * Check if index file creation is allowed in the collection.
- * @param {InternalCollection} collection Collection.
- * @returns {boolean} Result. It returns `false` if the index file already exists.
- */
-export const canCreateIndexFile = (collection) => {
-  const indexFile = getIndexFile(collection);
-
-  if (!indexFile) {
-    return false;
-  }
-
-  return !getEntriesByCollection(collection.name).some(({ slug }) => slug === indexFile.name);
 };

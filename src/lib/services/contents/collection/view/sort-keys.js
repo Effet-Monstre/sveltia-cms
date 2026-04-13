@@ -1,9 +1,10 @@
+import { _ } from '@sveltia/i18n';
 import { unique } from '@sveltia/utils/array';
 import { isObject } from '@sveltia/utils/object';
 import equal from 'fast-deep-equal';
 import { derived, get } from 'svelte/store';
-import { _, locale as appLocale } from 'svelte-i18n';
 
+import { appLocaleStore } from '$lib/services/app/i18n';
 import { allEntries } from '$lib/services/contents';
 import { selectedCollection } from '$lib/services/contents/collection';
 import { currentView } from '$lib/services/contents/collection/view';
@@ -33,6 +34,7 @@ export const SPECIAL_SORT_KEY_TYPES = {
   slug: String,
   commit_author: String,
   commit_date: Date,
+  _summary: String,
 };
 
 /**
@@ -126,11 +128,18 @@ export const getSortConfig = ({ collection, isCommitAuthorAvailable, isCommitDat
     name: collectionName,
     identifier_field: customIdField,
     sortable_fields: customSortableFields,
+    summary: summaryTemplate,
   } = collection;
 
   let { keys, defaultKey, defaultOrder } = customSortableFields
     ? parseCustomSortableFields(customSortableFields)
     : getDefaultSortKeys(customIdField);
+
+  // Special handling for summary field: if the collection has a summary template defined, we add
+  // `_summary` as a special sort key, which uses the generated summary value
+  if (summaryTemplate) {
+    keys.unshift('_summary');
+  }
 
   const hasCommitAuthorKey = keys.includes('commit_author');
   const hasCommitDateKey = keys.includes('commit_date');
@@ -207,7 +216,7 @@ export const getSortKeyType = ({ key, fieldConfig }) => {
  */
 export const getSortKeyLabel = ({ collection, key }) => {
   if ([...SPECIAL_SORT_KEYS, 'name'].includes(key)) {
-    return get(_)(`sort_keys.${key}`);
+    return _(`sort_keys.${key}`);
   }
 
   if (key.includes('.')) {
@@ -236,8 +245,9 @@ export const getSortKeyLabel = ({ collection, key }) => {
  * @type {Readable<{ key: string, label: string }[]>}
  */
 export const sortKeys = derived(
-  // Include `appLocale` as a dependency because `getSortKeyLabel()` may return a localized label
-  [selectedCollection, allEntries, appLocale],
+  // Include `appLocale.current` as a dependency because `getSortKeyLabel()` may return a localized
+  // label
+  [selectedCollection, allEntries, appLocaleStore],
   ([collection, _allEntries], set) => {
     // Disable sorting for file/singleton collection
     if (!collection || !('folder' in collection)) {

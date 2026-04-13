@@ -1,9 +1,10 @@
 <script>
-  import { Alert, Dialog, Icon, Tab, TabList, TabPanel, Toast } from '@sveltia/ui';
+  import { _ } from '@sveltia/i18n';
+  import { Dialog, Icon, Tab, TabList, TabPanel } from '@sveltia/ui';
   import { get } from 'svelte/store';
-  import { _ } from 'svelte-i18n';
 
   import { panels } from '$lib/components/settings';
+  import PanelContainer from '$lib/components/settings/panel-container.svelte';
 
   /**
    * @typedef {object} Props
@@ -20,12 +21,10 @@
   } = $props();
 
   let selectedPanel = $state('appearance');
-  let toastMessage = $state('');
-  let showToast = $state(false);
 </script>
 
 <Dialog
-  title={$_('settings')}
+  title={_('settings')}
   size="large"
   bind:open
   showOk={false}
@@ -36,11 +35,11 @@
   }}
 >
   <div role="none" class="wrapper">
-    <TabList orientation="vertical" aria-label={$_('categories')}>
+    <TabList orientation="vertical" aria-label={_('categories')}>
       {#each get(panels) as { key, icon, enabled = true } (key)}
         {#if enabled}
           <Tab
-            label={$_(`prefs.${key}.title`)}
+            label={_(`prefs.${key}.title`)}
             selected={key === selectedPanel}
             aria-controls="prefs-tab-{key}"
             onSelect={() => {
@@ -54,22 +53,13 @@
         {/if}
       {/each}
     </TabList>
-    {#each get(panels) as { key, component: Content } (key)}
+    {#each get(panels) as { key, component } (key)}
       <TabPanel id="prefs-tab-{key}">
-        <Content
-          onChange={(/** @type {{ message: string }} */ { message }) => {
-            toastMessage = message;
-            showToast = true;
-          }}
-        />
+        <PanelContainer Panel={component} />
       </TabPanel>
     {/each}
   </div>
 </Dialog>
-
-<Toast bind:show={showToast}>
-  <Alert status="success">{toastMessage}</Alert>
-</Toast>
 
 <style lang="scss">
   .wrapper {
@@ -83,33 +73,6 @@
       .sui.tab-panel {
         flex: auto;
         border-width: 0;
-
-        section:not(:first-child) {
-          margin: 16px 0 0;
-        }
-
-        p {
-          margin-top: 0;
-        }
-
-        h3 {
-          font-size: inherit;
-
-          & ~ div {
-            margin: 8px 0 0;
-          }
-
-          & ~ p {
-            margin: 8px 0 0;
-            color: var(--sui-secondary-foreground-color);
-            font-size: var(--sui-font-size-small);
-          }
-        }
-
-        h4 {
-          margin-bottom: 4px;
-          font-size: var(--sui-font-size-small);
-        }
       }
     }
   }

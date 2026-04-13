@@ -14,7 +14,7 @@ export type FieldKeyPath = string;
 /**
  * Cloud media storage name.
  */
-export type CloudMediaLibraryName = "cloudinary" | "uploadcare";
+export type CloudMediaLibraryName = "cloudinary" | "uploadcare" | "aws_s3" | "cloudflare_r2" | "digitalocean_spaces";
 /**
  * Supported media storage name.
  */
@@ -206,13 +206,60 @@ export type UploadcareMediaLibrary = {
     settings?: UploadcareMediaLibrarySettings;
 };
 /**
+ * Options for S3-compatible media libraries (Amazon S3, Cloudflare R2, DigitalOcean Spaces).
+ */
+export type S3MediaLibrary = {
+    /**
+     * Media library name (used when configuring via legacy `media_library`).
+     */
+    name?: string;
+    /**
+     * AWS access key ID or equivalent (safe to store in config).
+     */
+    access_key_id: string;
+    /**
+     * Bucket name.
+     */
+    bucket: string;
+    /**
+     * AWS region (e.g., 'us-east-1'). Required for Amazon S3 and
+     * DigitalOcean Spaces.
+     */
+    region?: string;
+    /**
+     * Cloudflare account ID. Required for Cloudflare R2.
+     */
+    account_id?: string;
+    /**
+     * Custom endpoint URL for S3-compatible services.
+     */
+    endpoint?: string;
+    /**
+     * Path prefix within bucket.
+     */
+    prefix?: string;
+    /**
+     * Use path-style URLs instead of virtual-hosted-style.
+     */
+    force_path_style?: boolean;
+    /**
+     * Base URL for public asset access. When set, asset preview and
+     * download URLs are constructed as `{public_url}/{key}` instead of the S3 API endpoint URL.
+     * Required for Cloudflare R2 (S3 API endpoint always requires authentication); set to the `r2.dev`
+     * development URL (e.g. `https://pub-abcd1234.r2.dev`) or a custom domain. Optional for Amazon S3
+     * and DigitalOcean Spaces — use when serving assets through a CDN or custom domain (e.g. CloudFront
+     * or Route 53 for S3, CDN endpoint for Spaces).
+     */
+    public_url?: string;
+};
+/**
  * Name of supported stock photo/video provider.
  */
 export type StockAssetProviderName = "pexels" | "picsum" | "pixabay" | "unsplash";
 /**
  * Options for the unified stock photo/video providers.
  */
-export type StockAssetMediaLibrary = {
+export type StockMediaLibrary = {
     /**
      * Enabled stock photo/video providers. The stock
      * photo/video section in the asset browser is hidden if an empty array is given. Default: all
@@ -221,9 +268,13 @@ export type StockAssetMediaLibrary = {
     providers?: StockAssetProviderName[];
 };
 /**
+ * Supported cloud media storage options.
+ */
+export type CloudMediaLibrary = CloudinaryMediaLibrary | UploadcareMediaLibrary | S3MediaLibrary;
+/**
  * Supported [media storage](https://sveltiacms.app/en/docs/media).
  */
-export type MediaLibrary = DefaultMediaLibrary | CloudinaryMediaLibrary | UploadcareMediaLibrary | StockAssetMediaLibrary;
+export type MediaLibrary = DefaultMediaLibrary | CloudMediaLibrary | StockMediaLibrary;
 /**
  * Unified media storage option that supports multiple storage providers. See the
  * [documentation](https://sveltiacms.app/en/docs/media#configuration) for details.
@@ -242,11 +293,28 @@ export type MediaLibraries = {
      */
     uploadcare?: UploadcareMediaLibrary;
     /**
+     * Options for the Amazon S3 media storage.
+     */
+    aws_s3?: S3MediaLibrary;
+    /**
+     * Options for the Cloudflare R2 media storage.
+     */
+    cloudflare_r2?: S3MediaLibrary;
+    /**
+     * Options for the DigitalOcean Spaces media
+     * storage.
+     */
+    digitalocean_spaces?: S3MediaLibrary;
+    /**
      * Options for the unified stock photo/video media
      * library.
      */
-    stock_assets?: StockAssetMediaLibrary;
+    stock_assets?: StockMediaLibrary;
 };
+/**
+ * Parsed, localized entry content.
+ */
+export type RawEntryContent = Record<string, any>;
 /**
  * Common field properties that are shared among all field types.
  */
@@ -780,6 +848,11 @@ export type ComplexListFieldBaseProps = {
      * `true`.
      */
     allow_remove?: boolean;
+    /**
+     * Whether to allow users to duplicate items in the list.
+     * Default: `true`.
+     */
+    allow_duplicate?: boolean;
     /**
      * Whether to allow users to reorder items in the list. Default:
      * `true`.
@@ -1774,6 +1847,11 @@ export type EntryCollectionProps = {
      */
     delete?: boolean;
     /**
+     * Whether to allow users to duplicate entries in the collection.
+     * Default: `true`.
+     */
+    duplicate?: boolean;
+    /**
      * File extension. Default: `md`.
      */
     extension?: FileExtension;
@@ -2179,6 +2257,13 @@ export type SlugOptions = {
      * Whether to convert the slug to lowercase. Default: `true`.
      */
     lowercase?: boolean;
+    /**
+     * Timezone to be used for date-based slug template tags,
+     * such as `{{day}}` and `{{hour}}`. Default is `utc` for backward compatibility with Netlify/Decap
+     * CMS. Use `local` to generate slugs based on the local time of the user’s browser, which is more
+     * intuitive in most cases.
+     */
+    timezone?: "utc" | "local";
 };
 /**
  * JSON format options.
@@ -2237,6 +2322,13 @@ export type OutputOptions = {
      * YAML format options.
      */
     yaml?: YamlFormatOptions;
+};
+export type IssueReports = {
+    /**
+     * URL of the issue reporting endpoint. Default:
+     * `https://github.com/sveltia/sveltia-cms/issues/new`.
+     */
+    url: string;
 };
 /**
  * CMS configuration.
@@ -2311,6 +2403,10 @@ export type CmsConfig = {
      */
     logout_redirect_url?: string;
     /**
+     * Issue reporting options.
+     */
+    issue_reports?: IssueReports;
+    /**
      * Whether to show site preview links. Default: `true`.
      */
     show_preview_links?: boolean;
@@ -2383,27 +2479,21 @@ export type EditorComponentDefinition = {
      */
     pattern: RegExp;
     /**
+     * Function to convert the
+     * matching result to field properties. This can be omitted if the `pattern` regex contains named
+     * capturing group(s) that will be passed directly to the internal `createNode` method.
+     */
+    fromBlock?: (match: RegExpMatchArray) => Record<string, any>;
+    /**
+     * Function to convert field properties
+     * to Markdown content.
+     */
+    toBlock: (props: Record<string, any>) => string;
+    /**
      * Function to convert
-     * the matching result to field properties. This can be omitted if the `pattern` regex contains
-     * named capturing group(s) that will be passed directly to the internal `createNode` method.
+     * field properties to field preview.
      */
-    fromBlock?: (match: RegExpMatchArray) => {
-        [key: string]: any;
-    };
-    /**
-     * Function to convert field
-     * properties to Markdown content.
-     */
-    toBlock: (props: {
-        [key: string]: any;
-    }) => string;
-    /**
-     * Function to
-     * convert field properties to field preview.
-     */
-    toPreview?: (props: {
-        [key: string]: any;
-    }) => string | JSX.Element;
+    toPreview?: (props: Record<string, any>) => string | ReactElement;
 };
 /**
  * Supported event type.
@@ -2425,7 +2515,7 @@ export type AppEventAuthor = {
 /**
  * Event entry media file data.
  */
-export type AppEventEntryMedia = {
+export type ApiEntryMedia = {
     /**
      * Media file ID.
      */
@@ -2458,7 +2548,7 @@ export type AppEventEntryMedia = {
 /**
  * Event entry data.
  */
-export type AppEventEntry = {
+export type ApiEntry = {
     /**
      * Entry data for the default locale.
      */
@@ -2486,7 +2576,7 @@ export type AppEventEntry = {
     /**
      * List of media files associated with the entry.
      */
-    mediaFiles: AppEventEntryMedia[];
+    mediaFiles: ApiEntryMedia[];
     /**
      * Entry meta data.
      */
@@ -2531,14 +2621,14 @@ export type AppEventListener = {
      */
     name: AppEventType;
     /**
-     * Event handler. For
-     * the `preSave` event, the handler can return a modified entry object in Immutable Map format to
-     * change the data before it is saved. For other events, the return value is ignored.
+     * Event handler. For the `preSave` event, the
+     * handler can return a modified entry object in Immutable Map format to change the data before it
+     * is saved. For other events, the return value is ignored.
      */
     handler: (args: {
         author: AppEventAuthor;
-        entry: MapOf<AppEventEntry>;
-    }) => void | MapOf<AppEventEntry> | Promise<void> | Promise<MapOf<AppEventEntry>>;
+        entry: MapOf<ApiEntry>;
+    }) => void | MapOf<ApiEntry> | Promise<void> | Promise<MapOf<ApiEntry>>;
 };
 export type CustomPreviewTemplateProps = {
     entry: Record<string, any>;
@@ -2567,5 +2657,5 @@ export type CustomFieldPreviewProps = {
 export type CustomFieldSchema = {
     properties: Record<string, any>;
 };
-import type { JSX } from 'react';
+import type { ReactElement } from 'react';
 import type { MapOf } from 'immutable';

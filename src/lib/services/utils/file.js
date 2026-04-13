@@ -1,9 +1,8 @@
+import { _, locale as appLocale } from '@sveltia/i18n';
 import { getHash } from '@sveltia/utils/crypto';
 import { getPathInfo } from '@sveltia/utils/file';
 import { compare, escapeRegExp } from '@sveltia/utils/string';
 import sanitize from 'sanitize-filename';
-import { get } from 'svelte/store';
-import { _, locale as appLocale } from 'svelte-i18n';
 
 import { slugify } from '$lib/services/common/slug';
 
@@ -14,7 +13,7 @@ import { slugify } from '$lib/services/common/slug';
  * @returns {RegExp} Regular expression.
  */
 export const createPathRegEx = (path, replacer) =>
-  new RegExp(`^${path.split('/').map(replacer).join('\\/')}(?:\\/|$)`);
+  new RegExp(`^${path.split('/').map(replacer).join('\\/')}(?=\\/|$)`);
 
 /**
  * Encode the given (partial) file path or file name. Since {@link encodeURIComponent} encodes
@@ -57,14 +56,23 @@ export const encodeFilePath = (path) => {
 export const decodeFilePath = (path) => decodeURIComponent(path);
 
 /**
+ * @type {Map<string, Intl.NumberFormat>}
+ */
+const fileSizeFormatterCache = new Map();
+
+/**
  * Format the given file size in bytes, KB, MB, GB or TB.
  * @param {number} size File size.
  * @returns {string} Formatted size.
  */
 export const formatSize = (size) => {
-  const formatter = new Intl.NumberFormat(/** @type {string} */ (get(appLocale)), {
-    maximumFractionDigits: 1,
-  });
+  const locale = appLocale.current;
+  let formatter = fileSizeFormatterCache.get(locale);
+
+  if (!formatter) {
+    formatter = new Intl.NumberFormat(locale, { maximumFractionDigits: 1 });
+    fileSizeFormatterCache.set(locale, formatter);
+  }
 
   const kb = 1000;
   const mb = kb * 1000;
@@ -72,22 +80,22 @@ export const formatSize = (size) => {
   const tb = gb * 1000;
 
   if (size < kb) {
-    return get(_)('file_size_units.b', { values: { size: formatter.format(size) } });
+    return _('file_size_units.b', { values: { size: formatter.format(size) } });
   }
 
   if (size < mb) {
-    return get(_)('file_size_units.kb', { values: { size: formatter.format(size / kb) } });
+    return _('file_size_units.kb', { values: { size: formatter.format(size / kb) } });
   }
 
   if (size < gb) {
-    return get(_)('file_size_units.mb', { values: { size: formatter.format(size / mb) } });
+    return _('file_size_units.mb', { values: { size: formatter.format(size / mb) } });
   }
 
   if (size < tb) {
-    return get(_)('file_size_units.gb', { values: { size: formatter.format(size / gb) } });
+    return _('file_size_units.gb', { values: { size: formatter.format(size / gb) } });
   }
 
-  return get(_)('file_size_units.tb', { values: { size: formatter.format(size / tb) } });
+  return _('file_size_units.tb', { values: { size: formatter.format(size / tb) } });
 };
 
 /**

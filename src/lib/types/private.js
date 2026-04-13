@@ -93,7 +93,7 @@
 
 /**
  * Basic Git repository information retrieved from the config file.
- * @typedef {object} RepositoryInfo
+ * @typedef {object} RepositoryBaseInfo
  * @property {GitBackendName | ''} service Repository hosting service name, e.g. `github`.
  * @property {string} label Service label, e.g. `GitHub`.
  * @property {string} owner Owner name, which could be either an organization or individual user.
@@ -103,13 +103,27 @@
  * UI to the backend service. Git backends only.
  * @property {string} [tokenPageURL] URL of the page where the user can create a personal access
  * token (PAT). Git backends only.
+ * @property {boolean} [isSelfHosted] Whether the repository is on a GitHub Enterprise Server or
+ * GitLab Self-Managed, or self-hosted Gitea/Forgejo instance.
+ * @property {string} [databaseName] IndexedDB database name. Git backends only.
+ */
+
+/**
+ * List of URLs for the repository’s web interface to access different resources, which can be used
+ * in the CMS UI to link to the backend service.
+ * @typedef {object} RepositoryBaseURLs
  * @property {string} [treeBaseURL] Repository’s tree base URL with a branch name. It’s the same as
  * `baseURL` when the default branch is used. Git backends only.
  * @property {string} [blobBaseURL] Repository’s blob base URL with a branch name. Git backends
  * only.
- * @property {boolean} [isSelfHosted] Whether the repository is on a GitHub Enterprise Server or
- * GitLab Self-Managed, or self-hosted Gitea/Forgejo instance.
- * @property {string} [databaseName] IndexedDB database name. Git backends only.
+ * @property {string} [commitBaseURL] Repository’s commit base URL. Append a SHA to get a commit
+ * URL. Git backends only.
+ */
+
+/**
+ * Complete repository information used in the CMS, which combines the basic repository info from
+ * the config file and the generated base URLs.
+ * @typedef {RepositoryBaseInfo & RepositoryBaseURLs} RepositoryInfo
  */
 
 /**
@@ -211,6 +225,19 @@
  * deletions, and return the commit hash and a map of committed files.
  * @property {() => Promise<Response>} [triggerDeployment] Function to manually trigger a new
  * deployment on any connected CI/CD provider. GitHub only.
+ * @property {(paths: string[]) => Promise<FileCommit[]>} [fetchFileCommits] Function to fetch
+ * commit history for given file paths. Git backends only.
+ */
+
+/**
+ * A single commit associated with one or more files.
+ * @typedef {object} FileCommit
+ * @property {string} sha Commit SHA hash.
+ * @property {string} authorName Author's display name.
+ * @property {string} [authorEmail] Author's email address.
+ * @property {string} [authorAvatarURL] Author's avatar URL.
+ * @property {string} [authorLogin] Author's username on the backend service.
+ * @property {Date} date Commit date.
  */
 
 /**
@@ -258,6 +285,17 @@
  * list files. For stock asset services, it should return popular or curated images.
  * @property {(files: File[], options: MediaLibraryFetchOptions) =>
  * Promise<ExternalAsset[]>} [upload] Function to upload files to the cloud storage service.
+ */
+
+/**
+ * Options for direct AI text completion requests.
+ * @typedef {object} AiCompletionOptions
+ * @property {string} apiKey API authentication key.
+ * @property {string} model Model name.
+ * @property {string} systemPrompt System/instruction prompt.
+ * @property {string} userMessage User message content.
+ * @property {number} [temperature] Sampling temperature (0–1). Default is 0.3.
+ * @property {number} [maxTokens] Maximum output tokens. Default is 4000.
  */
 
 /**
@@ -569,12 +607,17 @@
  */
 
 /**
- * Parsed, localized entry content.
- * @typedef {Record<string, any>} RawEntryContent
+ * Entry backlink information.
+ * @typedef {object} EntryBacklink
+ * @property {string} collectionName Source collection name.
+ * @property {string} collectionLabel Source collection label.
+ * @property {string} fieldLabel Relation field label.
+ * @property {Entry} entry Source entry referencing the target.
+ * @property {string} summary Display summary for the source entry.
  */
 
 /**
- * Flattened {@link RawEntryContent} object.
+ * Flattened `RawEntryContent` object.
  * @typedef {Record<FieldKeyPath, any>} FlattenedEntryContent - where key is a key path and value is
  * the corresponding field value.
  * @see https://www.npmjs.com/package/flatten
@@ -627,6 +670,17 @@
  */
 
 /**
+ * Flattened validation messages map, where key is a key path and value is the list of translated
+ * error message strings for that field.
+ * @typedef {Record<FieldKeyPath, string[]>} FlattenedValidationMessagesMap
+ */
+
+/**
+ * Locale validation messages map.
+ * @typedef {Record<InternalLocaleCode, FlattenedValidationMessagesMap>} LocaleValidationMessagesMap
+ */
+
+/**
  * Locale validity map.
  * @typedef {Record<InternalLocaleCode, FlattenedEntryValidityStateMap>} LocaleValidityMap
  */
@@ -668,6 +722,8 @@
  * @property {EntryFileMap} files Files to be uploaded.
  * @property {LocaleValidityMap} validities Key is a locale code, value is a flattened object
  * containing validation results of all the current field values while editing.
+ * @property {LocaleValidationMessagesMap} validationMessages Key is a locale code, value is a
+ * flattened object containing the translated validation error messages for each field.
  * @property {LocaleExpanderMap} expanderStates Key is a locale code, value is a flattened object
  * containing the expander UI state.
  * @property {Record<LocaleCode, boolean | 'readonly'>} slugEditor Whether to show the slug editor
@@ -805,7 +861,8 @@
  * file’s Exif data.
  * @property {GeoCoordinates} [coordinates] GPS coordinates extracted from an image file’s Exif
  * data.
- * @property {Entry[]} usedEntries List of entries using the asset.
+ * @property {Entry[]} [usedEntries] List of entries using the asset. `undefined` means the
+ * information is not yet available.
  */
 
 /**
@@ -909,6 +966,7 @@
  * name (and a file name joined by `|`), value is the left and right pane states. The state can be
  * `null` if preview is disabled.
  * @property {SelectAssetsView} [selectAssetsView] View settings for the Select Assets dialog.
+ * @property {string | null} [sidebarPanel] Active sidebar panel key, e.g. `validation`.
  */
 
 /**
@@ -1008,12 +1066,25 @@
  */
 
 /**
+ * @typedef {object} PopulateDefaultValueArgs
+ * @property {FlattenedEntryContent} content An object holding a new content key-value map.
+ * @property {FieldKeyPath} keyPath Field key path, e.g. `author.name`.
+ * @property {Field} fieldConfig Field configuration.
+ * @property {InternalLocaleCode} locale Locale.
+ * @property {InternalLocaleCode} defaultLocale Default locale of the entry draft.
+ * @property {Record<string, string>} dynamicValues Dynamic default values.
+ */
+
+/**
  * @typedef {object} GetDefaultValueMapFuncArgs
  * @property {Field} fieldConfig Field configuration.
  * @property {FieldKeyPath} keyPath Field key path, e.g. `author.name`.
  * @property {LocaleCode} locale Locale code.
  * @property {InternalLocaleCode} defaultLocale Default locale of the entry draft.
  * @property {string} [dynamicValue] Dynamic default value parsed from the URL query string.
+ * @property {(args: PopulateDefaultValueArgs) => void} [populateDefault] Callback to populate a
+ * default value for a sub-field, injected to avoid a circular dependency between field-type
+ * defaults and the centralized `populateDefaultValue` dispatcher.
  * @see https://decapcms.org/docs/dynamic-default-values/
  * @see https://sveltiacms.app/en/docs/ui/content-editor#dynamic-default-values
  */
@@ -1142,6 +1213,12 @@
  * @property {any} [value] Unsupported property value.
  * @property {string} [strKey] The i18n string key for the message. Default:
  * `unsupported_deprecated_option`.
+ */
+
+/**
+ * @typedef {object} SettingsPanelOnChangeArgs
+ * @property {string} message Message to show in a toast notification after the change is applied.
+ * @property {'success' | 'error'} [status] Status of the change. Default: `success`.
  */
 
 export {};

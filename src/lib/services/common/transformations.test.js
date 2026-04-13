@@ -7,6 +7,7 @@ import {
   applyDefaultTransformation,
   applyLowerCaseTransformation,
   applyTransformation,
+  applyTransformations,
   applyTruncateTransformation,
   applyUpperCaseTransformation,
   ternaryTransformation,
@@ -145,6 +146,106 @@ describe('Test applyTransformation()', () => {
       }),
     ).toBe('');
   });
+
+  test('slugify', () => {
+    expect(
+      applyTransformation({
+        value: 'Hello World',
+        transformation: 'slugify',
+      }),
+    ).toBe('hello-world');
+    expect(
+      applyTransformation({
+        value: 'My Post Title! 2024',
+        transformation: 'slugify',
+      }),
+    ).toBe('my-post-title-2024');
+    expect(
+      applyTransformation({
+        value: 'already-slugified',
+        transformation: 'slugify',
+      }),
+    ).toBe('already-slugified');
+    // locale is forwarded to slugify (no visible effect here since clean_accents defaults to false)
+    expect(
+      applyTransformation({
+        value: 'Hello World',
+        transformation: 'slugify',
+        locale: 'de',
+      }),
+    ).toBe('hello-world');
+  });
+
+  test('unknown transformation returns string value', () => {
+    expect(
+      applyTransformation({
+        value: 42,
+        transformation: 'nonexistent',
+      }),
+    ).toBe('42');
+    expect(
+      applyTransformation({
+        value: 'unchanged',
+        transformation: 'unknown_transform',
+      }),
+    ).toBe('unchanged');
+  });
+});
+
+describe('Test applyTransformations()', () => {
+  test('applies multiple transformations in sequence', () => {
+    expect(
+      applyTransformations({
+        value: 'Hello World',
+        transformations: ['lower', 'slugify'],
+      }),
+    ).toBe('hello-world');
+    expect(
+      applyTransformations({
+        value: '  Long title that needs truncating  ',
+        transformations: ['lower', 'truncate(10)'],
+      }),
+    ).toBe('long tit…');
+  });
+
+  test('applies a single transformation', () => {
+    expect(
+      applyTransformations({
+        value: 'hello',
+        transformations: ['upper'],
+      }),
+    ).toBe('HELLO');
+  });
+
+  test('applies no transformations returns string value', () => {
+    expect(
+      applyTransformations({
+        value: 'unchanged',
+        transformations: [],
+      }),
+    ).toBe('unchanged');
+  });
+
+  test('passes fieldConfig to date transformations', () => {
+    expect(
+      applyTransformations({
+        value: '2024-01-23T01:23:45Z',
+        transformations: ["date('YYYY-MM-DD-HH-mm')"],
+        fieldConfig: { name: 'date', widget: 'datetime', picker_utc: true },
+      }),
+    ).toBe('2024-01-23-01-23');
+  });
+
+  test('passes locale to slugify transformation', () => {
+    // locale is forwarded to slugify (no visible effect here since clean_accents defaults to false)
+    expect(
+      applyTransformations({
+        value: 'Hello World',
+        transformations: ['slugify'],
+        locale: 'de',
+      }),
+    ).toBe('hello-world');
+  });
 });
 
 describe('Test individual transformation functions', () => {
@@ -232,6 +333,17 @@ describe('Test individual transformation functions', () => {
           { name: 'datetime', widget: 'datetime', picker_utc: true },
         ),
       ).toBe('2024-01-23-01-23');
+    });
+
+    test('should use UTC parsing for date-only field with Z-suffixed datetime value', () => {
+      // Covers the (dateOnly && !!sValue.match(/T\d{2}:\d{2}...Z$/)) branch
+      expect(
+        applyDateTransformation(
+          '2024-01-23T06:00:00Z',
+          { format: 'YYYY-MM-DD' },
+          { name: 'date', widget: 'datetime', time_format: false },
+        ),
+      ).toBe('2024-01-23');
     });
   });
 

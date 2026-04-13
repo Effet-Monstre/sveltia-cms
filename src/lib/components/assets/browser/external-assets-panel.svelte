@@ -4,6 +4,7 @@
   one for an image/file entry field.
 -->
 <script>
+  import { _ } from '@sveltia/i18n';
   import {
     Alert,
     Button,
@@ -16,8 +17,8 @@
   import { sleep } from '@sveltia/utils/misc';
   import { sanitize } from 'isomorphic-dompurify';
   import { onMount, untrack } from 'svelte';
-  import { _ } from 'svelte-i18n';
 
+  import AssetPath from '$lib/components/assets/browser/asset-path.svelte';
   import SimpleImageGridItem from '$lib/components/assets/browser/simple-image-grid-item.svelte';
   import SimpleImageGrid from '$lib/components/assets/browser/simple-image-grid.svelte';
   import AssetPreview from '$lib/components/assets/shared/asset-preview.svelte';
@@ -80,6 +81,7 @@
   // Use the grid view for Picsum as it doesn’t provide description for the assets, and the list
   // view relies on the description to show asset information.
   const viewType = $derived(serviceId === 'picsum' ? 'grid' : $selectAssetsView?.type);
+  const isStockAssets = $derived(serviceType === 'stock_assets');
 
   const input = $state({ userName: '', password: '' });
   let hasConfig = $state(true);
@@ -98,8 +100,6 @@
 
   /** @type {MediaLibraryFetchOptions} */
   const listFetchOptions = $derived({ kind, fieldConfig, apiKey, userName, password });
-
-  let debounceTimer = 0;
 
   /**
    * Search or list assets from the external media library.
@@ -221,68 +221,76 @@
     void [searchTerms, hasAuthInfo];
 
     untrack(() => {
-      window.clearTimeout(debounceTimer);
-      debounceTimer = window.setTimeout(() => {
-        if (hasAuthInfo) {
-          getAssets(searchTerms);
-        }
-      }, 1000);
+      if (hasAuthInfo) {
+        getAssets(searchTerms);
+      }
     });
   });
 </script>
 
-{#snippet imageGrid()}
-  <SimpleImageGrid {viewType} {gridId} {multiple}>
-    <InfiniteScroll items={listedAssets ?? []} itemKey="id">
-      {#snippet renderItem(/** @type {ExternalAsset} */ asset)}
-        {#await sleep() then}
-          {@const { id, previewURL, description, kind: _kind } = asset}
-          <SimpleImageGridItem
-            value={id}
-            {viewType}
-            {multiple}
-            selected={isSelected(asset)}
-            onChange={({ detail: { selected } }) => {
-              onSelectionChange(asset, selected);
-            }}
-          >
-            <AssetPreview kind={_kind} src={previewURL} variant="tile" crossorigin="anonymous" />
-            {#if !$isSmallScreen || viewType === 'list'}
-              <span role="none" class="name">{description}</span>
-            {/if}
-          </SimpleImageGridItem>
-        {/await}
-      {/snippet}
-    </InfiniteScroll>
-  </SimpleImageGrid>
+{#snippet content()}
+  {#if !listedAssets}
+    <EmptyState>
+      <span role="alert">{_(searchTerms ? 'searching' : 'loading')}</span>
+    </EmptyState>
+  {:else if !listedAssets.length}
+    <EmptyState>
+      <span role="alert">{_('no_files_found')}</span>
+    </EmptyState>
+  {:else}
+    <SimpleImageGrid {viewType} {gridId} {multiple}>
+      <InfiniteScroll items={listedAssets ?? []} itemKey="id">
+        {#snippet renderItem(/** @type {ExternalAsset} */ asset)}
+          {#await sleep() then}
+            {@const { id, previewURL, description, kind: _kind } = asset}
+            <SimpleImageGridItem
+              value={id}
+              {viewType}
+              {multiple}
+              selected={isSelected(asset)}
+              onChange={({ detail: { selected } }) => {
+                onSelectionChange(asset, selected);
+              }}
+            >
+              <AssetPreview
+                kind={_kind}
+                src={previewURL}
+                alt={description}
+                variant="tile"
+                crossorigin="anonymous"
+              />
+              {#if viewType === 'list' || (!$isSmallScreen && !isStockAssets)}
+                <AssetPath
+                  path={isStockAssets ? undefined : description}
+                  caption={isStockAssets ? description : undefined}
+                />
+              {/if}
+            </SimpleImageGridItem>
+          {/await}
+        {/snippet}
+      </InfiniteScroll>
+    </SimpleImageGrid>
+  {/if}
 {/snippet}
 
 {#if hasAuthInfo}
   {#if error}
     <EmptyState>
-      <span role="alert">{$_(`assets_dialog.error.${error}`)}</span>
-    </EmptyState>
-  {:else if !listedAssets}
-    <EmptyState>
-      <span role="alert">{$_(searchTerms ? 'searching' : 'loading')}</span>
-    </EmptyState>
-  {:else if !listedAssets.length}
-    <EmptyState>
-      <span role="alert">{$_('no_files_found')}</span>
+      <span role="alert">{_(`assets_dialog.error.${error}`)}</span>
     </EmptyState>
   {:else if upload}
-    <DropZone accept={fieldConfig?.accept} {multiple} onDrop={({ files }) => uploadFiles(files)}>
-      {@render imageGrid()}
+    <DropZone accept={fieldConfig?.accept} multiple onDrop={({ files }) => uploadFiles(files)}>
+      {@render content()}
     </DropZone>
   {:else}
-    {@render imageGrid()}
+    {@render content()}
   {/if}
 {:else if hasConfig}
   <EmptyState>
     <p role="alert">
-      {#if serviceType === 'stock_assets'}
+      {#if isStockAssets}
         {@html sanitize(
-          $_('prefs.media.stock_photos.description', {
+          _('prefs.media.stock_photos.description', {
             values: {
               service: serviceLabel,
               homeHref: `href="${developerURL}"`,
@@ -294,9 +302,14 @@
       {/if}
       {#if serviceType === 'cloud_storage'}
         {@html sanitize(
-          $_(`cloud_storage.${serviceId}.auth.${authState}`, {
-            default: $_(`cloud_storage.auth.${authType}.${authState}`, {
-              values: { service: serviceLabel },
+          _(`cloud_storage.${serviceId}.auth.${authState}`, {
+            default: _(`cloud_storage.auth.${authType}.${authState}`, {
+              values: {
+                service: serviceLabel,
+                key: _(`cloud_storage.${serviceId}.auth_key_label`, {
+                  default: _(`cloud_storage.auth.${authType}.key_label`),
+                }),
+              },
             }),
           }),
           { ALLOWED_TAGS: ['a'], ALLOWED_ATTR: ['href', 'target', 'rel'] },
@@ -309,7 +322,7 @@
           flex
           monospace
           spellcheck="false"
-          aria-label={$_('prefs.media.stock_photos.field_label', {
+          aria-label={_('prefs.media.stock_photos.field_label', {
             values: { service: serviceLabel },
           })}
           oninput={(event) => {
@@ -331,14 +344,14 @@
         <TextInput
           flex
           spellcheck="false"
-          aria-label={$_('user_name')}
+          aria-label={_('user_name')}
           disabled={authState === 'requested'}
           bind:value={input.userName}
         />
       </div>
       <div role="none" class="input-outer">
         <SecretInput
-          aria-label={$_('password')}
+          aria-label={_('password')}
           disabled={authState === 'requested'}
           bind:value={input.password}
         />
@@ -346,7 +359,7 @@
       <div role="none" class="input-outer">
         <Button
           variant="secondary"
-          label={$_('sign_in')}
+          label={_('sign_in')}
           disabled={!input.userName || !input.password || authState === 'requested'}
           onclick={async () => {
             authState = 'requested';
@@ -371,21 +384,17 @@
   </EmptyState>
 {:else}
   <EmptyState>
-    <span role="alert">{$_('cloud_storage.invalid')}</span>
+    <span role="alert">{_('cloud_storage.invalid')}</span>
   </EmptyState>
 {/if}
 
 <Toast bind:show={uploadingToast.show}>
   <Alert status={uploadingToast.status}>
     {#if uploadingToast.status === 'info'}
-      {$_(uploadingToast.length === 1 ? 'uploading_file_progress' : 'uploading_files_progress', {
-        values: { count: uploadingToast.length },
-      })}
+      {_('uploading_files_progress', { values: { count: uploadingToast.length } })}
     {/if}
     {#if uploadingToast.status === 'error'}
-      {$_(uploadingToast.length === 1 ? 'uploading_file_failed' : 'uploading_files_failed', {
-        values: { count: uploadingToast.length },
-      })}
+      {_('uploading_files_failed', { values: { count: uploadingToast.length } })}
     {/if}
   </Alert>
 </Toast>

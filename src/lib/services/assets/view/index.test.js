@@ -1,29 +1,60 @@
-import { describe, expect, it, vi } from 'vitest';
+/* eslint-disable jsdoc/require-param-description */
+/* eslint-disable jsdoc/require-description */
+/* eslint-disable jsdoc/require-jsdoc */
 
-import { getFolderLabelByCollection, showAssetOverlay, showUploadAssetsDialog } from './index.js';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+
+import { getFolderLabelByCollection, showAssetOverlay, showUploadAssetsDialog } from '.';
+
+const { _backendAv, _assetListSettingsAv } = vi.hoisted(() => {
+  /**
+   * Minimal writable store factory.
+   * @template T
+   * @param {T} initial Initial value.
+   * @returns {import('svelte/store').Writable<T>} Writable store.
+   */
+  const w = (initial) => {
+    let value = initial;
+    /** @type {Set<(v: T) => void>} */
+    const subs = new Set();
+
+    /** @param {T} v */
+    const setFn = (v) => {
+      value = v;
+      subs.forEach((run) => run(value));
+    };
+
+    return {
+      subscribe(run) {
+        subs.add(run);
+        run(value);
+        return () => subs.delete(run);
+      },
+      set: setFn,
+      update(fn) {
+        setFn(fn(value));
+      },
+    };
+  };
+
+  return {
+    /** @type {import('svelte/store').Writable<any>} */
+    _backendAv: w(/** @type {any} */ (null)),
+    /** @type {import('svelte/store').Writable<any>} */
+    _assetListSettingsAv: w(/** @type {any} */ (undefined)),
+  };
+});
 
 // Mock dependencies
-vi.mock('svelte-i18n', () => ({
-  _: {
-    subscribe: vi.fn((callback) => {
-      /**
-       * Mock translation function for testing.
-       * @param {string} key Translation key to look up.
-       * @returns {string} Translated text or original key if not found.
-       */
-      const mockTranslationFunction = (key) => {
-        /** @type {Record<string, string>} */
-        const translations = {
-          all_assets: 'All Assets',
-          global_assets: 'Global Assets',
-        };
+vi.mock('@sveltia/i18n', () => ({
+  _: (/** @type {string} */ key) => {
+    /** @type {Record<string, string>} */
+    const translations = {
+      all_assets: 'All Assets',
+      global_assets: 'Global Assets',
+    };
 
-        return translations[key] || key;
-      };
-
-      callback(mockTranslationFunction);
-      return vi.fn();
-    }),
+    return translations[key] || key;
   },
 }));
 
@@ -77,7 +108,20 @@ vi.mock('$lib/services/user/prefs', () => ({
   },
 }));
 
+vi.mock('$lib/services/backends', () => ({
+  backend: _backendAv,
+}));
+
+vi.mock('$lib/services/assets/view/settings', () => ({
+  assetListSettings: _assetListSettingsAv,
+  initSettings: vi.fn(),
+}));
+
 describe('assets/view/index', () => {
+  beforeEach(() => {
+    _backendAv.set(null);
+    _assetListSettingsAv.set(undefined);
+  });
   describe('showAssetOverlay', () => {
     it('should be defined as a store', () => {
       expect(showAssetOverlay).toBeDefined();
@@ -110,7 +154,7 @@ describe('assets/view/index', () => {
         return vi.fn();
       });
 
-      const { showUploadAssetsConfirmDialog } = await import('./index.js');
+      const { showUploadAssetsConfirmDialog } = await import('.');
 
       showUploadAssetsConfirmDialog.subscribe(mockCallback);
 
@@ -312,7 +356,7 @@ describe('assets/view/index', () => {
 
   describe('defaultView', () => {
     it('should have correct default view settings', async () => {
-      const { defaultView } = await import('./index.js');
+      const { defaultView } = await import('.');
 
       expect(defaultView).toEqual({
         type: 'grid',
@@ -327,7 +371,7 @@ describe('assets/view/index', () => {
 
   describe('currentView', () => {
     it('should be defined as a store', async () => {
-      const { currentView } = await import('./index.js');
+      const { currentView } = await import('.');
 
       expect(currentView).toBeDefined();
       expect(typeof currentView.subscribe).toBe('function');
@@ -372,7 +416,7 @@ describe('assets/view/index', () => {
 
       vi.mocked(selectedAssets.set).mockImplementationOnce(() => {});
 
-      const { listedAssets } = await import('./index.js');
+      const { listedAssets } = await import('.');
       const mockAssetCallback = vi.fn();
 
       listedAssets.subscribe(mockAssetCallback);
@@ -406,7 +450,7 @@ describe('assets/view/index', () => {
 
       vi.mocked(selectedAssets.set).mockImplementationOnce(() => {});
 
-      const { listedAssets } = await import('./index.js');
+      const { listedAssets } = await import('.');
       const mockAssetCallback = vi.fn();
 
       listedAssets.subscribe(mockAssetCallback);
@@ -441,7 +485,7 @@ describe('assets/view/index', () => {
 
       vi.mocked(selectedAssets.set).mockImplementationOnce(() => {});
 
-      const { listedAssets } = await import('./index.js');
+      const { listedAssets } = await import('.');
       const mockAssetCallback = vi.fn();
 
       listedAssets.subscribe(mockAssetCallback);
@@ -494,7 +538,7 @@ describe('assets/view/index', () => {
 
       vi.mocked(selectedAssets.set).mockImplementationOnce(() => {});
 
-      const { listedAssets } = await import('./index.js');
+      const { listedAssets } = await import('.');
       const mockAssetCallback = vi.fn();
 
       listedAssets.subscribe(mockAssetCallback);
@@ -539,10 +583,75 @@ describe('assets/view/index', () => {
       mockFilterFn.mockReturnValue(mockAssets);
       mockGroupFn.mockReturnValue(mockGroups);
 
-      const { assetGroups } = await import('./index.js');
+      const { assetGroups } = await import('.');
       const mockCallback = vi.fn();
 
       assetGroups.subscribe(mockCallback);
+
+      await new Promise((resolve) => {
+        setTimeout(resolve, 10);
+      });
+
+      expect(mockCallback).toHaveBeenCalled();
+    });
+  });
+
+  describe('backend.subscribe and assetGroups coverage branches', () => {
+    it('should call initSettings when backend becomes truthy and assetListSettings is falsy', async () => {
+      const { initSettings } = await import('$lib/services/assets/view/settings');
+
+      // _backendAv starts as null (covers &&-short-circuit / binary-expr false path at module load)
+      // Set backend truthy with entryListSettings still undefined → initSettings called
+      _assetListSettingsAv.set(undefined);
+      _backendAv.set(/** @type {any} */ ({ repository: { databaseName: 'test-db' } }));
+
+      expect(vi.mocked(initSettings)).toHaveBeenCalledWith({
+        repository: { databaseName: 'test-db' },
+      });
+    });
+
+    it('should skip set(groups) when computed groups equal current store value (L117 false)', async () => {
+      // Cover L117 false: trigger two computations with the same groups result so that
+      // equal(get(assetGroups), groups) === true → !equal() === false → skip set.
+      // First computation: groups=mockGroups, get(assetGroups)=undefined → not equal → set →
+      //   assetGroups.value = mockGroups.
+      // Second computation (triggered by currentView update): groups=mockGroups still,
+      //   get(assetGroups)=mockGroups → equal → skip → L117 false covered.
+      vi.resetModules();
+
+      const { allAssets, selectedAssets } = await import('$lib/services/assets');
+      const { selectedAssetFolder } = await import('$lib/services/assets/folders');
+      const { filterAssets } = await import('$lib/services/assets/view/filter');
+      const { sortAssets } = await import('$lib/services/assets/view/sort');
+      const { groupAssets } = await import('$lib/services/assets/view/group');
+      const mockAssets = /** @type {any[]} */ ([]);
+      const mockGroups = /** @type {any} */ ({ '*': [] });
+
+      vi.mocked(sortAssets).mockReturnValue(mockAssets);
+      vi.mocked(filterAssets).mockReturnValue(mockAssets);
+      vi.mocked(groupAssets).mockReturnValue(mockGroups);
+
+      vi.mocked(allAssets.subscribe).mockImplementationOnce((callback) => {
+        callback(/** @type {any} */ ([]));
+        return vi.fn();
+      });
+
+      vi.mocked(selectedAssetFolder.subscribe).mockImplementationOnce((callback) => {
+        callback(/** @type {any} */ (undefined));
+        return vi.fn();
+      });
+
+      vi.mocked(selectedAssets.set).mockImplementationOnce(() => {});
+
+      const { assetGroups, currentView } = await import('.');
+      const mockCallback = vi.fn();
+
+      assetGroups.subscribe(mockCallback);
+
+      // First computation sets assetGroups.value = mockGroups (true branch).
+      // Update currentView to trigger a second computation — groups is still mockGroups,
+      // get(assetGroups) is now mockGroups → equal → skip → L117 false branch fires.
+      currentView.set(/** @type {any} */ ({ type: 'grid', showInfo: false }));
 
       await new Promise((resolve) => {
         setTimeout(resolve, 10);
@@ -564,7 +673,7 @@ describe('assets/view/index', () => {
         return vi.fn();
       });
 
-      await import('./index.js');
+      await import('.');
 
       // Should not have been called for logging when dev mode is disabled
       expect(consoleSpy).not.toHaveBeenCalledWith('listedAssets', expect.any(Array));
@@ -583,7 +692,7 @@ describe('assets/view/index', () => {
         return vi.fn();
       });
 
-      await import('./index.js');
+      await import('.');
 
       expect(consoleSpy).toHaveBeenCalledWith('listedAssets', expect.any(Array));
 

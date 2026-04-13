@@ -1,7 +1,6 @@
 <script>
   import { AppShell } from '@sveltia/ui';
   import { onMount } from 'svelte';
-  import { isLoading } from 'svelte-i18n';
 
   import EntrancePage from '$lib/components/entrance/entrance-page.svelte';
   import BackendStatusIndicator from '$lib/components/global/infobars/backend-status-indicator.svelte';
@@ -33,15 +32,18 @@
     /* eslint-enable prefer-const */
   } = $props();
 
-  onMount(() => {
+  /**
+   * State to track whether the app locale has been initialized and loaded. We can’t use `isLoading`
+   * from the i18n service here because it becomes `false` as soon as Sveltia UI strings are loaded.
+   */
+  let localeLoaded = $state(false);
+
+  $effect.pre(() => {
     initAppLocale();
+    localeLoaded = true;
   });
 
-  onMount(() => {
-    initCmsConfig(config);
-  });
-
-  onMount(() => {
+  $effect.pre(() => {
     initUserEnvDetection();
   });
 
@@ -52,6 +54,10 @@
       return;
     }
     signInManually(configuredBackendName);
+  });
+
+  $effect(() => {
+    initCmsConfig(config);
   });
 
   // Fix the position of the custom mount element if needed
@@ -118,7 +124,7 @@
 />
 
 <AppShell>
-  {#if !$isLoading}
+  {#if localeLoaded}
     <div role="none" class="outer">
       <UpdateNotification />
       {#if $backend}
@@ -132,8 +138,8 @@
         {/if}
       </div>
     </div>
+    <div role="status">{$announcedPageStatus}</div>
   {/if}
-  <div role="status">{$announcedPageStatus}</div>
 </AppShell>
 
 <style lang="scss">
@@ -238,6 +244,26 @@
     }
   }
 
+  @keyframes fade-out {
+    from {
+      opacity: 1;
+    }
+
+    to {
+      opacity: 0;
+    }
+  }
+
+  @keyframes fade-in {
+    from {
+      opacity: 0;
+    }
+
+    to {
+      opacity: 1;
+    }
+  }
+
   :global {
     html:active-view-transition-type(forwards) {
       @media (width < 768px) {
@@ -306,12 +332,20 @@
     }
 
     html:active-view-transition-type(unknown) {
-      &::view-transition-old(page-root) {
-        animation: none;
+      &::view-transition-old(page-main) {
+        animation: 100ms ease-in both fade-out;
+
+        @media (prefers-reduced-motion) {
+          animation: none;
+        }
       }
 
-      &::view-transition-new(page-root) {
-        animation: none;
+      &::view-transition-new(page-main) {
+        animation: 100ms ease-in both fade-in;
+
+        @media (prefers-reduced-motion) {
+          animation: none;
+        }
       }
     }
 

@@ -18,22 +18,24 @@
   import WorkflowPage from '$lib/components/workflow/workflow-page.svelte';
   import { parseLocation, selectedPageName } from '$lib/services/app/navigation';
   import { canShowMobileSignInDialog } from '$lib/services/app/onboarding';
-  import { showAssetOverlay } from '$lib/services/assets/view';
-  import { showContentOverlay } from '$lib/services/contents/editor';
   import { searchMode } from '$lib/services/search';
   import { isSmallScreen } from '$lib/services/user/env';
 
   /** @type {Record<string, any>} */
-  export const pages = {
+  const pages = $derived({
     collections: ContentsPage,
     assets: AssetsPage,
-    search: SearchPage,
+    search: $isSmallScreen
+      ? SearchPage
+      : $searchMode
+        ? { contents: ContentsPage, assets: AssetsPage }[$searchMode]
+        : SearchPage,
     workflow: WorkflowPage,
     config: ConfigPage,
     // For small screens
     menu: MenuPage,
     settings: SettingsPage,
-  };
+  });
 
   const SelectedPage = $derived(pages[$selectedPageName]);
 
@@ -42,9 +44,6 @@
    * @todo Show Not Found page.
    */
   export const selectPage = () => {
-    $showContentOverlay = false;
-    $showAssetOverlay = false;
-
     const { path } = parseLocation();
 
     const { pageName } =
@@ -58,7 +57,7 @@
     }
 
     if (pageName === 'collections') {
-      $searchMode = 'entries';
+      $searchMode = 'contents';
     } else if (pageName === 'assets') {
       $searchMode = 'assets';
     } else if (pageName !== 'search') {

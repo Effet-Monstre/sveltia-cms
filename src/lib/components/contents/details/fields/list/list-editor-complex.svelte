@@ -6,12 +6,12 @@
   @see https://sveltiacms.app/en/docs/fields/list
 -->
 <script>
+  import { _ } from '@sveltia/i18n';
   import { Button, Icon, Menu, MenuButton, MenuItem, Spacer, TruncatedText } from '@sveltia/ui';
   import { isObject } from '@sveltia/utils/object';
   import { escapeRegExp } from '@sveltia/utils/string';
   import { unflatten } from 'flat';
   import { getContext, onMount, untrack } from 'svelte';
-  import { _ } from 'svelte-i18n';
 
   import Image from '$lib/components/assets/shared/image.svelte';
   import ExpandIcon from '$lib/components/common/expand-icon.svelte';
@@ -70,6 +70,7 @@
     // Field type-specific options
     allow_add: allowAdd = true,
     allow_remove: allowRemove = true,
+    allow_duplicate: allowDuplicate = true,
     allow_reorder: allowReorder = true,
     collapsed,
     summary,
@@ -100,10 +101,7 @@
       Object.fromEntries(
         Object.entries(valueMap)
           .filter(([_keyPath]) => keyPathRegex.test(_keyPath))
-          .map(([_keyPath, value]) => [
-            _keyPath.replace(new RegExp(`^${escapeRegExp(keyPath)}`), fieldName),
-            value,
-          ]),
+          .map(([_keyPath, value]) => [`${fieldName}${_keyPath.slice(keyPath.length)}`, value]),
       ),
     )[fieldName] ?? [],
   );
@@ -183,6 +181,13 @@
         // Add a random ID to the new item to ensure it is unique. This is necessary for the `key`
         // attribute in the `each` block.
         newItem.__sc_item_id = crypto.randomUUID();
+
+        // Track original key paths for existing items before they shift due to the insertion
+        valueList.forEach((item, i) => {
+          if (isObject(item)) {
+            item.__sc_item_original_key_path ??= `${keyPath}.${i}`;
+          }
+        });
       }
 
       valueList.splice(index, 0, newItem);
@@ -199,6 +204,15 @@
    */
   const removeItem = (index) => {
     updateComplexList(({ valueList, expanderStateList }) => {
+      if (!hasSingleSubField) {
+        // Track original key paths for existing items before they shift due to the removal
+        valueList.forEach((item, i) => {
+          if (isObject(item)) {
+            item.__sc_item_original_key_path ??= `${keyPath}.${i}`;
+          }
+        });
+      }
+
       valueList.splice(index, 1);
       expanderStateList.splice(index, 1);
     });
@@ -214,6 +228,9 @@
         // Ensure the IDs are unique before swapping
         valueList[index].__sc_item_id ??= crypto.randomUUID();
         valueList[index + 1].__sc_item_id ??= crypto.randomUUID();
+        // Track original key paths for correct revert after reordering
+        valueList[index].__sc_item_original_key_path ??= `${keyPath}.${index}`;
+        valueList[index + 1].__sc_item_original_key_path ??= `${keyPath}.${index + 1}`;
       }
 
       [valueList[index], valueList[index + 1]] = [valueList[index + 1], valueList[index]];
@@ -277,6 +294,7 @@
       entry: $entryDraft?.originalEntry,
       collectionName,
       fileName,
+      typedKeyPath: `${typedKeyPath}.*.${thumbnailFieldName.replace(/^fields\./, '')}`,
     });
   };
 
@@ -312,11 +330,33 @@
   });
 </script>
 
+{#snippet addPositionItems(/** @type {number} */ insertIndex, /** @type {string} */ position)}
+  {#if hasVariableTypes}
+    <MenuItem label={_(`add_item_${position}`)} disabled={hasMaxItems}>
+      <!-- eslint-disable-next-line no-shadow -->
+      {#snippet items()}
+        {#each types ?? [] as { name, label: itemLabel } (name)}
+          <MenuItem
+            label={itemLabel || name}
+            onclick={() => addItem({ index: insertIndex, type: name })}
+          />
+        {/each}
+      {/snippet}
+    </MenuItem>
+  {:else}
+    <MenuItem
+      label={_(`add_item_${position}`)}
+      disabled={hasMaxItems}
+      onclick={() => addItem({ index: insertIndex })}
+    />
+  {/if}
+{/snippet}
+
 <div role="none" class="toolbar top">
   <Button
     iconic
     disabled={!items.length}
-    aria-label={parentExpanded ? $_('collapse') : $_('expand')}
+    aria-label={parentExpanded ? _('collapse') : _('expand')}
     aria-expanded={parentExpanded}
     aria-controls="list-{fieldId}-item-list"
     onclick={() => {
@@ -336,7 +376,7 @@
     <Button
       variant="tertiary"
       size="small"
-      label={$_('expand_all')}
+      label={_('expand_all')}
       disabled={itemExpanderStates.every(([, value]) => value)}
       onclick={() => {
         syncExpanderStates(Object.fromEntries(itemExpanderStates.map(([key]) => [key, true])));
@@ -345,7 +385,7 @@
     <Button
       variant="tertiary"
       size="small"
-      label={$_('collapse_all')}
+      label={_('collapse_all')}
       disabled={itemExpanderStates.every(([, value]) => !value)}
       onclick={() => {
         syncExpanderStates(Object.fromEntries(itemExpanderStates.map(([key]) => [key, false])));
@@ -386,7 +426,7 @@
                 size="small"
                 iconic
                 disabled={isDuplicateField || index === 0}
-                aria-label={$_('move_up')}
+                aria-label={_('move_up')}
                 onclick={() => moveDownItem(index - 1)}
               >
                 {#snippet startIcon()}
@@ -398,7 +438,7 @@
                 iconic
                 size="small"
                 disabled={isDuplicateField || index === items.length - 1}
-                aria-label={$_('move_down')}
+                aria-label={_('move_down')}
                 onclick={() => moveDownItem(index)}
               >
                 {#snippet startIcon()}
@@ -414,51 +454,20 @@
                 size="small"
                 iconic
                 popupPosition="bottom-right"
-                aria-label={$_('list_item_options')}
+                aria-label={_('list_item_options')}
                 disabled={isDuplicateField}
               >
                 {#snippet popup()}
-                  <Menu aria-label={$_('translation_options')}>
-                    <MenuItem
-                      label={$_('duplicate')}
-                      disabled={hasMaxItems}
-                      onclick={() => addItem({ index: index + 1, dupIndex: index })}
-                    />
-                    {#if hasVariableTypes}
-                      <MenuItem label={$_('add_item_above')} disabled={hasMaxItems}>
-                        <!-- eslint-disable-next-line no-shadow -->
-                        {#snippet items()}
-                          {#each types ?? [] as { name, label: itemLabel } (name)}
-                            <MenuItem
-                              label={itemLabel || name}
-                              onclick={() => addItem({ index, type: name })}
-                            />
-                          {/each}
-                        {/snippet}
-                      </MenuItem>
-                      <MenuItem label={$_('add_item_below')} disabled={hasMaxItems}>
-                        <!-- eslint-disable-next-line no-shadow -->
-                        {#snippet items()}
-                          {#each types ?? [] as { name, label: itemLabel } (name)}
-                            <MenuItem
-                              label={itemLabel || name}
-                              onclick={() => addItem({ index: index + 1, type: name })}
-                            />
-                          {/each}
-                        {/snippet}
-                      </MenuItem>
-                    {:else}
+                  <Menu aria-label={_('list_item_options')}>
+                    {#if allowDuplicate}
                       <MenuItem
-                        label={$_('add_item_above')}
+                        label={_('duplicate')}
                         disabled={hasMaxItems}
-                        onclick={() => addItem({ index })}
-                      />
-                      <MenuItem
-                        label={$_('add_item_below')}
-                        disabled={hasMaxItems}
-                        onclick={() => addItem({ index: index + 1 })}
+                        onclick={() => addItem({ index: index + 1, dupIndex: index })}
                       />
                     {/if}
+                    {@render addPositionItems(index, 'above')}
+                    {@render addPositionItems(index + 1, 'below')}
                   </Menu>
                 {/snippet}
               </MenuButton>
@@ -468,7 +477,7 @@
                 variant="ghost"
                 size="small"
                 iconic
-                aria-label={$_('remove')}
+                aria-label={_('remove')}
                 onclick={() => removeItem(index)}
               >
                 {#snippet startIcon()}

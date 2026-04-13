@@ -1,7 +1,7 @@
 <script>
+  import { _ } from '@sveltia/i18n';
   import { TextInput } from '@sveltia/ui';
   import { untrack } from 'svelte';
-  import { _ } from 'svelte-i18n';
 
   import FieldEditorGroup from '$lib/components/contents/details/editor/field-editor-group.svelte';
   import ValidationError from '$lib/components/contents/details/editor/validation-error.svelte';
@@ -28,6 +28,12 @@
   let inputValue = $state('');
 
   $effect(() => {
+    if (readonly) {
+      inputValue = $entryDraft?.currentSlugs[locale] ?? '';
+    }
+  });
+
+  $effect(() => {
     void [inputValue];
 
     untrack(() => {
@@ -41,26 +47,20 @@
       }
     });
   });
-
-  $effect(() => {
-    if (readonly) {
-      inputValue = $entryDraft?.currentSlugs[locale] ?? '';
-    }
-  });
 </script>
 
 {#if $entryDraft}
   <FieldEditorGroup>
     <header role="none">
-      <h4 role="none" id="{fieldId}-label">{$_('slug')}</h4>
+      <h4 role="none" id="{fieldId}-label">{_('slug')}</h4>
       {#if required}
-        <div class="required" aria-label={$_('required')}>*</div>
+        <div class="required" aria-label={_('required')}>*</div>
       {/if}
     </header>
     {#if invalid}
       <ValidationError id="{fieldId}-error">
         {#if validity?.valueMissing}
-          {$_('validation.value_missing')}
+          {_('validation.value_missing')}
         {/if}
       </ValidationError>
     {/if}

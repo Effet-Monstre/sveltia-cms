@@ -48,7 +48,8 @@ describe('Test slugify()', () => {
     expect(slugify('Hello, World!')).toBe('hello-world');
     expect(slugify('Hello@World#2024')).toBe('hello-world-2024');
     expect(slugify('Hello & World')).toBe('hello-world');
-    expect(slugify('Hello/World\\Test')).toBe('hello-world\\test');
+    expect(slugify('Hello/World\\Test')).toBe('hello-world-test');
+    expect(slugify('Hello%20World')).toBe('hello-20world'); // % is a delimiter
     expect(slugify('Hello(World)[Test]')).toBe('hello-world-test');
     expect(slugify('Hello"World\'Test')).toBe('hello-world-test');
     expect(slugify('Hello:World;Test')).toBe('hello-world-test');
@@ -150,6 +151,37 @@ describe('Test slugify()', () => {
     expect(slugify('François')).toBe('francois');
     expect(slugify('Björk')).toBe('bjoerk');
     expect(slugify('Москва')).toBe('moskva'); // Russian transliteration
+  });
+
+  test('locale option for accent cleaning', async () => {
+    // @ts-ignore
+    (await import('$lib/services/config')).cmsConfig = writable({
+      slug: {
+        encoding: 'unicode',
+        clean_accents: true,
+        sanitize_replacement: '-',
+      },
+    });
+
+    // Swedish locale: ö→o (vs default ö→oe)
+    expect(slugify('Björk', { locale: 'sv' })).toBe('bjork');
+    expect(slugify('Björk')).toBe('bjoerk'); // Default without locale
+
+    // Unsupported locales fall back to default transliteration
+    expect(slugify('Björk', { locale: 'en' })).toBe('bjoerk'); // 'en' not in TRANSLITERATION_LOCALES
+    expect(slugify('Björk', { locale: 'fr' })).toBe('bjoerk'); // 'fr' not in TRANSLITERATION_LOCALES
+
+    // locale option has no effect when clean_accents is false
+    // @ts-ignore
+    (await import('$lib/services/config')).cmsConfig = writable({
+      slug: {
+        encoding: 'unicode',
+        clean_accents: false,
+        sanitize_replacement: '-',
+      },
+    });
+
+    expect(slugify('Björk', { locale: 'sv' })).toBe('björk'); // No transliteration applied
   });
 
   test('custom sanitize replacement', async () => {
@@ -990,5 +1022,25 @@ describe('Test slugify()', () => {
     const resultPreserveCase = slugify('', { fallback: true });
 
     expect(resultPreserveCase).toMatch(/^[0-9a-f]{12}$/); // UUIDs are always lowercase
+  });
+
+  test('should produce consistent results across repeated calls with the same replacement character', async () => {
+    // Uses a replacement character (~) not used in any other test to guarantee a cache miss on
+    // the first call, so the second call exercises the slugReplacementRegexCache hit path.
+    // @ts-ignore
+    (await import('$lib/services/config')).cmsConfig = writable({
+      slug: {
+        encoding: 'unicode',
+        clean_accents: false,
+        sanitize_replacement: '~',
+      },
+    });
+
+    const result1 = slugify('Hello World');
+    // Second call: cache hit — same regexes reused from slugReplacementRegexCache.
+    const result2 = slugify('Hello World');
+
+    expect(result1).toBe('hello~world');
+    expect(result1).toBe(result2);
   });
 });

@@ -34,7 +34,13 @@ import App from './components/app.svelte';
  * // Don’t use `$lib` in `from` above, or type declarations will not be exported
  */
 
-const unsupportedFuncNames = [
+/**
+ * List of API functions in Netlify/Decap CMS that we don’t plan to support in Sveltia CMS, either
+ * because they are undocumented or because they are incompatible with Sveltia CMS’s architecture
+ * and design principles.
+ */
+const UNSUPPORTED_FUNC_NAMES = [
+  // Undocumented
   'getBackend',
   'getCustomFormats',
   'getCustomFormatsExtensions',
@@ -50,16 +56,22 @@ const unsupportedFuncNames = [
   'getWidgetValueSerializer',
   'getWidgets',
   'invokeEvent',
-  'moment',
+  'moment', // Removed in Decap CMS 3.1.1 as it switched from Moment.js to Day.js
   'registerBackend',
-  'registerLocale',
   'registerMediaLibrary',
-  'registerRemarkPlugin',
   'registerWidgetValueSerializer',
   'removeEventListener',
   'resolveWidget',
+  // Documented but not planned for implementation
+  'registerLocale', // https://decapcms.org/docs/configuration-options/#locale
+  'registerRemarkPlugin', // https://decapcms.org/docs/widgets/#Markdown
 ];
 
+/**
+ * URL for documentation on unsupported features and compatibility between Netlify/Decap CMS and
+ * Sveltia CMS. When users call an unsupported API function, they will see a warning in the console
+ * with a link to this documentation.
+ */
 const COMPATIBILITY_URL =
   'https://sveltiacms.app/en/docs/migration/netlify-decap-cms#features-not-to-be-implemented';
 
@@ -180,8 +192,6 @@ const registerEditorComponent = (definition) => {
   }
 
   customComponentRegistry.set(definition.id, definition);
-
-  console.warn('Preview for custom editor components are not yet supported in Sveltia CMS.');
 };
 
 /**
@@ -307,7 +317,7 @@ const CMS = new Proxy(
 
       let message = '';
 
-      if (unsupportedFuncNames.includes(key)) {
+      if (UNSUPPORTED_FUNC_NAMES.includes(key)) {
         message =
           'CMS.%s() is not supported in Sveltia CMS, and we don’t have any plans to implement it.';
       }
@@ -363,6 +373,15 @@ if (scriptElement?.type === 'module') {
     'The Sveltia CMS script is not an ES module. Remove the "type="module" attribute from the ' +
       '`<script>` tag to avoid unexpected behavior when using the JavaScript API.',
   );
+}
+
+const netlifyIdentityScriptElement =
+  'script[src="https://identity.netlify.com/v1/netlify-identity-widget.js"]';
+
+// Warn if Netlify Identity Widget is included, as it’s not compatible with Sveltia CMS and has been
+// officially deprecated by Netlify.
+if (document.querySelector(netlifyIdentityScriptElement)) {
+  console.warn('Netlify Identity has been deprecated. The widget is not supported in Sveltia CMS.');
 }
 
 // Automatically initialize the CMS if manual initialization is not requested AND the script is NOT

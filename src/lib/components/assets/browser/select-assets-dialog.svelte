@@ -1,4 +1,5 @@
 <script>
+  import { _ } from '@sveltia/i18n';
   import {
     Button,
     Dialog,
@@ -14,9 +15,7 @@
   } from '@sveltia/ui';
   import { getHash } from '@sveltia/utils/crypto';
   import { getPathInfo } from '@sveltia/utils/file';
-  import { escapeRegExp } from '@sveltia/utils/string';
   import equal from 'fast-deep-equal';
-  import { _ } from 'svelte-i18n';
 
   import CloudinaryPanel from '$lib/components/assets/browser/cloudinary-panel.svelte';
   import ExternalAssetsPanel from '$lib/components/assets/browser/external-assets-panel.svelte';
@@ -113,7 +112,7 @@
   };
 
   const title = $derived(
-    kind === 'image' ? $_('assets_dialog.title.image') : $_('assets_dialog.title.file'),
+    kind === 'image' ? _('assets_dialog.title.image') : _('assets_dialog.title.file'),
   );
   const searchTerms = $derived(normalize(rawSearchTerms));
   const isDefaultLibraryEnabled = $derived(
@@ -132,24 +131,27 @@
   });
   const targetFolderPath = $derived.by(() => {
     const { originalEntry } = $entryDraft ?? {};
+    const { entryRelative, internalPath, internalSubPath } = selectedFolder ?? {};
 
-    if (!selectedFolder?.entryRelative) {
-      return selectedFolder?.internalPath;
+    if (!entryRelative) {
+      // @todo FIXME: Replace all template tags in the path, not just `{{slug}}`
+      return internalPath?.replace('{{slug}}', originalEntry?.slug ?? '-');
     }
 
+    // A non-empty `internalSubPath` means the field has its own `media_folder` subfolder (e.g.
+    // `media_folder: "images1"`). Append it so that only assets in that specific subfolder are
+    // shown, not assets from sibling field folders (e.g. `images2`).
+    const subPath = internalSubPath || undefined;
+
     if (originalEntry) {
-      // @todo FIXME: This only works with `media_folder: ""`
-      return getPathInfo(Object.values(originalEntry.locales)[0].path).dirname;
+      const entryDir = getPathInfo(Object.values(originalEntry.locales)[0].path).dirname;
+
+      return subPath ? `${entryDir}/${subPath}` : entryDir;
     }
 
     // Append a placeholder because the complete path is not determined until the entry is saved
-    return `${selectedFolder?.internalPath}/-`;
+    return subPath ? `${internalPath}/${subPath}/-` : `${internalPath}/-`;
   });
-  const targetFolderPathRegex = $derived(
-    targetFolderPath !== undefined
-      ? new RegExp(`^${escapeRegExp(targetFolderPath)}(?:\\/|$)`)
-      : null,
-  );
   const listedAssets = $derived(
     [...$allAssets, ...unsavedAssets]
       .filter((asset) => !kind || kind === asset.kind)
@@ -193,6 +195,18 @@
   const Selector = $derived($isSmallScreen ? Select : Listbox);
 
   /**
+   * Check if a given path is in the target folder or its subfolders.
+   * @param {string} path Path to check.
+   * @returns {boolean} `true` if the path is in the target folder.
+   */
+  const isInTargetFolder = (path) =>
+    targetFolderPath !== undefined &&
+    (path === targetFolderPath ||
+      // Handle the case where the target folder is a template with an unresolved placeholder
+      `${path}/-` === targetFolderPath ||
+      path.startsWith(`${targetFolderPath}/`));
+
+  /**
    * Check if an asset is in the selected folder.
    * @param {Asset} asset Asset to check.
    * @returns {boolean} `true` if the asset is in the selected folder.
@@ -207,16 +221,16 @@
     }
 
     if (!selectedFolder.entryRelative) {
-      return true;
+      return isInTargetFolder(asset.path);
     }
 
     const { dirname } = getPathInfo(asset.path);
 
-    if (dirname === undefined || !targetFolderPathRegex) {
+    if (dirname === undefined) {
       return false;
     }
 
-    return targetFolderPathRegex.test(dirname);
+    return isInTargetFolder(dirname);
   };
 
   /**
@@ -341,14 +355,15 @@
     <SearchBar
       flex={$isSmallScreen}
       bind:value={rawSearchTerms}
+      debounce={!isDefaultLibrary}
       disabled={selectedResources.some((r) => r.file)}
-      aria-label={$_(`assets_dialog.search_for_${kind ?? 'file'}`)}
+      aria-label={_(`assets_dialog.search_for_${kind ?? 'file'}`)}
     />
   {/if}
   {#if isDefaultLibrary || (isCloudLibrary && libraryName !== 'cloudinary')}
     <Button
       variant="primary"
-      label={$_('upload')}
+      label={_('upload')}
       onclick={() => {
         filePicker?.open();
       }}
@@ -363,7 +378,7 @@
 <Dialog
   {title}
   size="x-large"
-  okLabel={$_('insert')}
+  okLabel={_('insert')}
   okDisabled={!selectedResources.length}
   keepContent={true}
   focusInput={false}
@@ -384,7 +399,7 @@
         allStockAssetProviders[/** @type {StockAssetProviderName} */ (libraryName)] ?? {}}
       {#if showServiceLink}
         <a href={serviceURL}>
-          {$_('prefs.media.stock_photos.credit', { values: { service: serviceLabel } })}
+          {_('prefs.media.stock_photos.credit', { values: { service: serviceLabel } })}
         </a>
       {/if}
     {/if}
@@ -393,7 +408,7 @@
     <div role="none" class="nav">
       <Selector
         class="tabs"
-        aria-label={$_('assets_dialog.locations')}
+        aria-label={_('assets_dialog.locations')}
         aria-controls="{elementIdPrefix}-content-pane"
         filterThreshold={-1}
         onChange={(event) => {
@@ -402,13 +417,13 @@
         }}
       >
         {#if isDefaultLibraryEnabled}
-          <OptionGroup label={$_('asset_location.repository')}>
+          <OptionGroup label={_('asset_location.repository')}>
             {#each Object.entries(assetLibraryFolderMap) as [id, { enabled }] (id)}
               {#if enabled}
                 {@const name = `default-${id}`}
                 <Option
                   {name}
-                  label={$_(`assets_dialog.folder.${id}`)}
+                  label={_(`assets_dialog.folder.${id}`)}
                   selected={libraryName === name}
                 />
               {/if}
@@ -416,21 +431,21 @@
           </OptionGroup>
         {/if}
         {#if canEnterURL || !!Object.keys(enabledCloudServiceEntries).length}
-          <OptionGroup label={$_('asset_location.external')}>
+          <OptionGroup label={_('asset_location.external')}>
             {#each enabledCloudServiceEntries as [, { serviceId, serviceLabel }] (serviceId)}
               <Option name={serviceId} label={serviceLabel} selected={libraryName === serviceId} />
             {/each}
             {#if canEnterURL}
               <Option
                 name="enter-url"
-                label={$_('assets_dialog.enter_url')}
+                label={_('assets_dialog.enter_url')}
                 selected={libraryName === 'enter-url'}
               />
             {/if}
           </OptionGroup>
         {/if}
         {#if enabledStockAssetProviderEntries.length}
-          <OptionGroup label={$_('asset_location.stock_photos')}>
+          <OptionGroup label={_('asset_location.stock_photos')}>
             {#each enabledStockAssetProviderEntries as [serviceId, { serviceLabel }] (serviceId)}
               <Option name={serviceId} label={serviceLabel} selected={libraryName === serviceId} />
             {/each}
@@ -461,8 +476,8 @@
         <EmptyState>
           <div role="none">
             {kind === 'image'
-              ? $_('assets_dialog.enter_image_url')
-              : $_('assets_dialog.enter_file_url')}
+              ? _('assets_dialog.enter_image_url')
+              : _('assets_dialog.enter_file_url')}
           </div>
           <TextInput
             bind:value={enteredURL}

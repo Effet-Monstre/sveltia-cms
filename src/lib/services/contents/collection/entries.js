@@ -1,18 +1,27 @@
+/* eslint-disable no-continue */
+/* eslint-disable no-await-in-loop */
+/* eslint-disable no-restricted-syntax */
+
 import { get, writable } from 'svelte/store';
 
 import { getMediaFieldURL } from '$lib/services/assets/info';
 import { cmsConfig } from '$lib/services/config';
-import { allEntries } from '$lib/services/contents';
+import { allEntries, allEntryFolders } from '$lib/services/contents';
 import { getCollection } from '$lib/services/contents/collection';
 import { getCollectionFilesByEntry } from '$lib/services/contents/collection/files';
-import { isCollectionIndexFile } from '$lib/services/contents/collection/index-file';
+import { getIndexFile, isCollectionIndexFile } from '$lib/services/contents/collection/index-file';
 import { getAssociatedCollections } from '$lib/services/contents/entry';
 import { getField, getPropertyValue } from '$lib/services/contents/entry/fields';
 import { getRegex } from '$lib/services/utils/misc';
 
 /**
  * @import { Writable } from 'svelte/store';
- * @import { Entry, FlattenedEntryContent, InternalCollectionFile } from '$lib/types/private';
+ * @import {
+ * Entry,
+ * FlattenedEntryContent,
+ * InternalCollection,
+ * InternalCollectionFile,
+ * } from '$lib/types/private';
  * @import { FieldKeyPath } from '$lib/types/public';
  */
 
@@ -52,8 +61,35 @@ export const getEntriesByCollection = (collectionName) => {
   const filterValues =
     filter?.value === undefined ? [] : Array.isArray(filter.value) ? filter.value : [filter.value];
 
+  // Pre-compute membership check to avoid calling getAssociatedCollections() per entry, which
+  // internally does get(allEntryFolders).filter().sort() for each entry.
+  let isMember;
+
+  if (_type === 'entry') {
+    const fullPathRegEx = collection._file?.fullPathRegEx;
+
+    isMember = fullPathRegEx
+      ? (/** @type {Entry} */ entry) =>
+          fullPathRegEx.test(Object.values(entry.locales)[0]?.path ?? '')
+      : (/** @type {Entry} */ entry) =>
+          getAssociatedCollections(entry).some(({ name }) => name === collectionName);
+  } else {
+    const validPaths = new Set(
+      get(allEntryFolders)
+        .filter(({ collectionName: name }) => name === collectionName)
+        .flatMap(({ filePathMap }) => (filePathMap ? Object.values(filePathMap) : [])),
+    );
+
+    // eslint-disable-next-line jsdoc/require-jsdoc
+    isMember = (/** @type {Entry} */ entry) => {
+      const entryPath = Object.values(entry.locales)[0]?.path;
+
+      return !!entryPath && validPaths.has(entryPath);
+    };
+  }
+
   return get(allEntries).filter((entry) => {
-    if (!getAssociatedCollections(entry).some(({ name }) => name === collectionName)) {
+    if (!isMember(entry)) {
       return false;
     }
 
@@ -161,60 +197,79 @@ export const getEntriesByAssetURL = async (
 ) => {
   const baseURL = get(cmsConfig)?._baseURL;
   const assetURL = baseURL && !url.startsWith('blob:') ? url.replace(baseURL, '') : url;
+  const isBlobURL = assetURL.startsWith('blob:');
+  const isReplacing = !!newURL;
 
   const results = await Promise.all(
     entries.map(async (entry) => {
       const { locales } = entry;
       const collections = getAssociatedCollections(entry);
+      let found = false;
 
-      const _results = await Promise.all(
-        Object.values(locales).map(async ({ content }) => {
-          const __results = await Promise.all(
-            Object.entries(content).map(async ([keyPath, value]) => {
-              if (typeof value !== 'string' || !value) {
-                return false;
-              }
+      for (const { content } of Object.values(locales)) {
+        for (const [keyPath, value] of Object.entries(content)) {
+          if (typeof value !== 'string' || !value) continue;
+          // Pre-filter: skip values that can't possibly contain the asset URL, avoiding the
+          // expensive getField() call for the vast majority of fields.
+          if (!isBlobURL && !value.includes(assetURL)) continue;
 
-              const ___results = await Promise.all(
-                collections.map(async (collection) => {
-                  const hasAssetArgs = {
-                    assetURL,
-                    newURL,
-                    collectionName: collection.name,
-                    entry,
-                    content,
-                    keyPath,
-                    value,
-                    isIndexFile: isCollectionIndexFile(collection, entry),
-                  };
+          for (const collection of collections) {
+            const hasAssetArgs = {
+              assetURL,
+              newURL,
+              collectionName: collection.name,
+              entry,
+              content,
+              keyPath,
+              value,
+              isIndexFile: isCollectionIndexFile(collection, entry),
+            };
 
-                  const collectionFiles = getCollectionFilesByEntry(collection, entry);
+            const collectionFiles = getCollectionFilesByEntry(collection, entry);
+            let matched;
 
-                  if (collectionFiles.length) {
-                    return (
-                      await Promise.all(
-                        collectionFiles.map((collectionFile) =>
-                          hasAsset({ ...hasAssetArgs, collectionFile }),
-                        ),
-                      )
-                    ).includes(true);
-                  }
+            if (collectionFiles.length) {
+              matched = (
+                await Promise.all(
+                  collectionFiles.map((collectionFile) =>
+                    hasAsset({ ...hasAssetArgs, collectionFile }),
+                  ),
+                )
+              ).includes(true);
+            } else {
+              matched = await hasAsset({ ...hasAssetArgs });
+            }
 
-                  return hasAsset({ ...hasAssetArgs });
-                }),
-              );
+            if (matched) {
+              found = true;
+              if (!isReplacing) break;
+            }
+          }
 
-              return ___results.includes(true);
-            }),
-          );
+          if (found && !isReplacing) break;
+        }
 
-          return __results.includes(true);
-        }),
-      );
+        if (found && !isReplacing) break;
+      }
 
-      return _results.includes(true);
+      return found;
     }),
   );
 
   return entries.filter((_entry, index) => results[index]);
+};
+
+/**
+ * Check if index file creation is allowed in the collection.
+ * @param {InternalCollection} collection Collection.
+ * @returns {boolean} Result. It returns `false` if the index file already exists.
+ */
+export const canCreateIndexFile = (collection) => {
+  const indexFile = getIndexFile(collection);
+
+  if (!indexFile) {
+    return false;
+  }
+
+  return !getEntriesByCollection(collection.name).some(({ slug }) => slug === indexFile.name);
 };

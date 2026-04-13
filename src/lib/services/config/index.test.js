@@ -1,13 +1,6 @@
-import { init as initI18n } from 'svelte-i18n';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import {
-  cmsConfig,
-  cmsConfigErrors,
-  cmsConfigLoaded,
-  cmsConfigVersion,
-  DEV_SITE_URL,
-} from './index.js';
+import { cmsConfig, cmsConfigErrors, cmsConfigLoaded, cmsConfigVersion, DEV_SITE_URL } from '.';
 
 // Mock external dependencies
 vi.mock('@sveltia/utils/crypto', () => ({
@@ -74,20 +67,13 @@ vi.mock('$lib/services/backends', () => ({
 }));
 
 // Mock i18n
-vi.mock('svelte-i18n', () => ({
-  init: vi.fn().mockResolvedValue({}),
-  _: vi.fn(),
-  locale: { subscribe: vi.fn() },
+vi.mock('@sveltia/i18n', () => ({
+  _: vi.fn((key) => key),
+  locale: { current: 'en', set: vi.fn() },
 }));
 
 describe('config/index', () => {
   beforeEach(async () => {
-    // Initialize i18n for tests
-    await initI18n({
-      fallbackLocale: 'en',
-      initialLocale: 'en',
-    });
-
     // Reset all mocks
     vi.clearAllMocks();
   });
@@ -264,7 +250,7 @@ describe('config/index', () => {
     });
 
     it('should throw error when not in secure context', async () => {
-      const { initCmsConfig } = await import('./index.js');
+      const { initCmsConfig } = await import('.');
 
       if (typeof window !== 'undefined') {
         Object.defineProperty(window, 'isSecureContext', { value: false, writable: true });
@@ -292,12 +278,19 @@ describe('config/index', () => {
     });
 
     it('should load config from file when no manual config provided', async () => {
-      const { initCmsConfig } = await import('./index.js');
+      const { initCmsConfig } = await import('.');
 
       const mockConfig = {
         backend: { name: 'github', repo: 'owner/repo' },
         media_folder: 'uploads',
-        collections: [{ name: 'posts', label: 'Posts', folder: 'posts' }],
+        collections: [
+          {
+            name: 'posts',
+            label: 'Posts',
+            folder: 'posts',
+            fields: [{ name: 'title', widget: 'string' }],
+          },
+        ],
       };
 
       fetchcmsConfigMock.mockResolvedValue(mockConfig);
@@ -325,13 +318,20 @@ describe('config/index', () => {
     });
 
     it('should use manual config when provided and load_config_file is false', async () => {
-      const { initCmsConfig } = await import('./index.js');
+      const { initCmsConfig } = await import('.');
 
       /** @type {any} */
       const manualConfig = {
         backend: { name: 'github', repo: 'owner/repo' },
         media_folder: 'uploads',
-        collections: [{ name: 'posts', label: 'Posts', folder: 'posts' }],
+        collections: [
+          {
+            name: 'posts',
+            label: 'Posts',
+            folder: 'posts',
+            fields: [{ name: 'title', widget: 'string' }],
+          },
+        ],
         load_config_file: false,
       };
 
@@ -357,12 +357,19 @@ describe('config/index', () => {
     });
 
     it('should merge manual config with file config when load_config_file is not false', async () => {
-      const { initCmsConfig } = await import('./index.js');
+      const { initCmsConfig } = await import('.');
 
       const fileConfig = {
         backend: { name: 'github', repo: 'owner/repo' },
         media_folder: 'uploads',
-        collections: [{ name: 'posts', label: 'Posts', folder: 'posts' }],
+        collections: [
+          {
+            name: 'posts',
+            label: 'Posts',
+            folder: 'posts',
+            fields: [{ name: 'title', widget: 'string' }],
+          },
+        ],
       };
 
       /** @type {any} */
@@ -396,7 +403,7 @@ describe('config/index', () => {
     });
 
     it('should throw error when manual config is not an object', async () => {
-      const { initCmsConfig } = await import('./index.js');
+      const { initCmsConfig } = await import('.');
 
       await initCmsConfig(/** @type {any} */ ('not-an-object'));
 
@@ -418,12 +425,19 @@ describe('config/index', () => {
     });
 
     it('should call fetchCmsConfig with manualInit option when merging with explicit load_config_file true', async () => {
-      const { initCmsConfig } = await import('./index.js');
+      const { initCmsConfig } = await import('.');
 
       const fileConfig = {
         backend: { name: 'github', repo: 'owner/repo' },
         media_folder: 'uploads',
-        collections: [{ name: 'posts', label: 'Posts', folder: 'posts' }],
+        collections: [
+          {
+            name: 'posts',
+            label: 'Posts',
+            folder: 'posts',
+            fields: [{ name: 'title', widget: 'string' }],
+          },
+        ],
       };
 
       /** @type {any} */
@@ -456,12 +470,19 @@ describe('config/index', () => {
     });
 
     it('should set _siteURL from site_url config', async () => {
-      const { initCmsConfig } = await import('./index.js');
+      const { initCmsConfig } = await import('.');
 
       const mockConfig = {
         backend: { name: 'github', repo: 'owner/repo' },
         media_folder: 'uploads',
-        collections: [{ name: 'posts', label: 'Posts', folder: 'posts' }],
+        collections: [
+          {
+            name: 'posts',
+            label: 'Posts',
+            folder: 'posts',
+            fields: [{ name: 'title', widget: 'string' }],
+          },
+        ],
         site_url: '  https://example.com  ',
       };
 
@@ -487,12 +508,19 @@ describe('config/index', () => {
     });
 
     it('should use DEV_SITE_URL in development when site_url is not provided', async () => {
-      const { initCmsConfig } = await import('./index.js');
+      const { initCmsConfig } = await import('.');
 
       const mockConfig = {
         backend: { name: 'github', repo: 'owner/repo' },
         media_folder: 'uploads',
-        collections: [{ name: 'posts', label: 'Posts', folder: 'posts' }],
+        collections: [
+          {
+            name: 'posts',
+            label: 'Posts',
+            folder: 'posts',
+            fields: [{ name: 'title', widget: 'string' }],
+          },
+        ],
       };
 
       fetchcmsConfigMock.mockResolvedValue(mockConfig);
@@ -517,12 +545,19 @@ describe('config/index', () => {
     });
 
     it('should set _baseURL to empty string for invalid URL (line 207)', async () => {
-      const { initCmsConfig } = await import('./index.js');
+      const { initCmsConfig } = await import('.');
 
       const mockConfig = {
         backend: { name: 'github', repo: 'owner/repo' },
         media_folder: 'uploads',
-        collections: [{ name: 'posts', label: 'Posts', folder: 'posts' }],
+        collections: [
+          {
+            name: 'posts',
+            label: 'Posts',
+            folder: 'posts',
+            fields: [{ name: 'title', widget: 'string' }],
+          },
+        ],
         site_url: 'not-a-valid-url',
       };
 
@@ -549,15 +584,30 @@ describe('config/index', () => {
     });
 
     it('should handle root collection folder variants', async () => {
-      const { initCmsConfig } = await import('./index.js');
+      const { initCmsConfig } = await import('.');
 
       const mockConfig = {
         backend: { name: 'github', repo: 'owner/repo' },
         media_folder: 'uploads',
         collections: [
-          { name: 'posts', label: 'Posts', folder: '.' },
-          { name: 'pages', label: 'Pages', folder: '/' },
-          { name: 'docs', label: 'Docs', folder: 'docs' },
+          {
+            name: 'posts',
+            label: 'Posts',
+            folder: '.',
+            fields: [{ name: 'title', widget: 'string' }],
+          },
+          {
+            name: 'pages',
+            label: 'Pages',
+            folder: '/',
+            fields: [{ name: 'title', widget: 'string' }],
+          },
+          {
+            name: 'docs',
+            label: 'Docs',
+            folder: 'docs',
+            fields: [{ name: 'title', widget: 'string' }],
+          },
         ],
       };
 
@@ -584,12 +634,19 @@ describe('config/index', () => {
     });
 
     it('should set cmsConfigVersion with hash of config', async () => {
-      const { initCmsConfig } = await import('./index.js');
+      const { initCmsConfig } = await import('.');
 
       const mockConfig = {
         backend: { name: 'github', repo: 'owner/repo' },
         media_folder: 'uploads',
-        collections: [{ name: 'posts', label: 'Posts', folder: 'posts' }],
+        collections: [
+          {
+            name: 'posts',
+            label: 'Posts',
+            folder: 'posts',
+            fields: [{ name: 'title', widget: 'string' }],
+          },
+        ],
       };
 
       fetchcmsConfigMock.mockResolvedValue(mockConfig);
@@ -619,7 +676,7 @@ describe('config/index', () => {
     });
 
     it('should handle validation errors', async () => {
-      const { initCmsConfig } = await import('./index.js');
+      const { initCmsConfig } = await import('.');
 
       const invalidConfig = {
         // Missing required fields
@@ -647,7 +704,7 @@ describe('config/index', () => {
     });
 
     it('should handle unexpected errors with generic message', async () => {
-      const { initCmsConfig } = await import('./index.js');
+      const { initCmsConfig } = await import('.');
 
       fetchcmsConfigMock.mockRejectedValue(new TypeError('Network error'));
 
@@ -671,15 +728,30 @@ describe('config/index', () => {
     });
 
     it('should handle folder normalization for root folders', async () => {
-      const { initCmsConfig } = await import('./index.js');
+      const { initCmsConfig } = await import('.');
 
       const mockConfig = {
         backend: { name: 'github', repo: 'owner/repo' },
         media_folder: 'uploads',
         collections: [
-          { name: 'posts', label: 'Posts', folder: '.' },
-          { name: 'pages', label: 'Pages', folder: '/' },
-          { name: 'drafts', label: 'Drafts', folder: 'drafts' },
+          {
+            name: 'posts',
+            label: 'Posts',
+            folder: '.',
+            fields: [{ name: 'title', widget: 'string' }],
+          },
+          {
+            name: 'pages',
+            label: 'Pages',
+            folder: '/',
+            fields: [{ name: 'title', widget: 'string' }],
+          },
+          {
+            name: 'drafts',
+            label: 'Drafts',
+            folder: 'drafts',
+            fields: [{ name: 'title', widget: 'string' }],
+          },
         ],
       };
 
@@ -707,14 +779,21 @@ describe('config/index', () => {
     });
 
     it('should log config to console in dev mode', async () => {
-      const { initCmsConfig } = await import('./index.js');
+      const { initCmsConfig } = await import('.');
       const { get } = await import('svelte/store');
       const consoleSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
 
       const mockConfig = {
         backend: { name: 'github', repo: 'owner/repo' },
         media_folder: 'uploads',
-        collections: [{ name: 'posts', label: 'Posts', folder: 'posts' }],
+        collections: [
+          {
+            name: 'posts',
+            label: 'Posts',
+            folder: 'posts',
+            fields: [{ name: 'title', widget: 'string' }],
+          },
+        ],
       };
 
       fetchcmsConfigMock.mockResolvedValue(mockConfig);
@@ -748,7 +827,7 @@ describe('config/index', () => {
     });
 
     it('should log console.warn when config has deprecated/unsupported options', async () => {
-      const { initCmsConfig } = await import('./index.js');
+      const { initCmsConfig } = await import('.');
       const consoleSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
       // `local_backend` is an unsupported option that triggers a warning during parsing
@@ -756,7 +835,14 @@ describe('config/index', () => {
         backend: { name: 'github', repo: 'owner/repo' },
         media_folder: 'uploads',
         local_backend: true,
-        collections: [{ name: 'posts', label: 'Posts', folder: 'posts' }],
+        collections: [
+          {
+            name: 'posts',
+            label: 'Posts',
+            folder: 'posts',
+            fields: [{ name: 'title', widget: 'string' }],
+          },
+        ],
       };
 
       fetchcmsConfigMock.mockResolvedValue(mockConfig);

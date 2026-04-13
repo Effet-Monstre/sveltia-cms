@@ -1,4 +1,5 @@
 <script>
+  import { _ } from '@sveltia/i18n';
   import { Menu, MenuButton, MenuItem, Spacer } from '@sveltia/ui';
   import { escapeRegExp } from '@sveltia/utils/string';
   import equal from 'fast-deep-equal';
@@ -6,26 +7,24 @@
   import { parseInline } from 'marked';
   import { getContext, setContext } from 'svelte';
   import { writable } from 'svelte/store';
-  import { _ } from 'svelte-i18n';
 
   import CopyMenuItems from '$lib/components/contents/details/editor/copy-menu-items.svelte';
   import FieldEditorGroup from '$lib/components/contents/details/editor/field-editor-group.svelte';
   import TranslateButton from '$lib/components/contents/details/editor/translate-button.svelte';
   import ValidationError from '$lib/components/contents/details/editor/validation-error.svelte';
   import { editors } from '$lib/components/contents/details/fields';
-  import { entryDraft } from '$lib/services/contents/draft';
-  import { revertChanges } from '$lib/services/contents/draft/update/revert';
+  import { entryDraft, INTERNAL_PROP_REGEX } from '$lib/services/contents/draft';
+  import {
+    resolveOriginalKeyPath,
+    revertChanges,
+  } from '$lib/services/contents/draft/update/revert';
   import { isFieldMultiple, isFieldRequired } from '$lib/services/contents/entry/fields';
-  import { MIN_MAX_VALUE_FIELD_TYPES } from '$lib/services/contents/fields';
-  import { parseDateTimeConfig } from '$lib/services/contents/fields/date-time/helper';
-  import { getFormattedDateTime } from '$lib/services/contents/fields/date-time/validate';
   import { DEFAULT_I18N_CONFIG } from '$lib/services/contents/i18n/config';
 
   /**
    * @import { Component } from 'svelte';
    * @import { Writable } from 'svelte/store';
    * @import {
-   * DateTimeFieldNormalizedProps,
    * DraftValueStoreKey,
    * FieldContext,
    * FieldEditorContext,
@@ -34,14 +33,10 @@
    * } from '$lib/types/private';
    * @import {
    * BooleanField,
-   * DateTimeField,
-   * DateTimeInputType,
    * Field,
    * FieldKeyPath,
-   * MinMaxValueField,
    * NumberField,
    * StringField,
-   * TextField,
    * VisibleField,
    * } from '$lib/types/public';
    */
@@ -99,47 +94,10 @@
     label = '',
     comment = '',
     hint = '',
-    // @ts-ignore Some field types don’t have `pattern` property
-    pattern = /** @type {string[]} */ ([]),
     readonly: readonlyOption = false,
   } = $derived(/** @type {VisibleField} */ (fieldConfig));
   const required = $derived(isFieldRequired({ fieldConfig, locale }));
   const multiple = $derived(isFieldMultiple(fieldConfig));
-  const parsedDateTimeConfig = $derived(
-    /** @type {DateTimeFieldNormalizedProps} */ (
-      fieldType === 'datetime'
-        ? parseDateTimeConfig(/** @type {DateTimeField} */ (fieldConfig))
-        : {}
-    ),
-  );
-  /** @type {{ min?: string | number, max?: string | number }} */
-  const { min, max } = $derived.by(() => {
-    if (MIN_MAX_VALUE_FIELD_TYPES.includes(fieldType)) {
-      const { min: _min, max: _max } =
-        fieldType === 'datetime'
-          ? parsedDateTimeConfig
-          : /** @type {MinMaxValueField} */ (fieldConfig);
-
-      return { min: _min, max: _max };
-    }
-
-    return {};
-  });
-  const type = $derived.by(() => {
-    if (fieldType === 'string') {
-      return /** @type {StringField} */ (fieldConfig).type ?? 'text';
-    }
-
-    if (fieldType === 'datetime') {
-      return parsedDateTimeConfig.type;
-    }
-
-    if (fieldType === 'number') {
-      return 'number';
-    }
-
-    return undefined;
-  });
   const allowPrefix = $derived(['string'].includes(fieldType));
   const prefix = $derived(
     allowPrefix ? /** @type {StringField} */ (fieldConfig).prefix : undefined,
@@ -159,7 +117,6 @@
       : undefined,
   );
   const hasExtraLabels = $derived(!!(prefix || suffix || beforeInputLabel || afterInputLabel));
-  const canAddMultiValue = $derived(fieldType === 'list' || fieldType === 'keyvalue' || multiple);
   const isList = $derived(fieldType === 'list' || multiple);
   const collection = $derived($entryDraft?.collection);
   const collectionFile = $derived($entryDraft?.collectionFile);
@@ -200,14 +157,45 @@
 
     return [];
   });
-  const originalValue = $derived(
-    isList
-      ? Object.entries(originalValues?.[locale] ?? {})
-          .filter(([_keyPath]) => keyPathRegex.test(_keyPath))
-          .map(([, val]) => val)
-          .filter((val) => val !== undefined)
-      : originalValues?.[locale]?.[keyPath],
-  );
+  const originalValue = $derived.by(() => {
+    if (isList) {
+      return Object.entries(originalValues?.[locale] ?? {})
+        .filter(([_keyPath]) => keyPathRegex.test(_keyPath))
+        .map(([, val]) => val)
+        .filter((val) => val !== undefined);
+    }
+
+    // For fields inside list items, use the original key path if the item was reordered
+    const currentMap = $state.snapshot($entryDraft?.[valueStoreKey][locale] ?? {});
+    const resolved = resolveOriginalKeyPath(currentMap, keyPath);
+
+    if (resolved) {
+      return originalValues?.[locale]?.[resolved.originalKeyPath];
+    }
+
+    return originalValues?.[locale]?.[keyPath];
+  });
+  const isRevertDisabled = $derived.by(() => {
+    if (fieldType === 'list') {
+      // For list fields, compare all flat entries under the keyPath prefix, because `currentValue`
+      // and `originalValue` may not capture complex (nested) list items correctly
+      const currentMap = $state.snapshot($entryDraft?.[valueStoreKey][locale] ?? {});
+      const originalMap = originalValues?.[locale] ?? {};
+      const keyPathPrefix = `${keyPath}.`;
+
+      const currentEntries = Object.entries(currentMap)
+        .filter(([k]) => k.startsWith(keyPathPrefix) && !INTERNAL_PROP_REGEX.test(k))
+        .sort(([a], [b]) => a.localeCompare(b));
+
+      const originalEntries = Object.entries(originalMap)
+        .filter(([k]) => k.startsWith(keyPathPrefix) && !INTERNAL_PROP_REGEX.test(k))
+        .sort(([a], [b]) => a.localeCompare(b));
+
+      return equal(currentEntries, originalEntries);
+    }
+
+    return equal(currentValue, originalValue);
+  });
   const validity = $derived($entryDraft?.validities[locale][keyPath]);
   const fieldLabel = $derived(label || fieldName);
   const readonly = $derived(
@@ -255,7 +243,7 @@
 
 {#if $entryDraft && canEdit && fieldType !== 'hidden'}
   <FieldEditorGroup
-    aria-label={$_('x_field', { values: { field: fieldLabel } })}
+    aria-label={_('x_field', { values: { field: fieldLabel } })}
     data-field-type={fieldType}
     data-key-path={keyPath}
     data-typed-key-path={typedKeyPath}
@@ -264,7 +252,7 @@
     <header role="none">
       <h4 role="none" id="{fieldId}-label">{fieldLabel}</h4>
       {#if !readonly && required}
-        <div class="required" aria-label={$_('required')}>*</div>
+        <div class="required" aria-label={_('required')}>*</div>
       {/if}
       <Spacer flex />
       {#if false && canCopy && ['richtext', 'markdown', 'string', 'text', 'list', 'object'].includes(fieldType)}
@@ -276,19 +264,17 @@
           size="small"
           iconic
           popupPosition="bottom-right"
-          aria-label={$_('show_field_options')}
+          aria-label={_('show_field_options')}
         >
           {#snippet popup()}
-            <Menu aria-label={$_('field_options')}>
+            <Menu aria-label={_('field_options')}>
               {#if canCopy}
                 <CopyMenuItems {locale} {otherLocales} {keyPath} />
               {/if}
               {#if canRevert}
                 <MenuItem
-                  label={$_('revert_changes')}
-                  disabled={equal(currentValue, originalValue) ||
-                    // Disable reversion in list items until we figure out how to handle reordering
-                    /\.\d+\./.test(keyPath)}
+                  label={_('revert_changes')}
+                  disabled={isRevertDisabled}
                   onclick={() => {
                     revertChanges({ locale, keyPath });
                   }}
@@ -306,64 +292,12 @@
     {/if}
     {#if validity?.valid === false}
       <ValidationError id="{fieldId}-error">
-        {#if validity.valueMissing}
-          {$_('validation.value_missing')}
-        {/if}
-        {#if validity.tooShort}
-          {@const { minlength } = (() => /** @type {StringField | TextField} */ (fieldConfig))()}
-          {$_(minlength === 1 ? 'validation.too_short.one' : 'validation.too_short.many', {
-            values: { min: minlength },
-          })}
-        {/if}
-        {#if validity.tooLong}
-          {@const { maxlength } = (() => /** @type {StringField | TextField} */ (fieldConfig))()}
-          {$_(maxlength === 1 ? 'validation.too_long.one' : 'validation.too_long.many', {
-            values: { max: maxlength },
-          })}
-        {/if}
-        {#if validity.rangeUnderflow}
-          {@const quantity = min === 1 ? 'one' : 'many'}
-          {#if fieldType === 'datetime' && typeof min === 'string'}
-            {$_(`validation.range_underflow.${type}`, {
-              values: {
-                min: getFormattedDateTime(/** @type {DateTimeInputType} */ (type), min),
-              },
-            })}
-          {:else if fieldType === 'number'}
-            {$_('validation.range_underflow.number', { values: { min } })}
-          {:else if canAddMultiValue}
-            {$_(`validation.range_underflow.add_${quantity}`, { values: { min } })}
-          {:else}
-            {$_(`validation.range_underflow.select_${quantity}`, { values: { min } })}
-          {/if}
-        {/if}
-        {#if validity.rangeOverflow}
-          {@const quantity = max === 1 ? 'one' : 'many'}
-          {#if fieldType === 'datetime' && typeof max === 'string'}
-            {$_(`validation.range_overflow.${type}`, {
-              values: {
-                max: getFormattedDateTime(/** @type {DateTimeInputType} */ (type), max),
-              },
-            })}
-          {:else if fieldType === 'number'}
-            {$_('validation.range_overflow.number', { values: { max } })}
-          {:else if canAddMultiValue}
-            {$_(`validation.range_overflow.add_${quantity}`, { values: { max } })}
-          {:else}
-            {$_(`validation.range_overflow.select_${quantity}`, { values: { max } })}
-          {/if}
-        {/if}
-        {#if validity.patternMismatch}
-          {pattern[1]}
-        {/if}
-        {#if validity.typeMismatch}
-          {$_(`validation.type_mismatch.${type}`)}
-        {/if}
+        {$entryDraft?.validationMessages[locale][keyPath]?.join(' ')}
       </ValidationError>
     {/if}
     <div role="none" class="field-wrapper" class:has-extra-labels={hasExtraLabels}>
       {#if !(fieldType in editors)}
-        <div role="none">{$_('unsupported_field_type_x', { values: { name: fieldType } })}</div>
+        <div role="none">{_('unsupported_field_type_x', { values: { name: fieldType } })}</div>
       {:else if isList}
         {@const Editor = editors[fieldType]}
         <Editor

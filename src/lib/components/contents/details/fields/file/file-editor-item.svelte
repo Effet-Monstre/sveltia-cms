@@ -1,8 +1,8 @@
 <script>
+  import { _ } from '@sveltia/i18n';
   import { Button, Icon } from '@sveltia/ui';
   import { isURL } from '@sveltia/utils/string';
   import { untrack } from 'svelte';
-  import { _ } from 'svelte-i18n';
 
   import AssetPreview from '$lib/components/assets/shared/asset-preview.svelte';
   import { getAssetByPath } from '$lib/services/assets';
@@ -26,6 +26,7 @@
    * @property {boolean} required Whether the field is required.
    * @property {string} collectionName The collection name.
    * @property {string | undefined} fileName The file name.
+   * @property {string} [typedKeyPath] Field key path for field-level media folders.
    * @property {Entry | undefined} entry The entry object.
    * @property {() => void} [onReplace] Event handler for replace action.
    * @property {() => void} [onRemove] Event handler for remove action.
@@ -43,6 +44,7 @@
     required = false,
     collectionName = '',
     fileName = undefined,
+    typedKeyPath = undefined,
     entry = undefined,
     onReplace,
     onRemove,
@@ -116,7 +118,7 @@
 
     // Update the `src` when an asset is selected
     if (value) {
-      const getURLArgs = { value, entry, collectionName, fileName, fieldConfig };
+      const getURLArgs = { value, entry, collectionName, fileName, fieldConfig, typedKeyPath };
 
       if (isImageField && /^https?:/.test(value)) {
         asset = undefined;
@@ -158,7 +160,7 @@
         size="small"
         iconic
         disabled={!onMoveUp}
-        aria-label={$_('move_up')}
+        aria-label={_('move_up')}
         onclick={() => {
           onMoveUp?.();
         }}
@@ -171,7 +173,7 @@
         size="small"
         iconic
         disabled={!onMoveDown}
-        aria-label={$_('move_down')}
+        aria-label={_('move_down')}
         onclick={() => {
           onMoveDown?.();
         }}
@@ -213,8 +215,8 @@
           disabled={readonly}
           variant="tertiary"
           size="small"
-          label={$_('replace')}
-          aria-label={$_(`replace_${fieldType}`)}
+          label={_('replace')}
+          aria-label={_(`replace_${fieldType}`)}
           aria-controls="{fieldId}-value"
           onclick={() => {
             onReplace();
@@ -226,8 +228,8 @@
           disabled={readonly}
           variant="tertiary"
           size="small"
-          label={$_('remove')}
-          aria-label={$_(`remove_${fieldType}`)}
+          label={_('remove')}
+          aria-label={_(`remove_${fieldType}`)}
           aria-controls="{fieldId}-value"
           onclick={() => {
             onRemove();

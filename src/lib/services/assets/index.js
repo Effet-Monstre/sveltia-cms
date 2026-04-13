@@ -30,6 +30,7 @@ import { createPath, decodeFilePath, resolvePath } from '$lib/services/utils/fil
  * InternalCollection,
  * InternalCollectionFile,
  * ProcessedAssets,
+ * TypedFieldKeyPath,
  * UploadingAssets,
  * } from '$lib/types/private';
  */
@@ -39,6 +40,28 @@ import { createPath, decodeFilePath, resolvePath } from '$lib/services/utils/fil
  * @type {Writable<Asset[]>}
  */
 export const allAssets = writable([]);
+
+/**
+ * Lazily-rebuilt Map from asset path to Asset, used for O(1) path lookups. Rebuilt only when
+ * `allAssets` changes reference.
+ * @type {{ source: Asset[] | undefined, map: Map<string, Asset> }}
+ */
+const assetPathCache = { source: undefined, map: new Map() };
+
+/**
+ * Get a Map from asset path to Asset, rebuilt only when `allAssets` changes.
+ * @returns {Map<string, Asset>} Map.
+ */
+const getAssetPathMap = () => {
+  const _allAssets = get(allAssets);
+
+  if (_allAssets !== assetPathCache.source) {
+    assetPathCache.source = _allAssets;
+    assetPathCache.map = new Map(_allAssets.map((asset) => [asset.path, asset]));
+  }
+
+  return assetPathCache.map;
+};
 
 /**
  * Selected assets.
@@ -130,15 +153,32 @@ export const processedAssets = derived([uploadingAssets], ([_uploadingAssets], s
  * path. Can be `undefined` when editing a new draft.
  * @param {InternalCollection} context.collection Associated collection.
  * @param {InternalCollectionFile} [context.file] Associated collection file.
+ * @param {TypedFieldKeyPath} [context.typedKeyPath] Field key path for field-level media folders.
  * @returns {Asset | undefined} Found asset.
  */
-export const getAssetByRelativePathAndCollection = ({ path, entry, collection, file }) => {
+export const getAssetByRelativePathAndCollection = ({
+  path,
+  entry,
+  collection,
+  file,
+  typedKeyPath,
+}) => {
   const { locales } = entry;
 
   const {
-    media_folder: mediaFolder, // e.g. `images`
     _i18n: { defaultLocale },
   } = file ?? collection;
+
+  // When a field-level key path is provided, look up the field-specific asset folder first so we
+  // use the correct `media_folder` (e.g. a field with `media_folder: images1` instead of the
+  // collection-level `/src/assets/images/blog`).
+  const fieldFolder = typedKeyPath
+    ? getAssetFolder({ collectionName: collection.name, fileName: file?.name, typedKeyPath })
+    : undefined;
+
+  const mediaFolder = fieldFolder?.entryRelative
+    ? (fieldFolder.internalSubPath ?? '')
+    : /** @type {string | undefined} */ ((file ?? collection).media_folder);
 
   const locale = defaultLocale in locales ? defaultLocale : Object.keys(locales)[0];
   const { path: entryFilePath, content: entryContent } = locales[locale];
@@ -147,17 +187,26 @@ export const getAssetByRelativePathAndCollection = ({ path, entry, collection, f
     return undefined;
   }
 
-  const { entryFolder } = entryFilePath.match(/(?<entryFolder>.+?)(?:\/[^/]+)?$/)?.groups ?? {};
+  // The regex matches any non-empty string (`entryFilePath` is guaranteed non-empty above). Named
+  // capture groups always produce a `groups` object, so no optional chaining needed.
+  const { entryFolder } = /** @type {{ entryFolder: string }} */ (
+    /** @type {RegExpMatchArray} */ (entryFilePath.match(/(?<entryFolder>.+?)(?:\/[^/]+)?$/)).groups
+  );
 
   // Strip the `media_folder` prefix from the stored path before joining with `mediaFolder`, to
   // avoid duplication when the stored value already includes the media folder (e.g.
-  // `images/photo.jpg`).
+  // `images/photo.jpg`). Also normalize `./` prefix since `./images/photo.jpg` and
+  // `images/photo.jpg` are equivalent relative paths.
+  const normalizedPath = path.replace(/^\.\//, '');
+
   const localPath =
-    mediaFolder && path.startsWith(`${mediaFolder}/`) ? path.slice(mediaFolder.length + 1) : path;
+    mediaFolder && normalizedPath.startsWith(`${mediaFolder}/`)
+      ? normalizedPath.slice(mediaFolder.length + 1)
+      : normalizedPath;
 
   const resolvedPath = resolvePath(createPath([entryFolder, mediaFolder, localPath]));
 
-  return get(allAssets).find((asset) => asset.path === resolvedPath);
+  return getAssetPathMap().get(resolvedPath);
 };
 
 /**
@@ -166,16 +215,57 @@ export const getAssetByRelativePathAndCollection = ({ path, entry, collection, f
  * @param {string} args.path Saved relative path.
  * @param {Entry} [args.entry] Associated entry to be used to help locate an asset from a relative
  * path. Can be `undefined` when editing a new draft.
+ * @param {string} [args.collectionName] Collection name, used when no entry is available.
+ * @param {string} [args.fileName] Collection file name. File/singleton collection only.
+ * @param {TypedFieldKeyPath} [args.typedKeyPath] Field key path for field-level media folders.
  * @returns {Asset | undefined} Corresponding asset.
  */
-export const getAssetByRelativePath = ({ path, entry }) => {
+export const getAssetByRelativePath = ({ path, entry, collectionName, fileName, typedKeyPath }) => {
   if (!entry) {
-    return undefined;
+    // Without an entry we use collectionName/fileName to scan configured folders. For
+    // entry-relative folders, internalPath + internalSubPath is used as a best-effort path.
+    const scanningFolders = /** @type {AssetFolderInfo[]} */ (
+      [
+        collectionName && typedKeyPath
+          ? getAssetFolder({ collectionName, fileName, typedKeyPath })
+          : undefined,
+        collectionName ? getAssetFolder({ collectionName, fileName }) : undefined,
+        collectionName ? getAssetFolder({ collectionName }) : undefined,
+        get(globalAssetFolder),
+      ].filter((folder) => !!folder && !folder.hasTemplateTags)
+    );
+
+    /** @type {Asset | undefined} */
+    let foundAsset;
+
+    scanningFolders.find((folder) => {
+      // Strip the publicPath prefix from the stored path to get the bare filename/subpath, so
+      // that e.g. `uploads/photo.jpg` with publicPath `/uploads` resolves to `uploads/photo.jpg`
+      // internally rather than `uploads/uploads/photo.jpg`.
+      const publicPathBase = folder.publicPath?.replace(/^\//, '') ?? '';
+
+      const localPath =
+        publicPathBase && path.startsWith(`${publicPathBase}/`)
+          ? path.slice(publicPathBase.length + 1)
+          : path;
+
+      const found = getAssetPathMap().get(
+        createPath([folder.internalPath, folder.internalSubPath ?? '', localPath]),
+      );
+
+      if (found) {
+        foundAsset = found;
+      }
+
+      return !!found;
+    });
+
+    return foundAsset ?? getAssetPathMap().get(path);
   }
 
-  const assets = getAssociatedCollections(entry).map((collection) => {
+  const assets = getAssociatedCollections(entry).flatMap((collection) => {
     const collectionFiles = getCollectionFilesByEntry(collection, entry);
-    const args = { path, entry, collection };
+    const args = { path, entry, collection, typedKeyPath };
 
     if (collectionFiles.length) {
       return collectionFiles.map((file) => getAssetByRelativePathAndCollection({ ...args, file }));
@@ -185,9 +275,9 @@ export const getAssetByRelativePath = ({ path, entry }) => {
   });
 
   return (
-    assets.flat(1).filter(Boolean)[0] ??
+    assets.filter(Boolean)[0] ??
     // Fall back to exact match at the root folder
-    get(allAssets).find((asset) => asset.path === path)
+    getAssetPathMap().get(path)
   );
 };
 
@@ -199,10 +289,11 @@ export const getAssetByRelativePath = ({ path, entry }) => {
  * path. Can be `undefined` when editing a new draft.
  * @param {string} args.collectionName Collection name.
  * @param {string} [args.fileName] Collection file name. File/singleton collection only.
+ * @param {TypedFieldKeyPath} [args.typedKeyPath] Field key path for field-level media folders.
  * @returns {Asset | undefined} Corresponding asset.
  */
-export const getAssetByAbsolutePath = ({ path, entry, collectionName, fileName }) => {
-  const exactMatch = get(allAssets).find((asset) => asset.path === stripSlashes(path));
+export const getAssetByAbsolutePath = ({ path, entry, collectionName, fileName, typedKeyPath }) => {
+  const exactMatch = getAssetPathMap().get(stripSlashes(path));
 
   if (exactMatch) {
     return exactMatch;
@@ -213,6 +304,7 @@ export const getAssetByAbsolutePath = ({ path, entry, collectionName, fileName }
   let foundAsset = undefined;
 
   const scanningFolders = [
+    typedKeyPath ? getAssetFolder({ collectionName, fileName, typedKeyPath }) : undefined,
     getAssetFolder({ collectionName, fileName }),
     getAssetFolder({ collectionName }),
     get(globalAssetFolder),
@@ -252,12 +344,16 @@ export const getAssetByAbsolutePath = ({ path, entry, collectionName, fileName }
     }
 
     // Handle assets stored in a subfolder of the internal path
-    if (publicPath && internalPath && dirName && dirName.startsWith(`${publicPath}/`)) {
-      internalPath = dirName.replace(publicPath, internalPath);
+    if (publicPath && internalPath && dirName) {
+      if (publicPath === '/') {
+        internalPath = `${internalPath}${dirName}`;
+      } else if (dirName.startsWith(`${publicPath}/`)) {
+        internalPath = dirName.replace(publicPath, internalPath);
+      }
     }
 
     const fullPath = createPath([internalPath, baseName]);
-    const found = get(allAssets).find((asset) => asset.path === fullPath);
+    const found = getAssetPathMap().get(fullPath);
 
     if (found) {
       foundAsset = found;
@@ -285,18 +381,19 @@ export const isRelativePath = (path) => !/^[/@]/.test(path);
  * path. Can be `undefined` when editing a new draft.
  * @param {string} args.collectionName Collection name.
  * @param {string} [args.fileName] Collection file name. File/singleton collection only.
+ * @param {TypedFieldKeyPath} [args.typedKeyPath] Field key path for field-level media folders.
  * @returns {Asset | undefined} Corresponding asset.
  */
-export const getAssetByPath = ({ value, entry, collectionName, fileName }) => {
+export const getAssetByPath = ({ value, entry, collectionName, fileName, typedKeyPath }) => {
   // Remove potential fragment before decoding
   const path = decodeFilePath(value.split('#')[0]);
 
   // Handle a relative path
   if (isRelativePath(path)) {
-    return getAssetByRelativePath({ path, entry });
+    return getAssetByRelativePath({ path, entry, collectionName, fileName, typedKeyPath });
   }
 
-  return getAssetByAbsolutePath({ path, entry, collectionName, fileName });
+  return getAssetByAbsolutePath({ path, entry, collectionName, fileName, typedKeyPath });
 };
 
 /**

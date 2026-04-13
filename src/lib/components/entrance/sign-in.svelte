@@ -1,7 +1,7 @@
 <script>
+  import { _ } from '@sveltia/i18n';
   import { Button, Icon, PromptDialog, Spacer } from '@sveltia/ui';
   import { onMount } from 'svelte';
-  import { _ } from 'svelte-i18n';
 
   import { allBackendServices } from '$lib/services/backends';
   import { cmsConfig } from '$lib/services/config';
@@ -34,18 +34,22 @@
   const showLocalBackendOption = $derived($isLocalHost && !isTestRepo);
 
   onMount(() => {
-    signInAutomatically();
+    // Skip automatic sign-in if there's already an error (e.g. repository access denied), so the
+    // error message is preserved and the user can try again with different credentials
+    if (!$signInError.message) {
+      signInAutomatically();
+    }
   });
 </script>
 
 <div role="none" class="buttons">
   {#if $signingIn}
-    <div role="alert" class="message">{$_('signing_in')}</div>
+    <div role="alert" class="message">{_('signing_in')}</div>
   {:else if configuredBackend}
     {#if showLocalBackendOption}
       <Button
         variant="primary"
-        label={$_('work_with_local_repo')}
+        label={_('work_with_local_repo')}
         disabled={!$isLocalBackendSupported}
         onclick={async () => {
           await signInManually('local');
@@ -55,19 +59,19 @@
         <div role="alert">
           {#if $isBrave}
             {@html makeLink(
-              $_('local_backend.disabled'),
+              _('local_workflow.disabled'),
               'https://sveltiacms.app/en/docs/workflows/local#enabling-file-system-access-api-in-brave',
             )}
           {:else}
-            {$_('local_backend.unsupported_browser')}
+            {_('local_workflow.unsupported_browser')}
           {/if}
         </div>
       {:else if !$signInError.message}
         <div role="none">
           {#if repositoryName}
-            {$_('work_with_local_repo_description', { values: { repo: repositoryName } })}
+            {_('work_with_local_repo_description', { values: { repo: repositoryName } })}
           {:else}
-            {$_('work_with_local_repo_description_no_repo')}
+            {_('work_with_local_repo_description_no_repo')}
           {/if}
         </div>
       {/if}
@@ -76,8 +80,8 @@
     <Button
       variant={showLocalBackendOption ? 'secondary' : 'primary'}
       label={isTestRepo
-        ? $_('work_with_test_repo')
-        : $_('sign_in_with_x', { values: { service: configuredBackend.label } })}
+        ? _('work_with_test_repo')
+        : _('sign_in_with_x', { values: { service: configuredBackend.label } })}
       onclick={async () => {
         await signInManually(configuredBackendName);
       }}
@@ -85,7 +89,7 @@
     {#if !isTestRepo}
       <Button
         variant="secondary"
-        label={$_('sign_in_with_x_using_token', { values: { service: configuredBackend.label } })}
+        label={_('sign_in_with_x_using_token', { values: { service: configuredBackend.label } })}
         onclick={() => {
           showTokenDialog = true;
         }}
@@ -93,7 +97,7 @@
     {/if}
   {/if}
   {#if $signInError.message && $signInError.context === 'authentication'}
-    <div role="alert" class="error">
+    <div role="alert" class="error iconic">
       <Icon name="error" />
       {$signInError.message}
     </div>
@@ -103,18 +107,18 @@
 <PromptDialog
   bind:open={showTokenDialog}
   bind:value={token}
-  title={$_('sign_in_using_pat_title')}
-  textboxAttrs={{ spellcheck: false, 'aria-label': $_('personal_access_token') }}
-  okLabel={$_('sign_in')}
+  title={_('sign_in_using_pat_title')}
+  textboxAttrs={{ spellcheck: false, 'aria-label': _('personal_access_token') }}
+  okLabel={_('sign_in')}
   okDisabled={!token.trim()}
   onOk={async () => {
     await signInManually(configuredBackendName, token.trim());
   }}
 >
-  {$_('sign_in_using_pat_description')}
+  {_('sign_in_using_pat_description')}
   {#if configuredBackend?.repository?.tokenPageURL}
     {@html makeLink(
-      $_('sign_in_using_pat_link', { values: { service: configuredBackend.label } }),
+      _('sign_in_using_pat_link', { values: { service: configuredBackend.label } }),
       configuredBackend.repository.tokenPageURL,
     )}
   {/if}
@@ -135,9 +139,11 @@
   }
 
   [role='alert'] {
-    display: flex;
-    align-items: center;
-    gap: 8px;
+    &.iconic {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
 
     &.error {
       color: var(--sui-error-foreground-color);

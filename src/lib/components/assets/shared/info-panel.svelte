@@ -1,14 +1,17 @@
 <script>
+  import { _, locale as appLocale } from '@sveltia/i18n';
   import { Button } from '@sveltia/ui';
   import { getPathInfo } from '@sveltia/utils/file';
-  import { sleep } from '@sveltia/utils/misc';
   import mime from 'mime';
-  import { _, locale as appLocale } from 'svelte-i18n';
 
   import AssetPreview from '$lib/components/assets/shared/asset-preview.svelte';
   import LeafletMap from '$lib/components/common/leaflet-map.svelte';
   import { goto } from '$lib/services/app/navigation';
-  import { defaultAssetDetails, getAssetDetails } from '$lib/services/assets/info';
+  import {
+    defaultAssetDetails,
+    getAssetDetails,
+    getAssetUsedEntries,
+  } from '$lib/services/assets/details';
   import { isMediaKind } from '$lib/services/assets/kinds';
   import { getCollectionLabel } from '$lib/services/contents/collection';
   import {
@@ -17,7 +20,7 @@
   } from '$lib/services/contents/collection/files';
   import { getAssociatedCollections } from '$lib/services/contents/entry';
   import { getEntrySummary } from '$lib/services/contents/entry/summary';
-  import { DATE_TIME_FORMAT_OPTIONS } from '$lib/services/utils/date';
+  import { formatDate } from '$lib/services/utils/date';
   import { formatSize } from '$lib/services/utils/file';
   import { formatDuration } from '$lib/services/utils/media/video';
 
@@ -50,18 +53,11 @@
   const canPreview = $derived(isMediaKind(kind) || path.endsWith('.pdf'));
 
   /**
-   * Format the date to a localized string.
-   * @param {Date} date Date to format.
-   * @returns {string} Formatted date string.
-   */
-  const formatDate = (date) =>
-    date.toLocaleString($appLocale ?? undefined, DATE_TIME_FORMAT_OPTIONS);
-
-  /**
    * Update the properties above.
    */
   const updateProps = async () => {
     details = asset ? await getAssetDetails(asset) : { ...defaultAssetDetails };
+    details.usedEntries = asset ? await getAssetUsedEntries(asset) : [];
   };
 
   $effect(() => {
@@ -93,18 +89,18 @@
     </div>
   {/if}
   <section>
-    <h4>{$_('kind')}</h4>
+    <h4>{_('kind')}</h4>
     <p>
-      {$_(`file_type_labels.${extension}`, {
+      {_(`file_type_labels.${extension}`, {
         default: mime.getType(path) ?? extension.toUpperCase(),
       })}
     </p>
   </section>
   {#if !!size}
     <section>
-      <h4>{$_('size')}</h4>
+      <h4>{_('size')}</h4>
       <p>
-        {#key $appLocale}
+        {#key appLocale.current}
           {formatSize(size)}
         {/key}
       </p>
@@ -112,18 +108,18 @@
   {/if}
   {#if canPreview}
     <section>
-      <h4>{$_('dimensions')}</h4>
+      <h4>{_('dimensions')}</h4>
       <p>{dimensions ? `${dimensions.width}×${dimensions.height}` : '–'}</p>
     </section>
   {/if}
   {#if ['audio', 'video'].includes(kind)}
     <section>
-      <h4>{$_('duration')}</h4>
+      <h4>{_('duration')}</h4>
       <p>{duration ? formatDuration(duration) : '–'}</p>
     </section>
   {/if}
   <section>
-    <h4>{$_('public_url')}</h4>
+    <h4>{_('public_url')}</h4>
     <p>
       {#if publicURL}
         <a href={publicURL} target="_blank">{publicURL}</a>
@@ -133,7 +129,7 @@
     </p>
   </section>
   <section>
-    <h4>{$_('file_path')}</h4>
+    <h4>{_('file_path')}</h4>
     <p>
       {#if repoBlobURL}
         <a href={repoBlobURL}>/{path}</a>
@@ -143,11 +139,13 @@
     </p>
   </section>
   <section>
-    <h4>{$_('used_in')}</h4>
-    {#each usedEntries as entry (entry.id)}
-      {#await sleep() then}
+    <h4>{_('used_in')}</h4>
+    {#if !usedEntries}
+      <p>{_('loading')}</p>
+    {:else}
+      {#each usedEntries as entry (entry.id)}
         {#each getAssociatedCollections(entry) as collection (collection.name)}
-          {#key $appLocale}
+          {#key appLocale.current}
             {@const collectionLabel = getCollectionLabel(collection)}
             {#each getCollectionFilesByEntry(collection, entry) as file (file.name)}
               {@render usedEntryLink({
@@ -164,32 +162,32 @@
             {/each}
           {/key}
         {/each}
-      {/await}
-    {:else}
-      <p>{$_('sort_keys.none')}</p>
-    {/each}
+      {:else}
+        <p>{_('sort_keys.none')}</p>
+      {/each}
+    {/if}
   </section>
   {#if commitAuthor}
     <section>
-      <h4>{$_('sort_keys.commit_author')}</h4>
+      <h4>{_('sort_keys.commit_author')}</h4>
       <p>{commitAuthor.name || commitAuthor.login || commitAuthor.email}</p>
     </section>
   {/if}
   {#if commitDate}
     <section>
-      <h4>{$_('sort_keys.commit_date')}</h4>
-      <p>{formatDate(commitDate)}</p>
+      <h4>{_('sort_keys.commit_date')}</h4>
+      <p>{formatDate(commitDate, appLocale.current)}</p>
     </section>
   {/if}
   {#if createdDate}
     <section>
-      <h4>{$_('created_date')}</h4>
-      <p>{formatDate(createdDate)}</p>
+      <h4>{_('created_date')}</h4>
+      <p>{formatDate(createdDate, appLocale.current)}</p>
     </section>
   {/if}
   {#if coordinates}
     <section>
-      <h4>{$_('location')}</h4>
+      <h4>{_('location')}</h4>
       <LeafletMap {coordinates} />
     </section>
   {/if}

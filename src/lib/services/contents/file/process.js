@@ -8,6 +8,7 @@ import { getCollectionFile } from '$lib/services/contents/collection/files';
 import { getIndexFile } from '$lib/services/contents/collection/index-file';
 import { hasRootField } from '$lib/services/contents/entry/fields';
 import { parseEntryFile } from '$lib/services/contents/file/parse';
+import { getOrCreate } from '$lib/services/utils/cache';
 
 /**
  * @import {
@@ -16,9 +17,8 @@ import { parseEntryFile } from '$lib/services/contents/file/parse';
  * InternalCollection,
  * InternalEntryCollection,
  * InternalLocaleCode,
- * RawEntryContent,
  * } from '$lib/types/private';
- * @import { Field } from '$lib/types/public';
+ * @import { Field, RawEntryContent } from '$lib/types/public';
  */
 
 /**
@@ -27,6 +27,9 @@ import { parseEntryFile } from '$lib/services/contents/file/parse';
  * @returns {boolean} Result.
  */
 export const isIndexFile = (path) => /\/_index(?:\.[\w-]+)?\.md$/.test(path);
+
+/** @type {Map<string, RegExp>} */
+const slugRegexCache = new Map();
 
 /**
  * Determine the slug for the given entry content.
@@ -42,41 +45,45 @@ export const isIndexFile = (path) => /\/_index(?:\.[\w-]+)?\.md$/.test(path);
  */
 export const getSlug = ({ subPath, subPathTemplate }) => {
   if (subPathTemplate?.includes('{{slug}}')) {
-    // Build regex by replacing placeholders with patterns
-    let regexPattern = '';
-    let remaining = subPathTemplate;
+    const regex = getOrCreate(slugRegexCache, subPathTemplate, () => {
+      // Build regex by replacing placeholders with patterns
+      let regexPattern = '';
+      let remaining = subPathTemplate;
 
-    // Process template character by character, handling placeholders specially
-    while (remaining.length > 0) {
-      const nextPlaceholder = remaining.indexOf('{{');
+      // Process template character by character, handling placeholders specially
+      while (remaining.length > 0) {
+        const nextPlaceholder = remaining.indexOf('{{');
 
-      if (nextPlaceholder === -1) {
-        // No more placeholders, escape remaining literal text
-        regexPattern += escapeRegExp(remaining);
-        break;
+        if (nextPlaceholder === -1) {
+          // No more placeholders, escape remaining literal text
+          regexPattern += escapeRegExp(remaining);
+          break;
+        }
+
+        // Add escaped literal text before placeholder
+        if (nextPlaceholder > 0) {
+          regexPattern += escapeRegExp(remaining.substring(0, nextPlaceholder));
+        }
+
+        // Find end of placeholder
+        const placeholderEnd = remaining.indexOf('}}', nextPlaceholder);
+
+        if (placeholderEnd === -1) {
+          // Malformed template, treat as literal
+          regexPattern += escapeRegExp(remaining);
+          break;
+        }
+
+        const placeholder = remaining.substring(nextPlaceholder, placeholderEnd + 2);
+
+        regexPattern += placeholder === '{{slug}}' ? '([^/]+)' : '[^/]+?';
+        remaining = remaining.substring(placeholderEnd + 2);
       }
 
-      // Add escaped literal text before placeholder
-      if (nextPlaceholder > 0) {
-        regexPattern += escapeRegExp(remaining.substring(0, nextPlaceholder));
-      }
+      return new RegExp(`^${regexPattern}$`);
+    });
 
-      // Find end of placeholder
-      const placeholderEnd = remaining.indexOf('}}', nextPlaceholder);
-
-      if (placeholderEnd === -1) {
-        // Malformed template, treat as literal
-        regexPattern += escapeRegExp(remaining);
-        break;
-      }
-
-      const placeholder = remaining.substring(nextPlaceholder, placeholderEnd + 2);
-
-      regexPattern += placeholder === '{{slug}}' ? '([^/]+)' : '[^/]+?';
-      remaining = remaining.substring(placeholderEnd + 2);
-    }
-
-    const [, slug] = subPath.match(new RegExp(`^${regexPattern}$`)) ?? [];
+    const [, slug] = subPath.match(regex) ?? [];
 
     if (slug) {
       return slug;
@@ -452,7 +459,9 @@ export const prepareEntry = async ({ file, entries, errors }) => {
       subPathTemplate,
       allLocales,
     );
-  } else if (isMultiFileStructure && locale) {
+  } else {
+    // `isMultiFileStructure` is always true here (the only non-`i18nSingleFile` path), and `locale`
+    // is always set (the guard above returned early if it wasn’t).
     const wasMerged = processI18nMultiFileEntry(
       entry,
       transformedContent,
@@ -460,7 +469,7 @@ export const prepareEntry = async ({ file, entries, errors }) => {
       fileName,
       subPath,
       subPathTemplate,
-      locale,
+      /** @type {InternalLocaleCode} */ (locale),
       defaultLocale,
       collectionName,
       canonicalSlugKey,

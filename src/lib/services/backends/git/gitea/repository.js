@@ -1,11 +1,10 @@
-import { get } from 'svelte/store';
-import { _ } from 'svelte-i18n';
+import { _ } from '@sveltia/i18n';
 
 import { fetchAPI } from '$lib/services/backends/git/shared/api';
 import { REPOSITORY_INFO_PLACEHOLDER } from '$lib/services/backends/git/shared/repository';
 
 /**
- * @import { RepositoryInfo } from '$lib/types/private';
+ * @import { RepositoryBaseURLs, RepositoryInfo } from '$lib/types/private';
  */
 
 /**
@@ -32,12 +31,13 @@ export const resetRepositoryInfoCache = () => {
  * @param {string} repoURL The base URL of the repository.
  * @param {string} [branch] The branch name. Could be `undefined` if the branch is not specified in
  * the CMS configuration.
- * @returns {{ treeBaseURL: string, blobBaseURL: string }} An object containing the tree base URL
- * for browsing files, and the blob base URL for accessing file contents.
+ * @returns {RepositoryBaseURLs} An object containing the tree base URL for browsing files, and the
+ * blob base URL for accessing file contents.
  */
 export const getBaseURLs = (repoURL, branch) => ({
   treeBaseURL: branch ? `${repoURL}/src/branch/${branch}` : repoURL,
   blobBaseURL: branch ? `${repoURL}/src/branch/${branch}` : '',
+  commitBaseURL: `${repoURL}/commit`,
 });
 
 /**
@@ -68,7 +68,7 @@ export const checkRepositoryAccess = async () => {
 
     if (!permissions?.pull) {
       throw new Error('Not a collaborator of the repository', {
-        cause: new Error(get(_)('repository_no_access', { values: { repo } })),
+        cause: new Error(_('repository_no_access', { values: { repo } })),
       });
     }
   } catch (error) {
@@ -77,7 +77,7 @@ export const checkRepositoryAccess = async () => {
     }
 
     throw new Error('Failed to check repository access', {
-      cause: new Error(get(_)('repository_not_found', { values: { repo } })),
+      cause: new Error(_('repository_not_found', { values: { repo } })),
     });
   }
 };
@@ -96,7 +96,7 @@ export const fetchDefaultBranchName = async () => {
 
     if (!branch) {
       throw new Error('Failed to retrieve the default branch name.', {
-        cause: new Error(get(_)('repository_empty', { values: { repo } })),
+        cause: new Error(_('repository_empty', { values: { repo } })),
       });
     }
 
@@ -105,7 +105,7 @@ export const fetchDefaultBranchName = async () => {
     return branch;
   } catch {
     throw new Error('Failed to retrieve the default branch name.', {
-      cause: new Error(get(_)('repository_not_found', { values: { repo } })),
+      cause: new Error(_('repository_not_found', { values: { repo } })),
     });
   }
 };

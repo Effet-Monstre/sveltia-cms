@@ -1,7 +1,7 @@
+import { _ } from '@sveltia/i18n';
 import { isObject } from '@sveltia/utils/object';
 import { LocalStorage } from '@sveltia/utils/storage';
 import { get, writable } from 'svelte/store';
-import { _ } from 'svelte-i18n';
 
 import { goto, parseLocation } from '$lib/services/app/navigation';
 import { backend, backendName } from '$lib/services/backends';
@@ -37,6 +37,31 @@ export const unauthenticated = writable(true);
 export const signingIn = writable(false);
 
 /**
+ * Clear the cached user token so the sign-in form is shown on next load.
+ */
+const clearUserCache = async () => {
+  await LocalStorage.set('sveltia-cms.user', {});
+  user.set(undefined);
+  unauthenticated.set(true);
+};
+
+/**
+ * Clear the cached token for authentication/access errors so the sign-in form is shown instead of a
+ * dead-end error. Don’t clear for configuration errors like missing branches or repositories where
+ * the credentials are still valid.
+ * @param {Error} error Exception to check if it’s an authentication error.
+ */
+const clearUserCacheIfNeeded = async (error) => {
+  const isAuthError =
+    typeof (/** @type {any} */ (error?.cause)?.status) === 'number' ||
+    error?.message === 'Not a collaborator of the repository';
+
+  if (isAuthError) {
+    await clearUserCache();
+  }
+};
+
+/**
  * Reset the sign-in error store.
  */
 export const resetError = () => {
@@ -49,15 +74,14 @@ export const resetError = () => {
  * @param {SignInErrorContext} [context] Context of the error.
  */
 export const logError = (ex, context = 'authentication') => {
-  let message =
-    /** @type {{ message: string }} */ (ex.cause)?.message || get(_)('unexpected_error');
+  let message = /** @type {{ message: string }} */ (ex.cause)?.message || _('unexpected_error');
 
   if (ex.name === 'NotFoundError') {
-    message = get(_)('sign_in_error.not_project_root');
+    message = _('sign_in_error.not_project_root');
   }
 
   if (ex.name === 'AbortError') {
-    message = get(_)(
+    message = _(
       get(backendName) === 'local'
         ? 'sign_in_error.picker_dismissed'
         : 'sign_in_error.authentication_aborted',
@@ -215,6 +239,8 @@ export const signInAutomatically = async () => {
     } else {
       logError(ex, 'dataFetch');
     }
+
+    await clearUserCacheIfNeeded(ex);
   }
 };
 
@@ -247,7 +273,7 @@ export const signInManually = async (_backendName, token) => {
       // If the user is signing in using a personal access token (PAT) and the token is invalid,
       // display a specific error message.
       logError(
-        new Error('Invalid token', { cause: { message: get(_)('sign_in_error.invalid_token') } }),
+        new Error('Invalid token', { cause: { message: _('sign_in_error.invalid_token') } }),
       );
     } else {
       logError(ex);
@@ -269,6 +295,7 @@ export const signInManually = async (_backendName, token) => {
     await _backend.fetchFiles();
   } catch (/** @type {any} */ ex) {
     logError(ex, 'dataFetch');
+    await clearUserCacheIfNeeded(ex);
   }
 };
 
@@ -277,14 +304,9 @@ export const signInManually = async (_backendName, token) => {
  */
 export const signOut = async () => {
   await get(backend)?.signOut();
-
-  // Leave an empty user object in the local storage to prevent the user from being signed in
-  // again automatically in `signInAutomatically`.
-  await LocalStorage.set('sveltia-cms.user', {});
+  await clearUserCache();
 
   backendName.set(undefined);
-  user.set(undefined);
-  unauthenticated.set(true);
   dataLoaded.set(false);
 
   const redirectURL = get(cmsConfig)?.logout_redirect_url;

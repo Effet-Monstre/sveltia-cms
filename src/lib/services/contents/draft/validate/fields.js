@@ -1,31 +1,34 @@
-import { escapeRegExp } from '@sveltia/utils/string';
 import { get } from 'svelte/store';
 
 import { entryDraft } from '$lib/services/contents/draft';
+import { getFieldValidationMessages } from '$lib/services/contents/draft/validate/messages';
 import { getField, isFieldMultiple, isFieldRequired } from '$lib/services/contents/entry/fields';
 import { MEDIA_FIELD_TYPES, MIN_MAX_VALUE_FIELD_TYPES } from '$lib/services/contents/fields';
+import { resolveCodeField } from '$lib/services/contents/fields/code/validate';
 import { validateDateTimeField } from '$lib/services/contents/fields/date-time/validate';
-import { getPairs } from '$lib/services/contents/fields/key-value/helper';
+import { validateKeyValueField } from '$lib/services/contents/fields/key-value/validate';
 import { getListFieldInfo } from '$lib/services/contents/fields/list/helper';
+import { validateListField } from '$lib/services/contents/fields/list/validate';
 import { validateNumberField } from '$lib/services/contents/fields/number/validate';
 import { COMPONENT_NAME_PREFIX_REGEX } from '$lib/services/contents/fields/rich-text';
 import { validateStringField } from '$lib/services/contents/fields/string/validate';
 import { getRegex } from '$lib/services/utils/misc';
 
 /**
- * @import { Writable } from 'svelte/store';
  * @import {
  * DraftValueStoreKey,
  * EntryDraft,
  * EntryValidityState,
  * FlattenedEntryContent,
  * GetFieldArgs,
+ * LocaleValidationMessagesMap,
  * LocaleValidityMap,
  * ValidateFieldFuncArgs,
  * } from '$lib/types/private';
  * @import {
  * CodeField,
  * Field,
+ * FieldKeyPath,
  * ListField,
  * LocaleCode,
  * MinMaxValueField,
@@ -37,10 +40,18 @@ import { getRegex } from '$lib/services/utils/misc';
  * @property {EntryDraft} draft Entry draft.
  * @property {LocaleValidityMap} validities Validity state.
  * @property {LocaleCode} locale Current locale.
- * @property {string} keyPath Field key path.
+ * @property {FieldKeyPath} keyPath Field key path.
  * @property {FlattenedEntryContent} valueMap Entry values.
  * @property {any} value Field value.
  * @property {string} [componentName] Rich text editor component name.
+ */
+
+/**
+ * @typedef {object} ValidationResults
+ * @property {boolean} valid Whether the entry draft is valid.
+ * @property {LocaleValidityMap} validities Validity state for each field in each locale.
+ * @property {LocaleValidationMessagesMap} validationMessages Validation messages for each field in
+ * each locale.
  */
 
 /**
@@ -94,11 +105,34 @@ export const validityProxyHandler = {
 };
 
 /**
+ * Validate a scalar field (all non-aggregate types), updating `validity` in place.
+ * @param {object} args Arguments.
+ * @param {any} args.value Current field value.
+ * @param {boolean} args.required Whether the field is required.
+ * @param {any} args.validation Pattern validation array or undefined.
+ * @param {EntryValidityState} args.validity Validity state to update.
+ */
+const validateScalarField = ({ value, required, validation, validity }) => {
+  const trimmed = typeof value === 'string' ? value.trim() : value;
+
+  if (required && (trimmed === undefined || trimmed === null || trimmed === '')) {
+    validity.valueMissing = true;
+  }
+
+  if (Array.isArray(validation)) {
+    const regex = getRegex(validation[0]);
+
+    if (regex && !regex.test(String(trimmed))) {
+      validity.patternMismatch = true;
+    }
+  }
+};
+
+/**
  * Validate each field.
  * @internal
  * @param {ValidateFieldArgs} args Arguments.
  * @returns {EntryValidityState | undefined} Field validity.
- * @todo Refactor this function to reduce complexity and improve readability.
  */
 export const validateAnyField = (args) => {
   const { draft, locale, valueMap, componentName, validities } = args;
@@ -146,31 +180,19 @@ export const validateAnyField = (args) => {
   const validity = { ...DEFAULT_VALIDITY };
 
   if (fieldType === 'list' || multiple) {
-    // Given that values for an array field are flatten into `field.0`, `field.1` ... `field.N`,
-    // we should validate only once against all these values
-    if (keyPath in validities[locale]) {
-      return undefined;
-    }
+    const { skip } = validateListField({
+      keyPath,
+      value,
+      valueEntries,
+      validity,
+      validities,
+      locale,
+      required,
+      min,
+      max,
+    });
 
-    const keyPathRegex = new RegExp(`^${escapeRegExp(keyPath)}\\.\\d+`);
-
-    // We need to check both the list itself and the items in the list because the list can be empty
-    // but still have items in the list, depending on the flattening condition. It means the data
-    // usually looks like `{ field.0: 'foo', field.1: 'bar' }`, but it can contain an empty list
-    // like `{ field: [], field.0: 'foo', field.1: 'bar' }` in some cases. Or it can be a simple
-    // list field like `{ field: ['foo', 'bar'] }` without the subfields.
-    const size =
-      Array.isArray(value) && !!value.length
-        ? value.length
-        : new Set(valueEntries.map(([key]) => key.match(keyPathRegex)?.[0]).filter(Boolean)).size;
-
-    if (required && !size) {
-      validity.valueMissing = true;
-    } else if (typeof min === 'number' && size < min) {
-      validity.rangeUnderflow = true;
-    } else if (typeof max === 'number' && size > max) {
-      validity.rangeOverflow = true;
-    }
+    if (skip) return undefined;
   }
 
   if (fieldType === 'object') {
@@ -180,53 +202,34 @@ export const validateAnyField = (args) => {
   }
 
   if (fieldType === 'keyvalue') {
-    // Given that values for a KeyValue field are flatten into `field.key1`, `field.key2` ...
-    // `field.keyN`, we should validate only once against all these values. The key can be
-    // empty, so use `.*` in the regex instead of `.+`
-    const _keyPath = /** @type {string} */ (keyPath.match(/(.+?)(?:\.[^.]*)?$/)?.[1]);
-
-    const parentFieldConfig = getField({
-      ...getFieldArgs,
-      keyPath: _keyPath.replace(COMPONENT_NAME_PREFIX_REGEX, ''), // Remove component name prefix
+    const result = validateKeyValueField({
+      keyPath,
+      getFieldArgs,
+      validity,
+      validities,
+      locale,
+      required,
+      min,
+      max,
     });
 
-    if (_keyPath in validities[locale] || parentFieldConfig?.widget !== 'keyvalue') {
-      return undefined;
-    }
-
-    keyPath = _keyPath;
-
-    const _entryDraft = /** @type {Writable<EntryDraft>} */ (entryDraft);
-    const pairs = getPairs({ entryDraft: _entryDraft, keyPath: _keyPath, locale });
-
-    if (required && !pairs.length) {
-      validity.valueMissing = true;
-    } else if (typeof min === 'number' && pairs.length < min) {
-      validity.rangeUnderflow = true;
-    } else if (typeof max === 'number' && pairs.length > max) {
-      validity.rangeOverflow = true;
-    }
+    if (result.skip) return undefined;
+    keyPath = result.keyPath;
   }
 
   if (fieldType === 'code') {
-    const {
-      output_code_only: outputCodeOnly = false,
-      keys: outputKeys = { code: 'code', lang: 'lang' },
-    } = /** @type {CodeField} */ (fieldConfig);
+    const result = resolveCodeField({
+      keyPath,
+      value,
+      valueMap,
+      fieldConfig: /** @type {CodeField} */ (fieldConfig),
+      validities,
+      locale,
+    });
 
-    const _keyPath = keyPath.match(`(.+)\\.(?:${outputKeys.code}|${outputKeys.lang})$`)?.[1] ?? '';
-
-    if (_keyPath) {
-      keyPath = _keyPath;
-    }
-
-    if (keyPath in validities[locale]) {
-      return undefined;
-    }
-
-    if (!outputCodeOnly) {
-      value = valueMap[`${keyPath}.${outputKeys.code}`];
-    }
+    if (result.skip) return undefined;
+    keyPath = result.keyPath;
+    value = result.value;
   }
 
   if (
@@ -239,30 +242,13 @@ export const validateAnyField = (args) => {
   }
 
   if (!(['object', 'list', 'hidden', 'compute', 'keyvalue'].includes(fieldType) || multiple)) {
-    if (typeof value === 'string') {
-      value = value.trim();
-    }
-
-    if (
-      required &&
-      (value === undefined || value === null || value === '' || (multiple && !value.length))
-    ) {
-      validity.valueMissing = true;
-    }
-
-    if (Array.isArray(validation)) {
-      const regex = getRegex(validation[0]);
-
-      if (regex && !regex.test(String(value))) {
-        validity.patternMismatch = true;
-      }
-    }
+    validateScalarField({ value, required, validation, validity });
   }
 
-  const validateField = VALIDATE_FIELD_FUNCTIONS[fieldType];
+  const validateFieldFn = VALIDATE_FIELD_FUNCTIONS[fieldType];
 
-  if (validateField) {
-    Object.assign(validity, validateField({ fieldConfig, locale, value }).validity);
+  if (validateFieldFn) {
+    Object.assign(validity, validateFieldFn({ fieldConfig, locale, value }).validity);
   }
 
   return new Proxy(validity, validityProxyHandler);
@@ -321,7 +307,7 @@ export const validateList = ({ fieldConfig, validateArgs }) => {
 /**
  * Validate the field values and return the results. Mimic the native `ValidityState` API.
  * @param {DraftValueStoreKey} valueStoreKey Key to store the values in {@link EntryDraft}.
- * @returns {{ valid: boolean, validities: LocaleValidityMap }} Validation results.
+ * @returns {ValidationResults} Validation results.
  * @see https://developer.mozilla.org/en-US/docs/Web/API/ValidityState
  */
 export const validateFields = (valueStoreKey) => {
@@ -329,6 +315,8 @@ export const validateFields = (valueStoreKey) => {
   const { collectionName, fileName, isIndexFile, currentLocales } = draft;
   /** @type {LocaleValidityMap} */
   const validities = {};
+  /** @type {LocaleValidationMessagesMap} */
+  const validationMessages = {};
   /** @type {GetFieldArgs} */
   const getFieldArgs = { collectionName, fileName, isIndexFile, keyPath: '', valueMap: {} };
   let valid = true;
@@ -341,6 +329,9 @@ export const validateFields = (valueStoreKey) => {
       validities[locale] = Object.fromEntries(
         valueEntries.map(([keyPath]) => [keyPath, { valid: true }]),
       );
+      validationMessages[locale] = Object.fromEntries(
+        valueEntries.map(([keyPath]) => [keyPath, []]),
+      );
 
       return;
     }
@@ -349,6 +340,7 @@ export const validateFields = (valueStoreKey) => {
 
     // Reset the state first
     validities[locale] = {};
+    validationMessages[locale] = {};
 
     valueEntries.forEach(([keyPath, value]) => {
       const [prefix] = keyPath.match(COMPONENT_NAME_PREFIX_REGEX) ?? [];
@@ -367,11 +359,13 @@ export const validateFields = (valueStoreKey) => {
 
       // Validate a list itself before the items
       if (LIST_KEY_PATH_REGEX.test(keyPath)) {
+        const listKeyPath = keyPath.replace(LIST_KEY_PATH_REGEX, '');
+
         const { valid: listValid, validateItems } = validateList({
           fieldConfig,
           validateArgs: {
             ...validateArgs,
-            keyPath: keyPath.replace(LIST_KEY_PATH_REGEX, ''),
+            keyPath: listKeyPath,
             value: '',
             componentName,
           },
@@ -379,6 +373,18 @@ export const validateFields = (valueStoreKey) => {
 
         if (!listValid) {
           valid = false;
+        }
+
+        // Compute messages for the list field itself (only on first item iteration)
+        if (!(listKeyPath in validationMessages[locale])) {
+          const listValidity = validities[locale][listKeyPath];
+
+          if (listValidity) {
+            validationMessages[locale][listKeyPath] = getFieldValidationMessages({
+              validity: listValidity,
+              fieldConfig,
+            });
+          }
         }
 
         if (!validateItems) {
@@ -389,64 +395,14 @@ export const validateFields = (valueStoreKey) => {
       if (!validateField({ ...validateArgs, keyPath, value, componentName })) {
         valid = false;
       }
+
+      const validity = validities[locale][keyPath];
+
+      if (validity) {
+        validationMessages[locale][keyPath] = getFieldValidationMessages({ validity, fieldConfig });
+      }
     });
   });
 
-  return { valid, validities };
-};
-
-/**
- * Validate the slugs and return the results. At this time, we only check if the slug is empty
- * when the slug editor is shown. A pattern check can be added later if needed.
- * @internal
- * @returns {{ valid: boolean, validities: LocaleValidityMap }} Validation results.
- */
-export const validateSlugs = () => {
-  const { currentSlugs, slugEditor } = /** @type {EntryDraft} */ (get(entryDraft));
-  /** @type {LocaleValidityMap} */
-  const validities = {};
-  let valid = true;
-
-  Object.entries(currentSlugs).forEach(([locale, slug]) => {
-    const valueMissing = !!slugEditor[locale] && !slug?.trim();
-
-    if (valueMissing) {
-      valid = false;
-    }
-
-    validities[locale] = { _slug: { valueMissing, valid: !valueMissing } };
-  });
-
-  return { valid, validities };
-};
-
-/**
- * Validate the field values, update the validity for all the fields, and return the final results
- * as a boolean.
- * @returns {boolean} Whether the entry draft is valid.
- */
-export const validateEntry = () => {
-  const { valid: currentValuesValid, validities: currentValuesValidities } =
-    validateFields('currentValues');
-
-  const { valid: extraValuesValid, validities: extraValuesValidities } =
-    validateFields('extraValues');
-
-  const { valid: slugsValid, validities: slugsValidities } = validateSlugs();
-
-  /** @type {Writable<EntryDraft>} */ (entryDraft).update((_draft) => ({
-    ..._draft,
-    validities: Object.fromEntries(
-      Object.keys(currentValuesValidities).map((locale) => [
-        locale,
-        {
-          ...currentValuesValidities[locale],
-          ...extraValuesValidities[locale],
-          ...slugsValidities[locale],
-        },
-      ]),
-    ),
-  }));
-
-  return currentValuesValid && extraValuesValid && slugsValid;
+  return { valid, validities, validationMessages };
 };

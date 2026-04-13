@@ -2,7 +2,7 @@
 
 import { beforeEach, describe, expect, test, vi } from 'vitest';
 
-import { markdownFieldKeys, sortEntries } from './sort';
+import { getSortKeyGetter, markdownFieldKeys, sortEntries } from './sort';
 
 /**
  * @import { Entry, InternalCollection } from '$lib/types/private';
@@ -301,6 +301,34 @@ describe('sortEntries', () => {
 
     // Entries without dates (treated as epoch 0) come before the dated entry
     expect(result.map((e) => e.slug)).toContain('entry-1');
+  });
+
+  test('should treat entry as zero when getDate returns null for a date field', () => {
+    const conditions = { key: 'date', order: 'ascending' };
+
+    vi.mocked(getField).mockReturnValue({
+      name: 'date',
+      widget: 'datetime',
+      label: 'Date',
+    });
+
+    vi.mocked(getSortKeyType).mockReturnValue(String);
+
+    vi.mocked(getPropertyValue).mockImplementation(({ entry, key }) => {
+      if (key === 'date') {
+        return entry.locales.en.content.date;
+      }
+
+      return undefined;
+    });
+
+    // getDate returns null for unparseable dates → ?? 0 fallback fires
+    vi.mocked(getDate).mockReturnValue(null);
+
+    const result = sortEntries(mockEntries, mockCollection, conditions);
+
+    // All sort keys are 0 when getDate returns null → order is stable
+    expect(result).toHaveLength(mockEntries.length);
   });
 
   test('should handle markdown fields by removing markdown syntax', () => {
@@ -1146,5 +1174,301 @@ describe('sortEntries', () => {
 
     // removeMarkdownSyntax should still be called
     expect(vi.mocked(removeMarkdownSyntax)).toHaveBeenCalled();
+  });
+
+  test('should sort by non-markdown string field (isMarkdownField=false path)', () => {
+    const conditions = { key: 'slug', order: 'ascending' };
+
+    vi.mocked(getField).mockReturnValue({
+      name: 'slug',
+      widget: 'string',
+      label: 'Slug',
+    });
+
+    vi.mocked(getSortKeyType).mockReturnValue(String);
+
+    vi.mocked(getPropertyValue).mockImplementation(({ entry, key }) => {
+      if (key === 'slug') {
+        return entry.slug;
+      }
+
+      return undefined;
+    });
+
+    vi.mocked(removeMarkdownSyntax).mockImplementation((s) => s);
+
+    const result = sortEntries(mockEntries, mockCollection, conditions);
+
+    // 'slug' is not in markdownFieldKeys and widget is not richtext/markdown,
+    // so the plain String(str) branch is used (isMarkdownField=false)
+    expect(result.map((e) => e.slug)).toEqual(['entry-1', 'entry-2', 'entry-3']);
+    expect(vi.mocked(removeMarkdownSyntax)).not.toHaveBeenCalled();
+  });
+
+  test('should sort by _summary field using generated summary values', () => {
+    const locale = 'en';
+
+    vi.mocked(getSortKeyType).mockReturnValue(String);
+
+    // Mock getEntrySummary to return different summary values for each entry
+    vi.mocked(getEntrySummary).mockImplementation((collection, entry) => {
+      const summaries = {
+        'entry-1': 'B Summary',
+        'entry-2': 'A Summary',
+        'entry-3': 'C Summary',
+      };
+
+      return summaries[entry.slug] || '';
+    });
+
+    const result = sortEntries(mockEntries, mockCollection, {
+      key: '_summary',
+      order: 'ascending',
+      locale,
+    });
+
+    // Entries should be sorted by their generated summary values
+    expect(result.map((e) => e.slug)).toEqual(['entry-2', 'entry-1', 'entry-3']); // A, B, C
+    expect(vi.mocked(getEntrySummary)).toHaveBeenCalledTimes(3);
+  });
+
+  test('should sort by _summary field in descending order', () => {
+    const locale = 'en';
+
+    vi.mocked(getSortKeyType).mockReturnValue(String);
+
+    vi.mocked(getEntrySummary).mockImplementation((collection, entry) => {
+      const summaries = {
+        'entry-1': 'B Summary',
+        'entry-2': 'A Summary',
+        'entry-3': 'C Summary',
+      };
+
+      return summaries[entry.slug] || '';
+    });
+
+    const result = sortEntries(mockEntries, mockCollection, {
+      key: '_summary',
+      order: 'descending',
+      locale,
+    });
+
+    // Entries should be sorted by their generated summary values in reverse
+    expect(result.map((e) => e.slug)).toEqual(['entry-3', 'entry-1', 'entry-2']); // C, B, A
+    expect(vi.mocked(getEntrySummary)).toHaveBeenCalledTimes(3);
+  });
+});
+
+describe('getSortKeyGetter', () => {
+  /** @type {InternalCollection} */
+  const mockCollection = {
+    _file: { format: 'frontmatter', extension: 'md', formatOptions: {} },
+    _i18n: {
+      i18nEnabled: false,
+      structure: 'single_file',
+      allLocales: ['en'],
+      initialLocales: ['en'],
+      defaultLocale: 'en',
+      locales: ['en'],
+      canonicalSlug: {},
+    },
+    name: 'posts',
+    label: 'Posts',
+    folder: 'content/posts',
+  };
+
+  /** @type {any} */
+  const mockEntry = {
+    id: 'entry-1',
+    sha: 'sha1',
+    slug: 'entry-1',
+    subPath: '',
+    locales: { en: { path: 'path1', slug: 'entry-1', content: { title: 'Hello' } } },
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  test('should return getEntrySummary result for _summary key', () => {
+    vi.mocked(getEntrySummary).mockReturnValue('Generated Summary');
+
+    const getter = getSortKeyGetter({
+      key: '_summary',
+      type: String,
+      collection: mockCollection,
+      locale: 'en',
+      collectionName: 'posts',
+      dateFieldConfig: undefined,
+      isMarkdownField: false,
+    });
+
+    const result = getter(mockEntry);
+
+    expect(result).toBe('Generated Summary');
+    expect(vi.mocked(getEntrySummary)).toHaveBeenCalledWith(mockCollection, mockEntry, {
+      locale: 'en',
+      useTemplate: true,
+    });
+  });
+
+  test('should return a numeric timestamp for a datetime field', () => {
+    const mockDate = new Date('2023-06-15');
+
+    vi.mocked(getPropertyValue).mockReturnValue('2023-06-15');
+    vi.mocked(getDate).mockReturnValue(mockDate);
+
+    /** @type {any} */
+    const dateFieldConfig = { widget: 'datetime', name: 'published' };
+
+    const getter = getSortKeyGetter({
+      key: 'published',
+      type: String,
+      collection: mockCollection,
+      locale: 'en',
+      collectionName: 'posts',
+      dateFieldConfig,
+      isMarkdownField: false,
+    });
+
+    const result = getter(mockEntry);
+
+    expect(result).toBe(Number(mockDate));
+  });
+
+  test('should return 0 when datetime field value is falsy', () => {
+    vi.mocked(getPropertyValue).mockReturnValue(undefined);
+
+    /** @type {any} */
+    const dateFieldConfig = { widget: 'datetime', name: 'published' };
+
+    const getter = getSortKeyGetter({
+      key: 'published',
+      type: String,
+      collection: mockCollection,
+      locale: 'en',
+      collectionName: 'posts',
+      dateFieldConfig,
+      isMarkdownField: false,
+    });
+
+    const result = getter(mockEntry);
+
+    expect(result).toBe(0);
+  });
+
+  test('should return 0 when getDate returns null', () => {
+    vi.mocked(getPropertyValue).mockReturnValue('bad-date');
+    vi.mocked(getDate).mockReturnValue(null);
+
+    /** @type {any} */
+    const dateFieldConfig = { widget: 'datetime', name: 'published' };
+
+    const getter = getSortKeyGetter({
+      key: 'published',
+      type: String,
+      collection: mockCollection,
+      locale: 'en',
+      collectionName: 'posts',
+      dateFieldConfig,
+      isMarkdownField: false,
+    });
+
+    const result = getter(mockEntry);
+
+    expect(result).toBe(0);
+  });
+
+  test('should return plain string for a String-type field', () => {
+    vi.mocked(getPropertyValue).mockReturnValue('Hello World');
+
+    const getter = getSortKeyGetter({
+      key: 'title',
+      type: String,
+      collection: mockCollection,
+      locale: 'en',
+      collectionName: 'posts',
+      dateFieldConfig: undefined,
+      isMarkdownField: false,
+    });
+
+    const result = getter(mockEntry);
+
+    expect(result).toBe('Hello World');
+    expect(vi.mocked(removeMarkdownSyntax)).not.toHaveBeenCalled();
+  });
+
+  test('should strip markdown for a String-type isMarkdownField', () => {
+    vi.mocked(getPropertyValue).mockReturnValue('**Bold Title**');
+    vi.mocked(removeMarkdownSyntax).mockReturnValue('Bold Title');
+
+    const getter = getSortKeyGetter({
+      key: 'title',
+      type: String,
+      collection: mockCollection,
+      locale: 'en',
+      collectionName: 'posts',
+      dateFieldConfig: undefined,
+      isMarkdownField: true,
+    });
+
+    const result = getter(mockEntry);
+
+    expect(result).toBe('Bold Title');
+    expect(vi.mocked(removeMarkdownSyntax)).toHaveBeenCalledWith('**Bold Title**');
+  });
+
+  test('should return empty string when String-type field value is falsy', () => {
+    vi.mocked(getPropertyValue).mockReturnValue(undefined);
+
+    const getter = getSortKeyGetter({
+      key: 'title',
+      type: String,
+      collection: mockCollection,
+      locale: 'en',
+      collectionName: 'posts',
+      dateFieldConfig: undefined,
+      isMarkdownField: false,
+    });
+
+    const result = getter(mockEntry);
+
+    expect(result).toBe('');
+  });
+
+  test('should return numeric value for a Number-type field', () => {
+    vi.mocked(getPropertyValue).mockReturnValue(42);
+
+    const getter = getSortKeyGetter({
+      key: 'score',
+      type: Number,
+      collection: mockCollection,
+      locale: 'en',
+      collectionName: 'posts',
+      dateFieldConfig: undefined,
+      isMarkdownField: false,
+    });
+
+    const result = getter(mockEntry);
+
+    expect(result).toBe(42);
+  });
+
+  test('should return 0 for Number-type field when value is nullish', () => {
+    vi.mocked(getPropertyValue).mockReturnValue(null);
+
+    const getter = getSortKeyGetter({
+      key: 'score',
+      type: Number,
+      collection: mockCollection,
+      locale: 'en',
+      collectionName: 'posts',
+      dateFieldConfig: undefined,
+      isMarkdownField: false,
+    });
+
+    const result = getter(mockEntry);
+
+    expect(result).toBe(0);
   });
 });
