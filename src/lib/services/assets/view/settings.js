@@ -1,10 +1,9 @@
-import { IndexedDB } from '@sveltia/utils/storage';
 import equal from 'fast-deep-equal';
 import { get, writable } from 'svelte/store';
 
 import { selectedAssetFolder } from '$lib/services/assets/folders';
 import { currentView, defaultView } from '$lib/services/assets/view';
-import { backend } from '$lib/services/backends';
+import { initViewSettingsStorage } from '$lib/services/common/view';
 
 /**
  * @import { Writable } from 'svelte/store';
@@ -15,7 +14,7 @@ import { backend } from '$lib/services/backends';
  * View settings for all the asset collection.
  * @type {Writable<Record<string, AssetListView> | undefined>}
  */
-const assetListSettings = writable();
+export const assetListSettings = writable();
 
 /**
  * Initialize {@link assetListSettings} and relevant subscribers.
@@ -23,23 +22,7 @@ const assetListSettings = writable();
  * @param {BackendService} _backend Backend service.
  */
 export const initSettings = async ({ repository }) => {
-  const { databaseName } = repository ?? {};
-  const settingsDB = databaseName ? new IndexedDB(databaseName, 'ui-settings') : null;
-  const storageKey = 'assets-view';
-
-  assetListSettings.set((await settingsDB?.get(storageKey)) ?? {});
-
-  assetListSettings.subscribe((_settings) => {
-    (async () => {
-      try {
-        if (!equal(_settings, await settingsDB?.get(storageKey))) {
-          await settingsDB?.set(storageKey, _settings);
-        }
-      } catch {
-        //
-      }
-    })();
-  });
+  await initViewSettingsStorage(repository, 'assets-view', assetListSettings);
 
   selectedAssetFolder.subscribe((folder) => {
     const view =
@@ -59,9 +42,3 @@ export const initSettings = async ({ repository }) => {
     }
   });
 };
-
-backend.subscribe((_backend) => {
-  if (_backend && !get(assetListSettings)) {
-    initSettings(_backend);
-  }
-});

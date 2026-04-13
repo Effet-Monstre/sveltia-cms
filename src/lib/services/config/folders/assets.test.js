@@ -74,6 +74,29 @@ describe('config/folders/assets', () => {
       expect(result).toHaveLength(0);
     });
 
+    it('should default public folder to media folder when public_folder is not set', () => {
+      vi.mocked(getValidCollections).mockReturnValue([]);
+
+      const config = {
+        backend: { name: 'git-gateway' },
+        media_folder: 'uploads',
+        collections: [],
+      };
+
+      // @ts-ignore - simplified config for testing
+      const result = getAllAssetFolders(config);
+
+      expect(result).toHaveLength(2); // all assets + global folder
+      expect(result[1]).toEqual({
+        collectionName: undefined,
+        internalPath: 'uploads',
+        internalSubPath: undefined,
+        publicPath: '/uploads',
+        entryRelative: false,
+        hasTemplateTags: false,
+      });
+    });
+
     it('should handle root folder configurations', () => {
       vi.mocked(getValidCollections).mockReturnValue([]);
 
@@ -818,8 +841,55 @@ describe('config/folders/assets', () => {
         typedKeyPath: 'fields.gallery',
         isIndexFile: false,
         internalPath: 'content/docs',
-        internalSubPath: './media/gallery',
+        internalSubPath: 'media/gallery',
         publicPath: './gallery',
+        entryRelative: true,
+        hasTemplateTags: false,
+      });
+    });
+
+    it('should normalize ./ prefix in field-level media_folder to match plain relative path', () => {
+      vi.mocked(getValidCollections).mockReturnValue([
+        // @ts-ignore - simplified collection for testing
+        {
+          name: 'entries',
+          folder: 'src/content/entry-collection',
+        },
+      ]);
+
+      const config = {
+        backend: { name: 'git-gateway' },
+        media_folder: 'static/images',
+        public_folder: '/images',
+        collections: [],
+      };
+
+      const fieldMediaFolders = [
+        {
+          fieldConfig: {
+            media_folder: './images',
+          },
+          context: {
+            collection: { name: 'entries', folder: 'src/content/entry-collection' },
+            collectionFile: undefined,
+            typedKeyPath: 'fields.image',
+            isIndexFile: false,
+          },
+        },
+      ];
+
+      // @ts-ignore - simplified config for testing
+      const result = getAllAssetFolders(config, fieldMediaFolders);
+      const fieldFolder = result.find((f) => f.typedKeyPath === 'fields.image');
+
+      expect(fieldFolder).toEqual({
+        collectionName: 'entries',
+        fileName: undefined,
+        typedKeyPath: 'fields.image',
+        isIndexFile: false,
+        internalPath: 'src/content/entry-collection',
+        internalSubPath: 'images',
+        publicPath: './images',
         entryRelative: true,
         hasTemplateTags: false,
       });
@@ -1094,6 +1164,28 @@ describe('config/folders/assets', () => {
       });
     });
 
+    it('should prefix publicPath with / for normal folder paths (line 114 false branch)', () => {
+      const result = normalizeAssetFolder({
+        collectionName: 'uploads',
+        fileName: undefined,
+        mediaFolder: '/uploads',
+        publicFolder: 'uploads',
+        baseFolder: 'uploads',
+        globalFolders,
+      });
+
+      expect(result).toEqual({
+        collectionName: 'uploads',
+        fileName: undefined,
+        typedKeyPath: undefined,
+        isIndexFile: false,
+        internalPath: 'uploads',
+        publicPath: '/uploads',
+        entryRelative: false,
+        hasTemplateTags: false,
+      });
+    });
+
     it('should handle file collections', () => {
       const result = normalizeAssetFolder({
         collectionName: 'settings',
@@ -1127,6 +1219,29 @@ describe('config/folders/assets', () => {
       });
 
       expect(result).toBeUndefined();
+    });
+
+    it('should use empty string when baseFolder is undefined with entry-relative media folder', () => {
+      const result = normalizeAssetFolder({
+        collectionName: 'about',
+        fileName: undefined,
+        mediaFolder: 'images',
+        publicFolder: undefined,
+        baseFolder: undefined,
+        globalFolders,
+      });
+
+      expect(result).toEqual({
+        collectionName: 'about',
+        fileName: undefined,
+        typedKeyPath: undefined,
+        isIndexFile: false,
+        internalPath: '',
+        internalSubPath: 'images',
+        publicPath: '/images',
+        entryRelative: true,
+        hasTemplateTags: false,
+      });
     });
 
     it('should return undefined when media folder has template tags without global folders', () => {

@@ -212,6 +212,67 @@ describe('Test resolveAssetFolderPaths()', () => {
     });
   });
 
+  test('nested path with _index filename, multiple folders, entry relative', async () => {
+    /** @type {InternalCollection} */
+    const collection = {
+      ...collectionBase,
+      _file: { ..._file, subPath: '{{slug}}/_index' },
+      _i18n: i18nMultiFolder,
+    };
+
+    await setupAssetFolder(relativeAssetFolder);
+
+    expect(
+      resolveAssetFolderPaths({
+        folder: relativeAssetFolder,
+        fillSlugOptions: {
+          collection,
+          content: {},
+          currentSlug,
+          entryFilePath: 'src/content/blog/foo/_index.md',
+        },
+      }),
+    ).toEqual({
+      resolvedInternalPath: 'src/content/blog/foo/images',
+      resolvedPublicPath: '../../foo',
+    });
+  });
+
+  test('nested path with custom filename, single file i18n, entry relative', async () => {
+    /** @type {InternalCollection} */
+    const collection = {
+      ...collectionBase,
+      _file: { ..._file, subPath: '{{slug}}/article' },
+      _i18n: i18nSingleFile,
+    };
+
+    const folder = {
+      collectionName: 'blog',
+      entryRelative: true,
+      hasTemplateTags: false,
+      internalPath: 'src/content/blog',
+      internalSubPath: '',
+      publicPath: '',
+    };
+
+    await setupAssetFolder(folder);
+
+    expect(
+      resolveAssetFolderPaths({
+        folder,
+        fillSlugOptions: {
+          collection,
+          content: {},
+          currentSlug,
+          entryFilePath: 'src/content/blog/foo/article.md',
+        },
+      }),
+    ).toEqual({
+      resolvedInternalPath: 'src/content/blog/foo',
+      resolvedPublicPath: '',
+    });
+  });
+
   test('simple path, multiple folders at root, entry relative', async () => {
     /** @type {InternalCollection} */
     const collection = {
@@ -1398,6 +1459,34 @@ describe('Test resolveAssetFolderPaths()', () => {
       resolvedPublicPath: expect.any(String),
     });
   });
+
+  test('uses empty string fallback when entryFilePath is undefined (new entry, line 213)', async () => {
+    // When entryFilePath is undefined (new entry not yet saved), `??` converts it to ''.
+    // getEntryFolderPath('', subPath) is called with an empty folder path.
+    // Inside getEntryFolderPath, the regex does NOT match '' → `?? folderPath` fallback (line 101)
+    // returns the original empty string.
+    /** @type {InternalCollection} */
+    const collection = {
+      ...collectionBase,
+      _file: { ..._file, subPath: '{{slug}}' },
+      _i18n: i18nMultiFolder,
+    };
+
+    await setupAssetFolder(relativeAssetFolder);
+
+    const result = resolveAssetFolderPaths({
+      folder: relativeAssetFolder,
+      fillSlugOptions: {
+        collection,
+        content: {},
+        currentSlug,
+        entryFilePath: undefined, // New entry: no file path yet
+      },
+    });
+
+    expect(result).toBeDefined();
+    expect(result.resolvedInternalPath).toBeDefined();
+  });
 });
 
 describe('Test replaceBlobURL()', () => {
@@ -1827,6 +1916,87 @@ describe('Test replaceBlobURL()', () => {
     });
 
     expect(content.image).toBe('./relative-image.jpg');
+  });
+
+  test('should not deduplicate files across different entry-relative folders', async () => {
+    const { getGitHash } = await import('$lib/services/utils/file');
+    const mockFile = new File(['test content'], 'photo.jpg', { type: 'image/jpeg' });
+    const blobURL = 'blob:http://localhost:5173/entry-rel-456';
+
+    vi.mocked(getGitHash).mockResolvedValue('sha-same');
+
+    /** @type {any} */
+    const draft = {
+      collection: {
+        _type: 'entry',
+        _i18n: { defaultLocale: 'en' },
+        _file: { basePath: 'content/blog' },
+        _assetFolder: { fields: [] },
+      },
+      collectionName: 'blog',
+      fileName: undefined,
+      collectionFile: undefined,
+      isIndexFile: false,
+      currentValues: { en: { title: 'Test' } },
+      currentSlugs: { en: 'test-post' },
+    };
+
+    /** @type {any} */
+    const folder2 = {
+      internalPath: 'images2',
+      publicPath: 'images2',
+      entryRelative: true,
+      collectionName: 'blog',
+      hasTemplateTags: false,
+    };
+
+    const content = { image2: blobURL };
+    /** @type {any[]} */
+    const changes = [{ action: 'create', path: 'images1/photo.jpg', data: mockFile }];
+
+    /** @type {any[]} */
+    const savingAssets = [
+      {
+        collectionName: 'blog',
+        folder: {
+          internalPath: 'images1',
+          publicPath: 'images1',
+          entryRelative: true,
+          collectionName: 'blog',
+          hasTemplateTags: false,
+        },
+        blobURL: 'blob:http://localhost:5173/entry-rel-123',
+        name: 'photo.jpg',
+        path: 'images1/photo.jpg',
+        sha: 'sha-same',
+        size: 1024,
+        kind: 'image',
+      },
+    ];
+
+    await replaceBlobURL({
+      file: mockFile,
+      folder: folder2,
+      blobURL,
+      draft,
+      defaultLocaleSlug: 'test-post',
+      keyPath: 'image2',
+      content,
+      changes,
+      savingAssets,
+      slugificationEnabled: false,
+      encodingEnabled: false,
+    });
+
+    // File should be added separately to images2/ even though SHA matches
+    expect(changes).toHaveLength(2);
+    expect(changes[1]).toEqual({
+      action: 'create',
+      path: 'images2/photo.jpg',
+      data: mockFile,
+    });
+    expect(savingAssets).toHaveLength(2);
+    expect(content.image2).toBe('images2/photo.jpg');
   });
 });
 

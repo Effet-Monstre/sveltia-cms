@@ -1,5 +1,6 @@
 <script>
-  import { _ } from 'svelte-i18n';
+  import { _ } from '@sveltia/i18n';
+  import { Toolbar } from '@sveltia/ui';
 
   import AssetResults from '$lib/components/search/asset-results.svelte';
   import EntryResults from '$lib/components/search/entry-results.svelte';
@@ -9,12 +10,12 @@
 
 <div role="none" class="wrapper">
   {#if !$isSmallScreen}
-    <header role="none">
-      <h2 role="none">{$_('search_results')}</h2>
-    </header>
+    <Toolbar variant="primary">
+      <h2 role="none">{_('search_results')}</h2>
+    </Toolbar>
   {/if}
   <div role="none" class="results">
-    {#if $searchMode === 'entries'}
+    {#if $searchMode === 'contents'}
       <EntryResults />
     {/if}
     {#if $searchMode === 'assets'}
@@ -25,6 +26,7 @@
 
 <style lang="scss">
   .wrapper {
+    flex: auto;
     display: flex;
     flex-direction: column;
     overflow: hidden;
@@ -32,34 +34,17 @@
     background-color: var(--sui-primary-background-color);
   }
 
-  header {
-    flex: none;
-    display: flex;
-    align-items: center;
-    padding: 0 16px;
-    height: 40px;
-    background-color: var(--sui-tertiary-background-color);
-
-    h2 {
-      font-size: var(--sui-font-size-x-large);
-    }
-  }
-
   .results {
     flex: auto;
-    display: flex;
-    gap: 16px;
-    overflow: hidden;
-    height: 100%;
+    overflow: auto;
 
     :global {
       & > .sui.group {
-        flex: auto;
-        display: flex;
-        flex-direction: column;
-        overflow: hidden;
-        width: 50%;
-        height: 100%;
+        display: contents;
+
+        & > .inner > div {
+          display: contents;
+        }
       }
 
       h3 {

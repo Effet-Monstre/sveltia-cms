@@ -47,6 +47,7 @@ vi.mock('$lib/services/contents/fields/rich-text/components/definitions', () => 
 
 vi.mock('$lib/services/contents/fields/date-time/helper', () => ({
   getDateTimeFieldDisplayValue: vi.fn(),
+  parseDateTimeConfig: vi.fn(() => ({})),
 }));
 
 vi.mock('$lib/services/contents/fields/relation/helper', () => ({
@@ -1976,6 +1977,22 @@ describe('Test getFieldDisplayValue()', () => {
       expect(result).toContain('javascript');
       expect(result).toContain('web development');
     });
+
+    test('should reuse cached regex when getFieldDisplayValue is called twice with the same keyPath', () => {
+      // Exercises the listItemDisplayRegexCache hit path added by the perf optimisation.
+      const valueMap = {
+        'simpleTags.0': 'react',
+        'simpleTags.1': 'svelte',
+      };
+
+      const args = { collectionName: 'posts', valueMap, keyPath: 'simpleTags', locale: 'en' };
+      const result1 = getFieldDisplayValue(args);
+      // Second call with the same keyPath — should retrieve the cached RegExp.
+      const result2 = getFieldDisplayValue(args);
+
+      expect(result1).toBe(result2);
+      expect(result1).toContain('react');
+    });
   });
 
   describe('Relation field handling', () => {
@@ -2303,6 +2320,39 @@ describe('Test getFieldDisplayValue()', () => {
       expect(mockGetDateTimeFieldDisplayValue).toHaveBeenCalled();
       expect(result).toBe('2024-01-15');
     });
+
+    test('should skip getDateTimeFieldDisplayValue when transformations contain a date pattern (line 343 false branch)', () => {
+      // When transformations contains a date() pattern, !some() = false,
+      // so getDateTimeFieldDisplayValue is NOT called (line 343 false branch).
+      mockGetDateTimeFieldDisplayValue.mockClear();
+
+      const mockCollectionWithDatetime = {
+        ...mockCollection,
+        fields: [
+          {
+            name: 'publishDate',
+            widget: 'datetime',
+            format: 'YYYY-MM-DD',
+          },
+        ],
+      };
+
+      // @ts-expect-error - Mock for testing
+      mockGetCollection.mockReturnValue(mockCollectionWithDatetime);
+
+      const valueMap = { publishDate: '2024-01-15T10:30:00Z' };
+
+      getFieldDisplayValue({
+        collectionName: 'posts',
+        valueMap,
+        keyPath: 'publishDate',
+        locale: 'en',
+        transformations: ["date('YYYY-MM-DD')"], // matches DATE_TRANSFORMATION_REGEX
+      });
+
+      // getDateTimeFieldDisplayValue should NOT be called when a date() transformation is present
+      expect(mockGetDateTimeFieldDisplayValue).not.toHaveBeenCalled();
+    });
   });
 
   describe('Transformations', () => {
@@ -2423,7 +2473,6 @@ describe('Test getFieldDisplayValue()', () => {
       });
 
       expect(result).toBe('1,234.56');
-      expect(Intl.NumberFormat).toHaveBeenCalledWith('en');
     });
 
     test('should format numbers when value_type defaults to int', () => {
@@ -2439,7 +2488,6 @@ describe('Test getFieldDisplayValue()', () => {
       });
 
       expect(result).toBe('5,678');
-      expect(Intl.NumberFormat).toHaveBeenCalledWith('en');
     });
 
     test('should not format numbers for custom value_type', () => {
@@ -2472,7 +2520,6 @@ describe('Test getFieldDisplayValue()', () => {
       });
 
       expect(result).toBe('2,345');
-      expect(Intl.NumberFormat).toHaveBeenCalledWith('en');
     });
 
     test('should handle string numbers for float type', () => {
@@ -2488,7 +2535,6 @@ describe('Test getFieldDisplayValue()', () => {
       });
 
       expect(result).toBe('2,345.67');
-      expect(Intl.NumberFormat).toHaveBeenCalledWith('en');
     });
 
     test('should handle zero values for number fields', () => {
@@ -2554,6 +2600,31 @@ describe('Test getFieldDisplayValue()', () => {
 
       expect(result).toBe('1234'); // Our mock returns toString() for non-en locales
       expect(Intl.NumberFormat).toHaveBeenCalledWith('ja');
+    });
+
+    test('should reuse the cached number formatter for the same locale', () => {
+      // Use 'de' which no other test uses — guarantees a cache miss on the first call.
+      vi.spyOn(Intl, 'NumberFormat').mockImplementation((locale) => ({
+        format: vi.fn((n) => `${locale}:${n}`),
+        resolvedOptions: vi.fn(),
+        formatToParts: vi.fn(),
+        formatRange: vi.fn(),
+        formatRangeToParts: vi.fn(),
+      }));
+
+      const args = {
+        collectionName: 'posts',
+        valueMap: { intNumber: 42 },
+        keyPath: 'intNumber',
+        locale: 'de',
+      };
+
+      const result1 = getFieldDisplayValue(args);
+      const result2 = getFieldDisplayValue(args);
+
+      // Intl.NumberFormat was constructed only once; the second call reused the cache.
+      expect(Intl.NumberFormat).toHaveBeenCalledTimes(1);
+      expect(result1).toBe(result2);
     });
 
     test('should handle invalid number values gracefully', () => {
@@ -3860,10 +3931,12 @@ describe('Test getField() with explicit variable type syntax', () => {
       expect(result).toEqual({ name: 'title', widget: 'string' });
     });
 
-    test('should handle field with only explicit type (empty prefix, line 85)', () => {
-      // Test parseExplicitType with an empty prefix, e.g., "<section>"
-      // This tests the branch where prefix is empty string, so prefix || ''
-      // uses the empty string branch
+    test('should handle field with only explicit type (empty prefix, line 106)', () => {
+      // Tests parseExplicitType with an empty prefix, e.g., "<section>".
+      // When the segment is "<section>", prefix = '' → `prefix || ''` uses the
+      // empty-string fallback (line 106 false branch), typeName = 'section'.
+      // The cleanKey='' then hits the `else` clause in getField() which sets
+      // field=undefined (no valid way to look up a field with an empty key).
       const mockCollection = {
         _type: 'entry',
         fields: [
@@ -3883,15 +3956,15 @@ describe('Test getField() with explicit variable type syntax', () => {
       // @ts-expect-error - Simplified mock for testing
       mockGetCollection.mockReturnValue(mockCollection);
 
-      // Using "*<section>" where "*" matches the wildcard for array access
-      // The cleanKey becomes "*" which is handled as a wildcard
+      // "<section>" segment has empty prefix → exercises `prefix || ''` false branch
+      // The empty cleanKey hits the else clause → field=undefined → result is undefined
       const result = getField({
         collectionName: 'posts',
-        keyPath: 'items.*<section>.content',
+        keyPath: 'items.<section>.content',
         valueMap: {},
       });
 
-      expect(result).toEqual({ name: 'content', widget: 'string' });
+      expect(result).toBeUndefined();
     });
   });
 

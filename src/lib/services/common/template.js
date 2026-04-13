@@ -160,14 +160,16 @@ const replaceTemplateTag = (tag, context) => {
     currentSlug,
     entryFilePath,
     locale,
-    dateTimeParts = getDateTimeParts({ timeZone: 'UTC' }),
+    dateTimeParts,
     identifierField,
     basePath,
     isIndexFile = false,
   } = context;
 
-  // Handle date-time fields
-  const dateTimeValue = handleDateTimeTag(tag, dateTimeParts);
+  // Handle date-time fields. Parts are pre-calculated in `fillTemplate` to avoid redundant
+  // calculations for multiple date-time tags in the same template.
+  const _dateTimeParts = /** @type {Record<string, string>} */ (dateTimeParts);
+  const dateTimeValue = handleDateTimeTag(tag, _dateTimeParts);
 
   if (dateTimeValue !== undefined) {
     return dateTimeValue;
@@ -254,22 +256,25 @@ const replaceTemplatePlaceholder = (placeholder, { replaceSubContext, getFieldAr
     return generateUUID('short');
   }
 
+  const { type, locale } = replaceSubContext;
+
   if (transformations.length) {
     value = applyTransformations({
       fieldConfig: getField({ ...getFieldArgs, keyPath: tag }),
       value,
       transformations,
+      locale,
     });
   }
 
   // Return the value as is when generating the preview path or media folder path
-  if (replaceSubContext.type) {
+  if (type) {
     return String(value);
   }
 
   // Slugify the value for a slug or filename. Don’t limit the length here; it will be handled later
   // in `fillTemplate`.
-  return slugify(String(value), { maxLength: Infinity });
+  return slugify(String(value), { locale, maxLength: Infinity });
 };
 
 /**
@@ -295,7 +300,15 @@ const getExistingSlugs = (collectionName, locale) =>
  * @see https://sveltiacms.app/en/docs/media/internal#using-placeholders
  */
 export const fillTemplate = (template, options) => {
-  const { collection, content: valueMap, currentSlug, locale, isIndexFile = false } = options;
+  const {
+    collection,
+    content: valueMap,
+    currentSlug,
+    locale,
+    dateTimeParts,
+    isIndexFile = false,
+  } = options;
+
   const { _type, name: collectionName } = collection;
 
   const {
@@ -304,12 +317,19 @@ export const fillTemplate = (template, options) => {
     _file: { basePath } = {},
   } = _type === 'entry' ? collection : {};
 
+  const slugOptions = get(cmsConfig)?.slug;
   // @todo Remove the legacy option prior to the 1.0 release.
-  const slugMaxLength = legacySlugLength ?? get(cmsConfig)?.slug?.maxlength;
+  const maxlength = legacySlugLength ?? slugOptions?.maxlength;
+  const timeZone = slugOptions?.timezone === 'local' ? undefined : 'UTC';
 
   /** @type {ReplaceContext} */
   const context = {
-    replaceSubContext: { ...options, identifierField, basePath },
+    replaceSubContext: {
+      ...options,
+      dateTimeParts: dateTimeParts ?? getDateTimeParts({ timeZone }),
+      identifierField,
+      basePath,
+    },
     getFieldArgs: { collectionName, keyPath: '', valueMap, isIndexFile },
   };
 
@@ -319,14 +339,16 @@ export const fillTemplate = (template, options) => {
     .replace(TEMPLATE_REGEX, (_match, tag) => replaceTemplatePlaceholder(tag, context))
     .trim();
 
-  // Truncate a long slug if needed
-  if (typeof slugMaxLength === 'number') {
-    slug = truncate(slug, slugMaxLength, { ellipsis: '' }).replace(/-$/, '');
-  }
-
-  // We don’t have to rename it when creating a path with a slug given
+  // We don’t have to rename it when creating a path with a slug given. Skip truncation because the
+  // slug has already been truncated during its own generation, and truncating the entire filled
+  // path template (e.g. `{{slug}}/+page`) would break the non-slug parts of the path.
   if (currentSlug) {
     return slug;
+  }
+
+  // Truncate a long slug if needed
+  if (typeof maxlength === 'number') {
+    slug = truncate(slug, maxlength, { ellipsis: '' }).replace(/-$/, '');
   }
 
   return renameIfNeeded(slug, getExistingSlugs(collectionName, locale));

@@ -4,7 +4,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
  * @import { ConfigParserCollectors } from '$lib/types/private';
  */
 
-// Mock svelte-i18n
+// Mock @sveltia/i18n
 /** @type {Record<string, string>} */
 const mockI18nStrings = {
   'config.error.file_format_mismatch': 'File format mismatch',
@@ -35,21 +35,9 @@ function mockTranslate(key, options) {
   return message;
 }
 
-vi.mock('svelte-i18n', () => ({
-  _: {
-    subscribe: vi.fn((fn) => {
-      fn(mockTranslate);
-
-      return () => {};
-    }),
-  },
-  locale: {
-    subscribe: vi.fn((fn) => {
-      fn('en-US');
-
-      return () => {};
-    }),
-  },
+vi.mock('@sveltia/i18n', () => ({
+  _: mockTranslate,
+  locale: { current: 'en-US', set: vi.fn() },
 }));
 
 const mockGetStore = vi.fn();
@@ -95,27 +83,14 @@ describe('Collection Files Parser', () => {
   beforeEach(() => {
     vi.clearAllMocks();
 
-    mockGetStore.mockImplementation((store) => {
-      // Handle the i18n store
-      if (store && typeof store.subscribe === 'function') {
-        let result;
-
-        store.subscribe((/** @type {any} */ value) => {
-          result = value;
-        })();
-
-        return result;
-      }
-
-      return store;
-    });
+    mockGetStore.mockImplementation((store) => store);
 
     mockCheckName.mockReturnValue(true);
   });
 
   describe('parseCollectionFile', () => {
     it('should parse field configurations in a collection file', async () => {
-      const { parseCollectionFile } = await import('./index.js');
+      const { parseCollectionFile } = await import('.');
       const collectors = createCollectors();
 
       /** @type {any} */
@@ -143,7 +118,7 @@ describe('Collection Files Parser', () => {
     });
 
     it('should use inherited format from collection if file format is not specified', async () => {
-      const { parseCollectionFile } = await import('./index.js');
+      const { parseCollectionFile } = await import('.');
       const collectors = createCollectors();
 
       /** @type {any} */
@@ -166,7 +141,7 @@ describe('Collection Files Parser', () => {
     });
 
     it('should detect format mismatch between file extension and format', async () => {
-      const { parseCollectionFile } = await import('./index.js');
+      const { parseCollectionFile } = await import('.');
       const collectors = createCollectors();
 
       mockIsFormatMismatch.mockReturnValue(true);
@@ -194,8 +169,82 @@ describe('Collection Files Parser', () => {
       expect(callArgs.values.format).toBe('yaml');
     });
 
+    it('should add error when collection file has no fields', async () => {
+      const { parseCollectionFile } = await import('.');
+      const collectors = createCollectors();
+
+      /** @type {any} */
+      const context = {
+        cmsConfig: {},
+        collection: { name: 'posts', format: 'yaml' },
+        collectionFile: {
+          name: 'post',
+          file: 'content/posts/index.yaml',
+          format: 'yaml',
+          fields: [],
+        },
+      };
+
+      parseCollectionFile(context, collectors);
+
+      expect(mockAddMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          strKey: 'collection_file_no_fields',
+        }),
+      );
+    });
+
+    it('should add error when collection file has undefined fields', async () => {
+      const { parseCollectionFile } = await import('.');
+      const collectors = createCollectors();
+
+      /** @type {any} */
+      const context = {
+        cmsConfig: {},
+        collection: { name: 'posts', format: 'yaml' },
+        collectionFile: {
+          name: 'post',
+          file: 'content/posts/index.yaml',
+          format: 'yaml',
+        },
+      };
+
+      parseCollectionFile(context, collectors);
+
+      expect(mockAddMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          strKey: 'collection_file_no_fields',
+        }),
+      );
+    });
+
+    it('should not add error when collection file has fields defined', async () => {
+      const { parseCollectionFile } = await import('.');
+      const collectors = createCollectors();
+
+      /** @type {any} */
+      const context = {
+        cmsConfig: {},
+        collection: { name: 'posts', format: 'yaml' },
+        collectionFile: {
+          name: 'post',
+          file: 'content/posts/index.yaml',
+          format: 'yaml',
+          fields: [{ name: 'title', widget: 'string' }],
+        },
+      };
+
+      parseCollectionFile(context, collectors);
+
+      expect(mockAddMessage).not.toHaveBeenCalledWith(
+        expect.objectContaining({
+          strKey: 'collection_file_no_fields',
+        }),
+      );
+    });
+
     it('should always parse fields regardless of format mismatch', async () => {
-      const { parseCollectionFile } = await import('./index.js');
+      const { parseCollectionFile } = await import('.');
       const collectors = createCollectors();
 
       mockIsFormatMismatch.mockReturnValue(true);
@@ -220,7 +269,7 @@ describe('Collection Files Parser', () => {
 
   describe('parseCollectionFiles', () => {
     it('should parse multiple collection files', async () => {
-      const { parseCollectionFiles } = await import('./index.js');
+      const { parseCollectionFiles } = await import('.');
       const collectors = createCollectors();
 
       /** @type {any} */
@@ -251,7 +300,7 @@ describe('Collection Files Parser', () => {
     });
 
     it('should skip divider entries', async () => {
-      const { parseCollectionFiles } = await import('./index.js');
+      const { parseCollectionFiles } = await import('.');
       const collectors = createCollectors();
 
       /** @type {any} */
@@ -292,7 +341,7 @@ describe('Collection Files Parser', () => {
     });
 
     it('should validate file names for duplicates', async () => {
-      const { parseCollectionFiles } = await import('./index.js');
+      const { parseCollectionFiles } = await import('.');
       const collectors = createCollectors();
 
       /** @type {any} */
@@ -328,7 +377,7 @@ describe('Collection Files Parser', () => {
     });
 
     it('should skip parsing files when checkName returns false', async () => {
-      const { parseCollectionFiles } = await import('./index.js');
+      const { parseCollectionFiles } = await import('.');
       const collectors = createCollectors();
 
       mockCheckName.mockReturnValueOnce(true).mockReturnValueOnce(false);
@@ -362,7 +411,7 @@ describe('Collection Files Parser', () => {
     });
 
     it('should pass correct context to checkName including file info', async () => {
-      const { parseCollectionFiles } = await import('./index.js');
+      const { parseCollectionFiles } = await import('.');
       const collectors = createCollectors();
 
       /** @type {any} */
@@ -391,7 +440,7 @@ describe('Collection Files Parser', () => {
     });
 
     it('should handle empty files array', async () => {
-      const { parseCollectionFiles } = await import('./index.js');
+      const { parseCollectionFiles } = await import('.');
       const collectors = createCollectors();
 
       /** @type {any} */

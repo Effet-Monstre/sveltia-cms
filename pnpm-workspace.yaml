@@ -1,23 +1,12 @@
-ignoredBuiltDependencies:
-  - unrs-resolver
+allowBuilds:
+  "@parcel/watcher": false
+  esbuild: false
+  svelte-preprocess: true
+  unrs-resolver: false
+
+engineStrict: true
 
 minimumReleaseAge: 1440
 
 minimumReleaseAgeExclude:
-  - devalue
-  - svelte
-  - '@sveltejs/*'
-  - '@sveltia/*'
-  - lexical
-  - '@lexical/*'
-  - dompurify
-
-onlyBuiltDependencies:
-  - '@parcel/watcher'
-  - es5-ext
-  - esbuild
-  - svelte-preprocess
-
-overrides:
-  dompurify@<=3.3.1: '>=3.3.2'
-  esbuild@<=0.24.2: '>=0.25.0'
+  - "@sveltia/*"

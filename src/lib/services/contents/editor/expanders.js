@@ -3,6 +3,7 @@ import { get } from 'svelte/store';
 
 import { entryDraft } from '$lib/services/contents/draft';
 import { getField } from '$lib/services/contents/entry/fields';
+import { getOrCreate } from '$lib/services/utils/cache';
 
 /**
  * @import {
@@ -13,6 +14,12 @@ import { getField } from '$lib/services/contents/entry/fields';
  * } from '$lib/types/private';
  * @import { FieldKeyPath, ObjectField, ListField } from '$lib/types/public';
  */
+
+/**
+ * Cache of pre-compiled regexes keyed by cleaned key path.
+ * @type {Map<string, RegExp>}
+ */
+const expanderRegexCache = new Map();
 
 /**
  * Get the initial object/list expander state based on the `collapsed` option. If `collapsed` is set
@@ -36,8 +43,14 @@ export const getInitialExpanderState = ({ key, locale, collapsed = true }) => {
 
   if (collapsed === 'auto') {
     const valueMap = _draft?.currentValues?.[locale] ?? {};
-    // Regular expression to match any non-nested subfields, with the `#` key suffix removed
-    const regex = new RegExp(`^${escapeRegExp(key.replace(/#$/, ''))}\\.[^\\.]+$`);
+    const cleanKey = key.replace(/#$/, '');
+
+    // Pre-compile and cache the regex — same key path is queried on every editor render.
+    const regex = getOrCreate(
+      expanderRegexCache,
+      cleanKey,
+      () => new RegExp(`^${escapeRegExp(cleanKey)}\\.[^\\.]+$`),
+    );
 
     return !Object.entries(valueMap).some(([keyPath, value]) => regex.test(keyPath) && !!value);
   }

@@ -5,10 +5,17 @@ import { TomlDate } from 'smol-toml';
 import { get } from 'svelte/store';
 
 import { cmsConfig } from '$lib/services/config';
+import { INTERNAL_PROP_REGEX } from '$lib/services/contents/draft';
 import { createKeyPathList } from '$lib/services/contents/draft/save/key-path';
 import { getField, hasRootField, isFieldRequired } from '$lib/services/contents/entry/fields';
 import { parseDateTimeConfig } from '$lib/services/contents/fields/date-time/helper';
-import { FULL_DATE_TIME_REGEX } from '$lib/services/utils/date';
+import { getOrCreate } from '$lib/services/utils/cache';
+
+/**
+ * Cache of wildcard key-path regexes used in {@link finalizeContent}, keyed by `keyPath`.
+ * @type {Map<string, RegExp>}
+ */
+const wildcardKeyPathRegexCache = new Map();
 
 /**
  * @import {
@@ -16,9 +23,8 @@ import { FULL_DATE_TIME_REGEX } from '$lib/services/utils/date';
  * FlattenedEntryContent,
  * InternalEntryCollection,
  * InternalLocaleCode,
- * RawEntryContent,
  * } from '$lib/types/private';
- * @import { DateTimeField, Field } from '$lib/types/public';
+ * @import { DateTimeField, Field, RawEntryContent } from '$lib/types/public';
  */
 
 /**
@@ -56,8 +62,8 @@ export const copyProperty = ({
   isTomlOutput,
   omitEmptyOptionalFields,
 }) => {
-  // Skip internal UUIDs added to list items
-  if (key.endsWith('.__sc_item_id')) {
+  // Skip internal properties added to list items
+  if (INTERNAL_PROP_REGEX.test(key)) {
     delete unsortedMap[key];
     return;
   }
@@ -69,26 +75,37 @@ export const copyProperty = ({
   // @see https://toml.io/en/v1.0.0#offset-date-time
   if (
     isTomlOutput &&
-    typeof value === 'string' &&
-    FULL_DATE_TIME_REGEX.test(value) &&
     field?.widget === 'datetime' &&
     !parseDateTimeConfig(/** @type {DateTimeField} */ (field)).format
   ) {
-    try {
-      value = new TomlDate(value);
-    } catch {
-      //
-    }
+    const tomlDate = new TomlDate(value);
+
+    // Ignore invalid dates to prevent serialization errors. This occurs when the field is optional
+    // and no value is provided, such as an empty string. In such cases, save nothing. We cannot
+    // save `null` because TOML doesn’t support it, and an empty string may not be the expected
+    // value for a date field.
+    value = tomlDate.isValid() ? tomlDate : undefined;
   }
 
   if (
     omitEmptyOptionalFields &&
     field &&
     !isFieldRequired({ fieldConfig: field, locale }) &&
-    !Object.keys(unsortedMap).some((_key) => _key.startsWith(`${key}.`)) &&
     isValueEmpty(value)
   ) {
-    // Omit the empty value
+    const childKeys = Object.keys(unsortedMap).filter((_key) => _key.startsWith(`${key}.`));
+
+    if (
+      childKeys.some((_key) => !INTERNAL_PROP_REGEX.test(_key) && !isValueEmpty(unsortedMap[_key]))
+    ) {
+      // Preserve the parent because it has non-empty children
+      sortedMap[key] = value;
+    } else {
+      // Omit the empty value and remove any empty children so they are not processed later
+      childKeys.forEach((_key) => {
+        delete unsortedMap[_key];
+      });
+    }
   } else {
     sortedMap[key] = value;
   }
@@ -157,15 +174,24 @@ const finalizeContent = ({
           copyProperty({ ...copyArgs, key: _keyPath, field });
         });
     } else {
-      const regex = new RegExp(
-        `^${escapeRegExp(keyPath.replaceAll('*', '\\d+')).replaceAll('\\\\d\\+', '\\d+')}$`,
+      const regex = getOrCreate(
+        wildcardKeyPathRegexCache,
+        keyPath,
+        () =>
+          new RegExp(
+            `^${escapeRegExp(keyPath.replaceAll('*', '\\d+')).replaceAll('\\\\d\\+', '\\d+')}$`,
+          ),
       );
 
       Object.keys(unsortedMap)
         .filter((_keyPath) => regex.test(_keyPath))
         .sort(([a, b]) => compare(a, b))
         .forEach((_keyPath) => {
-          copyProperty({ ...copyArgs, key: _keyPath, field });
+          // When the wildcard path couldn't resolve a typed list field, resolve with the concrete
+          // key path so that field metadata (e.g. `required`) is available to `copyProperty`
+          const resolvedField = field ?? getField({ ...getFieldArgs, keyPath: _keyPath });
+
+          copyProperty({ ...copyArgs, key: _keyPath, field: resolvedField });
         });
     }
   });

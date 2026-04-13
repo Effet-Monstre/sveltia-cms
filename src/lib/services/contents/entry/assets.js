@@ -35,25 +35,29 @@ export const getEntryThumbnail = async (collection, entry) => {
   }
 
   /** @type {FieldKeyPath[]} */
-  const keyPathList = _thumbnailFieldNames
-    .map((name) => {
-      // Support a wildcard in the key path, e.g. `images.*.src`
-      if (name.includes('*')) {
-        const regex = new RegExp(`^${escapeRegExp(name).replace('\\*', '.+')}$`);
+  const keyPathList = _thumbnailFieldNames.flatMap((name) => {
+    // Support a wildcard in the key path, e.g. `images.*.src`
+    if (name.includes('*')) {
+      const regex = new RegExp(`^${escapeRegExp(name).replace('\\*', '.+')}$`);
 
-        return Object.keys(content).filter((keyPath) => regex.test(keyPath));
-      }
+      return Object.keys(content).filter((keyPath) => regex.test(keyPath));
+    }
 
-      return name;
-    })
-    .flat(1);
+    return name;
+  });
 
   // Cannot use `Promise.all` or `Promise.any` here because we need the first available URL
   // eslint-disable-next-line no-restricted-syntax
   for (const keyPath of keyPathList) {
     const url = content[keyPath]
       ? // eslint-disable-next-line no-await-in-loop
-        await getMediaFieldURL({ value: content[keyPath], entry, collectionName, thumbnail: true })
+        await getMediaFieldURL({
+          value: content[keyPath],
+          entry,
+          collectionName,
+          typedKeyPath: keyPath,
+          thumbnail: true,
+        })
       : undefined;
 
     if (url) {
@@ -82,10 +86,11 @@ export const getAssociatedAssets = ({ entry, collectionName, fileName, relative 
   }
 
   const isIndexFile = isCollectionIndexFile(collection, entry);
+  const seen = new Set();
 
   const assets = /** @type {Asset[]} */ (
     Object.values(locales)
-      .map(({ content }) =>
+      .flatMap(({ content }) =>
         Object.entries(content ?? {}).map(([keyPath, value]) => {
           if (
             typeof value === 'string' &&
@@ -112,28 +117,31 @@ export const getAssociatedAssets = ({ entry, collectionName, fileName, relative 
           return undefined;
         }),
       )
-      .flat(1)
-      .filter((value, index, array) => !!value && array.indexOf(value) === index)
+      .filter((value) => !!value && !seen.has(value) && (seen.add(value), true))
   );
 
   // Add orphaned/unused entry-relative assets
   if (relative && getAssetFolder({ collectionName, fileName })?.entryRelative) {
     const entryFolderPath = getPathInfo(Object.values(entry.locales)[0].path).dirname;
 
-    get(allAssets).forEach((asset) => {
-      const assetFolderPath = getPathInfo(asset.path).dirname;
+    if (entryFolderPath !== undefined) {
+      const existingPaths = new Set(assets.map(({ path }) => path));
 
-      if (
-        assetFolderPath !== undefined &&
-        entryFolderPath !== undefined &&
-        // Include assets in the entry folder and its subfolders
-        (assetFolderPath === entryFolderPath ||
-          new RegExp(`^${escapeRegExp(entryFolderPath)}(?:\\/|$)`).test(assetFolderPath)) &&
-        !assets.find(({ path }) => path === asset.path)
-      ) {
-        assets.push(asset);
-      }
-    });
+      get(allAssets).forEach((asset) => {
+        const assetFolderPath = getPathInfo(asset.path).dirname;
+
+        if (
+          assetFolderPath !== undefined &&
+          // Include assets in the entry folder and its subfolders
+          (assetFolderPath === entryFolderPath ||
+            assetFolderPath.startsWith(`${entryFolderPath}/`)) &&
+          !existingPaths.has(asset.path)
+        ) {
+          assets.push(asset);
+          existingPaths.add(asset.path);
+        }
+      });
+    }
   }
 
   return assets;

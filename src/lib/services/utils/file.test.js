@@ -36,19 +36,9 @@ vi.mock('svelte/store', () => ({
 }));
 
 // Mock i18n dependencies
-vi.mock('svelte-i18n', () => ({
-  /**
-   * Locale store.
-   * @returns {string} Current locale.
-   */
-  locale: () => 'en',
-  /**
-   * Translation function store.
-   * @returns {import('vitest').Mock} Translation function.
-   */
-  _: () => vi.fn((key, options) => `${key}(${options?.values?.size || ''})`),
-  addMessages: vi.fn(),
-  init: vi.fn(),
+vi.mock('@sveltia/i18n', () => ({
+  locale: { current: 'en', set: vi.fn() },
+  _: vi.fn((key, options) => `${key}(${options?.values?.size || ''})`),
 }));
 
 describe('Test encodeFilePath()', () => {
@@ -462,6 +452,18 @@ describe('Test formatSize()', () => {
     expect(formatSize(0)).toBe('file_size_units.b(0)');
     expect(formatSize(1)).toBe('file_size_units.b(1)');
   });
+
+  test('should reuse the cached Intl.NumberFormat instance for the same locale', () => {
+    // After the tests above, 'en' is already in fileSizeFormatterCache.
+    // Subsequent calls for the same locale must hit the cache, not invoke the constructor.
+    const spy = vi.spyOn(Intl, 'NumberFormat');
+
+    formatSize(1000);
+    formatSize(5000000);
+
+    expect(spy).not.toHaveBeenCalled();
+    spy.mockRestore();
+  });
 });
 
 describe('Test resolvePath()', () => {
@@ -630,5 +632,20 @@ describe('Test createPathRegEx()', () => {
     expect(regex.test('app/(pages)/my-post.md')).toBe(true);
     expect(regex.test('app/(pages)/another.md')).toBe(true);
     expect(regex.test('app/pages/my-post.md')).toBe(false);
+  });
+
+  test('should not consume the trailing slash when used with String.replace()', () => {
+    // Regression: with a consuming match `(?:\/|$)`, the slash between the slug folder and the
+    // filename was swallowed, producing `/@assets/images/666-testphoto.jpg` instead of
+    // `/@assets/images/666-test/photo.jpg`.
+    const regex = createPathRegEx('src/assets/images/{{slug}}', (segment) => {
+      const tag = segment.match(/{{(?<tag>.+?)}}/)?.groups?.tag;
+
+      return tag ? `(?<${tag}>[^/]+)` : segment;
+    });
+
+    const result = 'src/assets/images/666-test/photo.jpg'.replace(regex, '/@assets/images/$<slug>');
+
+    expect(result).toBe('/@assets/images/666-test/photo.jpg');
   });
 });

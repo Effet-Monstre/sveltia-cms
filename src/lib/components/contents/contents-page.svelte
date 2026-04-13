@@ -1,7 +1,7 @@
 <script>
+  import { _, locale as appLocale } from '@sveltia/i18n';
   import { Alert, Toast } from '@sveltia/ui';
   import { onMount } from 'svelte';
-  import { _, locale as appLocale } from 'svelte-i18n';
 
   import PageContainerMainArea from '$lib/components/common/page-container-main-area.svelte';
   import PageContainer from '$lib/components/common/page-container.svelte';
@@ -12,6 +12,7 @@
   import PrimaryToolbar from '$lib/components/contents/list/primary-toolbar.svelte';
   import SecondarySidebar from '$lib/components/contents/list/secondary-sidebar.svelte';
   import SecondaryToolbar from '$lib/components/contents/list/secondary-toolbar.svelte';
+  import SearchMainArea from '$lib/components/search/search-main-area.svelte';
   import {
     announcedPageStatus,
     goto,
@@ -35,16 +36,18 @@
   import { createDraft } from '$lib/services/contents/draft/create';
   import { showContentOverlay } from '$lib/services/contents/editor';
   import { getEntrySummary } from '$lib/services/contents/entry/summary';
+  import { isSearchRoute } from '$lib/services/search/navigation';
   import { isSmallScreen } from '$lib/services/user/env';
 
   /**
    * @import { InternalCollection } from '$lib/types/private';
    */
 
-  const routeRegex =
+  const ROUTE_REGEX =
     /^\/collections(?:\/(?<_collectionName>[^/]+)(?:\/(?<routeType>new|entries))?(?:\/(?<subPath>.+?))?)?$/;
 
   let isIndexPage = $state(false);
+  let isSearchPage = $state(false);
   let editorLocale = $state();
 
   const MainContent = $derived('files' in ($selectedCollection ?? {}) ? FileList : EntryList);
@@ -55,9 +58,10 @@
    */
   const navigate = () => {
     const { path, params } = parseLocation();
-    const match = path.match(routeRegex);
+    const match = path.match(ROUTE_REGEX);
 
     isIndexPage = false;
+    isSearchPage = false;
 
     // Set the editor locale if specified in the URL params, e.g., `?_locale=fr`
     editorLocale = params._locale;
@@ -69,6 +73,10 @@
     }
 
     if (!match?.groups) {
+      $showContentOverlay = false;
+      // Check if it's the search page, which has a different URL pattern (`#/search/{query}`)
+      isSearchPage = isSearchRoute(path);
+
       return; // Different page
     }
 
@@ -78,7 +86,8 @@
       if ($isSmallScreen) {
         // Show the collection list only
         $selectedCollection = undefined;
-        $announcedPageStatus = $_('viewing_collection_list');
+        $showContentOverlay = false;
+        $announcedPageStatus = _('viewing_collection_list');
         isIndexPage = true;
       } else {
         // Redirect to the selected, first or singleton collection
@@ -100,7 +109,8 @@
     }
 
     if (!collection || !$selectedCollection) {
-      $announcedPageStatus = $_('collection_not_found');
+      $showContentOverlay = false;
+      $announcedPageStatus = _('collection_not_found');
 
       return; // Not Found
     }
@@ -110,16 +120,13 @@
     const _fileMap = '_fileMap' in $selectedCollection ? $selectedCollection._fileMap : undefined;
 
     if (!routeType) {
-      const count = $listedEntries.length;
-
-      $announcedPageStatus = $_(
-        count > 1
-          ? 'viewing_x_collection_many_entries'
-          : count === 1
-            ? 'viewing_x_collection_one_entry'
-            : 'viewing_x_collection_no_entries',
-        { values: { collection: collectionLabel, count } },
-      );
+      $showContentOverlay = false;
+      $announcedPageStatus = _('viewing_x_collection', {
+        values: {
+          collection: collectionLabel,
+          count: $listedEntries.length,
+        },
+      });
 
       return;
     }
@@ -148,7 +155,7 @@
           });
         }
 
-        $announcedPageStatus = $_(`edit_${collection._type}_announcement`, {
+        $announcedPageStatus = _(`edit_${collection._type}_announcement`, {
           values: {
             collection: collectionLabel,
             file: getCollectionFileLabel(collectionFile),
@@ -164,7 +171,7 @@
           isIndexFile: !!window.history.state?.index,
         });
 
-        $announcedPageStatus = $_('create_entry_announcement', {
+        $announcedPageStatus = _('create_entry_announcement', {
           values: {
             collection: collectionLabel,
           },
@@ -174,10 +181,10 @@
       if (routeType === 'entries' && subPath) {
         const originalEntry = $listedEntries.find((entry) => entry.subPath === subPath);
 
-        if (originalEntry && $appLocale) {
+        if (originalEntry && appLocale.current) {
           createDraft({ collection, originalEntry });
 
-          $announcedPageStatus = $_('edit_entry_announcement', {
+          $announcedPageStatus = _('edit_entry_announcement', {
             values: {
               collection: collectionLabel,
               entry: getEntrySummary($selectedCollection, originalEntry),
@@ -190,29 +197,38 @@
 
   onMount(() => {
     navigate();
+
+    return () => {
+      $showContentOverlay = false;
+    };
   });
 </script>
 
 <svelte:window
   onhashchange={(event) => {
-    updateContentFromHashChange(event, navigate, routeRegex);
+    updateContentFromHashChange(event, navigate, ROUTE_REGEX);
   }}
 />
 
-<PageContainer aria-label={$_('content_library')}>
+<PageContainer aria-label={_('content_library')}>
   {#snippet primarySidebar()}
     {#if !$isSmallScreen || isIndexPage}
-      <PrimarySidebar />
+      <PrimarySidebar {isSearchPage} />
     {/if}
   {/snippet}
   {#snippet main()}
-    {#if !$isSmallScreen || !isIndexPage}
+    {#if isSearchPage}
+      <SearchMainArea />
+    {:else if !$isSmallScreen || !isIndexPage}
       <PageContainerMainArea
-        aria-label={$_('x_collection', {
+        aria-label={_('x_collection', {
           values: {
             collection:
-              // `$appLocale` is a key, because `getCollectionLabel` can return a localized label
-              $appLocale && $selectedCollection ? getCollectionLabel($selectedCollection) : '',
+              // `appLocale.current` is a key, because `getCollectionLabel` can return a localized
+              // label
+              appLocale.current && $selectedCollection
+                ? getCollectionLabel($selectedCollection)
+                : '',
           },
         })}
         aria-description={$selectedCollection?.description}
@@ -242,14 +258,12 @@
 
 <Toast bind:show={$contentUpdatesToast.saved}>
   <Alert status="success">
-    {$_($contentUpdatesToast.published ? 'entry_saved_and_published' : 'entry_saved')}
+    {_($contentUpdatesToast.published ? 'entry_saved_and_published' : 'entry_saved')}
   </Alert>
 </Toast>
 
 <Toast bind:show={$contentUpdatesToast.deleted}>
   <Alert status="success">
-    {$_($contentUpdatesToast.count === 1 ? 'entry_deleted' : 'entries_deleted', {
-      values: { count: $contentUpdatesToast.count },
-    })}
+    {_('entries_deleted', { values: { count: $contentUpdatesToast.count } })}
   </Alert>
 </Toast>

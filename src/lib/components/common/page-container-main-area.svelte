@@ -42,6 +42,10 @@
     overflow: hidden;
     background-color: var(--sui-primary-background-color);
 
+    @media (768px <= width) {
+      view-transition-name: page-main;
+    }
+
     &:not(:first-child) {
       border-start-start-radius: 16px;
     }

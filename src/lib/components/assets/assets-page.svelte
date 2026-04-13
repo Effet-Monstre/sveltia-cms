@@ -1,9 +1,9 @@
 <script>
+  import { _, locale as appLocale } from '@sveltia/i18n';
   import { Alert, Toast } from '@sveltia/ui';
   import { sleep } from '@sveltia/utils/misc';
   import equal from 'fast-deep-equal';
   import { onMount } from 'svelte';
-  import { _, locale as appLocale } from 'svelte-i18n';
 
   import AssetDetailsOverlay from '$lib/components/assets/details/asset-details-overlay.svelte';
   import EditAssetDialog from '$lib/components/assets/details/edit-asset-dialog.svelte';
@@ -15,6 +15,7 @@
   import SecondaryToolbar from '$lib/components/assets/list/secondary-toolbar.svelte';
   import PageContainerMainArea from '$lib/components/common/page-container-main-area.svelte';
   import PageContainer from '$lib/components/common/page-container.svelte';
+  import SearchMainArea from '$lib/components/search/search-main-area.svelte';
   import {
     announcedPageStatus,
     goto,
@@ -29,15 +30,20 @@
     listedAssets,
     showAssetOverlay,
   } from '$lib/services/assets/view';
+  import { isSearchRoute } from '$lib/services/search/navigation';
   import { isSmallScreen } from '$lib/services/user/env';
 
   const ROUTE_REGEX = /^\/assets(?:\/(?<folderPath>.+?)(?:\/(?<fileName>[^/]+\.[A-Za-z0-9]+))?)?$/;
 
   let isIndexPage = $state(false);
+  let isSearchPage = $state(false);
 
   const selectedAssetFolderLabel = $derived(
-    // `$appLocale` is a key, because `getFolderLabelByCollection` can return a localized label
-    $appLocale && $selectedAssetFolder ? getFolderLabelByCollection($selectedAssetFolder) : '',
+    // `appLocale.current` is a key, because `getFolderLabelByCollection` can return a localized
+    // label
+    appLocale.current && $selectedAssetFolder
+      ? getFolderLabelByCollection($selectedAssetFolder)
+      : '',
   );
 
   /**
@@ -49,8 +55,13 @@
     const match = path.match(ROUTE_REGEX);
 
     isIndexPage = false;
+    isSearchPage = false;
 
     if (!match?.groups) {
+      $showAssetOverlay = false;
+      // Check if it's the search page, which has a different URL pattern (`#/search/{query}`)
+      isSearchPage = isSearchRoute(path);
+
       return; // Different page
     }
 
@@ -60,7 +71,8 @@
       if ($isSmallScreen) {
         // Show the asset folder list only
         $selectedAssetFolder = undefined;
-        $announcedPageStatus = $_('viewing_asset_folder_list');
+        $showAssetOverlay = false;
+        $announcedPageStatus = _('viewing_asset_folder_list');
         isIndexPage = true;
       } else {
         // Redirect to All Assets
@@ -86,19 +98,16 @@
     }
 
     if (!fileName) {
-      const count = $listedAssets.length;
-
       // Wait for `selectedAssetFolderLabel` to be updated
       await sleep(100);
 
-      $announcedPageStatus = $_(
-        count > 1
-          ? 'viewing_x_asset_folder_many_assets'
-          : count === 1
-            ? 'viewing_x_asset_folder_one_asset'
-            : 'viewing_x_asset_folder_no_assets',
-        { values: { folder: selectedAssetFolderLabel, count } },
-      );
+      $showAssetOverlay = false;
+      $announcedPageStatus = _('viewing_x_asset_folder', {
+        values: {
+          folder: selectedAssetFolderLabel,
+          count: $listedAssets.length,
+        },
+      });
 
       return;
     }
@@ -107,13 +116,17 @@
       ? $allAssets.find((asset) => asset.path === `${folderPath}/${fileName}`)
       : undefined;
     $announcedPageStatus = $overlaidAsset
-      ? $_('viewing_x_asset_details', { values: { name: $overlaidAsset.name } })
-      : $_('file_not_found');
+      ? _('viewing_x_asset_details', { values: { name: $overlaidAsset.name } })
+      : _('file_not_found');
     $showAssetOverlay = true;
   };
 
   onMount(() => {
     navigate();
+
+    return () => {
+      $showAssetOverlay = false;
+    };
   });
 </script>
 
@@ -123,17 +136,19 @@
   }}
 />
 
-<PageContainer aria-label={$_('asset_library')}>
+<PageContainer aria-label={_('asset_library')}>
   {#snippet primarySidebar()}
     {#if !$isSmallScreen || isIndexPage}
-      <PrimarySidebar />
+      <PrimarySidebar {isSearchPage} />
     {/if}
   {/snippet}
   {#snippet main()}
-    {#if !$isSmallScreen || !isIndexPage}
+    {#if isSearchPage}
+      <SearchMainArea />
+    {:else if !$isSmallScreen || !isIndexPage}
       <PageContainerMainArea
         id="assets-container"
-        aria-label={$_('x_asset_folder', { values: { folder: selectedAssetFolderLabel } })}
+        aria-label={_('x_asset_folder', { values: { folder: selectedAssetFolderLabel } })}
       >
         {#snippet primaryToolbar()}
           <PrimaryToolbar />
@@ -163,41 +178,26 @@
 
 <Toast bind:show={$assetUpdatesToast.saved}>
   <Alert status="success">
-    {$_(
-      $assetUpdatesToast.published
-        ? $assetUpdatesToast.count === 1
-          ? 'asset_saved_and_published'
-          : 'assets_saved_and_published'
-        : $assetUpdatesToast.count === 1
-          ? 'asset_saved'
-          : 'assets_saved',
-      {
-        values: { count: $assetUpdatesToast.count },
-      },
-    )}
+    {_($assetUpdatesToast.published ? 'assets_saved_and_published' : 'assets_saved', {
+      values: { count: $assetUpdatesToast.count },
+    })}
   </Alert>
 </Toast>
 
 <Toast bind:show={$assetUpdatesToast.moved}>
   <Alert status="success">
-    {$_($assetUpdatesToast.count === 1 ? 'asset_moved' : 'assets_moved', {
-      values: { count: $assetUpdatesToast.count },
-    })}
+    {_('assets_moved', { values: { count: $assetUpdatesToast.count } })}
   </Alert>
 </Toast>
 
 <Toast bind:show={$assetUpdatesToast.renamed}>
   <Alert status="success">
-    {$_($assetUpdatesToast.count === 1 ? 'asset_renamed' : 'assets_renamed', {
-      values: { count: $assetUpdatesToast.count },
-    })}
+    {_('assets_renamed', { values: { count: $assetUpdatesToast.count } })}
   </Alert>
 </Toast>
 
 <Toast bind:show={$assetUpdatesToast.deleted}>
   <Alert status="success">
-    {$_($assetUpdatesToast.count === 1 ? 'asset_deleted' : 'assets_deleted', {
-      values: { count: $assetUpdatesToast.count },
-    })}
+    {_('assets_deleted', { values: { count: $assetUpdatesToast.count } })}
   </Alert>
 </Toast>

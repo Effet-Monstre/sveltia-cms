@@ -1,3 +1,5 @@
+/* eslint-disable jsdoc/require-jsdoc */
+
 import { writable } from 'svelte/store';
 import { describe, expect, test, vi } from 'vitest';
 
@@ -17,19 +19,9 @@ import {
  * @import { InternalEntryCollection } from '$lib/types/private';
  */
 
-vi.mock('svelte-i18n', () => ({
-  _: {
-    subscribe: vi.fn((fn) => {
-      fn((/** @type {string} */ key) => key);
-
-      return vi.fn();
-    }),
-  },
-  locale: {
-    subscribe: vi.fn(() => vi.fn()),
-    set: vi.fn(),
-    update: vi.fn(),
-  },
+vi.mock('@sveltia/i18n', () => ({
+  _: (/** @type {string} */ key) => key,
+  locale: { current: 'en', set: vi.fn() },
 }));
 
 vi.mock('$lib/services/config');
@@ -775,6 +767,39 @@ describe('Test getSortConfig()', async () => {
     });
   });
 
+  test('adds _summary at the beginning of keys when collection has summary template', () => {
+    expect(
+      getSortConfig({
+        collection: {
+          ...collectionBase,
+          summary: '{{title}} - {{slug}}',
+          sortable_fields: ['title', 'date'],
+        },
+        isCommitAuthorAvailable: false,
+        isCommitDateAvailable: false,
+      }),
+    ).toEqual({
+      keys: ['_summary', 'title', 'date'],
+      default: { key: '_summary', order: 'ascending' },
+    });
+  });
+
+  test('does not add _summary when collection has no summary template', () => {
+    expect(
+      getSortConfig({
+        collection: {
+          ...collectionBase,
+          sortable_fields: ['title', 'date'],
+        },
+        isCommitAuthorAvailable: false,
+        isCommitDateAvailable: false,
+      }),
+    ).toEqual({
+      keys: ['title', 'date'],
+      default: { key: 'title', order: 'ascending' },
+    });
+  });
+
   test('handles mixed commit fields with isCommitAuthorAvailable/isCommitDateAvailable flags', () => {
     expect(
       getSortConfig({
@@ -818,12 +843,13 @@ describe('Test exported constants and utilities', () => {
       slug: String,
       commit_author: String,
       commit_date: Date,
+      _summary: String,
     });
-    expect(Object.keys(SPECIAL_SORT_KEY_TYPES)).toHaveLength(3);
+    expect(Object.keys(SPECIAL_SORT_KEY_TYPES)).toHaveLength(4);
   });
 
   test('SPECIAL_SORT_KEYS contains keys from SPECIAL_SORT_KEY_TYPES', () => {
-    expect(SPECIAL_SORT_KEYS).toEqual(['slug', 'commit_author', 'commit_date']);
+    expect(SPECIAL_SORT_KEYS).toEqual(['slug', 'commit_author', 'commit_date', '_summary']);
     expect(SPECIAL_SORT_KEYS).toEqual(Object.keys(SPECIAL_SORT_KEY_TYPES));
   });
 });
@@ -1022,7 +1048,7 @@ describe('Test getSortKeyLabel()', () => {
 
   test('returns localized labels for special keys', () => {
     // SPECIAL_SORT_KEYS includes 'slug', 'commit_author', 'commit_date', etc.
-    // getSortKeyLabel returns get(_)(`sort_keys.${key}`) for special keys
+    // getSortKeyLabel returns _(`sort_keys.${key}`) for special keys
     const slugLabel = getSortKeyLabel({ collection: mockCollection, key: 'slug' });
 
     expect(typeof slugLabel).toBe('string');

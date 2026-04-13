@@ -1,7 +1,18 @@
 import { describe, expect, test, vi } from 'vitest';
 
-import { getCanonicalLocale, getLocaleLabel, getLocalePath } from '$lib/services/contents/i18n';
+import {
+  getCanonicalLocale,
+  getListFormatter,
+  getLocaleLabel,
+  getLocalePath,
+} from '$lib/services/contents/i18n';
 import { DEFAULT_I18N_CONFIG } from '$lib/services/contents/i18n/config';
+
+// Controllable locale mock so we can set appLocale.current to null/undefined to cover the
+// `appLocale.current ?? 'en'` fallback branch in getLocaleLabel's default parameter.
+const mockLocale = vi.hoisted(() => ({ current: /** @type {string | null} */ (''), set: vi.fn() }));
+
+vi.mock('@sveltia/i18n', () => ({ locale: mockLocale }));
 
 describe('Test getCanonicalLocale()', () => {
   test('valid locale code', () => {
@@ -419,7 +430,8 @@ describe('Test getLocaleLabel()', () => {
     // @ts-ignore
     Intl.DisplayNames = MockDisplayNames;
 
-    const result = getLocaleLabel('en', { displayLocale: 'en' });
+    // Use a displayLocale ('it') not yet in displayNamesCache so the mock constructor is invoked.
+    const result = getLocaleLabel('en', { displayLocale: 'it' });
 
     expect(result).toBe(undefined);
     expect(errorSpy).toHaveBeenCalled();
@@ -427,5 +439,57 @@ describe('Test getLocaleLabel()', () => {
     // @ts-ignore
     Intl.DisplayNames = originalDisplayNames;
     errorSpy.mockRestore();
+  });
+});
+
+describe('Test getListFormatter()', () => {
+  test('should return the same formatter instance for identical locale and options', () => {
+    const formatter1 = getListFormatter('en', { style: 'narrow', type: 'conjunction' });
+    const formatter2 = getListFormatter('en', { style: 'narrow', type: 'conjunction' });
+
+    // Cache hit: both calls must return the exact same object reference.
+    expect(formatter1).toBe(formatter2);
+  });
+
+  test('should return different formatter instances for different options', () => {
+    const formatter1 = getListFormatter('en', { style: 'narrow', type: 'conjunction' });
+    const formatter2 = getListFormatter('en', { style: 'long', type: 'disjunction' });
+
+    expect(formatter1).not.toBe(formatter2);
+  });
+});
+
+describe('Test getLocaleLabel() null/undefined appLocale.current', () => {
+  test('falls back to en when appLocale.current is null', () => {
+    mockLocale.current = null;
+    // null ?? 'en' → 'en', so displayLocale becomes 'en' and the formatter returns English names
+    expect(getLocaleLabel('en')).toBe('English');
+    expect(getLocaleLabel('fr')).toBe('French');
+    mockLocale.current = '';
+  });
+});
+
+describe('Test getLocaleLabel() cache', () => {
+  test('should reuse the cached Intl.DisplayNames for the same displayLocale', () => {
+    // 'nl' is not used by any other test — guarantees a cache miss on first call.
+    const spy = vi.spyOn(Intl, 'DisplayNames');
+
+    getLocaleLabel('en', { displayLocale: 'nl' });
+    // Second call with same displayLocale: should hit displayNamesCache, not call constructor.
+    getLocaleLabel('fr', { displayLocale: 'nl' });
+
+    expect(spy).toHaveBeenCalledTimes(1);
+    spy.mockRestore();
+  });
+
+  test('uses Intl.DisplayNames with undefined locale when displayLocale is falsy', () => {
+    // Passing displayLocale: '' triggers the else branch at index.js:64
+    const spy = vi.spyOn(Intl, 'DisplayNames');
+
+    getLocaleLabel('en', { displayLocale: '' });
+
+    // Should have been called with undefined as first argument (the else branch)
+    expect(spy).toHaveBeenCalledWith(undefined, { type: 'language' });
+    spy.mockRestore();
   });
 });

@@ -1,13 +1,12 @@
+import { _ } from '@sveltia/i18n';
 import { encodeBase64 } from '@sveltia/utils/file';
-import { get } from 'svelte/store';
-import { _ } from 'svelte-i18n';
 
 import { repository } from '$lib/services/backends/git/github/repository';
 import { fetchGraphQL } from '$lib/services/backends/git/shared/api';
 import { createCommitMessage } from '$lib/services/backends/git/shared/commits';
 
 /**
- * @import { CommitOptions, CommitResults, FileChange } from '$lib/types/private';
+ * @import { CommitOptions, CommitResults, FileChange, FileCommit } from '$lib/types/private';
  */
 
 /**
@@ -50,13 +49,13 @@ export const fetchLastCommit = async () => {
 
   if (!result.repository) {
     throw new Error('Failed to retrieve the last commit hash.', {
-      cause: new Error(get(_)('repository_not_found', { values: { repo } })),
+      cause: new Error(_('repository_not_found', { values: { repo } })),
     });
   }
 
   if (!result.repository.ref) {
     throw new Error('Failed to retrieve the last commit hash.', {
-      cause: new Error(get(_)('branch_not_found', { values: { repo, branch } })),
+      cause: new Error(_('branch_not_found', { values: { repo, branch } })),
     });
   }
 
@@ -64,6 +63,12 @@ export const fetchLastCommit = async () => {
 
   return { hash, message };
 };
+
+/**
+ * GitHub’s GraphQL API cannot resolve blob OIDs for files over this size (10 MB).
+ * @see https://github.com/sveltia/sveltia-cms/issues/692
+ */
+const MAX_GRAPHQL_BLOB_SIZE = 10 * 1024 * 1024;
 
 /**
  * Save entries or assets remotely.
@@ -76,22 +81,34 @@ export const fetchLastCommit = async () => {
 export const commitChanges = async (changes, options) => {
   const { owner, repo, branch } = repository;
 
+  const additionChanges = changes.filter(({ action }) =>
+    ['create', 'update', 'move'].includes(action),
+  );
+
   const additions = await Promise.all(
-    changes
-      .filter(({ action }) => ['create', 'update', 'move'].includes(action))
-      .map(async ({ path, data }) => ({
-        path,
-        contents: await encodeBase64(data ?? ''),
-      })),
+    additionChanges.map(async ({ path, data }) => ({
+      path,
+      contents: await encodeBase64(data ?? ''),
+    })),
   );
 
   const deletions = changes
     .filter(({ action }) => ['move', 'delete'].includes(action))
     .map(({ previousPath, path }) => ({ path: previousPath ?? path }));
 
-  // Part of the query to fetch new file SHAs
+  // Part of the query to fetch new file SHAs; skip files over 10 MB to avoid a GitHub GraphQL
+  // limitation where large blob OIDs cannot be resolved
+  // @see https://github.com/sveltia/sveltia-cms/issues/692
   const fileShaQuery = additions
-    .map(({ path }, index) => `file_${index}: file(path: ${JSON.stringify(path)}) { oid }`)
+    .map(({ path }, index) => {
+      const { data } = additionChanges[index];
+      const size = data instanceof Blob ? data.size : new Blob([data ?? '']).size;
+
+      return size <= MAX_GRAPHQL_BLOB_SIZE
+        ? `file_${index}: file(path: ${JSON.stringify(path)}) { oid }`
+        : '';
+    })
+    .filter(Boolean)
     .join(' ');
 
   const query = `
@@ -126,7 +143,82 @@ export const commitChanges = async (changes, options) => {
     sha: commit.oid,
     date: new Date(commit.committedDate),
     files: Object.fromEntries(
-      additions.map(({ path }, index) => [path, { sha: commit[`file_${index}`]?.oid }]),
+      additions.map(({ path }, index) => {
+        const { data } = additionChanges[index];
+
+        return [
+          path,
+          {
+            sha: commit[`file_${index}`]?.oid,
+            // Preserve the original file for large uploads so the UI can create a blob URL
+            ...(data instanceof Blob && data.size > MAX_GRAPHQL_BLOB_SIZE ? { file: data } : {}),
+          },
+        ];
+      }),
     ),
   };
+};
+
+/**
+ * Fetch commit history for the given file paths.
+ * @param {string[]} paths File paths to fetch commit history for.
+ * @returns {Promise<FileCommit[]>} Deduplicated and sorted list of commits.
+ * @see https://docs.github.com/en/graphql/reference/objects#commit
+ */
+export const fetchFileCommits = async (paths) => {
+  const innerQuery = paths
+    .map(
+      (path, i) => `
+        history_${i}: ref(qualifiedName: $branch) {
+          target {
+            ... on Commit {
+              history(first: 100, path: ${JSON.stringify(path)}) {
+                nodes {
+                  oid
+                  author {
+                    name
+                    email
+                    avatarUrl
+                    user { login }
+                  }
+                  committedDate
+                }
+              }
+            }
+          }
+        }
+      `,
+    )
+    .join('');
+
+  const query = `
+    query($owner: String!, $repo: String!, $branch: String!) {
+      repository(owner: $owner, name: $repo) {
+        ${innerQuery}
+      }
+    }
+  `;
+
+  const data = /** @type {{ repository: Record<string, any> }} */ (await fetchGraphQL(query));
+  /** @type {Map<string, FileCommit>} */
+  const commitMap = new Map();
+
+  paths.forEach((_path, i) => {
+    const nodes = data.repository[`history_${i}`]?.target?.history?.nodes ?? [];
+
+    nodes.forEach((/** @type {any} */ node) => {
+      if (!commitMap.has(node.oid)) {
+        commitMap.set(node.oid, {
+          sha: node.oid,
+          authorName: node.author.name,
+          authorEmail: node.author.email,
+          authorAvatarURL: node.author.avatarUrl,
+          authorLogin: node.author.user?.login,
+          date: new Date(node.committedDate),
+        });
+      }
+    });
+  });
+
+  return [...commitMap.values()].sort((a, b) => b.date.getTime() - a.date.getTime());
 };

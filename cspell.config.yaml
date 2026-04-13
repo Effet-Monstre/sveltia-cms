@@ -22,6 +22,8 @@ words:
   - analyzing
   - astrolicious
   - astros
+  - backlink
+  - backlinks
   - brotlied
   - BYOK
   - camelcase
@@ -47,6 +49,7 @@ words:
   - gitdir
   - Gitea
   - goldmark
+  - groupable
   - hotlinking
   - hugolify
   - husenunicorn
@@ -60,6 +63,7 @@ words:
   - jSquash
   - keymap
   - keyvalue
+  - Kohei
   - kyoshino
   - lvml
   - mdwn
@@ -95,6 +99,7 @@ words:
   - rearchitect
   - rebranded
   - reimagined
+  - rescanning
   - Roadmap
   - safesearch
   - sebousan
@@ -107,6 +112,7 @@ words:
   - smol
   - strikethrough
   - stylelint
+  - subfolders
   - sveltejs
   - Sveltia
   - templatized
@@ -119,6 +125,7 @@ words:
   - unlocalized
   - unpatched
   - unproxify
+  - unrs
   - unsubscribers
   - Uploadcare
   - videoseries
@@ -131,6 +138,7 @@ words:
   - worktree
   - xslx
   - yacosta
+  - Yoshino
   - zanhk
   - Zola
 overrides:

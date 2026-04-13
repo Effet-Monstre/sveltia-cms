@@ -1,5 +1,5 @@
 /**
- * @import { JSX } from 'react';
+ * @import { ReactElement } from 'react';
  * @import { MapOf } from 'immutable';
  */
 
@@ -31,7 +31,8 @@
 
 /**
  * Cloud media storage name.
- * @typedef {'cloudinary' | 'uploadcare'} CloudMediaLibraryName
+ * @typedef {'cloudinary' | 'uploadcare' | 'aws_s3' | 'cloudflare_r2' |
+ * 'digitalocean_spaces'} CloudMediaLibraryName
  */
 
 /**
@@ -165,22 +166,46 @@
  */
 
 /**
+ * Options for S3-compatible media libraries (Amazon S3, Cloudflare R2, DigitalOcean Spaces).
+ * @typedef {object} S3MediaLibrary
+ * @property {string} [name] Media library name (used when configuring via legacy `media_library`).
+ * @property {string} access_key_id AWS access key ID or equivalent (safe to store in config).
+ * @property {string} bucket Bucket name.
+ * @property {string} [region] AWS region (e.g., 'us-east-1'). Required for Amazon S3 and
+ * DigitalOcean Spaces.
+ * @property {string} [account_id] Cloudflare account ID. Required for Cloudflare R2.
+ * @property {string} [endpoint] Custom endpoint URL for S3-compatible services.
+ * @property {string} [prefix] Path prefix within bucket.
+ * @property {boolean} [force_path_style] Use path-style URLs instead of virtual-hosted-style.
+ * @property {string} [public_url] Base URL for public asset access. When set, asset preview and
+ * download URLs are constructed as `{public_url}/{key}` instead of the S3 API endpoint URL.
+ * Required for Cloudflare R2 (S3 API endpoint always requires authentication); set to the `r2.dev`
+ * development URL (e.g. `https://pub-abcd1234.r2.dev`) or a custom domain. Optional for Amazon S3
+ * and DigitalOcean Spaces — use when serving assets through a CDN or custom domain (e.g. CloudFront
+ * or Route 53 for S3, CDN endpoint for Spaces).
+ */
+
+/**
  * Name of supported stock photo/video provider.
  * @typedef {'pexels' | 'picsum' | 'pixabay' | 'unsplash'} StockAssetProviderName
  */
 
 /**
  * Options for the unified stock photo/video providers.
- * @typedef {object} StockAssetMediaLibrary
+ * @typedef {object} StockMediaLibrary
  * @property {StockAssetProviderName[]} [providers] Enabled stock photo/video providers. The stock
  * photo/video section in the asset browser is hidden if an empty array is given. Default: all
  * supported providers.
  */
 
 /**
+ * Supported cloud media storage options.
+ * @typedef {CloudinaryMediaLibrary | UploadcareMediaLibrary | S3MediaLibrary} CloudMediaLibrary
+ */
+
+/**
  * Supported [media storage](https://sveltiacms.app/en/docs/media).
- * @typedef {DefaultMediaLibrary | CloudinaryMediaLibrary | UploadcareMediaLibrary |
- * StockAssetMediaLibrary} MediaLibrary
+ * @typedef {DefaultMediaLibrary | CloudMediaLibrary | StockMediaLibrary} MediaLibrary
  */
 
 /**
@@ -190,8 +215,17 @@
  * @property {DefaultMediaLibrary} [default] Options for the default media storage.
  * @property {CloudinaryMediaLibrary} [cloudinary] Options for the Cloudinary media storage.
  * @property {UploadcareMediaLibrary} [uploadcare] Options for the Uploadcare media storage.
- * @property {StockAssetMediaLibrary} [stock_assets] Options for the unified stock photo/video media
+ * @property {S3MediaLibrary} [aws_s3] Options for the Amazon S3 media storage.
+ * @property {S3MediaLibrary} [cloudflare_r2] Options for the Cloudflare R2 media storage.
+ * @property {S3MediaLibrary} [digitalocean_spaces] Options for the DigitalOcean Spaces media
+ * storage.
+ * @property {StockMediaLibrary} [stock_assets] Options for the unified stock photo/video media
  * library.
+ */
+
+/**
+ * Parsed, localized entry content.
+ * @typedef {Record<string, any>} RawEntryContent
  */
 
 /**
@@ -552,6 +586,8 @@
  * `true`.
  * @property {boolean} [allow_remove] Whether to allow users to remove items from the list. Default:
  * `true`.
+ * @property {boolean} [allow_duplicate] Whether to allow users to duplicate items in the list.
+ * Default: `true`.
  * @property {boolean} [allow_reorder] Whether to allow users to reorder items in the list. Default:
  * `true`.
  * @property {boolean} [add_to_top] Whether to add new items to the top of the list instead of the
@@ -1248,6 +1284,8 @@
  * to `true` to provide a better out-of-the-box experience.
  * @property {boolean} [delete] Whether to allow users to delete entries in the collection. Default:
  * `true`.
+ * @property {boolean} [duplicate] Whether to allow users to duplicate entries in the collection.
+ * Default: `true`.
  * @property {FileExtension} [extension] File extension. Default: `md`.
  * @property {FieldKeyPath} [identifier_field] Field name to be used as the title and slug of an
  * entry. Default: `title`.
@@ -1494,6 +1532,10 @@
  * @property {boolean} [trim] Whether to trim leading and trailing replacement characters. Default:
  * `true`.
  * @property {boolean} [lowercase] Whether to convert the slug to lowercase. Default: `true`.
+ * @property {'utc' | 'local'} [timezone] Timezone to be used for date-based slug template tags,
+ * such as `{{day}}` and `{{hour}}`. Default is `utc` for backward compatibility with Netlify/Decap
+ * CMS. Use `local` to generate slugs based on the local time of the user’s browser, which is more
+ * intuitive in most cases.
  * @see https://decapcms.org/docs/configuration-options/#slug-type
  * @see https://sveltiacms.app/en/docs/collections/entries#global-slug-options
  */
@@ -1534,6 +1576,12 @@
  */
 
 /**
+ * @typedef {object} IssueReports
+ * @property {string} url URL of the issue reporting endpoint. Default:
+ * `https://github.com/sveltia/sveltia-cms/issues/new`.
+ */
+
+/**
  * CMS configuration.
  * @typedef {object} CmsConfig
  * @property {boolean} [load_config_file] Whether to load YAML/JSON CMS configuration file(s) when
@@ -1565,6 +1613,7 @@
  * https://sveltiacms.app/en/docs/customization#custom-logo for details.
  * @property {LogoOptions} [logo] Site logo options.
  * @property {string} [logout_redirect_url] URL to redirect users to after logging out.
+ * @property {IssueReports} [issue_reports] Issue reporting options.
  * @property {boolean} [show_preview_links] Whether to show site preview links. Default: `true`.
  * @property {SlugOptions} [slug] Entry slug options.
  * @property {(Collection | CollectionDivider)[]} [collections] Set of collections. The list can
@@ -1607,13 +1656,13 @@
  * @property {boolean} [collapsed] Whether to collapse the object by default. Default: `false`.
  * @property {Field[]} fields Set of fields to be displayed in the component.
  * @property {RegExp} pattern Regular expression to search a block from Markdown document.
- * @property {(match: RegExpMatchArray) => { [key: string]: any }} [fromBlock] Function to convert
- * the matching result to field properties. This can be omitted if the `pattern` regex contains
- * named capturing group(s) that will be passed directly to the internal `createNode` method.
- * @property {(props: { [key: string]: any }) => string} toBlock Function to convert field
- * properties to Markdown content.
- * @property {(props: { [key: string]: any }) => string | JSX.Element} [toPreview] Function to
- * convert field properties to field preview.
+ * @property {(match: RegExpMatchArray) => Record<string, any>} [fromBlock] Function to convert the
+ * matching result to field properties. This can be omitted if the `pattern` regex contains named
+ * capturing group(s) that will be passed directly to the internal `createNode` method.
+ * @property {(props: Record<string, any>) => string} toBlock Function to convert field properties
+ * to Markdown content.
+ * @property {(props: Record<string, any>) => string | ReactElement} [toPreview] Function to convert
+ * field properties to field preview.
  * @see https://decapcms.org/docs/custom-widgets/#registereditorcomponent
  * @see https://sveltiacms.app/en/docs/api/editor-components
  */
@@ -1635,7 +1684,7 @@
 
 /**
  * Event entry media file data.
- * @typedef {object} AppEventEntryMedia
+ * @typedef {object} ApiEntryMedia
  * @property {string} id Media file ID.
  * @property {string} path Media file path.
  * @property {string} name Media file name.
@@ -1647,14 +1696,14 @@
 
 /**
  * Event entry data.
- * @typedef {object} AppEventEntry
+ * @typedef {object} ApiEntry
  * @property {Record<string, any>} data Entry data for the default locale.
  * @property {Record<string, any>} i18n Entry data for other locales with locale codes as keys.
  * @property {string} slug Entry slug.
  * @property {string} path Entry file path.
  * @property {boolean} newRecord Whether the entry is newly created.
  * @property {string} collection Name of the collection.
- * @property {AppEventEntryMedia[]} mediaFiles List of media files associated with the entry.
+ * @property {ApiEntryMedia[]} mediaFiles List of media files associated with the entry.
  * @property {{ path: string }} meta Entry meta data.
  * @property {null} isModification Unknown. Always `null`.
  * @property {null} label Unknown. Always `null`.
@@ -1669,10 +1718,10 @@
  * Event listener properties.
  * @typedef {object} AppEventListener
  * @property {AppEventType} name Event type.
- * @property {(args: { author: AppEventAuthor, entry: MapOf<AppEventEntry> }) => void |
- * MapOf<AppEventEntry> | Promise<void> | Promise<MapOf<AppEventEntry>>} handler Event handler. For
- * the `preSave` event, the handler can return a modified entry object in Immutable Map format to
- * change the data before it is saved. For other events, the return value is ignored.
+ * @property {(args: { author: AppEventAuthor, entry: MapOf<ApiEntry> }) => void | MapOf<ApiEntry> |
+ * Promise<void> | Promise<MapOf<ApiEntry>>} handler Event handler. For the `preSave` event, the
+ * handler can return a modified entry object in Immutable Map format to change the data before it
+ * is saved. For other events, the return value is ignored.
  * @see https://decapcms.org/docs/registering-events/
  * @see https://sveltiacms.app/en/docs/api/events
  */

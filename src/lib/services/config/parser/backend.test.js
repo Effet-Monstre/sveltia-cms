@@ -4,12 +4,13 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
  * @import { ConfigParserCollectors } from '$lib/types/private';
  */
 
-// Mock svelte-i18n
+// Mock @sveltia/i18n
 /** @type {Record<string, string>} */
 const mockI18nStrings = {
   'config.error.missing_backend': 'Missing backend configuration',
   'config.error.missing_backend_name': 'Backend name is required',
   'config.error.unsupported_known_backend': 'Unsupported backend: {name}',
+  'config.error.unsupported_deprecated_backend': 'Deprecated backend: {name}',
   'config.error.unsupported_custom_backend': 'Unsupported backend: {name}',
   'config.error.unsupported_backend_suggestion': 'Please check the supported backends.',
   'config.error.missing_repository': 'Missing repository',
@@ -37,21 +38,9 @@ function mockTranslate(key, options) {
   return message;
 }
 
-vi.mock('svelte-i18n', () => ({
-  _: {
-    subscribe: vi.fn((fn) => {
-      fn(mockTranslate);
-
-      return () => {};
-    }),
-  },
-  locale: {
-    subscribe: vi.fn((fn) => {
-      fn('en-US');
-
-      return () => {};
-    }),
-  },
+vi.mock('@sveltia/i18n', () => ({
+  _: mockTranslate,
+  locale: { current: 'en-US', set: vi.fn() },
 }));
 
 const mockGetStore = vi.fn();
@@ -82,7 +71,7 @@ vi.mock('$lib/services/backends', () => ({
   unsupportedBackends: {
     azure: { label: 'Azure DevOps' },
     bitbucket: { label: 'Bitbucket' },
-    'git-gateway': { label: 'Git Gateway' },
+    'git-gateway': { label: 'Git Gateway', deprecated: true },
   },
 }));
 
@@ -109,20 +98,7 @@ describe('parseBackendConfig', () => {
   beforeEach(() => {
     vi.clearAllMocks();
 
-    mockGetStore.mockImplementation((store) => {
-      // Handle the i18n store
-      if (store && typeof store.subscribe === 'function') {
-        let result;
-
-        store.subscribe((/** @type {any} */ value) => {
-          result = value;
-        })();
-
-        return result;
-      }
-
-      return store;
-    });
+    mockGetStore.mockImplementation((store) => store);
 
     mockIsObject.mockImplementation(
       /**
@@ -208,6 +184,60 @@ describe('parseBackendConfig', () => {
       const [error] = [...collectors.errors];
 
       expect(error).toContain('Unsupported backend: Bitbucket');
+      expect(error).toContain('Please check the supported backends');
+    });
+
+    it('should use "custom" message branch for completely unknown backend name', async () => {
+      const { parseBackendConfig } = await import('./backend.js');
+      const collectors = createCollectors();
+      /** @type {any} */
+      const config = { backend: { name: 'my-custom-backend' } };
+
+      parseBackendConfig(config, collectors);
+
+      expect(collectors.errors.size).toBe(1);
+
+      const [error] = [...collectors.errors];
+
+      // 'my-custom-backend' is not in unsupportedBackends, so it uses the
+      // 'unsupported_custom_backend' message key (custom backend branch at line 51)
+      expect(error).toContain('Unsupported backend');
+      expect(error).toContain('Please check the supported backends');
+    });
+
+    it('should use "deprecated" message branch for deprecated backend', async () => {
+      const { parseBackendConfig } = await import('./backend.js');
+      const collectors = createCollectors();
+      /** @type {any} */
+      const config = { backend: { name: 'git-gateway' } };
+
+      parseBackendConfig(config, collectors);
+
+      expect(collectors.errors.size).toBe(1);
+
+      const [error] = [...collectors.errors];
+
+      // 'git-gateway' is in unsupportedBackends with deprecated: true, so it uses the
+      // 'unsupported_deprecated_backend' message key
+      expect(error).toContain('Deprecated backend: Git Gateway');
+      expect(error).toContain('Please check the supported backends');
+    });
+
+    it('should use "known" message branch for non-deprecated unsupported backend', async () => {
+      const { parseBackendConfig } = await import('./backend.js');
+      const collectors = createCollectors();
+      /** @type {any} */
+      const config = { backend: { name: 'azure' } };
+
+      parseBackendConfig(config, collectors);
+
+      expect(collectors.errors.size).toBe(1);
+
+      const [error] = [...collectors.errors];
+
+      // 'azure' is in unsupportedBackends without deprecated flag, so it uses the
+      // 'unsupported_known_backend' message key
+      expect(error).toContain('Unsupported backend: Azure DevOps');
       expect(error).toContain('Please check the supported backends');
     });
   });

@@ -19,8 +19,8 @@ vi.mock('svelte/store', () => ({
   get: getMock,
 }));
 
-vi.mock('svelte-i18n', () => ({
-  _: {}, // Mock _ as a store-like object
+vi.mock('@sveltia/i18n', () => ({
+  _: vi.fn((key) => key),
 }));
 
 vi.mock('$lib/services/backends/git/shared/api', () => ({
@@ -38,7 +38,7 @@ describe('Gitea Repository Service', () => {
     // Reset the repository info cache
     resetRepositoryInfoCache();
 
-    // Mock get(_) to return a translation function (following pattern from other tests)
+    // Mock _ to return a translation function (following pattern from other tests)
     // @ts-ignore
     getMock.mockReturnValue((key, options) => {
       switch (key) {
@@ -76,6 +76,7 @@ describe('Gitea Repository Service', () => {
       expect(result).toEqual({
         treeBaseURL: 'https://gitea.example.com/owner/repo/src/branch/main',
         blobBaseURL: 'https://gitea.example.com/owner/repo/src/branch/main',
+        commitBaseURL: 'https://gitea.example.com/owner/repo/commit',
       });
     });
 
@@ -86,6 +87,7 @@ describe('Gitea Repository Service', () => {
       expect(result).toEqual({
         treeBaseURL: 'https://gitea.example.com/owner/repo',
         blobBaseURL: '',
+        commitBaseURL: 'https://gitea.example.com/owner/repo/commit',
       });
     });
 
@@ -95,6 +97,7 @@ describe('Gitea Repository Service', () => {
       expect(result).toEqual({
         treeBaseURL: '/src/branch/main',
         blobBaseURL: '/src/branch/main',
+        commitBaseURL: '/commit',
       });
     });
   });

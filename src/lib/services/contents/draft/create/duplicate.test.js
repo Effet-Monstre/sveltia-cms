@@ -25,6 +25,10 @@ vi.mock('$lib/services/contents/fields/uuid/helper', () => ({
   getInitialValue: vi.fn(),
 }));
 
+vi.mock('$lib/services/contents/draft/create', () => ({
+  getSlugEditorProp: vi.fn(),
+}));
+
 describe('contents/draft/create/duplicate', () => {
   /** @type {any} */
   let mockEntryDraft;
@@ -40,6 +44,8 @@ describe('contents/draft/create/duplicate', () => {
   let mockGetHiddenFieldDefaultValueMap;
   /** @type {any} */
   let mockGetInitialUuidValue;
+  /** @type {any} */
+  let mockGetSlugEditorProp;
 
   beforeEach(async () => {
     vi.clearAllMocks();
@@ -51,6 +57,7 @@ describe('contents/draft/create/duplicate', () => {
     const { getField } = await import('$lib/services/contents/entry/fields');
     const { getDefaultValueMap } = await import('$lib/services/contents/fields/hidden/defaults');
     const { getInitialValue } = await import('$lib/services/contents/fields/uuid/helper');
+    const { getSlugEditorProp } = await import('$lib/services/contents/draft/create');
 
     mockGet = getMock;
     mockEntryDraftSet = entryDraft.set;
@@ -58,6 +65,8 @@ describe('contents/draft/create/duplicate', () => {
     mockGetField = getField;
     mockGetHiddenFieldDefaultValueMap = getDefaultValueMap;
     mockGetInitialUuidValue = getInitialValue;
+    mockGetSlugEditorProp = getSlugEditorProp;
+    mockGetSlugEditorProp.mockReturnValue({ en: true, ja: 'readonly' });
 
     // Setup default mock entry draft
     mockEntryDraft = {
@@ -88,6 +97,7 @@ describe('contents/draft/create/duplicate', () => {
       },
       isIndexFile: false,
       isNew: false,
+      slugEditor: { en: false, ja: false },
       originalEntry: { id: 'existing-id' },
       originalSlugs: { en: 'test-post', ja: 'test-post' },
       currentSlugs: { en: 'test-post', ja: 'test-post' },
@@ -321,6 +331,37 @@ describe('contents/draft/create/duplicate', () => {
       expect(setCallArg.currentSlugs).toEqual({});
     });
 
+    it('should recompute slugEditor via getSlugEditorProp with no originalEntry id', async () => {
+      const { duplicateDraft } = await import('./duplicate.js');
+
+      duplicateDraft();
+
+      expect(mockGetSlugEditorProp).toHaveBeenCalledWith({
+        collection: mockEntryDraft.collection,
+        collectionFile: mockEntryDraft.collectionFile,
+        originalSlugs: {},
+      });
+
+      const setCallArg = mockEntryDraftSet.mock.calls[0][0];
+
+      expect(setCallArg.slugEditor).toEqual({ en: true, ja: 'readonly' });
+    });
+
+    it("should not carry over the original entry's false slugEditor values", async () => {
+      // Simulate an existing entry whose slug editor was disabled
+      mockEntryDraft.slugEditor = { en: false, ja: false };
+      mockGetSlugEditorProp.mockReturnValue({ en: true, ja: false });
+
+      const { duplicateDraft } = await import('./duplicate.js');
+
+      duplicateDraft();
+
+      const setCallArg = mockEntryDraftSet.mock.calls[0][0];
+
+      expect(setCallArg.slugEditor).toEqual({ en: true, ja: false });
+      expect(setCallArg.slugEditor).not.toEqual({ en: false, ja: false });
+    });
+
     it('should show duplicate toast', async () => {
       const { duplicateDraft } = await import('./duplicate.js');
 
@@ -481,6 +522,60 @@ describe('contents/draft/create/duplicate', () => {
       duplicateDraft();
 
       // When i18n is 'duplicate', should only be called for default locale
+      const { calls } = mockGetHiddenFieldDefaultValueMap.mock;
+      const jaLocaleCall = (calls ?? []).filter((/** @type {any} */ c) => c[0].locale === 'ja');
+
+      expect(jaLocaleCall).toHaveLength(0);
+    });
+
+    it('should not reset uuid field for non-default locale when i18n is unspecified (??false branch)', async () => {
+      mockEntryDraft.currentValues.en.uuid = 'old-uuid-value';
+      mockEntryDraft.currentValues.ja.uuid = 'old-uuid-value-ja';
+
+      mockGetField.mockImplementation((/** @type {any} */ { keyPath }) => {
+        if (keyPath === 'uuid') {
+          // No i18n property at all → fieldConfig.i18n is undefined → ?? false fires
+          return { widget: 'uuid' };
+        }
+
+        return undefined;
+      });
+
+      mockGetInitialUuidValue.mockReturnValue('new-uuid-value');
+
+      const { duplicateDraft } = await import('./duplicate.js');
+
+      duplicateDraft();
+
+      const setCallArg = mockEntryDraftSet.mock.calls[0][0];
+
+      // Default locale resets (condition true via locale === defaultLocale)
+      expect(setCallArg.currentValues.en.uuid).toBe('new-uuid-value');
+      // Non-default locale does not reset (fieldConfig.i18n is undefined → ?? false → condition
+      // false)
+      expect(setCallArg.currentValues.ja.uuid).toBe('old-uuid-value-ja');
+    });
+
+    it('should not reset hidden field for non-default locale when i18n is unspecified (??false branch)', async () => {
+      mockEntryDraft.currentValues.en.hiddenField = 'old-value';
+      mockEntryDraft.currentValues.ja.hiddenField = 'old-value-ja';
+
+      mockGetField.mockImplementation((/** @type {any} */ { keyPath }) => {
+        if (keyPath === 'hiddenField') {
+          // No i18n property at all → fieldConfig.i18n is undefined → ?? false fires
+          return { widget: 'hidden', default: 'new-default-value' };
+        }
+
+        return undefined;
+      });
+
+      mockGetHiddenFieldDefaultValueMap.mockReturnValue({ hiddenField: 'new-default-value' });
+
+      const { duplicateDraft } = await import('./duplicate.js');
+
+      duplicateDraft();
+
+      // Should only call for defaultLocale (en), not for ja
       const { calls } = mockGetHiddenFieldDefaultValueMap.mock;
       const jaLocaleCall = (calls ?? []).filter((/** @type {any} */ c) => c[0].locale === 'ja');
 

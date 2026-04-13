@@ -1,12 +1,14 @@
+import { _ } from '@sveltia/i18n';
 import equal from 'fast-deep-equal';
 import { derived, get, writable } from 'svelte/store';
-import { _ } from 'svelte-i18n';
 
 import { allAssets, selectedAssets, uploadingAssets } from '$lib/services/assets';
 import { selectedAssetFolder } from '$lib/services/assets/folders';
 import { filterAssets } from '$lib/services/assets/view/filter';
 import { groupAssets } from '$lib/services/assets/view/group';
+import { assetListSettings, initSettings } from '$lib/services/assets/view/settings';
 import { sortAssets } from '$lib/services/assets/view/sort';
+import { backend } from '$lib/services/backends';
 import { getCollection, getCollectionLabel } from '$lib/services/contents/collection';
 import { getCollectionFile, getCollectionFileLabel } from '$lib/services/contents/collection/files';
 import { prefs } from '$lib/services/user/prefs';
@@ -47,7 +49,7 @@ export const showUploadAssetsConfirmDialog = derived(
  */
 export const getFolderLabelByCollection = ({ collectionName, fileName, internalPath }) => {
   if (collectionName === undefined) {
-    return get(_)(internalPath === undefined ? 'all_assets' : 'global_assets');
+    return _(internalPath === undefined ? 'all_assets' : 'global_assets');
   }
 
   const collection = getCollection(collectionName);
@@ -117,6 +119,12 @@ export const assetGroups = derived(
     }
   },
 );
+
+backend.subscribe((_backend) => {
+  if (_backend && !get(assetListSettings)) {
+    initSettings(_backend);
+  }
+});
 
 listedAssets.subscribe((assets) => {
   selectedAssets.set([]);

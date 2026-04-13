@@ -4,10 +4,21 @@ import { truncate } from '@sveltia/utils/string';
 import { get } from 'svelte/store';
 
 import { cmsConfig } from '$lib/services/config';
+import { getOrCreate } from '$lib/services/utils/cache';
 
 /**
  * @import { InternalCmsConfig } from '$lib/types/private';
  */
+
+/**
+ * Locales that are supported in the `locale` option of the transliteration library.
+ * @see https://github.com/sindresorhus/transliterate/tree/main#locale
+ */
+const TRANSLITERATION_LOCALES = ['da', 'de', 'hu', 'nb', 'sr', 'sv', 'tr'];
+/**
+ * @type {Map<string, { consecutivePattern: RegExp, trimPattern: RegExp }>}
+ */
+const slugReplacementRegexCache = new Map();
 
 /**
  * Slugify the given string to be used as a filename or URL slug, based on the `slug` configuration.
@@ -16,6 +27,8 @@ import { cmsConfig } from '$lib/services/config';
  * @param {object} [options] Options.
  * @param {boolean} [options.fallback] Whether to return a fallback value if the slug is empty.
  * Defaults to `true`, which returns a part of a UUID.
+ * @param {string} [options.locale] BCP 47 language tag passed to the transliterate library when
+ * `clean_accents` is enabled.
  * @param {number} [options.maxLength] Maximum length of the slug.
  * @returns {string} Slug.
  * @see https://decapcms.org/docs/configuration-options/#slug-type
@@ -23,7 +36,7 @@ import { cmsConfig } from '$lib/services/config';
  */
 export const slugify = (
   string,
-  { fallback = true, maxLength: maxLengthParam = undefined } = {},
+  { fallback = true, locale = undefined, maxLength: maxLengthParam = undefined } = {},
 ) => {
   const {
     slug: {
@@ -42,7 +55,9 @@ export const slugify = (
   if (cleanAccents) {
     // Remove any accented characters by transliterating them to their ASCII equivalents
     // @see https://www.npmjs.com/package/@sindresorhus/transliterate
-    slug = transliterate(slug.normalize('NFD'));
+    slug = transliterate(slug.normalize('NFD'), {
+      locale: locale && TRANSLITERATION_LOCALES.includes(locale) ? locale : undefined,
+    });
   }
 
   if (encoding === 'ascii') {
@@ -50,7 +65,7 @@ export const slugify = (
   } else {
     // Disallow space, control, delimiter, reserved, unwise characters
     // @see https://stackoverflow.com/q/1547899
-    slug = slug.replaceAll(/[\p{Z}\p{C}!"#$&'()*+,/:;<=>?@[\]^`{|}]/gu, ' ');
+    slug = slug.replaceAll(/[\p{Z}\p{C}!"#$%&'()*+,/:;<=>?@[\\\]^`{|}]/gu, ' ');
   }
 
   // Replace all the spaces with replacers (hyphens by default)
@@ -59,13 +74,17 @@ export const slugify = (
   // Consolidate consecutive replacement characters into a single one and trim them from ends
   if (sanitizeReplacement) {
     const escapedReplacement = sanitizeReplacement.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const consecutivePattern = new RegExp(`${escapedReplacement}+`, 'g');
 
-    slug = slug.replace(consecutivePattern, sanitizeReplacement);
+    const cachedSlugRegexes = getOrCreate(slugReplacementRegexCache, escapedReplacement, () => ({
+      consecutivePattern: new RegExp(`${escapedReplacement}+`, 'g'),
+      trimPattern: new RegExp(`^${escapedReplacement}+|${escapedReplacement}+$`, 'g'),
+    }));
+
+    slug = slug.replace(cachedSlugRegexes.consecutivePattern, sanitizeReplacement);
 
     // Trim replacement characters from the beginning and end
     if (trimReplacement) {
-      slug = slug.replace(new RegExp(`^${escapedReplacement}+|${escapedReplacement}+$`, 'g'), '');
+      slug = slug.replace(cachedSlugRegexes.trimPattern, '');
     }
   }
 

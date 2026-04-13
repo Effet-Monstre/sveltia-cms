@@ -4,8 +4,10 @@ import { appendFile, cp, mkdir, readFile, writeFile } from 'fs/promises';
 import path from 'path';
 
 import { svelte } from '@sveltejs/vite-plugin-svelte';
+import { isObject } from '@sveltia/utils/object';
 import { createGenerator } from 'ts-json-schema-generator';
 import { defineConfig } from 'vite';
+import { parse as parseYAML } from 'yaml';
 
 import { BUILTIN_FIELD_TYPES } from './src/lib/services/contents/fields';
 import svelteConfig from './svelte.config';
@@ -22,6 +24,63 @@ const MAIN_TYPE_PATH = 'package/main.d.ts';
  * Path to the generated public type declaration file.
  */
 const PUBLIC_TYPE_PATH = 'package/types/public.d.ts';
+
+/**
+ * Recursively squash multiline strings in a parsed YAML object into single lines.
+ * @param {unknown} value The value to process.
+ * @returns {unknown} The processed value.
+ */
+const squashStrings = (value) => {
+  if (typeof value === 'string') {
+    return value
+      .replace(/\s*\n\s*/g, ' ')
+      .replace(/ {2,}/g, ' ')
+      .replace(/\{\{ /g, '{{')
+      .replace(/ \}\}/g, '}}')
+      .trim();
+  }
+
+  if (Array.isArray(value)) {
+    return value.map(squashStrings);
+  }
+
+  if (isObject(value)) {
+    return Object.fromEntries(
+      Object.entries(/** @type {Record<string, unknown>} */ (value)).map(([k, v]) => [
+        k,
+        squashStrings(v),
+      ]),
+    );
+  }
+
+  return value;
+};
+
+/**
+ * Transform YAML files into JS object modules, stripping comments and squashing multiline strings.
+ * This also handles `?raw` imports used by dependencies such as `@sveltia/ui`.
+ * @returns {import('vite').Plugin} Vite plugin.
+ */
+const yamlToJS = () => ({
+  name: 'yaml-to-js',
+  enforce: 'pre',
+  // eslint-disable-next-line jsdoc/require-jsdoc
+  async load(id) {
+    const [cleanId, query = ''] = id.split('?');
+
+    if (!cleanId.endsWith('.yaml') && !cleanId.endsWith('.yml')) return null;
+
+    const content = await readFile(cleanId, 'utf-8');
+    const parsed = squashStrings(parseYAML(content));
+
+    if (new URLSearchParams(query).has('raw')) {
+      // Return a JSON string so that the runtime `yaml.parse` call in dependencies still works
+      return `export default ${JSON.stringify(JSON.stringify(parsed))};`;
+    }
+
+    return `export default ${JSON.stringify(parsed)};`;
+  },
+});
 
 /**
  * Copy essential package files while modifying the `package.json` content.
@@ -181,32 +240,46 @@ export default defineConfig({
     extensions: ['.js', '.svelte'],
   },
   build: {
-    target: 'es2024',
     reportCompressedSize: false,
     chunkSizeWarningLimit: 5000,
     sourcemap: true,
-    rollupOptions: {
+    rolldownOptions: {
       // Output JavaScript only
       input: 'src/lib/main.js',
       output: [
         {
           entryFileNames: 'sveltia-cms.js',
           format: 'iife',
+          comments: {
+            legal: true,
+          },
+          // Work around the “Prism is not defined” error
+          // @see https://github.com/vitejs/vite/issues/21948
+          strictExecutionOrder: true,
         },
         {
           entryFileNames: 'sveltia-cms.mjs',
           format: 'es',
+          comments: {
+            legal: true,
+          },
+          strictExecutionOrder: true,
         },
       ],
       // Keep exports in the ES module
       // https://stackoverflow.com/q/71500190
       preserveEntrySignatures: 'strict',
+      // Silence some warnings that are not relevant to our use case
+      checks: {
+        missingNameOptionForIifeExport: false,
+        mixedExports: false,
+        pluginTimings: false,
+      },
     },
     outDir: 'package/dist',
   },
-  // https://esbuild.github.io/api/#legal-comments
-  esbuild: { legalComments: 'eof' },
   plugins: [
+    yamlToJS(),
     svelte({
       ...svelteConfig,
       emitCss: false,
@@ -217,7 +290,7 @@ export default defineConfig({
   test: {
     coverage: {
       include: ['src/lib/{components,services}/**/*.js'],
-      reporter: ['text'],
+      reporter: ['text', 'json-summary', 'json'],
     },
     silent: true,
   },

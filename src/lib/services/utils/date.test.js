@@ -4,43 +4,12 @@ import {
   DATE_FORMAT_OPTIONS,
   DATE_REGEX,
   DATE_TIME_FORMAT_OPTIONS,
-  FULL_DATE_TIME_REGEX,
+  formatDate,
   TIME_FORMAT_OPTIONS,
   TIME_SUFFIX_REGEX,
 } from './date';
 
 describe('Date utility regexes', () => {
-  describe('FULL_DATE_TIME_REGEX', () => {
-    test('should match complete ISO 8601 date-time formats', () => {
-      const validFormats = [
-        '2023-12-25T14:30:00.000Z',
-        '2023-12-25T14:30:00Z',
-        '2023-12-25T14:30:00.123Z',
-        '2023-12-25T14:30:00+01:00',
-        '2023-12-25T14:30:00-05:00',
-        '2023-12-25T14:30',
-        '2023-12-25',
-        'T14:30:00',
-        'T14:30',
-      ];
-
-      validFormats.forEach((format) => {
-        expect(FULL_DATE_TIME_REGEX.test(format)).toBe(true);
-      });
-    });
-
-    test('should not match invalid formats', () => {
-      // Test completely invalid strings that don't match the ISO pattern at all
-      expect(FULL_DATE_TIME_REGEX.test('invalid-date')).toBe(false);
-      expect(FULL_DATE_TIME_REGEX.test('not-a-date-at-all')).toBe(false);
-      expect(FULL_DATE_TIME_REGEX.test('2023/12/25')).toBe(false); // Wrong separators
-
-      // Note: This regex is lenient and designed to match partial dates
-      // It doesn't validate the actual validity of dates, just the format structure
-      // Values like '2023-13-25' would still match the pattern structure
-    });
-  });
-
   describe('DATE_REGEX', () => {
     test('should match valid date formats', () => {
       const validDates = [
@@ -123,5 +92,55 @@ describe('Date format options', () => {
       minute: 'numeric',
       hour12: true,
     });
+  });
+});
+
+describe('formatDate', () => {
+  test('formats date using DATE_TIME_FORMAT_OPTIONS with given locale', () => {
+    const date = new Date('2024-06-15T14:30:00Z');
+
+    expect(formatDate(date, 'en-US')).toBe(date.toLocaleString('en-US', DATE_TIME_FORMAT_OPTIONS));
+  });
+
+  test('uses the provided locale for formatting', () => {
+    const date = new Date('2024-01-01T09:05:00Z');
+    const enUS = formatDate(date, 'en-US');
+    const jaJP = formatDate(date, 'ja-JP');
+
+    expect(enUS).not.toBe(jaJP);
+    expect(enUS).toBe(date.toLocaleString('en-US', DATE_TIME_FORMAT_OPTIONS));
+    expect(jaJP).toBe(date.toLocaleString('ja-JP', DATE_TIME_FORMAT_OPTIONS));
+  });
+
+  test('formats a date at midnight', () => {
+    const date = new Date('2023-12-31T00:00:00Z');
+
+    expect(formatDate(date, 'en-US')).toBe(date.toLocaleString('en-US', DATE_TIME_FORMAT_OPTIONS));
+  });
+
+  test('formats a date at end of day', () => {
+    const date = new Date('2023-12-31T23:59:59Z');
+
+    expect(formatDate(date, 'en-US')).toBe(date.toLocaleString('en-US', DATE_TIME_FORMAT_OPTIONS));
+  });
+
+  test('returns a non-empty string', () => {
+    const date = new Date('2024-03-22T10:00:00Z');
+
+    expect(typeof formatDate(date, 'en-US')).toBe('string');
+    expect(formatDate(date, 'en-US').length).toBeGreaterThan(0);
+  });
+
+  test('treats null locale the same as undefined', () => {
+    const date = new Date('2024-06-15T14:30:00Z');
+
+    expect(formatDate(date, null)).toBe(date.toLocaleString(undefined, DATE_TIME_FORMAT_OPTIONS));
+  });
+
+  test('returns a non-empty string when locale is null', () => {
+    const date = new Date('2024-03-22T10:00:00Z');
+
+    expect(typeof formatDate(date, null)).toBe('string');
+    expect(formatDate(date, null).length).toBeGreaterThan(0);
   });
 });

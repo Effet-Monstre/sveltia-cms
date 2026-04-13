@@ -1,13 +1,14 @@
 <script>
-  import { Alert, Icon, Menu, MenuItem, Spacer, Toast, Toolbar } from '@sveltia/ui';
+  import { _ } from '@sveltia/i18n';
+  import { Icon, Menu, MenuItem, Spacer, Toolbar } from '@sveltia/ui';
   import { onMount } from 'svelte';
   import { get } from 'svelte/store';
-  import { _ } from 'svelte-i18n';
 
   import PageContainerMainArea from '$lib/components/common/page-container-main-area.svelte';
   import PageContainer from '$lib/components/common/page-container.svelte';
   import BackButton from '$lib/components/common/page-toolbar/back-button.svelte';
   import { panels } from '$lib/components/settings';
+  import PanelContainer from '$lib/components/settings/panel-container.svelte';
   import {
     goBack,
     goto,
@@ -19,8 +20,6 @@
 
   /** @type {{ key: string, icon: string, component: import('svelte').Component } | undefined} */
   let selectedPanel = $state(undefined);
-  let toastMessage = $state('');
-  let showToast = $state(false);
 
   /**
    * Navigate to the index page or a specific page given the URL hash.
@@ -50,17 +49,17 @@
   }}
 />
 
-<PageContainer aria-label={$_('settings')}>
+<PageContainer aria-label={_('settings')}>
   {#snippet main()}
     <PageContainerMainArea>
       {#snippet primaryToolbar()}
         <Toolbar variant="primary">
           {#if selectedPanel}
             <BackButton onclick={() => goBack('/settings')} />
-            <h2 role="none">{$_(`prefs.${selectedPanel.key}.title`)}</h2>
+            <h2 role="none">{_(`prefs.${selectedPanel.key}.title`)}</h2>
           {:else}
             <BackButton onclick={() => goBack('/menu')} />
-            <h2 role="none">{$_('settings')}</h2>
+            <h2 role="none">{_('settings')}</h2>
           {/if}
           <Spacer flex />
         </Toolbar>
@@ -68,20 +67,12 @@
       {#snippet mainContent()}
         <div role="none" class="wrapper">
           {#if selectedPanel}
-            {@const Content = selectedPanel.component}
-            <div role="none" class="inner">
-              <Content
-                onChange={(/** @type {{ message: string }} */ { message }) => {
-                  toastMessage = message;
-                  showToast = true;
-                }}
-              />
-            </div>
+            <PanelContainer Panel={selectedPanel.component} />
           {:else}
-            <Menu aria-label={$_('settings')}>
+            <Menu aria-label={_('settings')}>
               {#each get(panels) as { key, icon } (key)}
                 <MenuItem
-                  label={$_(`prefs.${key}.title`)}
+                  label={_(`prefs.${key}.title`)}
                   onclick={() => goto(`/settings/${key}`, { transitionType: 'forwards' })}
                 >
                   {#snippet startIcon()}
@@ -97,10 +88,6 @@
   {/snippet}
 </PageContainer>
 
-<Toast bind:show={showToast}>
-  <Alert status="success">{toastMessage}</Alert>
-</Toast>
-
 <style lang="scss">
   .wrapper {
     overflow-y: auto;
@@ -109,31 +96,10 @@
     --sui-menu-border-radius: 0;
     --sui-menu-padding: 8px 0;
 
-    .inner {
-      padding: 16px;
-
-      :global {
-        section:not(:first-child) {
-          margin: 16px 0 0;
-        }
-
-        p {
-          margin-top: 0;
-        }
-
-        h4 {
-          font-size: inherit;
-
-          & ~ div {
-            margin: 8px 0 0;
-          }
-
-          & ~ p {
-            margin: 8px 0 0;
-            color: var(--sui-secondary-foreground-color);
-            font-size: var(--sui-font-size-small);
-          }
-        }
+    :global {
+      & > .container {
+        display: block;
+        padding: 16px;
       }
     }
   }
