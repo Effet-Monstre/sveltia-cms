@@ -18,21 +18,28 @@ const getCsrfToken = () =>
     ?.content ?? '';
 
 /**
- * Read the cms-handle and cms-version meta tags injected by CmsController#internal.
- * Returns null when not present (normal CMS mode — no version pinning).
- * @returns {{ handle: string, version: number } | null}
+ * Read the cms-versions meta tag injected by CmsController#internal.
+ * Returns an array of [handle, version] pairs, or empty array when not present.
+ * @returns {[string, number][]}
  */
-const getPinnedVersion = () => {
-  const handleMeta  = /** @type {HTMLMetaElement | null} */ (document.querySelector('meta[name=cms-handle]'));
-  const versionMeta = /** @type {HTMLMetaElement | null} */ (document.querySelector('meta[name=cms-version]'));
-
-  if (!handleMeta?.content || !versionMeta?.content) return null;
-
-  return {
-    handle:  handleMeta.content,
-    version: parseInt(versionMeta.content, 10),
-  };
+const getPinnedVersions = () => {
+  const meta = /** @type {HTMLMetaElement | null} */ (
+    document.querySelector('meta[name=cms-versions]')
+  );
+  if (!meta?.content) return [];
+  try {
+    return JSON.parse(meta.content);
+  } catch {
+    return [];
+  }
 };
+
+/**
+ * Returns the pinned version number for a given handle, or undefined if not pinned.
+ * @param {string} handle
+ * @returns {number | undefined}
+ */
+const getPinnedVersionForHandle = (handle) => getPinnedVersions().find(([h]) => h === handle)?.[1];
 
 /**
  * Serialize entry content to a text string, or return `undefined` for binary-only entries.
@@ -45,34 +52,24 @@ const contentToText = (content) => {
 };
 
 /**
- * Fetch all entries from the API (latest draft or published per handle).
+ * Fetch all entries from the API (highest version per handle by default).
+ * When pinnedVersions is non-empty, the backend selects the specified version
+ * for each pinned handle and falls back to highest version for the rest.
+ * @param {[string, number][]} pinnedVersions
  * @returns {Promise<ApiEntry[]>}
  */
-const apiAll = async () => {
-  const response = await fetch('/admin/entries', {
+const apiAll = async (pinnedVersions = []) => {
+  const url = new URL('/admin/entries', window.location.origin);
+  if (pinnedVersions.length) {
+    url.searchParams.set('cms_versions', JSON.stringify(pinnedVersions));
+  }
+  const response = await fetch(url.toString(), {
     headers: { 'X-CSRF-Token': getCsrfToken() },
   });
 
   const { entries } = await response.json();
 
   return entries;
-};
-
-/**
- * Fetch a specific version of an entry.
- * @param {string} handle
- * @param {number} version
- * @returns {Promise<ApiEntry | null>}
- */
-const apiGetVersion = async (handle, version) => {
-  const response = await fetch(
-    `/admin/entries/show?handle=${encodeURIComponent(handle)}&version=${version}`,
-    { headers: { 'X-CSRF-Token': getCsrfToken() } },
-  );
-
-  if (!response.ok) return null;
-  const { entry } = await response.json();
-  return entry;
 };
 
 /**
@@ -126,19 +123,11 @@ export default createGitBackend({
   /**
    * Fetch the file list from the API.
    *
-   * Normal mode: returns one entry per handle (latest draft or published).
-   * Pinned-version mode: when cms-handle + cms-version meta tags are present, fetches only
-   * that specific version and presents it as the sole file to Sveltia.
+   * Fetches all entries, forwarding the cms-versions array so the backend selects
+   * pinned versions per handle and falls back to the highest version for the rest.
    */
   async getFileList() {
-    const pinned = getPinnedVersion();
-
-    if (pinned) {
-      const entry = await apiGetVersion(pinned.handle, pinned.version);
-      _entries = entry ? [entry] : [];
-    } else {
-      _entries = await apiAll();
-    }
+    _entries = await apiAll(getPinnedVersions());
 
     return Promise.all(
       _entries.map(async ({ handle, content }) => {
@@ -174,15 +163,17 @@ export default createGitBackend({
    * @returns {Promise<Blob>}
    */
   async fetchBlob(path) {
-    const pinned  = getPinnedVersion();
-    const version = pinned?.handle === path ? pinned.version : undefined;
-    const url     = version
-      ? `/admin/entries/show?handle=${encodeURIComponent(path)}&version=${version}`
-      : `/admin/entries/show?handle=${encodeURIComponent(path)}`;
+    const version = getPinnedVersionForHandle(path);
+    const url =
+      version !== undefined
+        ? `/admin/entries/show?handle=${encodeURIComponent(path)}&version=${version}`
+        : `/admin/entries/show?handle=${encodeURIComponent(path)}`;
 
     const response = await fetch(url, { headers: { 'X-CSRF-Token': getCsrfToken() } });
 
-    const { entry: { file_url } } = await response.json();
+    const {
+      entry: { file_url },
+    } = await response.json();
 
     return fetch(file_url).then((r) => r.blob());
   },
@@ -195,8 +186,6 @@ export default createGitBackend({
    * @returns {Promise<CommitResults>}
    */
   async commitChanges(changes) {
-    const pinned = getPinnedVersion();
-
     const results = await Promise.all(
       changes.map(async ({ action, path, previousPath, data }) => {
         if (action === 'delete') {
@@ -207,7 +196,7 @@ export default createGitBackend({
 
         if (data !== undefined) {
           const isText = typeof data === 'string';
-          const version = (pinned && pinned.handle === path) ? pinned.version : undefined;
+          const version = getPinnedVersionForHandle(path);
 
           await apiWrite(
             path,
