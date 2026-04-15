@@ -180,7 +180,7 @@
           // component object directly rather than going through EditorComponent/CustomNode.
           return /** @type {import('@sveltia/ui').TextEditorComponent} */ ({
             id: 'table',
-            label: get(_)('editor_components.table'),
+            label: _('editor_components.table'),
             icon: 'table',
             node: TableNode,
             createNode: () => {
