@@ -9,13 +9,21 @@
   import { getDateTimeParts } from '@sveltia/utils/datetime';
   import { sleep } from '@sveltia/utils/misc';
   import {
+    $createTableNodeWithDimensions as createTableNodeWithDimensions,
+    TableNode,
+  } from '@lexical/table';
+  import {
     $createParagraphNode as createParagraphNode,
+    $getNodeByKey as getNodeByKey,
     getNearestEditorFromDOMNode,
     $insertNodes as insertNodes,
   } from 'lexical';
   import { getContext, untrack } from 'svelte';
+  import { get } from 'svelte/store';
+  import { _ } from '@sveltia/i18n';
 
   import { entryDraft } from '$lib/services/contents/draft';
+  import InsertTableDialog from '$lib/components/contents/details/fields/rich-text/insert-table-dialog.svelte';
   import {
     BUILTIN_COMPONENTS,
     BUTTON_NAME_MAP,
@@ -75,6 +83,69 @@
 
   let cleanupTimeout = 0;
 
+  /** Whether the insert-table dialog is open. */
+  let showTableDialog = $state(false);
+
+  /**
+   * Key of the placeholder paragraph node inserted when the user triggers "Insert Table". The
+   * dialog replaces or removes this placeholder once the user confirms or cancels.
+   * @type {string | null}
+   */
+  let pendingTablePlaceholderKey = $state(null);
+
+  /**
+   * A no-op Markdown transformer passed as part of the table `TextEditorComponent`. The actual
+   * TABLE transformer is already registered globally inside `@sveltia/ui`'s Lexical core; this
+   * placeholder prevents a second registration while satisfying the `TextEditorComponent` type.
+   * @type {import('@lexical/markdown').ElementTransformer}
+   */
+  const NOOP_TABLE_TRANSFORMER = {
+    type: 'element',
+    dependencies: [],
+    export: () => null,
+    regExp: /(?!)/,
+    replace: () => {},
+  };
+
+  /**
+   * Replace the pending placeholder paragraph with a real table node of the given dimensions.
+   * @param {number} rows Number of rows.
+   * @param {number} cols Number of columns.
+   */
+  const onTableConfirm = (rows, cols) => {
+    const outer = /** @type {HTMLElement | null} */ (wrapper?.querySelector('.lexical-root'));
+    const editor = getNearestEditorFromDOMNode(outer);
+
+    editor?.update(() => {
+      const placeholder = pendingTablePlaceholderKey
+        ? getNodeByKey(pendingTablePlaceholderKey)
+        : null;
+
+      if (placeholder) {
+        placeholder.replace(createTableNodeWithDimensions(rows, cols, true));
+      } else {
+        insertNodes([createTableNodeWithDimensions(rows, cols, true)]);
+      }
+
+      pendingTablePlaceholderKey = null;
+    });
+  };
+
+  /**
+   * Remove the pending placeholder paragraph when the user cancels the insert-table dialog.
+   */
+  const onTableCancel = () => {
+    const outer = /** @type {HTMLElement | null} */ (wrapper?.querySelector('.lexical-root'));
+    const editor = getNearestEditorFromDOMNode(outer);
+
+    editor?.update(() => {
+      if (pendingTablePlaceholderKey) {
+        getNodeByKey(pendingTablePlaceholderKey)?.remove();
+        pendingTablePlaceholderKey = null;
+      }
+    });
+  };
+
   const {
     // Field type-specific options
     modes: _modes = [...DEFAULT_MODES],
@@ -103,14 +174,36 @@
     }
 
     return _editorComponents
-      .map((name) =>
-        getComponentDef(name === 'image' && linkedImagesEnabled ? 'linked-image' : name),
-      )
-      .filter((def) => !!def)
-      .map(
-        (def) =>
-          /** @type {import('@sveltia/ui').TextEditorComponent} */ (new EditorComponent(def)),
-      );
+      .map((name) => {
+        if (name === 'table') {
+          // Tables use native Lexical nodes already registered in @sveltia/ui's core; create the
+          // component object directly rather than going through EditorComponent/CustomNode.
+          return /** @type {import('@sveltia/ui').TextEditorComponent} */ ({
+            id: 'table',
+            label: get(_)('editor_components.table'),
+            icon: 'table',
+            node: TableNode,
+            createNode: () => {
+              // Insert a placeholder paragraph, then open the dialog. The dialog's confirm/cancel
+              // handlers will replace or remove this placeholder node.
+              const placeholder = createParagraphNode();
+              pendingTablePlaceholderKey = placeholder.getKey();
+              showTableDialog = true;
+              return placeholder;
+            },
+            transformer: NOOP_TABLE_TRANSFORMER,
+          });
+        }
+
+        const def = getComponentDef(
+          name === 'image' && linkedImagesEnabled ? 'linked-image' : name,
+        );
+
+        return def
+          ? /** @type {import('@sveltia/ui').TextEditorComponent} */ (new EditorComponent(def))
+          : null;
+      })
+      .filter((c) => !!c);
   });
   const imageComponent = $derived(
     components.find(({ id }) => id === 'image' || id === 'linked-image'),
@@ -412,6 +505,12 @@
     {/key}
   {/await}
 </div>
+
+<InsertTableDialog
+  bind:open={showTableDialog}
+  onConfirm={onTableConfirm}
+  onCancel={onTableCancel}
+/>
 
 <style lang="scss">
   .wrapper {
