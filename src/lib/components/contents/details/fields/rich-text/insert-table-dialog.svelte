@@ -33,8 +33,8 @@
 
 <Dialog
   bind:open
-  title={$_('insert_table')}
-  okLabel={$_('insert')}
+  title={_('insert_table')}
+  okLabel={_('insert')}
   okDisabled={!rows || !cols || rows < 1 || cols < 1}
   onOk={() => {
     onConfirm?.(rows, cols);
@@ -46,7 +46,7 @@
   <div role="none" class="fields">
     <section>
       <div role="none">
-        <h3 id="{componentId}-rows-label">{$_('table_rows')}</h3>
+        <h3 id="{componentId}-rows-label">{_('table_rows')}</h3>
       </div>
       <div role="none">
         <NumberInput
@@ -61,7 +61,7 @@
     </section>
     <section>
       <div role="none">
-        <h3 id="{componentId}-cols-label">{$_('table_cols')}</h3>
+        <h3 id="{componentId}-cols-label">{_('table_cols')}</h3>
       </div>
       <div role="none">
         <NumberInput
