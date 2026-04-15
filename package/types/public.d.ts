@@ -974,7 +974,7 @@ export type RichTextEditorButtonName = "bold" | "italic" | "strikethrough" | "co
 /**
  * Built-in editor component name for the rich text editor.
  */
-export type RichTextEditorComponentName = "code-block" | "image";
+export type RichTextEditorComponentName = "code-block" | "image" | "table";
 /**
  * Supported mode name for the rich text editor.
  */
