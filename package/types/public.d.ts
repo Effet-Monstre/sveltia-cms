@@ -14,7 +14,7 @@ export type FieldKeyPath = string;
 /**
  * Cloud media storage name.
  */
-export type CloudMediaLibraryName = "cloudinary" | "uploadcare" | "aws_s3" | "cloudflare_r2" | "digitalocean_spaces";
+export type CloudMediaLibraryName = "cloudinary" | "uploadcare" | "aws_s3" | "cloudflare_r2" | "digitalocean_spaces" | "scaleway_object_storage" | "supabase_storage";
 /**
  * Supported media storage name.
  */
@@ -41,19 +41,19 @@ export type RasterImageTransformationOptions = {
     /**
      * New format. Default: `webp`.
      */
-    format?: RasterImageConversionFormat;
+    format?: "webp" | undefined;
     /**
      * Image quality between 0 and 100. Default: `85`.
      */
-    quality?: number;
+    quality?: number | undefined;
     /**
      * Max width. Default: original width.
      */
-    width?: number;
+    width?: number | undefined;
     /**
      * Max height. Default: original height.
      */
-    height?: number;
+    height?: number | undefined;
 };
 /**
  * Raster image transformation option map.
@@ -63,27 +63,27 @@ export type RasterImageTransformations = {
      * Raster image transformation options
      * that apply to any supported raster image format.
      */
-    raster_image?: RasterImageTransformationOptions;
+    raster_image?: RasterImageTransformationOptions | undefined;
     /**
      * AVIF image transformation options.
      */
-    avif?: RasterImageTransformationOptions;
+    avif?: RasterImageTransformationOptions | undefined;
     /**
      * GIF image transformation options.
      */
-    gif?: RasterImageTransformationOptions;
+    gif?: RasterImageTransformationOptions | undefined;
     /**
      * JPEG image transformation options.
      */
-    jpeg?: RasterImageTransformationOptions;
+    jpeg?: RasterImageTransformationOptions | undefined;
     /**
      * PNG image transformation options.
      */
-    png?: RasterImageTransformationOptions;
+    png?: RasterImageTransformationOptions | undefined;
     /**
      * WebP image transformation options.
      */
-    webp?: RasterImageTransformationOptions;
+    webp?: RasterImageTransformationOptions | undefined;
 };
 /**
  * Vector image transformation option map.
@@ -92,7 +92,7 @@ export type VectorImageTransformationOptions = {
     /**
      * Whether to optimize the image.
      */
-    optimize?: boolean;
+    optimize?: boolean | undefined;
 };
 /**
  * Vector image transformation option map.
@@ -101,7 +101,7 @@ export type VectorImageTransformations = {
     /**
      * SVG image transformation options.
      */
-    svg?: VectorImageTransformationOptions;
+    svg?: VectorImageTransformationOptions | undefined;
 };
 /**
  * Image transformation option map.
@@ -112,34 +112,43 @@ export type ImageTransformations = RasterImageTransformations & VectorImageTrans
  */
 export type FileTransformations = ImageTransformations;
 /**
- * Configuration for the default media storage.
+ * Shared options that apply to all media libraries.
  */
-export type DefaultMediaLibraryConfig = {
-    /**
-     * Whether to allow multiple file selection in the media storage.
-     * This option is available for compatibility with the Cloudinary and Uploadcare media storage
-     * providers, but you can simply use the `multiple` option for the File/Image field types instead.
-     */
-    multiple?: boolean;
+export type SharedMediaLibraryOptions = {
     /**
      * Maximum file size in bytes that can be accepted for uploading.
      */
-    max_file_size?: number;
+    max_file_size?: number | undefined;
     /**
      * Whether to rename an original asset file when saving it,
      * according to the global `slug` option. Default: `false`, meaning that the original file name is
      * kept by default, while Netlify/Decap CMS forces to slugify file names. If set to `true`, for
      * example, `Hello World (1).webp` would be `hello-world-1.webp`.
      */
-    slugify_filename?: boolean;
+    slugify_filename?: boolean | undefined;
     /**
      * File transformation option map. The key is an
      * original format like `png` or `jpeg`. It can also be `raster_image` that matches any supported
      * raster image format. See the
      * [documentation](https://sveltiacms.app/en/docs/media/internal#image-optimization) for details.
      */
-    transformations?: FileTransformations;
+    transformations?: ImageTransformations | undefined;
 };
+/**
+ * Configuration for the default media storage.
+ */
+export type DefaultMediaLibraryBaseConfig = {
+    /**
+     * Whether to allow multiple file selection in the media storage.
+     * This option is available for compatibility with the Cloudinary and Uploadcare media storage
+     * providers, but you can simply use the `multiple` option for the File/Image field types instead.
+     */
+    multiple?: boolean | undefined;
+};
+/**
+ * Configuration for the default media storage.
+ */
+export type DefaultMediaLibraryConfig = SharedMediaLibraryOptions & DefaultMediaLibraryBaseConfig;
 /**
  * Options for the default media storage.
  */
@@ -147,7 +156,7 @@ export type DefaultMediaLibrary = {
     /**
      * Configuration for the default media storage.
      */
-    config?: DefaultMediaLibraryConfig;
+    config?: DefaultMediaLibraryConfig | undefined;
 };
 /**
  * Options for the [Cloudinary media storage](https://sveltiacms.app/en/docs/media/cloudinary).
@@ -157,12 +166,12 @@ export type CloudinaryMediaLibrary = {
      * Whether to output a file name instead of a full URL.
      * Default: `false`.
      */
-    output_filename_only?: boolean;
+    output_filename_only?: boolean | undefined;
     /**
      * Whether to include transformation segments in an output
      * URL. Default: `true`.
      */
-    use_transformations?: boolean;
+    use_transformations?: boolean | undefined;
     /**
      * Options to be passed to Cloudinary, such as `multiple`.
      * The `cloud_name` and `api_key` options are required for the global `media_library` option. See
@@ -171,7 +180,7 @@ export type CloudinaryMediaLibrary = {
      * for a full list of available options. Some options, including `inline_container`, will be ignored
      * in Sveltia CMS because we use an API-based integration instead of Cloudinary’s pre-built widget.
      */
-    config?: Record<string, any>;
+    config?: Record<string, any> | undefined;
 };
 /**
  * Settings for the [Uploadcare media storage](https://sveltiacms.app/en/docs/media/uploadcare).
@@ -181,12 +190,12 @@ export type UploadcareMediaLibrarySettings = {
      * Whether to append a file name to an output URL. Default:
      * `false`.
      */
-    autoFilename?: boolean;
+    autoFilename?: boolean | undefined;
     /**
      * Transformation operations to be included in an output URL.
      * Default: empty string.
      */
-    defaultOperations?: string;
+    defaultOperations?: string | undefined;
 };
 /**
  * Options for the [Uploadcare media storage](https://sveltiacms.app/en/docs/media/uploadcare).
@@ -199,20 +208,20 @@ export type UploadcareMediaLibrary = {
      * available options. Some options, including `previewStep`, will be ignored in Sveltia CMS because
      * we use an API-based integration instead of Uploadcare’s deprecated jQuery File Uploader.
      */
-    config?: Record<string, any>;
+    config?: Record<string, any> | undefined;
     /**
      * Integration settings.
      */
-    settings?: UploadcareMediaLibrarySettings;
+    settings?: UploadcareMediaLibrarySettings | undefined;
 };
 /**
- * Options for S3-compatible media libraries (Amazon S3, Cloudflare R2, DigitalOcean Spaces).
+ * Options for S3-compatible media libraries.
  */
 export type S3MediaLibrary = {
     /**
      * Media library name (used when configuring via legacy `media_library`).
      */
-    name?: string;
+    name?: string | undefined;
     /**
      * AWS access key ID or equivalent (safe to store in config).
      */
@@ -222,26 +231,36 @@ export type S3MediaLibrary = {
      */
     bucket: string;
     /**
-     * AWS region (e.g., 'us-east-1'). Required for Amazon S3 and
-     * DigitalOcean Spaces.
+     * AWS region (e.g., 'us-east-1'). Required for Amazon S3, DigitalOcean
+     * Spaces, Scaleway Object Storage, and Supabase Storage.
      */
-    region?: string;
+    region?: string | undefined;
     /**
      * Cloudflare account ID. Required for Cloudflare R2.
      */
-    account_id?: string;
+    account_id?: string | undefined;
+    /**
+     * Cloudflare R2 jurisdiction. Required for
+     * buckets created in the EU or FedRAMP jurisdictions; the global endpoint returns an error for
+     * those buckets. Default: `'default'`.
+     */
+    jurisdiction?: "default" | "eu" | "fedramp" | undefined;
+    /**
+     * Supabase project reference ID. Required for Supabase Storage.
+     */
+    project_id?: string | undefined;
     /**
      * Custom endpoint URL for S3-compatible services.
      */
-    endpoint?: string;
+    endpoint?: string | undefined;
     /**
      * Path prefix within bucket.
      */
-    prefix?: string;
+    prefix?: string | undefined;
     /**
      * Use path-style URLs instead of virtual-hosted-style.
      */
-    force_path_style?: boolean;
+    force_path_style?: boolean | undefined;
     /**
      * Base URL for public asset access. When set, asset preview and
      * download URLs are constructed as `{public_url}/{key}` instead of the S3 API endpoint URL.
@@ -250,7 +269,7 @@ export type S3MediaLibrary = {
      * and DigitalOcean Spaces — use when serving assets through a CDN or custom domain (e.g. CloudFront
      * or Route 53 for S3, CDN endpoint for Spaces).
      */
-    public_url?: string;
+    public_url?: string | undefined;
 };
 /**
  * Name of supported stock photo/video provider.
@@ -265,7 +284,7 @@ export type StockMediaLibrary = {
      * photo/video section in the asset browser is hidden if an empty array is given. Default: all
      * supported providers.
      */
-    providers?: StockAssetProviderName[];
+    providers?: StockAssetProviderName[] | undefined;
 };
 /**
  * Supported cloud media storage options.
@@ -281,35 +300,56 @@ export type MediaLibrary = DefaultMediaLibrary | CloudMediaLibrary | StockMediaL
  */
 export type MediaLibraries = {
     /**
-     * Options for the default media storage.
+     * Default options that apply to all internal and cloud
+     * media libraries, except for Cloudinary, which uses its own widget. These options can be
+     * overridden by library-specific options.
      */
-    default?: DefaultMediaLibrary;
+    all?: SharedMediaLibraryOptions | undefined;
+    /**
+     * Options for the default media storage. Set to
+     * `false` to explicitly disable the default (internal) storage.
+     */
+    default?: false | DefaultMediaLibrary | undefined;
     /**
      * Options for the Cloudinary media storage.
+     * Set to `false` to explicitly disable.
      */
-    cloudinary?: CloudinaryMediaLibrary;
+    cloudinary?: false | CloudinaryMediaLibrary | undefined;
     /**
      * Options for the Uploadcare media storage.
+     * Set to `false` to explicitly disable.
      */
-    uploadcare?: UploadcareMediaLibrary;
+    uploadcare?: false | UploadcareMediaLibrary | undefined;
     /**
-     * Options for the Amazon S3 media storage.
+     * Options for the Amazon S3 media storage. Set to
+     * `false` to explicitly disable.
      */
-    aws_s3?: S3MediaLibrary;
+    aws_s3?: false | S3MediaLibrary | undefined;
     /**
      * Options for the Cloudflare R2 media storage.
+     * Set to `false` to explicitly disable.
      */
-    cloudflare_r2?: S3MediaLibrary;
+    cloudflare_r2?: false | S3MediaLibrary | undefined;
     /**
-     * Options for the DigitalOcean Spaces media
-     * storage.
+     * Options for the DigitalOcean Spaces
+     * media storage. Set to `false` to explicitly disable.
      */
-    digitalocean_spaces?: S3MediaLibrary;
+    digitalocean_spaces?: false | S3MediaLibrary | undefined;
     /**
-     * Options for the unified stock photo/video media
-     * library.
+     * Options for the Scaleway Object
+     * Storage media storage. Set to `false` to explicitly disable.
      */
-    stock_assets?: StockMediaLibrary;
+    scaleway_object_storage?: false | S3MediaLibrary | undefined;
+    /**
+     * Options for the Supabase Storage media
+     * storage. Set to `false` to explicitly disable.
+     */
+    supabase_storage?: false | S3MediaLibrary | undefined;
+    /**
+     * Options for the unified stock photo/video
+     * media library. Set to `false` to explicitly disable.
+     */
+    stock_assets?: false | StockMediaLibrary | undefined;
 };
 /**
  * Parsed, localized entry content.
@@ -331,7 +371,7 @@ export type CommonFieldProps = {
      * when i18n is set up with the global and collection-level `i18n` option. See the
      * [documentation](https://sveltiacms.app/en/docs/i18n#field-level-configuration) for details.
      */
-    i18n?: boolean | "duplicate" | "translate" | "none";
+    i18n?: boolean | "none" | "translate" | "duplicate" | undefined;
 };
 /**
  * Properties for a field that is visible in the editor UI.
@@ -341,32 +381,32 @@ export type VisibleFieldProps = {
      * Label of the field to be displayed in the editor UI. Default: `name`
      * field value.
      */
-    label?: string;
+    label?: string | undefined;
     /**
      * Short description of the field to be displayed in the editor UI.
      */
-    comment?: string;
+    comment?: string | undefined;
     /**
      * Help message to be displayed below the input UI. Limited Markdown
      * formatting is supported: bold, italic, strikethrough and links.
      */
-    hint?: string;
+    hint?: string | undefined;
     /**
      * Whether to show the preview of the field. Default: `true`.
      */
-    preview?: boolean;
+    preview?: boolean | undefined;
     /**
      * Whether to make data input on the field required.
      * Default: `true`. This option also affects data output if the `omit_empty_optional_fields` global
      * output option is `true`. If i18n is enabled and the field doesn’t require input in all locales,
      * required locale codes can be passed as an array like `[en, fr]` instead of a boolean.
      */
-    required?: boolean | LocaleCode[];
+    required?: boolean | string[] | undefined;
     /**
      * Whether to make the field read-only. Default: `false`. This is
      * useful when a `default` value is provided and the field should not be editable by users.
      */
-    readonly?: boolean;
+    readonly?: boolean | undefined;
 };
 /**
  * Field validation properties.
@@ -377,7 +417,7 @@ export type FieldValidationProps = {
      * regular expression matching pattern for a valid input value, and the second argument is an error
      * message to be displayed when the input value does not match the pattern.
      */
-    pattern?: [string | RegExp, string];
+    pattern?: [string | RegExp, string] | undefined;
 };
 /**
  * Field-level media storage options.
@@ -386,7 +426,7 @@ export type FieldMediaLibraryOptions = {
     /**
      * Library name.
      */
-    name?: MediaLibraryName;
+    name?: MediaLibraryName | undefined;
 };
 /**
  * Media field properties.
@@ -396,54 +436,54 @@ export type MediaFieldProps = {
      * Default value. Accepts a file path or complete URL. If
      * the `multiple` option is set to `true`, it accepts an array of file paths or URLs.
      */
-    default?: string | string[];
+    default?: string | string[] | undefined;
     /**
      * Whether to allow multiple file selection for the field. Default:
      * `false`.
      */
-    multiple?: boolean;
+    multiple?: boolean | undefined;
     /**
      * Minimum number of files that can be selected. Ignored unless the
      * `multiple` option is set to `true`. Default: `0`.
      */
-    min?: number;
+    min?: number | undefined;
     /**
      * Maximum number of files that can be selected.  Ignored unless the
      * `multiple` option is set to `true`. Default: `Infinity`.
      */
-    max?: number;
+    max?: number | undefined;
     /**
      * File types that the field should accept. The value would be a
      * comma-separated list of unique file type specifiers, the format used for the HTML
      * [`accept`](https://developer.mozilla.org/en-US/docs/Web/HTML/Reference/Attributes/accept)
      * attribute.
      */
-    accept?: string;
+    accept?: string | undefined;
     /**
      * Whether to show the URL input UI. Default: `true`.
      */
-    choose_url?: boolean;
+    choose_url?: boolean | undefined;
     /**
      * Internal media folder path for the field. Default: global or
      * collection-level `media_folder` value.
      */
-    media_folder?: string;
+    media_folder?: string | undefined;
     /**
      * Public media folder path for the field. Default:
      * `media_folder` option value.
      */
-    public_folder?: string;
+    public_folder?: string | undefined;
     /**
      * Legacy media storage option
      * that allows only one library. This overrides the global `media_library` option. Use
      * `media_libraries` instead to support multiple libraries.
      */
-    media_library?: MediaLibrary & FieldMediaLibraryOptions;
+    media_library?: (MediaLibrary & FieldMediaLibraryOptions) | undefined;
     /**
      * Unified media storage option that supports multiple
      * libraries. This overrides the global `media_libraries` option.
      */
-    media_libraries?: MediaLibraries;
+    media_libraries?: MediaLibraries | undefined;
 };
 /**
  * Options for a field accepting multiple values.
@@ -452,11 +492,11 @@ export type MultiValueFieldProps = {
     /**
      * Minimum number of items that can be added. Default: `0`.
      */
-    min?: number;
+    min?: number | undefined;
     /**
      * Maximum number of items that can be added. Default: `Infinity`.
      */
-    max?: number;
+    max?: number | undefined;
 };
 /**
  * Options for a field showing multiple options.
@@ -465,22 +505,22 @@ export type MultiOptionFieldProps = {
     /**
      * Whether to accept multiple values. Default: `false`.
      */
-    multiple?: boolean;
+    multiple?: boolean | undefined;
     /**
      * Minimum number of items that can be selected. Ignored if `multiple` is
      * `false`. Default: `0`.
      */
-    min?: number;
+    min?: number | undefined;
     /**
      * Maximum number of items that can be selected. Ignored if `multiple` is
      * `false`. Default: `Infinity`.
      */
-    max?: number;
+    max?: number | undefined;
     /**
      * Maximum number of options to be displayed as radio
      * buttons (single-select) or checkboxes (multi-select) rather than a dropdown list. Default: `5`.
      */
-    dropdown_threshold?: number;
+    dropdown_threshold?: number | undefined;
 };
 /**
  * Variable type for List/Object fields.
@@ -494,20 +534,20 @@ export type VariableFieldType = {
      * Label of the type to be displayed in the editor UI. Default: `name`
      * field value.
      */
-    label?: string;
+    label?: string | undefined;
     /**
      * Field type. Values other than `object` are ignored.
      */
-    widget?: "object";
+    widget?: "object" | undefined;
     /**
      * Template of a label to be displayed on a collapsed object.
      */
-    summary?: string;
+    summary?: string | undefined;
     /**
      * Set of subfields. This option can be omitted; in that case, only the
      * `type` property will be saved.
      */
-    fields?: Field[];
+    fields?: Field[] | undefined;
 };
 /**
  * Variable field properties.
@@ -521,7 +561,7 @@ export type VariableFieldProps = {
      * Property name to store the type name in nested objects. Default:
      * `type`.
      */
-    typeKey?: string;
+    typeKey?: string | undefined;
 };
 /**
  * Options for a field with a simple input UI that allows for extra labels.
@@ -531,12 +571,12 @@ export type AdjacentLabelProps = {
      * An extra label to be displayed before the input UI. Markdown is
      * supported. Default: empty string.
      */
-    before_input?: string;
+    before_input?: string | undefined;
     /**
      * An extra label to be displayed after the input UI. Markdown is
      * supported. Default: empty string.
      */
-    after_input?: string;
+    after_input?: string | undefined;
 };
 /**
  * Options for a field with a string-type input UI that counts the number of characters.
@@ -546,12 +586,12 @@ export type CharCountProps = {
      * Minimum number of characters that can be entered in the input.
      * Default: `0`.
      */
-    minlength?: number;
+    minlength?: number | undefined;
     /**
      * Maximum number of characters that can be entered in the input.
      * Default: `Infinity`.
      */
-    maxlength?: number;
+    maxlength?: number | undefined;
 };
 /**
  * Boolean field properties.
@@ -564,7 +604,7 @@ export type BooleanFieldProps = {
     /**
      * Default value. Accepts `true` or `false`.
      */
-    default?: boolean;
+    default?: boolean | undefined;
 };
 /**
  * Boolean field definition.
@@ -582,22 +622,22 @@ export type CodeFieldProps = {
      * Default value. It must be a string if
      * `output_code_only` is `false`. Otherwise it must be an object that match the `keys` option.
      */
-    default?: string | Record<string, string>;
+    default?: string | Record<string, string> | undefined;
     /**
      * Default language to be selected, like `js`. See the [Prism
      * documentation](https://prismjs.com/#supported-languages) for a list of supported languages.
      * Default: empty string, which is plaintext.
      */
-    default_language?: string;
+    default_language?: string | undefined;
     /**
      * Whether to show a language switcher so that users
      * can change the language mode. Default: `true` (the Decap CMS document is wrong).
      */
-    allow_language_selection?: boolean;
+    allow_language_selection?: boolean | undefined;
     /**
      * Whether to output code snippet only. Default: `false`.
      */
-    output_code_only?: boolean;
+    output_code_only?: boolean | undefined;
     /**
      * Output property names. It has no effect if
      * `output_code_only` is `true`. Default: `{ code: 'code', lang: 'lang' }`.
@@ -605,7 +645,7 @@ export type CodeFieldProps = {
     keys?: {
         code: string;
         lang: string;
-    };
+    } | undefined;
 };
 /**
  * Code field definition.
@@ -623,16 +663,16 @@ export type ColorFieldProps = {
      * Default value. Accepts a Hex color code in the six-value (`#RRGGBB`)
      * or eight-value (`#RRGGBBAA`) syntax.
      */
-    default?: string;
+    default?: string | undefined;
     /**
      * Whether to show a textbox that allows users to manually edit the
      * value. Default: `false`.
      */
-    allowInput?: boolean;
+    allowInput?: boolean | undefined;
     /**
      * Whether to edit/save the alpha channel value. Default: `false`.
      */
-    enableAlpha?: boolean;
+    enableAlpha?: boolean | undefined;
 };
 /**
  * Color field definition.
@@ -671,7 +711,7 @@ export type DateTimeFieldProps = {
      * Default value. Accepts a date/time string that matches the `format`,
      * or `{{now}}` to populate the current date/time. Default: empty string.
      */
-    default?: string;
+    default?: string | undefined;
     /**
      * The
      * [`type`](https://developer.mozilla.org/en-US/docs/Web/HTML/Reference/Elements/input#input_types)
@@ -680,21 +720,21 @@ export type DateTimeFieldProps = {
      * only accept time values and the date part will be disabled. Default: `datetime-local`, which
      * accepts both date and time values.
      */
-    type?: DateTimeInputType;
+    type?: DateTimeInputType | undefined;
     /**
      * The
      * [`min`](https://developer.mozilla.org/en-US/docs/Web/HTML/Reference/Attributes/min) HTML
      * attribute value for the date/time input. The expected format depends on the `type` option:
      * `YYYY-MM-DDTHH:mm` for `datetime-local`, `YYYY-MM-DD` for `date`, and `HH:mm` for `time`.
      */
-    min?: string;
+    min?: string | undefined;
     /**
      * The
      * [`max`](https://developer.mozilla.org/en-US/docs/Web/HTML/Reference/Attributes/max) HTML
      * attribute value for the date/time input. The expected format depends on the `type` option:
      * `YYYY-MM-DDTHH:mm` for `datetime-local`, `YYYY-MM-DD` for `date`, and `HH:mm` for `time`.
      */
-    max?: string;
+    max?: string | undefined;
     /**
      * The
      * [`step`](https://developer.mozilla.org/en-US/docs/Web/HTML/Reference/Attributes/step) HTML
@@ -703,12 +743,12 @@ export type DateTimeFieldProps = {
      * 5-minute steps). For `date` inputs, the integer represents the step in days (e.g. `7` for weekly
      * steps). Default: `60` seconds for `datetime-local` and `time`; `1` day for `date`.
      */
-    step?: number | "any";
+    step?: number | "any" | undefined;
     /**
      * Storage format written in [Day.js
      * tokens](https://day.js.org/docs/en/display/format). Default: ISO 8601 format.
      */
-    format?: string;
+    format?: string | undefined;
     /**
      * Date storage format written in [Day.js
      * tokens](https://day.js.org/docs/en/display/format) if the value is a string and the `format`
@@ -716,7 +756,7 @@ export type DateTimeFieldProps = {
      * If `false`, date input/output is disabled. This option is available for backward compatibility
      * with Netlify CMS; use the `format` or `type` option instead.
      */
-    date_format?: string | boolean;
+    date_format?: string | boolean | undefined;
     /**
      * Time storage format written in [Day.js
      * tokens](https://day.js.org/docs/en/display/format) if the value is a string and the `format`
@@ -724,11 +764,11 @@ export type DateTimeFieldProps = {
      * If `false`, time input/output is disabled. This option is available for backward compatibility
      * with Netlify CMS; use the `format` or `type` option instead.
      */
-    time_format?: string | boolean;
+    time_format?: string | boolean | undefined;
     /**
      * Whether to make the date input/output UTC. Default: `false`.
      */
-    picker_utc?: boolean;
+    picker_utc?: boolean | undefined;
 };
 /**
  * DateTime field definition.
@@ -789,15 +829,15 @@ export type KeyValueFieldProps = {
     /**
      * Default key-value pairs.
      */
-    default?: Record<string, string>;
+    default?: Record<string, string> | undefined;
     /**
      * Label for the key column. Default: Key.
      */
-    key_label?: string;
+    key_label?: string | undefined;
     /**
      * Label for the value column. Default: Value.
      */
-    value_label?: string;
+    value_label?: string | undefined;
     /**
      * Whether to save the field value at the top-level of the data file
      * without the field name. If the `single_file` i18n structure is enabled, the key-value pairs will
@@ -805,7 +845,7 @@ export type KeyValueFieldProps = {
      * [documentation](https://sveltiacms.app/en/docs/fields/keyvalue#top-level-key-value-pairs) for
      * details.
      */
-    root?: boolean;
+    root?: boolean | undefined;
 };
 /**
  * KeyValue field definition.
@@ -824,7 +864,7 @@ export type ListFieldProps = {
      * format depends on how the field is configured, with or without `field`, `fields` or `types`. See
      * the document for details.
      */
-    default?: string[] | Record<string, any>[] | Record<string, any>;
+    default?: string[] | Record<string, any> | Record<string, any>[] | undefined;
 };
 /**
  * Base properties for a List field.
@@ -842,61 +882,61 @@ export type ComplexListFieldBaseProps = {
      * Whether to allow users to add new items to the list. Default:
      * `true`.
      */
-    allow_add?: boolean;
+    allow_add?: boolean | undefined;
     /**
      * Whether to allow users to remove items from the list. Default:
      * `true`.
      */
-    allow_remove?: boolean;
+    allow_remove?: boolean | undefined;
     /**
      * Whether to allow users to duplicate items in the list.
      * Default: `true`.
      */
-    allow_duplicate?: boolean;
+    allow_duplicate?: boolean | undefined;
     /**
      * Whether to allow users to reorder items in the list. Default:
      * `true`.
      */
-    allow_reorder?: boolean;
+    allow_reorder?: boolean | undefined;
     /**
      * Whether to add new items to the top of the list instead of the
      * bottom. Default: `false`.
      */
-    add_to_top?: boolean;
+    add_to_top?: boolean | undefined;
     /**
      * Label to be displayed on the Add button. Default: `label`
      * field value.
      */
-    label_singular?: string;
+    label_singular?: string | undefined;
     /**
      * Template of a label to be displayed on a collapsed list item.
      */
-    summary?: string;
+    summary?: string | undefined;
     /**
      * Subfield name to be used as a thumbnail image for a list item. It
      * will be displayed along with the summary label when the item is collapsed. The subfield must be
      * an Image field. Default: none.
      */
-    thumbnail?: string;
+    thumbnail?: string | undefined;
     /**
      * Whether to collapse the list items by default. Default:
      * `false`. If set to `auto`, the UI is collapsed if the item has any filled subfields and expanded
      * if all the subfields are empty.
      */
-    collapsed?: boolean | "auto";
+    collapsed?: boolean | "auto" | undefined;
     /**
      * Whether to collapse the entire list. Default:
      * `false`. If set to `auto`, the UI is collapsed if the list has any items and expanded if it’s
      * empty.
      */
-    minimize_collapsed?: boolean | "auto";
+    minimize_collapsed?: boolean | "auto" | undefined;
     /**
      * Whether to save the field value at the top-level of the data file
      * without the field name. If the `single_file` i18n structure is enabled, the lists will still be
      * saved under locale keys. Default: `false`. See the
      * [documentation](https://sveltiacms.app/en/docs/fields/list#top-level-list) for details.
      */
-    root?: boolean;
+    root?: boolean | undefined;
 };
 /**
  * Properties for a complex List field with subfields or variable types.
@@ -953,15 +993,24 @@ export type MapFieldProps = {
      * [GeoJSON](https://geojson.org/) geometry object that contains `type` and `coordinates`
      * properties.
      */
-    default?: string;
+    default?: string | undefined;
     /**
      * Precision of coordinates to be saved. Default: `7`.
      */
-    decimals?: number;
+    decimals?: number | undefined;
     /**
      * Geometry type. Default: `Point`.
      */
-    type?: "Point" | "LineString" | "Polygon";
+    type?: "Point" | "LineString" | "Polygon" | undefined;
+    /**
+     * Default center coordinates as `[longitude, latitude]`.
+     * Default: `[0, 0]`.
+     */
+    center?: [number, number] | undefined;
+    /**
+     * Default zoom level. Default: `2`.
+     */
+    zoom?: number | undefined;
 };
 /**
  * Map field definition.
@@ -986,34 +1035,34 @@ export type RichTextFieldBaseProps = {
     /**
      * Default value.
      */
-    default?: string;
+    default?: string | undefined;
     /**
      * Whether to minimize the toolbar height.
      */
-    minimal?: boolean;
+    minimal?: boolean | undefined;
     /**
      * Names of formatting buttons and menu items to be
      * enabled in the editor UI. Default: all the supported button names.
      */
-    buttons?: RichTextEditorButtonName[];
+    buttons?: RichTextEditorButtonName[] | undefined;
     /**
      * Names of components to
      * be enabled in the editor UI. This may include custom component names. Default: all the built-in
      * component names.
      */
-    editor_components?: (RichTextEditorComponentName | string)[];
+    editor_components?: string[] | undefined;
     /**
      * Editor modes to be enabled. If it’s `[raw, rich_text]`,
      * rich text mode is disabled by default. Default: `[rich_text, raw]`.
      */
-    modes?: RichTextEditorMode[];
+    modes?: RichTextEditorMode[] | undefined;
     /**
      * Whether to sanitize the preview HTML. Default: `true`.
      * Note that Sveltia CMS has changed the default value from `false` to `true` to enhance security,
      * whereas Netlify/Decap CMS keeps it as `false`. We recommend keeping this option enabled unless
      * disabling it fixes a broken preview and you fully trust all users of your CMS.
      */
-    sanitize_preview?: boolean;
+    sanitize_preview?: boolean | undefined;
     /**
      * Whether to enable the linked images feature for the built-in
      * `image` component. Default: `true`. When enabled, the image component provides an additional text
@@ -1021,7 +1070,7 @@ export type RichTextFieldBaseProps = {
      * the format `[![alt](src)](link)`, where clicking the image navigates to the provided link. This
      * feature can be disabled if it causes conflicts with certain frameworks.
      */
-    linked_images?: boolean;
+    linked_images?: boolean | undefined;
 };
 /**
  * RichText field properties.
@@ -1060,7 +1109,7 @@ export type NumberFieldProps = {
     /**
      * Default value.
      */
-    default?: number | string;
+    default?: string | number | undefined;
     /**
      * Type of the value. `int`
      * makes the input accept only an integer value and saves it as a number. `float` makes the input
@@ -1068,19 +1117,19 @@ export type NumberFieldProps = {
      * the input accept only an integer or floating-point value, respectively, but save it as a string.
      * Default: `int`.
      */
-    value_type?: "int" | "float" | "int/string" | "float/string";
+    value_type?: "float" | "int" | "int/string" | "float/string" | undefined;
     /**
      * Minimum value that can be entered in the input. Default: `-Infinity`.
      */
-    min?: number;
+    min?: number | undefined;
     /**
      * Maximum value that can be entered in the input. Default: `Infinity`.
      */
-    max?: number;
+    max?: number | undefined;
     /**
      * Number to increase/decrease with the arrow key/button. Default: `1`.
      */
-    step?: number;
+    step?: number | undefined;
 };
 /**
  * Number field definition.
@@ -1097,17 +1146,17 @@ export type ObjectFieldProps = {
     /**
      * Default values.
      */
-    default?: Record<string, any>;
+    default?: Record<string, any> | undefined;
     /**
      * Whether to collapse the object by default. Default:
      * `false`. If set to `auto`, the UI is collapsed if the object has any filled subfields and
      * expanded if all the subfields are empty.
      */
-    collapsed?: boolean | "auto";
+    collapsed?: boolean | "auto" | undefined;
     /**
      * Template of a label to be displayed on a collapsed object.
      */
-    summary?: string;
+    summary?: string | undefined;
 };
 /**
  * Base properties for a complex Object field with subfields or variable types.
@@ -1143,9 +1192,17 @@ export type RelationFieldFilterOptions = {
      */
     field: FieldKeyPath;
     /**
-     * One or more values to be matched.
+     * One or more values to be matched. String values may contain template
+     * tags — `{{fields.fieldName}}` (resolved from the current entry’s field values) or `{{slug}}`
+     * (resolved from the current entry’s slug) — that are resolved against the entry currently being
+     * edited. Unresolvable templates (e.g. `{{slug}}` for a new, unsaved entry) are ignored.
      */
     values: any[];
+    /**
+     * If `true`, entries matching this filter are excluded instead of
+     * included. Default: `false`.
+     */
+    exclude?: boolean | undefined;
 };
 /**
  * Relation field properties.
@@ -1169,28 +1226,28 @@ export type RelationFieldProps = {
      * Referenced file identifier for a file/singleton collection. Required if
      * the `collection` is defined.
      */
-    file?: string;
+    file?: string | undefined;
     /**
      * Field name to be stored as the value, or
      * `{{slug}}` (entry slug). It can contain a locale prefix like `{{locale}}/{{slug}}` if i18n is
      * enabled. Default: `{{slug}}`.
      */
-    value_field?: FieldKeyPath | string;
+    value_field?: string | undefined;
     /**
      * Name of fields to be displayed. It can
      * contain string templates. Default: `value_field` field value or the referenced collection’s
      * `identifier_field`, which is `title` by default.
      */
-    display_fields?: (FieldKeyPath | string)[];
+    display_fields?: string[] | undefined;
     /**
      * Name of fields to be searched. Default:
      * `display_fields` field value.
      */
-    search_fields?: FieldKeyPath[];
+    search_fields?: string[] | undefined;
     /**
      * Entry filter options.
      */
-    filters?: RelationFieldFilterOptions[];
+    filters?: RelationFieldFilterOptions[] | undefined;
 };
 /**
  * Relation field definition.
@@ -1212,7 +1269,7 @@ export type SelectFieldProps = {
      * Default value that matches one of the
      * options. When `multiple` is `true`, it should be an array of valid values.
      */
-    default?: SelectFieldValue | SelectFieldValue[];
+    default?: SelectFieldValue | SelectFieldValue[] | undefined;
     /**
      * Options.
      */
@@ -1232,24 +1289,24 @@ export type StringFieldProps = {
     /**
      * Field type.
      */
-    widget?: "string";
+    widget?: "string" | undefined;
     /**
      * Default value.
      */
-    default?: string;
+    default?: string | undefined;
     /**
      * Data type. It’s useful when the input value needs a
      * validation. Default: `text`.
      */
-    type?: "text" | "url" | "email";
+    type?: "url" | "text" | "email" | undefined;
     /**
      * A string to be prepended to the value. Default: empty string.
      */
-    prefix?: string;
+    prefix?: string | undefined;
     /**
      * A string to be appended to the value. Default: empty string.
      */
-    suffix?: string;
+    suffix?: string | undefined;
 };
 /**
  * String field definition.
@@ -1266,7 +1323,7 @@ export type TextFieldProps = {
     /**
      * Default value.
      */
-    default?: string;
+    default?: string | undefined;
 };
 /**
  * Text field definition.
@@ -1283,21 +1340,21 @@ export type UuidFieldProps = {
     /**
      * Default value.
      */
-    default?: string;
+    default?: string | undefined;
     /**
      * A string to be prepended to the value. Default: empty string.
      */
-    prefix?: string;
+    prefix?: string | undefined;
     /**
      * Whether to encode the value with Base32. Default: `false`.
      */
-    use_b32_encoding?: boolean;
+    use_b32_encoding?: boolean | undefined;
     /**
      * Whether to make the field read-only. Default: `true`.
      * @deprecated Use the `readonly` common field option instead, which defaults to `true` for the
      * UUID field type.
      */
-    read_only?: boolean;
+    read_only?: boolean | undefined;
 };
 /**
  * UUID field definition.
@@ -1356,28 +1413,30 @@ export type Field = StandardField | CustomField;
 /**
  * Internationalization (i18n) file structure type.
  */
-export type I18nFileStructure = "single_file" | "multiple_files" | "multiple_folders" | "multiple_folders_i18n_root" | "multiple_root_folders";
+export type I18nFileStructure = "single_file" | "single_file_default_root" | "multiple_files" | "multiple_folders" | "multiple_folders_i18n_root" | "multiple_root_folders";
 /**
  * Global, collection-level or collection file-level i18n options. See the
  * [documentation](https://sveltiacms.app/en/docs/i18n) for details.
  */
 export type I18nOptions = {
     /**
-     * File structure for entry collections. File/singleton
-     * collection must define the structure using `{{locale}}` in the `file` option.
-     * `multiple_folders_i18n_root` has been deprecated in favor of `multiple_root_folders`. See the
+     * File structure for entry collections. **Required for
+     * the global i18n options**. File/singleton collection must define the structure using `{{locale}}`
+     * in the `file` option. `multiple_folders_i18n_root` has been deprecated in favor of
+     * `multiple_root_folders`. See the
      * [documentation](https://sveltiacms.app/en/docs/i18n#managing-content-structure) for details.
      */
-    structure: I18nFileStructure;
+    structure?: I18nFileStructure | undefined;
     /**
-     * List of all available locales.
+     * List of all available locales. **Required for the global i18n
+     * options**.
      */
-    locales: LocaleCode[];
+    locales?: string[] | undefined;
     /**
      * Default locale. Default: first locale in the `locales`
      * option.
      */
-    default_locale?: LocaleCode;
+    default_locale?: string | undefined;
     /**
      * Locales to be enabled when
      * creating a new entry draft. If this option is used, users will be able to disable the output of
@@ -1385,7 +1444,7 @@ export type I18nOptions = {
      * [documentation](https://sveltiacms.app/en/docs/i18n#disabling-non-default-locale-content) for
      * details.
      */
-    initial_locales?: LocaleCode[] | "all" | "default";
+    initial_locales?: string[] | "default" | "all" | undefined;
     /**
      * Whether to save collection entries in all the locales.
      * Default: `true`.
@@ -1393,7 +1452,7 @@ export type I18nOptions = {
      * `save_all_locales: false` is equivalent to `initial_locales: all`. See the documentation
      * https://sveltiacms.app/en/docs/i18n#disabling-non-default-locale-content for details.
      */
-    save_all_locales?: boolean;
+    save_all_locales?: boolean | undefined;
     /**
      * Property name and value template
      * used to add a canonical slug to entry files, which helps Sveltia CMS and some frameworks to link
@@ -1404,7 +1463,7 @@ export type I18nOptions = {
     canonical_slug?: {
         key?: string;
         value?: string;
-    };
+    } | undefined;
     /**
      * Whether to exclude the default locale
      * from entry filenames. Default: `false`. This option applies to entry collections with the
@@ -1413,20 +1472,36 @@ export type I18nOptions = {
      * sites](https://www.getzola.org/documentation/content/multilingual/).
      * @deprecated Use the `omit_default_locale_from_file_path` option instead.
      */
-    omit_default_locale_from_filename?: boolean;
+    omit_default_locale_from_filename?: boolean | undefined;
     /**
      * Whether to exclude the default locale
      * from entry file paths. Default: `false`. This option applies to both entry collections and file
      * collections, where the path includes a `{{locale}}.` or  `{{locale}}/` placeholder. It aims to
      * support [Zola’s multilingual sites](https://www.getzola.org/documentation/content/multilingual/).
      */
-    omit_default_locale_from_file_path?: boolean;
+    omit_default_locale_from_file_path?: boolean | undefined;
     /**
      * Whether to exclude the default locale
      * from preview URL paths. Default: `false`. This option helps to create cleaner URLs for the
      * default locale when generating preview links for multilingual content.
      */
-    omit_default_locale_from_preview_path?: boolean;
+    omit_default_locale_from_preview_path?: boolean | undefined;
+};
+/**
+ * Body field options for front matter formats.
+ */
+export type BodyFieldOptions = {
+    /**
+     * Field name to store the body content when using a front matter format.
+     * Default: `body`.
+     */
+    key?: string | undefined;
+    /**
+     * Whether to store the body content in the front matter as a field
+     * along with other fields. If `false`, the body content is stored as the main content of the file,
+     * after the front matter block. Default: `false`.
+     */
+    inline?: boolean | undefined;
 };
 /**
  * Single file in a file/singleton collection.
@@ -1439,14 +1514,14 @@ export type CollectionFile = {
     /**
      * Label to be displayed in the editor UI. Default: `name` option value.
      */
-    label?: string;
+    label?: string | undefined;
     /**
      * Name of a [Material Symbols
      * icon](https://fonts.google.com/icons?icon.set=Material+Symbols) to be displayed in the collection
      * file list and other places. See the
      * [documentation](https://sveltiacms.app/en/docs/collections#icons) for details.
      */
-    icon?: string;
+    icon?: string | undefined;
     /**
      * File path relative to the project root.
      */
@@ -1459,40 +1534,44 @@ export type CollectionFile = {
      * Internal media folder path for the collection. This overrides
      * the global or collection-level `media_folder` option.
      */
-    media_folder?: string;
+    media_folder?: string | undefined;
     /**
      * Public media folder path for an entry collection. This
      * overrides the global or collection-level `public_folder` option. Default: `media_folder` option
      * value.
      */
-    public_folder?: string;
+    public_folder?: string | undefined;
     /**
      * File format. This overrides the collection-level `format` option.
      * Default: `yaml-frontmatter`.
      */
-    format?: FileFormat;
+    format?: string | undefined;
     /**
      * Delimiters to be used for the front matter
      * format. This overrides the collection-level `frontmatter_delimiter` option. Default: depends on
      * the front matter type.
      */
-    frontmatter_delimiter?: string | string[];
+    frontmatter_delimiter?: string | string[] | undefined;
+    /**
+     * Body field options for front matter formats.
+     */
+    body_field?: BodyFieldOptions | undefined;
     /**
      * I18n options. Default: `false`.
      */
-    i18n?: I18nOptions | boolean;
+    i18n?: boolean | I18nOptions | undefined;
     /**
      * Preview URL path template.
      */
-    preview_path?: string;
+    preview_path?: string | undefined;
     /**
      * Date field name used for `preview_path`.
      */
-    preview_path_date_field?: FieldKeyPath;
+    preview_path_date_field?: string | undefined;
     /**
      * Editor view options.
      */
-    editor?: EditorOptions;
+    editor?: EditorOptions | undefined;
 };
 /**
  * Supported file extension. Actually it can be any string.
@@ -1522,7 +1601,7 @@ export type CollectionFilter = {
     /**
      * Regular expression matching pattern.
      */
-    pattern?: string | RegExp;
+    pattern?: string | RegExp | undefined;
 };
 /**
  * The default options for the sortable fields.
@@ -1537,7 +1616,7 @@ export type SortableFieldsDefaultOptions = {
      * sort direction. Title case values are supported for Static CMS compatibility. However, `None` is
      * the same as `ascending`. Default: `ascending`.
      */
-    direction?: "ascending" | "descending" | "Ascending" | "Descending" | "None";
+    direction?: "ascending" | "descending" | "Ascending" | "Descending" | "None" | undefined;
 };
 /**
  * A collection’s advanced sortable fields definition, which is compatible with Static CMS.
@@ -1551,7 +1630,7 @@ export type SortableFields = {
      * Default sort settings. See the
      * [documentation](https://sveltiacms.app/en/docs/collections/entries#sorting) for details.
      */
-    default?: SortableFieldsDefaultOptions;
+    default?: SortableFieldsDefaultOptions | undefined;
 };
 /**
  * View filter.
@@ -1560,7 +1639,7 @@ export type ViewFilter = {
     /**
      * Unique identifier for the filter.
      */
-    name?: string;
+    name?: string | undefined;
     /**
      * Label.
      */
@@ -1585,7 +1664,7 @@ export type ViewFilters = {
     /**
      * Default filter name.
      */
-    default?: string;
+    default?: string | undefined;
 };
 /**
  * View group.
@@ -1594,7 +1673,7 @@ export type ViewGroup = {
     /**
      * Unique identifier for the group.
      */
-    name?: string;
+    name?: string | undefined;
     /**
      * Label.
      */
@@ -1607,7 +1686,7 @@ export type ViewGroup = {
      * Regular expression matching pattern or exact
      * value.
      */
-    pattern?: string | RegExp | boolean;
+    pattern?: string | boolean | RegExp | undefined;
 };
 /**
  * A collection’s advanced group definition, which is compatible with Static CMS.
@@ -1620,7 +1699,7 @@ export type ViewGroups = {
     /**
      * Default group name.
      */
-    default?: string;
+    default?: string | undefined;
 };
 /**
  * Editor options.
@@ -1639,15 +1718,15 @@ export type NestedCollectionOptions = {
      * Maximum depth to show nested items in the collection tree. Default:
      * `Infinity`.
      */
-    depth?: number;
+    depth?: number | undefined;
     /**
      * Summary template for a tree item. Default: `{{title}}`.
      */
-    summary?: string;
+    summary?: string | undefined;
     /**
      * Whether to include subfolders. Default: `true`.
      */
-    subfolders?: boolean;
+    subfolders?: boolean | undefined;
 };
 /**
  * Collection meta data’s path options.
@@ -1656,15 +1735,15 @@ export type CollectionMetaDataPath = {
     /**
      * Field type for editing the path name.
      */
-    widget?: "string";
+    widget?: "string" | undefined;
     /**
      * Label for the path editor.
      */
-    label?: string;
+    label?: string | undefined;
     /**
      * Index file name to be used.
      */
-    index_file?: string;
+    index_file?: string | undefined;
 };
 /**
  * Collection meta data.
@@ -1673,7 +1752,7 @@ export type CollectionMetaData = {
     /**
      * Entry path options.
      */
-    path?: CollectionMetaDataPath;
+    path?: CollectionMetaDataPath | undefined;
 };
 /**
  * Index file inclusion options. See the
@@ -1685,27 +1764,27 @@ export type CollectionIndexFile = {
      * Index file name without a locale or file extension. Default: `_index`,
      * which is used for Hugo’s special index file.
      */
-    name?: string;
+    name?: string | undefined;
     /**
      * Label to be displayed in the editor UI. Default: Index File or its
      * localized version.
      */
-    label?: string;
+    label?: string | undefined;
     /**
      * Name of a [Material Symbols
      * icon](https://fonts.google.com/icons?icon.set=Material+Symbols) to be displayed in the editor UI.
      * Default: `home`.
      */
-    icon?: string;
+    icon?: string | undefined;
     /**
      * Set of fields for the index file. If omitted, the regular entry
      * collection `fields` will be used instead.
      */
-    fields?: Field[];
+    fields?: Field[] | undefined;
     /**
      * Editor view options.
      */
-    editor?: EditorOptions;
+    editor?: EditorOptions | undefined;
 };
 /**
  * A divider in the collection list and singleton list. See the
@@ -1718,7 +1797,7 @@ export type CollectionDivider = {
      * previous version of Sveltia CMS, a divider was defined as a collection with the `divider` option
      * set to `true`, and the `name` option was required.
      */
-    name?: string;
+    name?: string | undefined;
     /**
      * Whether to make this collection a divider UI in the collection list.
      * It must be `true` to be used as a divider.
@@ -1737,23 +1816,23 @@ export type CommonCollectionProps = {
      * Label of the field to be displayed in the editor UI. Default: `name`
      * option value.
      */
-    label?: string;
+    label?: string | undefined;
     /**
      * Singular UI label. It will be Blog Post if the `label` is
      * Blog Posts, for example. Default: `label` option value.
      */
-    label_singular?: string;
+    label_singular?: string | undefined;
     /**
      * Short description of the collection to be displayed in the
      * editor UI.
      */
-    description?: string;
+    description?: string | undefined;
     /**
      * Name of a [Material Symbols
      * icon](https://fonts.google.com/icons?icon.set=Material+Symbols) to be displayed in the collection
      * list.
      */
-    icon?: string;
+    icon?: string | undefined;
     /**
      * Internal media folder path for the collection. This overrides
      * the global `media_folder` option. It can be a relative path from the project root if it starts
@@ -1762,47 +1841,51 @@ export type CommonCollectionProps = {
      * [documentation](https://sveltiacms.app/en/docs/media/internal#collection-level-configuration) for
      * details.
      */
-    media_folder?: string;
+    media_folder?: string | undefined;
     /**
      * Public media folder path for an entry collection. This
      * overrides the global `public_folder` option. Default: `media_folder` option value.
      */
-    public_folder?: string;
+    public_folder?: string | undefined;
     /**
      * Whether to hide the collection in the UI. Default: `false`.
      */
-    hide?: boolean;
+    hide?: boolean | undefined;
     /**
      * Whether to show the publishing control UI for Editorial Workflow.
      * Default: `true`. Note that Editorial Workflow is not yet supported in Sveltia CMS.
      */
-    publish?: boolean;
+    publish?: boolean | undefined;
     /**
      * File format. It should match the file extension. Default:
      * `yaml-frontmatter`.
      */
-    format?: FileFormat;
+    format?: string | undefined;
     /**
      * Delimiters to be used for the front matter
      * format. Default: depends on the front matter type.
      */
-    frontmatter_delimiter?: string | string[];
+    frontmatter_delimiter?: string | string[] | undefined;
+    /**
+     * Body field options for front matter formats.
+     */
+    body_field?: BodyFieldOptions | undefined;
     /**
      * I18n options. Default: `false`.
      */
-    i18n?: I18nOptions | boolean;
+    i18n?: boolean | I18nOptions | undefined;
     /**
      * Preview URL path template.
      */
-    preview_path?: string;
+    preview_path?: string | undefined;
     /**
      * Date field name used for `preview_path`.
      */
-    preview_path_date_field?: string;
+    preview_path_date_field?: string | undefined;
     /**
      * Editor view options.
      */
-    editor?: EditorOptions;
+    editor?: EditorOptions | undefined;
     /**
      * Whether to double-quote all the strings values if the YAML
      * format is used for file output. Default: `false`.
@@ -1810,7 +1893,7 @@ export type CommonCollectionProps = {
      * double`. See the documentation https://sveltiacms.app/en/docs/data-output#controlling-data-output
      * for details.
      */
-    yaml_quote?: boolean;
+    yaml_quote?: boolean | undefined;
 };
 /**
  * Entry collection properties.
@@ -1830,36 +1913,46 @@ export type EntryCollectionProps = {
      * contain slashes to create subfolders. Default: `{{slug}}`. To use Hugo’s page bundle, set this to
      * `{{slug}}/index`.
      */
-    path?: string;
+    path?: string | undefined;
     /**
      * Entry filter.
      */
-    filter?: CollectionFilter;
+    filter?: CollectionFilter | undefined;
     /**
      * Whether to allow users to create entries in the collection. Default:
      * `true`. Note that the default value is `false` in Netlify/Decap CMS, whereas Sveltia CMS sets it
      * to `true` to provide a better out-of-the-box experience.
      */
-    create?: boolean;
+    create?: boolean | undefined;
     /**
      * Whether to allow users to delete entries in the collection. Default:
      * `true`.
      */
-    delete?: boolean;
+    delete?: boolean | undefined;
     /**
      * Whether to allow users to duplicate entries in the collection.
      * Default: `true`.
      */
-    duplicate?: boolean;
+    duplicate?: boolean | undefined;
+    /**
+     * Whether to allow users to reorder entries in the
+     * collection. Default: `false`. If set to `true`, entries can be reordered with a drag-and-drop UI,
+     * and the numeric order starting from 1 is saved in an automatically generated `order` field. If an
+     * object with a `key` property is provided, e.g. `{ key: 'weight' }`, the specified field is used
+     * to save the order instead of the default `order` field.
+     */
+    reorder?: boolean | {
+        key: string;
+    } | undefined;
     /**
      * File extension. Default: `md`.
      */
-    extension?: FileExtension;
+    extension?: string | undefined;
     /**
      * Field name to be used as the title and slug of an
      * entry. Default: `title`.
      */
-    identifier_field?: FieldKeyPath;
+    identifier_field?: string | undefined;
     /**
      * Item slug template. Default: `identifier_field` option value. It cannot
      * contain slashes; to organize entries in subfolders, use the `path` option instead. It’s possible
@@ -1868,49 +1961,49 @@ export type EntryCollectionProps = {
      * possible to show a special slug editor field in initial entry drafts by using `{{fields._slug}}`
      * (with an underscore prefix) or `{{fields._slug | localize}}` (to localize the slug).
      */
-    slug?: string;
+    slug?: string | undefined;
     /**
      * The maximum number of characters allowed for an entry slug.
      * Default: `Infinity`.
      * @deprecated Use the global `slug.maxlength` option instead.
      */
-    slug_length?: number;
+    slug_length?: number | undefined;
     /**
      * Entry summary template. Default: `identifier_field`.
      */
-    summary?: string;
+    summary?: string | undefined;
     /**
      * Custom sortable fields. Default:
      * `title`, `name`, `date`, `author` and `description`. For a Git backend, commit author and commit
      * date are also included by default. See the
      * [documentation](https://sveltiacms.app/en/docs/collections/entries#sorting) for details.
      */
-    sortable_fields?: FieldKeyPath[] | SortableFields;
+    sortable_fields?: string[] | SortableFields | undefined;
     /**
      * View filters to be used in the entry list.
      */
-    view_filters?: ViewFilter[] | ViewFilters;
+    view_filters?: ViewFilters | ViewFilter[] | undefined;
     /**
      * View groups to be used in the entry list.
      */
-    view_groups?: ViewGroup[] | ViewGroups;
+    view_groups?: ViewGroups | ViewGroup[] | undefined;
     /**
      * Options for a nested collection. Note that nested
      * collections are not yet supported in Sveltia CMS.
      */
-    nested?: NestedCollectionOptions;
+    nested?: NestedCollectionOptions | undefined;
     /**
      * Meta data for a nested collection. Note that nested
      * collections are not yet supported in Sveltia CMS.
      */
-    meta?: CollectionMetaData;
+    meta?: CollectionMetaData | undefined;
     /**
      * Index file inclusion options. If `true`,
      * the default index file name is `_index`, which is used for Hugo’s special index file. See the
      * [documentation](https://sveltiacms.app/en/docs/collections/entries#managing-hugo-s-special-index-file)
      * for details.
      */
-    index_file?: CollectionIndexFile | boolean;
+    index_file?: boolean | CollectionIndexFile | undefined;
     /**
      * Whether to show entry thumbnails
      * in the entry list. Default: `true` (auto-detect image/file fields). Set to `false` to disable, or
@@ -1918,12 +2011,12 @@ export type EntryCollectionProps = {
      * nested fields with dot notation and wildcards (e.g., `images.*.src`). An empty array equals
      * `false`.
      */
-    thumbnail?: boolean | FieldKeyPath | FieldKeyPath[];
+    thumbnail?: string | boolean | string[] | undefined;
     /**
      * The maximum number of entries that can be created in the collection.
      * Default: `Infinity`.
      */
-    limit?: number;
+    limit?: number | undefined;
 };
 /**
  * Entry collection definition. In Netlify/Decap CMS, an entry collection is called a folder
@@ -1962,28 +2055,32 @@ export type CommitMessages = {
     /**
      * Message to be used when a new entry is created.
      */
-    create?: string;
+    create?: string | undefined;
     /**
      * Message to be used when existing entries are updated.
      */
-    update?: string;
+    update?: string | undefined;
     /**
      * Message to be used when existing entries are deleted.
      */
-    delete?: string;
+    delete?: string | undefined;
     /**
      * Message to be used when new files are uploaded/updated.
      */
-    uploadMedia?: string;
+    uploadMedia?: string | undefined;
     /**
      * Message to be used when existing files are deleted.
      */
-    deleteMedia?: string;
+    deleteMedia?: string | undefined;
     /**
      * Message to be used when committed via a forked repository.
      */
-    openAuthoring?: string;
+    openAuthoring?: string | undefined;
 };
+/**
+ * Authentication method name for Git backends.
+ */
+export type AuthMethodName = "oauth" | "token";
 /**
  * Git backend properties.
  */
@@ -1992,18 +2089,18 @@ export type GitBackendProps = {
      * Git branch name. If omitted, the default branch, usually `main` or
      * `master`, will be automatically detected and used.
      */
-    branch?: string;
+    branch?: string | undefined;
     /**
      * Site domain used for OAuth, which will be included in the
      * `site_id` param to be sent to the API endpoint. Default: [current
      * hostname](https://developer.mozilla.org/en-US/docs/Web/API/Location/hostname) (or
      * `cms.netlify.com` on `localhost`).
      */
-    site_domain?: string;
+    site_domain?: string | undefined;
     /**
      * Custom commit messages.
      */
-    commit_messages?: CommitMessages;
+    commit_messages?: CommitMessages | undefined;
     /**
      * Whether to enable or disable automatic deployments
      * with any connected CI/CD provider. Default: `undefined`.
@@ -2012,7 +2109,7 @@ export type GitBackendProps = {
      * true` is equivalent to `skip_ci: false`. See the documentation
      * https://sveltiacms.app/en/docs/deployments#disabling-automatic-deployments for details.
      */
-    automatic_deployments?: boolean;
+    automatic_deployments?: boolean | undefined;
     /**
      * Whether to enable or disable automatic deployments with any
      * connected CI/CD provider, such as GitHub Actions or Cloudflare Pages. If `true`, the `[skip ci]`
@@ -2020,7 +2117,20 @@ export type GitBackendProps = {
      * [documentation](https://sveltiacms.app/en/docs/deployments#disabling-automatic-deployments) for
      * details.
      */
-    skip_ci?: boolean;
+    skip_ci?: boolean | undefined;
+    /**
+     * Allowed authentication methods. Default: both `oauth`
+     * and `token` are allowed. To restrict sign-in options, specify only the methods you want to
+     * enable, e.g. `[oauth]` to disable access token sign-in, or `[token]` to disable OAuth sign-in. An
+     * empty array is invalid and will result in a configuration error.
+     */
+    auth_methods?: AuthMethodName[] | undefined;
+    /**
+     * Whether to include credentials in API requests.
+     * Default: `false`. If set to `true`, credentials such as cookies will be included in API requests.
+     * This is only necessary when using cookie-based authentication with a self-hosted Git backend.
+     */
+    include_credentials?: boolean | undefined;
 };
 /**
  * GitHub backend properties.
@@ -2039,54 +2149,54 @@ export type GitHubBackendProps = {
      * REST API endpoint for the backend. Required when using GitHub
      * Enterprise Server. Default: `https://api.github.com`.
      */
-    api_root?: string;
+    api_root?: string | undefined;
     /**
      * GraphQL API endpoint for the backend. Default: inferred
      * from `api_root` option value.
      */
-    graphql_api_root?: string;
+    graphql_api_root?: string | undefined;
     /**
      * OAuth base URL origin. Required when using an OAuth client other
      * than Netlify, including [Sveltia CMS Authenticator](https://github.com/sveltia/sveltia-cms-auth).
      * Default: `https://api.netlify.com`.
      */
-    base_url?: string;
+    base_url?: string | undefined;
     /**
      * OAuth grant type. The default is an empty string, which is
      * authorization code grant. `pkce` is not yet supported.
      */
-    auth_type?: "";
+    auth_type?: "" | undefined;
     /**
      * OAuth base URL path. Default: `auth`.
      */
-    auth_endpoint?: string;
+    auth_endpoint?: string | undefined;
     /**
      * OAuth application ID. Required when using PKCE authorization.
      */
-    app_id?: string;
+    app_id?: string | undefined;
     /**
      * Pull request label prefix for Editorial Workflow. Default:
      * `sveltia-cms/`. Note that Editorial Workflow is not yet supported in Sveltia CMS.
      */
-    cms_label_prefix?: string;
+    cms_label_prefix?: string | undefined;
     /**
      * Whether to use squash marge for Editorial Workflow. Default:
      * `false`. Note that Editorial Workflow is not yet supported in Sveltia CMS.
      */
-    squash_merges?: boolean;
+    squash_merges?: boolean | undefined;
     /**
      * Deploy preview link context.
      */
-    preview_context?: string;
+    preview_context?: string | undefined;
     /**
      * Whether to use Open Authoring. Default: `false`. Note that
      * Open Authoring is not yet supported in Sveltia CMS.
      */
-    open_authoring?: boolean;
+    open_authoring?: boolean | undefined;
     /**
      * Authentication scope for Open Authoring.
      */
-    auth_scope?: "repo" | "public_repo";
+    auth_scope?: "repo" | "public_repo" | undefined;
 };
 /**
  * GitHub backend.
@@ -2109,42 +2219,42 @@ export type GitLabBackendProps = {
      * REST API endpoint for the backend. Required when using a
      * self-hosted GitLab instance. Default: `https://gitlab.com/api/v4`.
      */
-    api_root?: string;
+    api_root?: string | undefined;
     /**
      * GraphQL API endpoint for the backend. Default: inferred
      * from `api_root` option value.
      */
-    graphql_api_root?: string;
+    graphql_api_root?: string | undefined;
     /**
      * OAuth base URL origin. Required when using an OAuth client other
      * than Netlify, including [Sveltia CMS Authenticator](https://github.com/sveltia/sveltia-cms-auth).
      * Default: `https://gitlab.com`.
      */
-    base_url?: string;
+    base_url?: string | undefined;
     /**
      * OAuth grant type. The default is an empty string, which is
      * authorization code grant. `pkce` is recommended for better security and easier setup. `implicit`
      * is not supported in Sveltia CMS.
      */
-    auth_type?: "" | "pkce";
+    auth_type?: "" | "pkce" | undefined;
     /**
      * OAuth base URL path. Default: `oauth/authorize`.
      */
-    auth_endpoint?: string;
+    auth_endpoint?: string | undefined;
     /**
      * OAuth application ID. Required when using PKCE authorization.
      */
-    app_id?: string;
+    app_id?: string | undefined;
     /**
      * Pull request label prefix for Editorial Workflow. Default:
      * `sveltia-cms/`. Note that Editorial Workflow is not yet supported in Sveltia CMS.
      */
-    cms_label_prefix?: string;
+    cms_label_prefix?: string | undefined;
     /**
      * Whether to use squash marge for Editorial Workflow. Default:
      * `false`. Note that Editorial Workflow is not yet supported in Sveltia CMS.
      */
-    squash_merges?: boolean;
+    squash_merges?: boolean | undefined;
 };
 /**
  * GitLab backend.
@@ -2167,17 +2277,17 @@ export type GiteaBackendProps = {
      * REST API endpoint for the backend. Required when using a
      * self-hosted Gitea/Forgejo instance. Default: `https://gitea.com/api/v1`.
      */
-    api_root?: string;
+    api_root?: string | undefined;
     /**
      * OAuth base URL origin. Required when using an OAuth client other
      * than Netlify, including [Sveltia CMS Authenticator](https://github.com/sveltia/sveltia-cms-auth).
      * Default: `https://gitea.com/`.
      */
-    base_url?: string;
+    base_url?: string | undefined;
     /**
      * OAuth base URL path. Default: `login/oauth/authorize`.
      */
-    auth_endpoint?: string;
+    auth_endpoint?: string | undefined;
     /**
      * OAuth application ID.
      */
@@ -2225,7 +2335,7 @@ export type LogoOptions = {
     /**
      * Whether to show the logo in the header. Default: `true`.
      */
-    show_in_header?: boolean;
+    show_in_header?: boolean | undefined;
 };
 /**
  * Entry slug options.
@@ -2234,36 +2344,36 @@ export type SlugOptions = {
     /**
      * Encoding option. Default: `unicode`.
      */
-    encoding?: "unicode" | "ascii";
+    encoding?: "unicode" | "ascii" | undefined;
     /**
      * Whether to remove accents. Default: `false`.
      */
-    clean_accents?: boolean;
+    clean_accents?: boolean | undefined;
     /**
      * String to replace sanitized characters. Default: `-`.
      */
-    sanitize_replacement?: string;
+    sanitize_replacement?: string | undefined;
     /**
      * The maximum number of characters allowed for an entry slug.
      * Default: `Infinity`.
      */
-    maxlength?: number;
+    maxlength?: number | undefined;
     /**
      * Whether to trim leading and trailing replacement characters. Default:
      * `true`.
      */
-    trim?: boolean;
+    trim?: boolean | undefined;
     /**
      * Whether to convert the slug to lowercase. Default: `true`.
      */
-    lowercase?: boolean;
+    lowercase?: boolean | undefined;
     /**
      * Timezone to be used for date-based slug template tags,
      * such as `{{day}}` and `{{hour}}`. Default is `utc` for backward compatibility with Netlify/Decap
      * CMS. Use `local` to generate slugs based on the local time of the user’s browser, which is more
      * intuitive in most cases.
      */
-    timezone?: "utc" | "local";
+    timezone?: "local" | "utc" | undefined;
 };
 /**
  * JSON format options.
@@ -2272,11 +2382,11 @@ export type JsonFormatOptions = {
     /**
      * Indent style. Default: 'space'.
      */
-    indent_style?: "space" | "tab";
+    indent_style?: "space" | "tab" | undefined;
     /**
      * Indent size. Default: `2`.
      */
-    indent_size?: number;
+    indent_size?: number | undefined;
 };
 /**
  * YAML format options.
@@ -2285,16 +2395,16 @@ export type YamlFormatOptions = {
     /**
      * Indent size. Default: `2`.
      */
-    indent_size?: number;
+    indent_size?: number | undefined;
     /**
      * Whether to indent block sequences. Default: `true`.
      */
-    indent_sequences?: boolean;
+    indent_sequences?: boolean | undefined;
     /**
      * String value’s default quote type. Default:
      * 'none'.
      */
-    quote?: "none" | "single" | "double";
+    quote?: "none" | "double" | "single" | undefined;
 };
 /**
  * Data output options. See the
@@ -2305,7 +2415,7 @@ export type OutputOptions = {
      * Whether to prevent fields with `required: false`
      * and an empty value from being included in entry data output. Default: `false`.
      */
-    omit_empty_optional_fields?: boolean;
+    omit_empty_optional_fields?: boolean | undefined;
     /**
      * Whether to encode the file path in File/Image fields.
      * Default: `false`. This is useful when a file path contains special characters that need to be
@@ -2313,15 +2423,15 @@ export type OutputOptions = {
      * `Hello%20World%20%281%29.webp`. In general, File/Image fields should contain the original file
      * path, and web-specific encoding should be done in the front-end code.
      */
-    encode_file_path?: boolean;
+    encode_file_path?: boolean | undefined;
     /**
      * JSON format options.
      */
-    json?: JsonFormatOptions;
+    json?: JsonFormatOptions | undefined;
     /**
      * YAML format options.
      */
-    yaml?: YamlFormatOptions;
+    yaml?: YamlFormatOptions | undefined;
 };
 export type IssueReports = {
     /**
@@ -2329,6 +2439,16 @@ export type IssueReports = {
      * `https://github.com/sveltia/sveltia-cms/issues/new`.
      */
     url: string;
+};
+/**
+ * Default options for fields. These options will be applied to all fields of the specified type
+ * unless they are overridden by field-specific options.
+ */
+export type FieldDefaults = {
+    /**
+     * RichText and Markdown field default options.
+     */
+    richtext?: RichTextFieldBaseProps | undefined;
 };
 /**
  * CMS configuration.
@@ -2339,7 +2459,7 @@ export type CmsConfig = {
      * [manually initializing the CMS](https://sveltiacms.app/en/docs/api/initialization). This works
      * only in the `CMS.init()` method’s `config` option. Default: `true`.
      */
-    load_config_file?: boolean;
+    load_config_file?: boolean | undefined;
     /**
      * Backend options.
      */
@@ -2349,43 +2469,43 @@ export type CmsConfig = {
      * the same as `simple`. Default: `simple`. Note that Editorial Workflow is not yet supported in
      * Sveltia CMS.
      */
-    publish_mode?: "" | "simple" | "editorial_workflow";
+    publish_mode?: "" | "simple" | "editorial_workflow" | undefined;
     /**
      * Global internal media folder path, relative to the project’s
      * root directory. Required unless a cloud media storage is configured.
      */
-    media_folder?: string;
+    media_folder?: string | undefined;
     /**
      * Global public media folder path, relative to the project’s
      * public URL. It must be an absolute path starting with `/`. Default: `media_folder` option value.
      */
-    public_folder?: string;
+    public_folder?: string | undefined;
     /**
      * Legacy media storage option
      * that allows only one library. This overrides the global `media_library` option. Use
      * `media_libraries` instead to support multiple storage providers.
      */
-    media_library?: MediaLibrary & GlobalMediaLibraryOptions;
+    media_library?: (MediaLibrary & GlobalMediaLibraryOptions) | undefined;
     /**
      * Unified media storage option that supports multiple
      * libraries. See the [documentation](https://sveltiacms.app/en/docs/media#configuration) for
      * details.
      */
-    media_libraries?: MediaLibraries;
+    media_libraries?: MediaLibraries | undefined;
     /**
      * Custom title for the CMS, which will be displayed on the login
      * page and the browser’s tab. Default: `Sveltia CMS`.
      */
-    app_title?: string;
+    app_title?: string | undefined;
     /**
      * Site URL. Default: current site’s origin
      * ([`location.origin`](https://developer.mozilla.org/en-US/docs/Web/API/Location/origin)).
      */
-    site_url?: string;
+    site_url?: string | undefined;
     /**
      * Site URL linked from the UI. Default: `site_url` option value.
      */
-    display_url?: string;
+    display_url?: string | undefined;
     /**
      * Absolute URL or absolute path to the site logo that will be
      * displayed on the entrance page and the browser’s tab (favicon). A square image works best.
@@ -2393,53 +2513,57 @@ export type CmsConfig = {
      * @deprecated This option is superseded by the new `logo.src` option. See the documentation
      * https://sveltiacms.app/en/docs/customization#custom-logo for details.
      */
-    logo_url?: string;
+    logo_url?: string | undefined;
     /**
      * Site logo options.
      */
-    logo?: LogoOptions;
+    logo?: LogoOptions | undefined;
     /**
      * URL to redirect users to after logging out.
      */
-    logout_redirect_url?: string;
+    logout_redirect_url?: string | undefined;
     /**
      * Issue reporting options.
      */
-    issue_reports?: IssueReports;
+    issue_reports?: IssueReports | undefined;
     /**
      * Whether to show site preview links. Default: `true`.
      */
-    show_preview_links?: boolean;
+    show_preview_links?: boolean | undefined;
     /**
      * Entry slug options.
      */
-    slug?: SlugOptions;
+    slug?: SlugOptions | undefined;
     /**
      * Set of collections. The list can
      * also contain dividers, which are used to group collections in the collection list. Either
      * `collections` or `singletons` option must be defined.
      */
-    collections?: (Collection | CollectionDivider)[];
+    collections?: (Collection | CollectionDivider)[] | undefined;
     /**
      * Set of singleton files, such as
      * the CMS configuration file or the homepage file. They are not part of any collection and can be
      * accessed directly through the collection list. The list can also contain dividers. See the
      * [documentation](https://sveltiacms.app/en/docs/collections/singletons) for details.
      */
-    singletons?: (CollectionFile | CollectionDivider)[];
+    singletons?: (CollectionFile | CollectionDivider)[] | undefined;
     /**
      * Global i18n options.
      */
-    i18n?: I18nOptions;
+    i18n?: I18nOptions | undefined;
     /**
      * Editor view options.
      */
-    editor?: EditorOptions;
+    editor?: EditorOptions | undefined;
     /**
      * Data output options. See the
      * [documentation](https://sveltiacms.app/en/docs/data-output#controlling-data-output) for details.
      */
-    output?: OutputOptions;
+    output?: OutputOptions | undefined;
+    /**
+     * Default options for fields.
+     */
+    field_defaults?: FieldDefaults | undefined;
 };
 /**
  * Entry file Parser.
@@ -2449,6 +2573,10 @@ export type FileParser = (text: string) => any | Promise<any>;
  * Entry file formatter.
  */
 export type FileFormatter = (value: any) => string | Promise<string>;
+/**
+ * Custom editor component mode.
+ */
+export type EditorComponentMode = "block" | "dialog";
 /**
  * Custom rich text editor component options.
  */
@@ -2465,11 +2593,23 @@ export type EditorComponentDefinition = {
      * Name of a [Material Symbols
      * icon](https://fonts.google.com/icons?icon.set=Material+Symbols) to be displayed in the editor UI.
      */
-    icon?: string;
+    icon?: string | undefined;
     /**
-     * Whether to collapse the object by default. Default: `false`.
+     * Whether to collapse the object by default (`block` mode only).
+     * Default: `false`.
      */
-    collapsed?: boolean;
+    collapsed?: boolean | undefined;
+    /**
+     * Editing mode for the component. `block` (default) renders
+     * the component within the rich text editor with an expandable field list. `dialog` renders a
+     * compact placeholder that opens a dialog when clicked.
+     */
+    mode?: EditorComponentMode | undefined;
+    /**
+     * Template for the placeholder text when `mode` is `dialog`, e.g.
+     * `{{title}} - {{videoId}}`. Falls back to the first string field value, then to the label.
+     */
+    summary?: string | undefined;
     /**
      * Set of fields to be displayed in the component.
      */
@@ -2483,7 +2623,7 @@ export type EditorComponentDefinition = {
      * matching result to field properties. This can be omitted if the `pattern` regex contains named
      * capturing group(s) that will be passed directly to the internal `createNode` method.
      */
-    fromBlock?: (match: RegExpMatchArray) => Record<string, any>;
+    fromBlock?: ((match: RegExpMatchArray) => Record<string, any>) | undefined;
     /**
      * Function to convert field properties
      * to Markdown content.
@@ -2493,7 +2633,7 @@ export type EditorComponentDefinition = {
      * Function to convert
      * field properties to field preview.
      */
-    toPreview?: (props: Record<string, any>) => string | ReactElement;
+    toPreview?: ((props: Record<string, any>) => string | ReactElement) | undefined;
 };
 /**
  * Supported event type.
@@ -2506,11 +2646,11 @@ export type AppEventAuthor = {
     /**
      * Author login name.
      */
-    login?: string;
+    login?: string | undefined;
     /**
      * Author display name.
      */
-    name?: string;
+    name?: string | undefined;
 };
 /**
  * Event entry media file data.

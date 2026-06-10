@@ -20,7 +20,7 @@ declare namespace CMS {
  * @see https://sveltiacms.app/en/docs/api/initialization
  */
 export function init({ config }?: {
-    config?: CmsConfig;
+    config?: CmsConfig | undefined;
 }): Promise<void>;
 /**
  * Register a custom entry file format.
@@ -81,7 +81,7 @@ declare function registerFieldType(name: string, control: ComponentType<CustomFi
  * @see https://sveltiacms.app/en/docs/api/preview-styles
  */
 declare function registerPreviewStyle(style: string, { raw }?: {
-    raw?: boolean;
+    raw?: boolean | undefined;
 }): void;
 /**
  * Register a custom preview template.
