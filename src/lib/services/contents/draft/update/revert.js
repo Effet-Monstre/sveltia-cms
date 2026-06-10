@@ -2,6 +2,7 @@ import { get } from 'svelte/store';
 
 import { entryDraft } from '$lib/services/contents/draft';
 import { getField } from '$lib/services/contents/entry/fields';
+import { isNumeric } from '$lib/services/utils/number';
 
 /**
  * @import {
@@ -15,7 +16,7 @@ import { getField } from '$lib/services/contents/entry/fields';
 
 /**
  * Resolve the original key path for a field that may be inside a reordered list item. When list
- * items are reordered, added, or removed, each item's `__sc_item_original_key_path` property tracks
+ * items are reordered, added, or removed, each item’s `__sc_item_original_key_path` property tracks
  * where it was originally located.
  * @param {Record<string, any>} valueMap Current flat value map for the locale.
  * @param {FieldKeyPath} keyPath Current field key path.
@@ -26,7 +27,7 @@ export const resolveOriginalKeyPath = (valueMap, keyPath) => {
   const parts = keyPath.split('.');
 
   for (let i = parts.length - 1; i >= 1; i -= 1) {
-    if (/^\d+$/.test(parts[i])) {
+    if (isNumeric(parts[i])) {
       const itemPrefix = parts.slice(0, i + 1).join('.');
       const originalPrefix = valueMap[`${itemPrefix}.__sc_item_original_key_path`];
 

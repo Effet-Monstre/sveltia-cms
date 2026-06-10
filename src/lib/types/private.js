@@ -3,6 +3,7 @@
  * @import { Writable } from 'svelte/store';
  * @import {
  * BackendName,
+ * BodyFieldOptions,
  * CmsConfig,
  * Collection,
  * CollectionDivider,
@@ -23,6 +24,7 @@
  * MediaField,
  * RasterImageFormat,
  * RelationField,
+ * S3MediaLibrary,
  * SelectField,
  * SelectFieldValue,
  * } from './public';
@@ -136,6 +138,8 @@
  * @property {string} [authScheme] Authorization scheme. Default is `token`.
  * @property {string} restBaseURL REST API endpoint, e.g. `/api/v3`.
  * @property {string} [graphqlBaseURL] GraphQL API endpoint, e.g. `/api/graphql`.
+ * @property {boolean} [includeCredentials] Whether to include credentials (e.g. cookies) in all API
+ * and token requests. Corresponds to the `include_credentials` backend config option.
  */
 
 /**
@@ -233,10 +237,10 @@
  * A single commit associated with one or more files.
  * @typedef {object} FileCommit
  * @property {string} sha Commit SHA hash.
- * @property {string} authorName Author's display name.
- * @property {string} [authorEmail] Author's email address.
- * @property {string} [authorAvatarURL] Author's avatar URL.
- * @property {string} [authorLogin] Author's username on the backend service.
+ * @property {string} authorName Author’s display name.
+ * @property {string} [authorEmail] Author’s email address.
+ * @property {string} [authorAvatarURL] Author’s avatar URL.
+ * @property {string} [authorLogin] Author’s username on the backend service.
  * @property {Date} date Commit date.
  */
 
@@ -258,6 +262,12 @@
  */
 
 /**
+ * Resolved S3 configuration passed to core request helpers. Extends the public `S3MediaLibrary`
+ * with internal fields that providers set in their `getConfig` functions.
+ * @typedef {S3MediaLibrary & { acl?: string | false }} S3Config
+ */
+
+/**
  * External media library service, such as a stock asset provider or a cloud storage service.
  * @typedef {object} MediaLibraryService
  * @property {'stock_assets' | 'cloud_storage'} serviceType Service type.
@@ -274,8 +284,8 @@
  * @property {string} [developerURL] URL of the page that provides the API/developer service.
  * @property {string} [apiKeyURL] URL of the page that provides an API key.
  * @property {RegExp} [apiKeyPattern] API key pattern.
- * @property {() => boolean} [isEnabled] Whether the service is enabled. It’s determined by whether
- * the service is defined in the CMS configuration.
+ * @property {(fieldConfig?: MediaField) => boolean} [isEnabled] Whether the service is enabled.
+ * It’s determined by whether the service is defined in the CMS or field configuration.
  * @property {() => Promise<boolean>} [init] Function to initialize the service.
  * @property {(userName: string, password: string) => Promise<boolean>} [signIn] Function to sign in
  * to the service.
@@ -296,6 +306,8 @@
  * @property {string} userMessage User message content.
  * @property {number} [temperature] Sampling temperature (0–1). Default is 0.3.
  * @property {number} [maxTokens] Maximum output tokens. Default is 4000.
+ * @property {boolean} [reasoning] Whether to enable reasoning mode. Only supported by certain
+ * providers (e.g., DeepSeek, Mistral AI). Default varies by provider.
  */
 
 /**
@@ -384,6 +396,7 @@
  * i18n structure into account. Entry collection only.
  * @property {string} [fullPath] File path of the default locale. File/singleton collection only.
  * @property {[string, string]} [fmDelimiters] Front matter delimiters.
+ * @property {BodyFieldOptions} [bodyField] Body field options for front matter formats.
  * @property {boolean} [yamlQuote] YAML quote configuration. DEPRECATED in favor of the global YAML
  * format options.
  */
@@ -479,6 +492,8 @@
 /**
  * @typedef {object} I18nFileStructureMap
  * @property {boolean} i18nSingleFile Whether the i18n structure is a single file.
+ * @property {boolean} i18nSingleFileDefaultRoot Whether the i18n structure is a single file with
+ * the default locale content at the root level instead of under a locale key.
  * @property {boolean} i18nMultiFile Whether the i18n structure is multiple files.
  * @property {boolean} i18nMultiFolder Whether the i18n structure is multiple folders.
  * @property {boolean} i18nMultiRootFolder Whether the i18n structure is multiple folders with the
@@ -624,15 +639,18 @@
  */
 
 /**
- * Flattened entry file list object, where key is a blob URL, and value is be a file to be uploaded
- * and its target asset folder.
- * @typedef {Record<string, { file: File, folder?: AssetFolderInfo }>} EntryFileMap
+ * File to be uploaded and its target asset folder information.
+ * @typedef {object} EntryFileItem
+ * @property {File} file File to be uploaded.
+ * @property {AssetFolderInfo | undefined} folder Target asset folder information.
+ * @property {boolean} replace Whether to replace the existing file if there’s a file with the same
+ * name in the target folder.
  */
 
 /**
- * A legacy version of {@link EntryFileMap} that may be used in backups.
- * @typedef {Record<string, File>} LegacyEntryFileMap
- * @todo Remove this before the 1.0 release.
+ * Flattened entry file list object, where key is a blob URL, and value is be a file to be uploaded
+ * and its target asset folder.
+ * @typedef {Record<string, EntryFileItem>} EntryFileMap
  */
 
 /**
@@ -736,15 +754,13 @@
  * @property {Date} timestamp When the backup was created.
  * @property {string} cmsConfigVersion The SHA-1 hash of the CMS configuration file, which is used
  * to verify that the backup can be safely restored.
- * @property {string} [siteConfigVersion] Replaced by `cmsConfigVersion`. Remove this before the 1.0
- * release.
  * @property {string} collectionName Collection name.
  * @property {string} slug Entry slug. An empty string for a new entry.
  * @property {LocaleStateMap} currentLocales Current locale state.
  * @property {LocaleSlugMap} currentSlugs Key is a locale code, value is the current slug.
  * @property {LocaleContentMap} currentValues Key is a locale code, value is a flattened object
  * containing all the current field values while editing.
- * @property {EntryFileMap | LegacyEntryFileMap} files Files to be uploaded.
+ * @property {EntryFileMap} files Files to be uploaded.
  */
 
 /**
@@ -786,7 +802,7 @@
  * @typedef {object} UploadingAssets
  * @property {AssetFolderInfo | undefined} folder Target asset folder info.
  * @property {File[]} files File list.
- * @property {Asset} [originalAsset] Asset to be replaced.
+ * @property {Asset[]} [originalAssets] Assets to be replaced.
  */
 
 /**
@@ -890,6 +906,7 @@
  * @property {string} [url] URL from direct input or a hotlinking stock asset.
  * @property {string} [credit] Attribution HTML string for a stock asset, including the photographer
  * name/link and service name/link.
+ * @property {boolean} [replace] Whether to replace an existing file.
  */
 
 /**
@@ -1195,6 +1212,14 @@
  * @property {Set<string>} warnings Collected warning messages.
  * @property {Set<CollectedMediaField>} mediaFields Collected media fields.
  * @property {Set<CollectedRelationField>} relationFields Collected relation fields.
+ */
+
+/**
+ * Relation field option.
+ * @typedef {object} RelationOption
+ * @property {string} label Option label.
+ * @property {any} value Option value.
+ * @property {string} searchValue Searchable value.
  */
 
 /**

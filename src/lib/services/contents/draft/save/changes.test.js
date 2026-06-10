@@ -25,7 +25,7 @@ vi.mock('$lib/services/integrations/media-libraries/default');
 vi.mock('$lib/services/contents/draft/events', () => ({
   callEventHooks: vi.fn(),
 }));
-vi.mock('$lib/services/user/prefs', () => ({
+vi.mock('$lib/services/user/prefs.svelte', () => ({
   prefs: { subscribe: vi.fn(() => vi.fn()) },
 }));
 vi.mock('svelte/store', async () => {
@@ -56,6 +56,7 @@ describe('draft/save/changes', () => {
       await import('$lib/services/integrations/media-libraries/default');
 
     vi.mocked(getDefaultMediaLibraryOptions).mockReturnValue({
+      enabled: true,
       config: {
         max_file_size: Infinity,
         multiple: false,
@@ -416,6 +417,39 @@ describe('draft/save/changes', () => {
       expect(result.savingAssets).toEqual([]);
     });
 
+    it('should strip keys with undefined values during normalization', async () => {
+      const { createEntryPath } = await import('./entry-path');
+
+      vi.mocked(createEntryPath).mockReturnValue('posts/test-post.md');
+
+      const draft = {
+        collection: {
+          _type: 'entry',
+          _i18n: {
+            canonicalSlug: { key: 'translationKey' },
+          },
+        },
+        collectionName: 'posts',
+        collectionFile: undefined,
+        fileName: undefined,
+        isIndexFile: false,
+        currentLocales: { en: true },
+        currentValues: { en: { title: 'Test Post', draft: undefined } },
+        files: {},
+      };
+
+      const slugs = {
+        defaultLocaleSlug: 'test-post',
+        canonicalSlug: 'test-post',
+        localizedSlugs: undefined,
+      };
+
+      const result = await createBaseSavingEntryData({ draft, slugs });
+
+      expect(result.localizedEntryMap.en.content).not.toHaveProperty('draft');
+      expect(result.localizedEntryMap.en.content.title).toBe('Test Post');
+    });
+
     it('should handle multiple locales', async () => {
       const { createEntryPath } = await import('./entry-path');
 
@@ -452,6 +486,41 @@ describe('draft/save/changes', () => {
 
       expect(result.localizedEntryMap.en).toBeDefined();
       expect(result.localizedEntryMap.ja).toBeDefined();
+    });
+
+    it('should not wipe a user-defined field that shares the canonical slug key when canonicalSlug is undefined', async () => {
+      const { createEntryPath } = await import('./entry-path');
+
+      vi.mocked(createEntryPath).mockReturnValue('posts/en/test-post.md');
+
+      const draft = {
+        collection: {
+          _type: 'entry',
+          _i18n: {
+            canonicalSlug: { key: 'translationKey' },
+          },
+        },
+        collectionName: 'posts',
+        collectionFile: undefined,
+        fileName: undefined,
+        isIndexFile: false,
+        currentLocales: { en: true },
+        // The user has a field named `translationKey` with an existing value.
+        currentValues: { en: { title: 'Test Post', translationKey: 'my-custom-key' } },
+        files: {},
+      };
+
+      const slugs = {
+        defaultLocaleSlug: 'test-post',
+        // canonicalSlug is undefined because the slug template has no `| localize` filter.
+        canonicalSlug: undefined,
+        localizedSlugs: undefined,
+      };
+
+      const result = await createBaseSavingEntryData({ draft, slugs });
+
+      // The user's `translationKey` value must be preserved, not wiped.
+      expect(result.localizedEntryMap.en.content.translationKey).toBe('my-custom-key');
     });
   });
 
@@ -1536,6 +1605,131 @@ describe('draft/save/changes', () => {
       const calls = vi.mocked(serializeContent).mock.calls.filter(([args]) => args.locale === 'ja');
 
       expect(calls).toHaveLength(0);
+    });
+  });
+
+  describe('getSingleFileChange with single_file_default_root', () => {
+    it('should spread default locale content at root and nest non-default locales under their key', async () => {
+      const { formatEntryFile } = await import('$lib/services/contents/file/format');
+      const { serializeContent } = await import('./serialize');
+
+      vi.mocked(formatEntryFile).mockResolvedValue('formatted content');
+      vi.mocked(serializeContent).mockImplementation(({ locale }) =>
+        locale === 'de'
+          ? { title: 'Über uns', content: 'Deutsche Version.' }
+          : { title: 'About Us', content: 'English version.' },
+      );
+
+      const draft = {
+        collection: {
+          _type: 'entry',
+          _file: { format: 'yaml' },
+          _i18n: {
+            i18nEnabled: true,
+            defaultLocale: 'de',
+            structureMap: { i18nSingleFileDefaultRoot: true },
+          },
+        },
+        isNew: true,
+        originalSlugs: undefined,
+        originalEntry: undefined,
+        collectionFile: undefined,
+      };
+
+      const savingEntry = {
+        locales: {
+          de: { slug: 'about', path: 'about.yaml', content: { title: 'Über uns' } },
+          en: { slug: 'about', path: 'about.yaml', content: { title: 'About Us' } },
+        },
+      };
+
+      await getSingleFileChange({ draft, savingEntry, cacheDB: undefined });
+
+      const [formatArgs] = vi.mocked(formatEntryFile).mock.calls[0];
+
+      expect(formatArgs.content).toEqual({
+        lang: ['de', 'en'],
+        title: 'Über uns',
+        content: 'Deutsche Version.',
+        en: { title: 'About Us', content: 'English version.' },
+      });
+    });
+
+    it('should omit non-default locales without content', async () => {
+      const { formatEntryFile } = await import('$lib/services/contents/file/format');
+      const { serializeContent } = await import('./serialize');
+
+      vi.mocked(formatEntryFile).mockResolvedValue('formatted content');
+      vi.mocked(serializeContent).mockReturnValue({ title: 'Default' });
+
+      const draft = {
+        collection: {
+          _type: 'entry',
+          _file: { format: 'yaml' },
+          _i18n: {
+            i18nEnabled: true,
+            defaultLocale: 'en',
+            structureMap: { i18nSingleFileDefaultRoot: true },
+          },
+        },
+        isNew: true,
+        originalSlugs: undefined,
+        originalEntry: undefined,
+        collectionFile: undefined,
+      };
+
+      const savingEntry = {
+        locales: {
+          en: { slug: 'post', path: 'post.yaml', content: { title: 'Hello' } },
+          fr: { slug: 'post', path: 'post.yaml', content: null },
+        },
+      };
+
+      await getSingleFileChange({ draft, savingEntry, cacheDB: undefined });
+
+      const [formatArgs] = vi.mocked(formatEntryFile).mock.calls[0];
+
+      // fr has no content so it's excluded from lang and from root fields
+      expect(formatArgs.content).toEqual({ lang: ['en'], title: 'Default' });
+    });
+
+    it('should fall back to empty object when default locale has no content', async () => {
+      const { formatEntryFile } = await import('$lib/services/contents/file/format');
+      const { serializeContent } = await import('./serialize');
+
+      vi.mocked(formatEntryFile).mockResolvedValue('formatted content');
+      vi.mocked(serializeContent).mockReturnValue({ title: 'French' });
+
+      const draft = {
+        collection: {
+          _type: 'entry',
+          _file: { format: 'yaml' },
+          _i18n: {
+            i18nEnabled: true,
+            defaultLocale: 'en',
+            structureMap: { i18nSingleFileDefaultRoot: true },
+          },
+        },
+        isNew: true,
+        originalSlugs: undefined,
+        originalEntry: undefined,
+        collectionFile: undefined,
+      };
+
+      const savingEntry = {
+        locales: {
+          // en locale has no content (falsy), so it won't appear in localeContents
+          en: { slug: 'post', path: 'post.yaml', content: null },
+          fr: { slug: 'post', path: 'post.yaml', content: { title: 'French' } },
+        },
+      };
+
+      await getSingleFileChange({ draft, savingEntry, cacheDB: undefined });
+
+      const [formatArgs] = vi.mocked(formatEntryFile).mock.calls[0];
+
+      // defaultContent should fall back to {} since en has no content
+      expect(formatArgs.content).toEqual({ lang: ['en', 'fr'], fr: { title: 'French' } });
     });
   });
 

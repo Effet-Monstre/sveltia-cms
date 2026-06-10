@@ -1,6 +1,8 @@
 // @ts-nocheck
 import { describe, expect, it, vi } from 'vitest';
 
+import { TEMPLATE_TAG_REPLACE_REGEX } from '$lib/services/common/template/constants';
+
 import {
   getCanonicalSlug,
   getFillSlugOptions,
@@ -17,11 +19,14 @@ vi.mock('$lib/services/common/template', () => ({
       return options.currentSlug || options.content?._slug || '';
     }
 
-    return template.replace(/{{(.+?)}}/g, (match, field) => options.content?.[field] || '');
+    return template.replace(
+      TEMPLATE_TAG_REPLACE_REGEX,
+      (match, field) => options.content?.[field] || '',
+    );
   }),
 }));
 
-vi.mock('$lib/services/contents/collection/index-file', () => ({
+vi.mock('$lib/services/contents/collection/entries/index-file', () => ({
   getIndexFile: vi.fn(() => ({ name: 'index' })),
 }));
 
@@ -642,6 +647,26 @@ describe('draft/slugs', () => {
           _i18n: {
             defaultLocale: 'en',
             structureMap: { i18nSingleFile: true },
+          },
+        },
+        collectionFile: undefined,
+        currentLocales: { en: true, fr: true },
+      };
+
+      const result = getLocalizedSlugs({ draft, defaultLocaleSlug: 'my-article' });
+
+      expect(result).toBeUndefined();
+    });
+
+    it('should return undefined for single_file_default_root i18n', () => {
+      const draft = {
+        collection: {
+          _type: 'entry',
+          identifier_field: 'title',
+          slug: '{{title | localize}}',
+          _i18n: {
+            defaultLocale: 'en',
+            structureMap: { i18nSingleFile: false, i18nSingleFileDefaultRoot: true },
           },
         },
         collectionFile: undefined,

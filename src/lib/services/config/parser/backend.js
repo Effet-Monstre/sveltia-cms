@@ -29,7 +29,7 @@ const UNSUPPORTED_OPTIONS = [
  */
 export const parseBackendConfig = (cmsConfig, collectors) => {
   const { backend } = cmsConfig;
-  const { errors } = collectors;
+  const { errors, warnings } = collectors;
 
   if (!isObject(backend)) {
     errors.add(_('config.error.missing_backend'));
@@ -60,30 +60,51 @@ export const parseBackendConfig = (cmsConfig, collectors) => {
     const {
       repo,
       automatic_deployments: autoDeploy,
+      auth_methods: authMethods,
       // @ts-ignore GitHub/GitLab only
       auth_type: authType,
       // @ts-ignore GitLab/Gitea only
       app_id: appId,
     } = /** @type {GitBackend} */ (backend);
 
+    if (Array.isArray(authMethods) && !authMethods.length) {
+      errors.add(_('config.error.no_auth_methods'));
+    }
+
+    const allowTokenAuth = !authMethods || authMethods.includes('token');
+
     if (repo === undefined) {
       errors.add(_('config.error.missing_repository'));
     }
 
-    if (typeof repo !== 'string' || !/(.+)\/([^/]+)$/.test(repo)) {
+    if (typeof repo !== 'string' || !/^[^/:]+(?:\/[^/:]+)+$/.test(repo)) {
       errors.add(_('config.error.invalid_repository'));
     }
 
     if (authType === 'implicit') {
-      errors.add(_('config.error.oauth_implicit_flow'));
+      errors.add(_('config.error.oauth_implicit_flow').replace('BACKEND_NAME', name));
     }
 
     if (name === 'github' && authType === 'pkce') {
       errors.add(_('config.error.github_pkce_unsupported'));
     }
 
-    if ((name === 'gitea' || authType === 'pkce') && !appId) {
+    if (name === 'gitlab' && authType === 'pkce' && !appId) {
       errors.add(_('config.error.oauth_no_app_id'));
+    }
+
+    // Gitea requires an app ID for OAuth authentication, but also supports token-based sign-in,
+    // which doesn’t require one. If no app ID is configured and token auth is allowed (the
+    // default), we issue a warning and disable the OAuth Sign In button in the UI — users can still
+    // sign in with a token. If token auth is explicitly disabled as well, we issue an error because
+    // there is no working sign-in method available.
+    // @see https://github.com/sveltia/sveltia-cms/issues/721
+    if (name === 'gitea' && !appId) {
+      if (allowTokenAuth) {
+        warnings.add(_('config.warning.oauth_no_app_id'));
+      } else {
+        errors.add(_('config.error.oauth_no_app_id'));
+      }
     }
 
     // @todo Remove the option prior to the 1.0 release.

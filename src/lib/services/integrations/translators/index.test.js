@@ -21,7 +21,7 @@ vi.mock('./google-ai.js', () => ({
   default: {
     serviceId: 'google-ai',
     serviceLabel: 'Google Gemini',
-    apiLabel: 'Google AI Studio API',
+    apiLabel: 'Gemini API',
     developerURL: 'https://ai.google.dev/gemini-api/docs',
     apiKeyURL: 'https://aistudio.google.com/api-keys',
     apiKeyPattern: /AIza[a-zA-Z0-9_-]{35}/,
@@ -59,15 +59,43 @@ vi.mock('./anthropic.js', () => ({
   },
 }));
 
+vi.mock('./deepseek.js', () => ({
+  default: {
+    serviceId: 'deepseek',
+    serviceLabel: 'DeepSeek',
+    apiLabel: 'DeepSeek API',
+    developerURL: 'https://api-docs.deepseek.com/',
+    apiKeyURL: 'https://platform.deepseek.com/api_keys',
+    apiKeyPattern: /sk-[a-zA-Z0-9]{32,}/,
+    markdownSupported: true,
+    availability: vi.fn(),
+    translate: vi.fn(),
+  },
+}));
+
+vi.mock('./mistral.js', () => ({
+  default: {
+    serviceId: 'mistral',
+    serviceLabel: 'Mistral',
+    apiLabel: 'Mistral AI API',
+    developerURL: 'https://docs.mistral.ai/',
+    apiKeyURL: 'https://console.mistral.ai/home?profile_dialog=api-keys',
+    apiKeyPattern: /[a-zA-Z0-9]{32,}/,
+    markdownSupported: true,
+    availability: vi.fn(),
+    translate: vi.fn(),
+  },
+}));
+
 vi.mock('svelte/store', () => {
-  // Use globalThis to avoid hoisting issues
-  const mockDerived = vi.fn((stores, callback) => {
-    /** @type {any} */ (globalThis).testDerivedCallback = callback; // Capture the callback
+  // Capture the getter function passed to toStore for direct testing
+  const mockToStore = vi.fn((getter) => {
+    /** @type {any} */ (globalThis).testToStoreGetter = getter; // Capture the getter
     return { subscribe: vi.fn() };
   });
 
   return {
-    derived: mockDerived,
+    toStore: mockToStore,
     get: vi.fn(),
     writable: vi.fn(() => ({
       subscribe: vi.fn(),
@@ -77,9 +105,22 @@ vi.mock('svelte/store', () => {
   };
 });
 
+/** @type {{ defaultTranslationService: string | undefined }} */
+const mockPrefs = vi.hoisted(
+  () =>
+    /** @type {{ defaultTranslationService: string | undefined }} */ ({
+      defaultTranslationService: 'google',
+    }),
+);
+
+vi.mock('$lib/services/user/prefs.svelte', () => ({
+  prefs: mockPrefs,
+}));
+
 describe('Translator Services Index', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockPrefs.defaultTranslationService = 'google';
   });
 
   describe('allTranslationServices', () => {
@@ -104,6 +145,18 @@ describe('Translator Services Index', () => {
       expect(allTranslationServices).toHaveProperty('openai');
       expect(allTranslationServices.openai).toBeDefined();
       expect(allTranslationServices.openai.serviceId).toBe('openai');
+    });
+
+    it('should include DeepSeek translator service', () => {
+      expect(allTranslationServices).toHaveProperty('deepseek');
+      expect(allTranslationServices.deepseek).toBeDefined();
+      expect(allTranslationServices.deepseek.serviceId).toBe('deepseek');
+    });
+
+    it('should include Mistral AI translator service', () => {
+      expect(allTranslationServices).toHaveProperty('mistral');
+      expect(allTranslationServices.mistral).toBeDefined();
+      expect(allTranslationServices.mistral.serviceId).toBe('mistral');
     });
 
     it('should have all required properties for each service', () => {
@@ -143,6 +196,7 @@ describe('Translator Services Index', () => {
     it('should have correct markdown support flags', () => {
       expect(allTranslationServices.google.markdownSupported).toBe(false);
       expect(allTranslationServices.openai.markdownSupported).toBe(true);
+      expect(allTranslationServices.deepseek.markdownSupported).toBe(true);
     });
   });
 
@@ -162,34 +216,40 @@ describe('Translator Services Index', () => {
     });
 
     it('should test derived callback with default prefs', () => {
-      const callback = /** @type {any} */ (globalThis).testDerivedCallback;
+      const getter = /** @type {any} */ (globalThis).testToStoreGetter;
 
-      expect(callback).toBeDefined();
+      expect(getter).toBeDefined();
 
-      // Test the callback with empty prefs (should default to google)
-      const result = callback([{}]);
+      // Test the getter with empty prefs (should default to google)
+      mockPrefs.defaultTranslationService = undefined;
+
+      const result = getter();
 
       expect(result).toBe(allTranslationServices.google);
     });
 
     it('should test derived callback with openai prefs', () => {
-      const callback = /** @type {any} */ (globalThis).testDerivedCallback;
+      const getter = /** @type {any} */ (globalThis).testToStoreGetter;
 
-      expect(callback).toBeDefined();
+      expect(getter).toBeDefined();
 
-      // Test the callback with prefs specifying openai
-      const result = callback([{ defaultTranslationService: 'openai' }]);
+      // Test the getter with prefs specifying openai
+      mockPrefs.defaultTranslationService = 'openai';
+
+      const result = getter();
 
       expect(result).toBe(allTranslationServices.openai);
     });
 
     it('should test derived callback fallback for unknown service', () => {
-      const callback = /** @type {any} */ (globalThis).testDerivedCallback;
+      const getter = /** @type {any} */ (globalThis).testToStoreGetter;
 
-      expect(callback).toBeDefined();
+      expect(getter).toBeDefined();
 
-      // Test the callback with prefs specifying an unknown service
-      const result = callback([{ defaultTranslationService: 'deepl' }]);
+      // Test the getter with prefs specifying an unknown service
+      mockPrefs.defaultTranslationService = 'deepl';
+
+      const result = getter();
 
       // Should fallback to google when service is not found
       expect(result).toBe(allTranslationServices.google);

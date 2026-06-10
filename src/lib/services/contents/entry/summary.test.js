@@ -34,6 +34,7 @@ describe('Test getEntrySummary()', () => {
       structure: 'multiple_files',
       structureMap: {
         i18nSingleFile: false,
+        i18nSingleFileDefaultRoot: false,
         i18nMultiFile: true,
         i18nMultiFolder: false,
         i18nMultiRootFolder: false,
@@ -166,6 +167,31 @@ describe('Test getEntrySummary()', () => {
 
     expect(format(charRefStr, { allowMarkdown: true })).toEqual('«ABC\u00adDEF\u00a0GH»');
     expect(format(charRefStr, { allowMarkdown: false })).toEqual('«ABC\u00adDEF\u00a0GH»');
+  });
+
+  test('sanitizes entity-encoded HTML in Markdown summary templates', () => {
+    const maliciousEntry = {
+      ...entry,
+      locales: {
+        de: {
+          ...entry.locales.de,
+          content: {
+            ...entry.locales.de.content,
+            title:
+              '&lt;strong onmouseover=&quot;alert(1)&quot;&gt;Safe&lt;/strong&gt;' +
+              '&lt;img src=x onerror=&quot;alert(2)&quot;&gt;',
+          },
+        },
+      },
+    };
+
+    const result = getEntrySummary({ ...collection, summary: '{{title}}' }, maliciousEntry, {
+      locale: 'de',
+      useTemplate: true,
+      allowMarkdown: true,
+    });
+
+    expect(result).toBe('<strong>Safe</strong>');
   });
 
   test('handles non-entry collection type (line 206)', () => {
@@ -322,6 +348,20 @@ describe('Test sanitizeEntrySummary()', () => {
     expect(result).toBe('«Test» & <example>');
   });
 
+  test('should strip entity-encoded dangerous HTML tags from Markdown summaries', () => {
+    const input = '&lt;img src=x onerror=&quot;alert(1)&quot;&gt;Safe';
+    const result = sanitizeEntrySummary(input, { allowMarkdown: true });
+
+    expect(result).toBe('Safe');
+  });
+
+  test('should strip entity-encoded event handlers from allowed Markdown tags', () => {
+    const input = '&lt;strong onmouseover=&quot;alert(1)&quot;&gt;Safe&lt;/strong&gt;';
+    const result = sanitizeEntrySummary(input, { allowMarkdown: true });
+
+    expect(result).toBe('<strong>Safe</strong>');
+  });
+
   test('should trim whitespace', () => {
     const input = '  Test content  ';
     const result = sanitizeEntrySummary(input);
@@ -353,6 +393,7 @@ describe('Test sanitizeEntrySummary()', () => {
         structure: 'multiple_files',
         structureMap: {
           i18nSingleFile: false,
+          i18nSingleFileDefaultRoot: false,
           i18nMultiFile: true,
           i18nMultiFolder: false,
           i18nMultiRootFolder: false,
@@ -1246,6 +1287,7 @@ describe('Additional comprehensive tests for edge cases', () => {
         structure: 'multiple_files',
         structureMap: {
           i18nSingleFile: false,
+          i18nSingleFileDefaultRoot: false,
           i18nMultiFile: true,
           i18nMultiFolder: false,
           i18nMultiRootFolder: false,
@@ -1488,6 +1530,7 @@ describe('Additional comprehensive tests for edge cases', () => {
         structure: 'multiple_files',
         structureMap: {
           i18nSingleFile: false,
+          i18nSingleFileDefaultRoot: false,
           i18nMultiFile: true,
           i18nMultiFolder: false,
           i18nMultiRootFolder: false,

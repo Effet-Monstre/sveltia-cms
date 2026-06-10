@@ -4,7 +4,8 @@
 
   import ReleaseNotesMenuItem from '$lib/components/help/release-notes-menu-item.svelte';
   import ShortcutsMenuItem from '$lib/components/help/shortcuts-menu-item.svelte';
-  import { prefs } from '$lib/services/user/prefs';
+  import { prefs } from '$lib/services/user/prefs.svelte';
+  import { openNewTab } from '$lib/services/utils/window';
 
   /**
    * @typedef {object} Props
@@ -23,14 +24,14 @@
   <MenuItem
     label={_(labelKey)}
     onclick={() => {
-      window.open(url, '_blank');
+      openNewTab(url);
     }}
   />
 {/snippet}
 
 <Menu aria-label={_('help')}>
   <ShortcutsMenuItem {menuButton} />
-  {#if $prefs.devModeEnabled}
+  {#if prefs.devModeEnabled}
     {@render link('documentation', 'https://sveltiacms.app/en/docs')}
     <ReleaseNotesMenuItem />
     {@render link(
@@ -44,6 +45,7 @@
       'https://github.com/sveltia/sveltia-cms/discussions/categories/ideas',
     )}
     {@render link('get_help', 'https://github.com/sveltia/sveltia-cms/discussions/categories/q-a')}
+    {@render link('donate', 'https://github.com/sponsors/kyoshino')}
     <Divider />
     {@render link('bluesky', 'https://bsky.app/profile/sveltiacms.app')}
     {@render link('join_discord', 'https://discord.com/invite/5hwCGqup5b')}

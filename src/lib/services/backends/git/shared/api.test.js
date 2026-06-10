@@ -8,20 +8,21 @@ vi.mock('@sveltia/i18n', () => ({
   _: vi.fn(() => 'Token refresh failed'),
 }));
 
-// Mock svelte/store
-vi.mock('svelte/store', () => ({
-  get: vi.fn((value) => value), // get() should just return the value passed to it
-}));
-
 // Mock user store
-vi.mock('$lib/services/user', () => ({
-  user: {
-    update: vi.fn(),
-  },
+const mockUserState = vi.hoisted(() => ({ account: /** @type {any} */ (null) }));
+
+vi.mock('$lib/services/user/account.svelte', () => ({
+  user: mockUserState,
 }));
 
 // Mock networking utils
 vi.mock('$lib/services/utils/networking', () => ({
+  isSecureURL: vi.fn(
+    (url) =>
+      url.startsWith('https://') ||
+      url.startsWith('http://localhost') ||
+      url.startsWith('http://127.0.0.1'),
+  ),
   sendRequest: vi.fn(),
 }));
 
@@ -31,6 +32,7 @@ global.fetch = vi.fn();
 describe('api.js', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockUserState.account = null;
   });
 
   afterEach(() => {
@@ -59,6 +61,7 @@ describe('api.js', () => {
       expect(apiConfig).toHaveProperty('authScheme');
       expect(apiConfig).toHaveProperty('restBaseURL');
       expect(apiConfig).toHaveProperty('graphqlBaseURL');
+      expect(apiConfig).toHaveProperty('includeCredentials');
     });
 
     it('should have empty string defaults', () => {
@@ -72,6 +75,10 @@ describe('api.js', () => {
 
     it('should have token auth scheme as default', () => {
       expect(apiConfig.authScheme).toBe('token');
+    });
+
+    it('should have includeCredentials as false by default', () => {
+      expect(apiConfig.includeCredentials).toBe(false);
     });
   });
 
@@ -120,8 +127,8 @@ describe('api.js', () => {
       });
     });
 
-    it('should update user store when refreshing token successfully', async () => {
-      const { user } = await import('$lib/services/user');
+    it('should update user state when refreshing token successfully', async () => {
+      mockUserState.account = { token: 'old-token', refreshToken: 'old-refresh' };
 
       const mockResponse = new Response(
         JSON.stringify({
@@ -139,29 +146,14 @@ describe('api.js', () => {
         refreshToken: 'old-refresh-token',
       });
 
-      expect(user.update).toHaveBeenCalled();
-
-      // Get the callback function and test it
-      const updateCallback = vi.mocked(user.update).mock.calls[0]?.[0];
-
-      if (updateCallback) {
-        // Test the callback with an existing user (use type assertion to bypass type checking)
-        const existingUser = /** @type {any} */ ({
-          token: 'old-token',
-          refreshToken: 'old-refresh',
-        });
-
-        const result = updateCallback(existingUser);
-
-        expect(result).toEqual({
-          token: 'new-access-token',
-          refreshToken: 'new-refresh-token',
-        });
-      }
+      expect(mockUserState.account).toEqual({
+        token: 'new-access-token',
+        refreshToken: 'new-refresh-token',
+      });
     });
 
-    it('should update user store callback with null user', async () => {
-      const { user } = await import('$lib/services/user');
+    it('should not update user state when user is null', async () => {
+      mockUserState.account = null;
 
       const mockResponse = new Response(
         JSON.stringify({
@@ -179,14 +171,7 @@ describe('api.js', () => {
         refreshToken: 'old-refresh-token',
       });
 
-      // Get the callback and test with null user
-      const updateCallback = vi.mocked(user.update).mock.calls[0]?.[0];
-
-      if (updateCallback) {
-        const result = updateCallback(null);
-
-        expect(result).toBeNull();
-      }
+      expect(mockUserState.account).toBeNull();
     });
 
     it('should handle fetch error', async () => {
@@ -214,6 +199,64 @@ describe('api.js', () => {
         }),
       ).rejects.toThrow('Token refresh failed');
     });
+
+    it('should reject insecure token refresh URLs', async () => {
+      await expect(
+        refreshAccessToken({
+          clientId: 'test-client-id',
+          tokenURL: 'http://api.example.com/oauth/token',
+          refreshToken: 'old-refresh-token',
+        }),
+      ).rejects.toThrow('Token refresh failed');
+
+      expect(fetch).not.toHaveBeenCalled();
+    });
+
+    it('should include credentials in request when apiConfig.includeCredentials is true', async () => {
+      const mockResponse = new Response(
+        JSON.stringify({ access_token: 'new-token', refresh_token: 'new-refresh' }),
+        { status: 200, statusText: 'OK' },
+      );
+
+      vi.mocked(fetch).mockResolvedValue(mockResponse);
+
+      Object.assign(apiConfig, { includeCredentials: true });
+
+      await refreshAccessToken({
+        clientId: 'test-client-id',
+        tokenURL: 'https://api.github.com/oauth/token',
+        refreshToken: 'old-refresh-token',
+      });
+
+      expect(fetch).toHaveBeenCalledWith(
+        'https://api.github.com/oauth/token',
+        expect.objectContaining({ credentials: 'include' }),
+      );
+
+      Object.assign(apiConfig, { includeCredentials: false });
+    });
+
+    it('should not include credentials when apiConfig.includeCredentials is false', async () => {
+      const mockResponse = new Response(
+        JSON.stringify({ access_token: 'new-token', refresh_token: 'new-refresh' }),
+        { status: 200, statusText: 'OK' },
+      );
+
+      vi.mocked(fetch).mockResolvedValue(mockResponse);
+
+      Object.assign(apiConfig, { includeCredentials: false });
+
+      await refreshAccessToken({
+        clientId: 'test-client-id',
+        tokenURL: 'https://api.github.com/oauth/token',
+        refreshToken: 'old-refresh-token',
+      });
+
+      expect(fetch).toHaveBeenCalledWith(
+        'https://api.github.com/oauth/token',
+        expect.not.objectContaining({ credentials: expect.anything() }),
+      );
+    });
   });
 
   describe('fetchAPI', () => {
@@ -238,9 +281,8 @@ describe('api.js', () => {
       const { fetchAPI } = await import('./api');
       const { sendRequest } = await import('$lib/services/utils/networking');
       const mockUser = { token: 'test-token', refreshToken: 'test-refresh-token' };
-      const { get } = await import('svelte/store');
 
-      vi.mocked(get).mockReturnValue(mockUser);
+      mockUserState.account = mockUser;
 
       vi.mocked(sendRequest).mockResolvedValue({ success: true });
 
@@ -264,9 +306,8 @@ describe('api.js', () => {
       const { fetchAPI } = await import('./api');
       const { sendRequest } = await import('$lib/services/utils/networking');
       const mockUser = { token: 'test-token', refreshToken: 'test-refresh-token' };
-      const { get } = await import('svelte/store');
 
-      vi.mocked(get).mockReturnValue(mockUser);
+      mockUserState.account = mockUser;
 
       vi.mocked(sendRequest).mockResolvedValue({ success: true });
 
@@ -290,9 +331,8 @@ describe('api.js', () => {
       const { fetchAPI } = await import('./api');
       const { sendRequest } = await import('$lib/services/utils/networking');
       const mockUser = { token: 'test-token', refreshToken: 'test-refresh-token' };
-      const { get } = await import('svelte/store');
 
-      vi.mocked(get).mockReturnValue(mockUser);
+      mockUserState.account = mockUser;
 
       vi.mocked(sendRequest).mockResolvedValue({ success: true });
 
@@ -316,9 +356,8 @@ describe('api.js', () => {
       const { fetchAPI } = await import('./api');
       const { sendRequest } = await import('$lib/services/utils/networking');
       const mockUser = { token: 'test-token', refreshToken: 'test-refresh-token' };
-      const { get } = await import('svelte/store');
 
-      vi.mocked(get).mockReturnValue(mockUser);
+      mockUserState.account = mockUser;
 
       vi.mocked(sendRequest).mockResolvedValue({ success: true });
 
@@ -354,9 +393,8 @@ describe('api.js', () => {
       const { fetchAPI } = await import('./api');
       const { sendRequest } = await import('$lib/services/utils/networking');
       const mockUser = { token: 'store-token', refreshToken: 'store-refresh-token' };
-      const { get } = await import('svelte/store');
 
-      vi.mocked(get).mockReturnValue(mockUser);
+      mockUserState.account = mockUser;
 
       vi.mocked(sendRequest).mockResolvedValue({ success: true });
 
@@ -384,9 +422,8 @@ describe('api.js', () => {
       const { fetchAPI } = await import('./api');
       const { sendRequest } = await import('$lib/services/utils/networking');
       const mockUser = { token: 'test-token' }; // No refreshToken
-      const { get } = await import('svelte/store');
 
-      vi.mocked(get).mockReturnValue(mockUser);
+      mockUserState.account = mockUser;
 
       vi.mocked(sendRequest).mockResolvedValue({ success: true });
 
@@ -414,9 +451,8 @@ describe('api.js', () => {
       Object.assign(apiConfig, { authScheme: 'Bearer' });
 
       const mockUser = { token: 'test-token', refreshToken: 'test-refresh-token' };
-      const { get } = await import('svelte/store');
 
-      vi.mocked(get).mockReturnValue(mockUser);
+      mockUserState.account = mockUser;
 
       vi.mocked(sendRequest).mockResolvedValue({ success: true });
 
@@ -439,10 +475,9 @@ describe('api.js', () => {
     it('should handle undefined user in store', async () => {
       const { fetchAPI } = await import('./api');
       const { sendRequest } = await import('$lib/services/utils/networking');
-      const { get } = await import('svelte/store');
 
       // Mock user store to return undefined
-      vi.mocked(get).mockReturnValue(undefined);
+      mockUserState.account = undefined;
 
       vi.mocked(sendRequest).mockResolvedValue({ success: true });
 
@@ -468,14 +503,13 @@ describe('api.js', () => {
     it('should invoke refreshAccessToken callback when provided', async () => {
       const { fetchAPI } = await import('./api');
       const { sendRequest } = await import('$lib/services/utils/networking');
-      const { get } = await import('svelte/store');
 
       const mockUser = {
         token: 'test-token',
         refreshToken: 'test-refresh-token',
       };
 
-      vi.mocked(get).mockReturnValue(mockUser);
+      mockUserState.account = mockUser;
       vi.mocked(sendRequest).mockResolvedValue({ success: true });
 
       await fetchAPI('/test-endpoint', { refreshToken: 'provided-refresh-token' });
@@ -489,9 +523,8 @@ describe('api.js', () => {
     it('should handle undefined token and refreshToken from user and params', async () => {
       const { fetchAPI } = await import('./api');
       const { sendRequest } = await import('$lib/services/utils/networking');
-      const { get } = await import('svelte/store');
 
-      vi.mocked(get).mockReturnValue(null);
+      mockUserState.account = null;
       vi.mocked(sendRequest).mockResolvedValue({ success: true });
 
       await fetchAPI('/test-endpoint', {});
@@ -513,9 +546,8 @@ describe('api.js', () => {
     it('should use provided token when user token is undefined', async () => {
       const { fetchAPI } = await import('./api');
       const { sendRequest } = await import('$lib/services/utils/networking');
-      const { get } = await import('svelte/store');
 
-      vi.mocked(get).mockReturnValue(null);
+      mockUserState.account = null;
       vi.mocked(sendRequest).mockResolvedValue({ success: true });
 
       await fetchAPI('/test-endpoint', { token: 'provided-token' });
@@ -534,9 +566,8 @@ describe('api.js', () => {
     it('should set correct responseType in sendRequest', async () => {
       const { fetchAPI } = await import('./api');
       const { sendRequest } = await import('$lib/services/utils/networking');
-      const { get } = await import('svelte/store');
 
-      vi.mocked(get).mockReturnValue({ token: 'test-token' });
+      mockUserState.account = { token: 'test-token' };
       vi.mocked(sendRequest).mockResolvedValue(new Blob());
 
       await fetchAPI('/test-endpoint', { responseType: 'blob' });
@@ -545,6 +576,40 @@ describe('api.js', () => {
         expect.any(String),
         expect.any(Object),
         expect.objectContaining({ responseType: 'blob' }),
+      );
+    });
+
+    it('should pass credentials: include to sendRequest when includeCredentials is true', async () => {
+      const { fetchAPI } = await import('./api');
+      const { sendRequest } = await import('$lib/services/utils/networking');
+
+      Object.assign(apiConfig, { includeCredentials: true });
+      vi.mocked(sendRequest).mockResolvedValue({ success: true });
+
+      await fetchAPI('/test-endpoint');
+
+      expect(sendRequest).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({ credentials: 'include' }),
+        expect.any(Object),
+      );
+
+      Object.assign(apiConfig, { includeCredentials: false });
+    });
+
+    it('should not pass credentials to sendRequest when includeCredentials is false', async () => {
+      const { fetchAPI } = await import('./api');
+      const { sendRequest } = await import('$lib/services/utils/networking');
+
+      Object.assign(apiConfig, { includeCredentials: false });
+      vi.mocked(sendRequest).mockResolvedValue({ success: true });
+
+      await fetchAPI('/test-endpoint');
+
+      expect(sendRequest).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.not.objectContaining({ credentials: expect.anything() }),
+        expect.any(Object),
       );
     });
   });
@@ -570,9 +635,8 @@ describe('api.js', () => {
     it('normalizes query by removing line breaks and spaces', async () => {
       const { fetchGraphQL } = await import('./api');
       const { sendRequest } = await import('$lib/services/utils/networking');
-      const { get } = await import('svelte/store');
 
-      vi.mocked(get).mockReturnValue({ token: 'test-token' });
+      mockUserState.account = { token: 'test-token' };
       vi.mocked(sendRequest).mockResolvedValue({ data: { test: 'result' } });
 
       const query = `query {
@@ -597,9 +661,8 @@ describe('api.js', () => {
     it('applies common variables from graphqlVars when query includes them', async () => {
       const { fetchGraphQL } = await import('./api');
       const { sendRequest } = await import('$lib/services/utils/networking');
-      const { get } = await import('svelte/store');
 
-      vi.mocked(get).mockReturnValue({ token: 'test-token' });
+      mockUserState.account = { token: 'test-token' };
       vi.mocked(sendRequest).mockResolvedValue({ data: { test: 'result' } });
 
       // Set up graphqlVars (these should be applied automatically)
@@ -628,9 +691,8 @@ describe('api.js', () => {
     it('allows passed variables to override graphqlVars', async () => {
       const { fetchGraphQL } = await import('./api');
       const { sendRequest } = await import('$lib/services/utils/networking');
-      const { get } = await import('svelte/store');
 
-      vi.mocked(get).mockReturnValue({ token: 'test-token' });
+      mockUserState.account = { token: 'test-token' };
       vi.mocked(sendRequest).mockResolvedValue({ data: { test: 'result' } });
 
       // Set up graphqlVars
@@ -657,9 +719,8 @@ describe('api.js', () => {
     it('only applies graphqlVars that are used in the query', async () => {
       const { fetchGraphQL } = await import('./api');
       const { sendRequest } = await import('$lib/services/utils/networking');
-      const { get } = await import('svelte/store');
 
-      vi.mocked(get).mockReturnValue({ token: 'test-token' });
+      mockUserState.account = { token: 'test-token' };
       vi.mocked(sendRequest).mockResolvedValue({ data: { test: 'result' } });
 
       // Set up graphqlVars
@@ -698,10 +759,9 @@ describe('api.js', () => {
     it('extracts and returns data from the API response', async () => {
       const { fetchGraphQL } = await import('./api');
       const { sendRequest } = await import('$lib/services/utils/networking');
-      const { get } = await import('svelte/store');
       const mockData = { repository: { name: 'test-repo', owner: 'test-owner' } };
 
-      vi.mocked(get).mockReturnValue({ token: 'test-token' });
+      mockUserState.account = { token: 'test-token' };
       vi.mocked(sendRequest).mockResolvedValue({ data: mockData });
 
       const query = 'query { repository { name owner } }';
@@ -713,9 +773,8 @@ describe('api.js', () => {
     it('handles queries with no variables', async () => {
       const { fetchGraphQL } = await import('./api');
       const { sendRequest } = await import('$lib/services/utils/networking');
-      const { get } = await import('svelte/store');
 
-      vi.mocked(get).mockReturnValue({ token: 'test-token' });
+      mockUserState.account = { token: 'test-token' };
       vi.mocked(sendRequest).mockResolvedValue({ data: { test: 'result' } });
 
       const query = 'query { viewer { login } }';
@@ -737,9 +796,8 @@ describe('api.js', () => {
     it('handles GraphQL query with whitespace and newlines', async () => {
       const { fetchGraphQL } = await import('./api');
       const { sendRequest } = await import('$lib/services/utils/networking');
-      const { get } = await import('svelte/store');
 
-      vi.mocked(get).mockReturnValue({ token: 'test-token' });
+      mockUserState.account = { token: 'test-token' };
       vi.mocked(sendRequest).mockResolvedValue({ data: { result: 'test' } });
 
       const query = `
@@ -772,9 +830,8 @@ describe('api.js', () => {
     it('applies graphqlVars only when variables are referenced in query', async () => {
       const { fetchGraphQL } = await import('./api');
       const { sendRequest } = await import('$lib/services/utils/networking');
-      const { get } = await import('svelte/store');
 
-      vi.mocked(get).mockReturnValue({ token: 'test-token' });
+      mockUserState.account = { token: 'test-token' };
       vi.mocked(sendRequest).mockResolvedValue({ data: { test: 'result' } });
 
       // Mock graphqlVars with multiple variables
@@ -801,9 +858,8 @@ describe('api.js', () => {
     it('prefers passed variables over graphqlVars', async () => {
       const { fetchGraphQL } = await import('./api');
       const { sendRequest } = await import('$lib/services/utils/networking');
-      const { get } = await import('svelte/store');
 
-      vi.mocked(get).mockReturnValue({ token: 'test-token' });
+      mockUserState.account = { token: 'test-token' };
       vi.mocked(sendRequest).mockResolvedValue({ data: { test: 'result' } });
 
       graphqlVars.owner = 'default-owner';
@@ -824,7 +880,6 @@ describe('api.js', () => {
     it('returns data extracted from response', async () => {
       const { fetchGraphQL } = await import('./api');
       const { sendRequest } = await import('$lib/services/utils/networking');
-      const { get } = await import('svelte/store');
 
       const mockData = {
         project: {
@@ -838,7 +893,7 @@ describe('api.js', () => {
         },
       };
 
-      vi.mocked(get).mockReturnValue({ token: 'test-token' });
+      mockUserState.account = { token: 'test-token' };
       vi.mocked(sendRequest).mockResolvedValue({ data: mockData });
 
       const query = 'query { project { repository { tree { blobs { nodes { path sha } } } } } }';
@@ -850,9 +905,8 @@ describe('api.js', () => {
     it('should not include refreshAccessToken when refreshToken is undefined', async () => {
       const { fetchAPI } = await import('./api');
       const { sendRequest } = await import('$lib/services/utils/networking');
-      const { get } = await import('svelte/store');
 
-      vi.mocked(get).mockReturnValue({ token: 'test-token' });
+      mockUserState.account = { token: 'test-token' };
       vi.mocked(sendRequest).mockResolvedValue({ data: { result: 'test' } });
 
       await fetchAPI('/test', { method: 'GET' });
@@ -869,9 +923,8 @@ describe('api.js', () => {
     it('should invoke refreshAccessToken callback when provided', async () => {
       const { fetchAPI } = await import('./api');
       const { sendRequest } = await import('$lib/services/utils/networking');
-      const { get } = await import('svelte/store');
 
-      vi.mocked(get).mockReturnValue({ token: 'test-token', refreshToken: 'refresh-token' });
+      mockUserState.account = { token: 'test-token', refreshToken: 'refresh-token' };
 
       // Mock sendRequest to call the refreshAccessToken callback
       /** @type {any} */
@@ -908,14 +961,13 @@ describe('api.js', () => {
     it('handles empty graphqlVars', async () => {
       const { fetchGraphQL } = await import('./api');
       const { sendRequest } = await import('$lib/services/utils/networking');
-      const { get } = await import('svelte/store');
 
       // Clear graphqlVars
       Object.keys(graphqlVars).forEach((key) => {
         delete graphqlVars[key];
       });
 
-      vi.mocked(get).mockReturnValue({ token: 'test-token' });
+      mockUserState.account = { token: 'test-token' };
       vi.mocked(sendRequest).mockResolvedValue({ data: { test: 'result' } });
 
       const query = 'query { viewer { login } }';

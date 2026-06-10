@@ -1,5 +1,8 @@
 import { getPathInfo } from '@sveltia/utils/file';
+import { escapeRegExp } from '@sveltia/utils/string';
 import { derived, get, writable } from 'svelte/store';
+
+import { ESCAPED_PLACEHOLDER_REGEX } from '$lib/services/common/template/constants';
 
 /**
  * @import { Readable, Writable } from 'svelte/store';
@@ -106,13 +109,12 @@ const getAssetFolderPathCache = () => {
     } else {
       // Pre-compile both regex variants so we don’t recreate them on every path lookup.
       // The internal path can contain template tags like `{{slug}}`, which we normalize to `.+?`.
-      const normalizedPath = internalPath.replace(/{{.+?}}/g, '.+?');
+      const normalizedPath = escapeRegExp(internalPath).replace(ESCAPED_PLACEHOLDER_REGEX, '.+?');
 
       items.push({
         folder,
-        // `\b` anchors the match at the end of the folder segment (sub-folder matching).
-        // When `internalPath` is empty (root), fall back to `$` to avoid a bare `\b` anchor.
-        regexSub: new RegExp(`^${normalizedPath}${internalPath ? '\\b' : '$'}`),
+        // Match the end of the folder segment for sub-folder matching.
+        regexSub: new RegExp(`^${normalizedPath}${internalPath ? '(?=\\/|$)' : '$'}`),
         regexExact: new RegExp(`^${normalizedPath}$`),
       });
     }

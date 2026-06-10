@@ -23,7 +23,7 @@
    * @property {Component} panel The panel component to render when the tab is active.
    */
 
-  /** Whether any relation field references the current entry's collection. */
+  /** Whether any relation field references the current entry’s collection. */
   const isReferenced = $derived.by(() => {
     const collectionName = $entryDraft?.collectionName;
     const fileName = $entryDraft?.fileName;
@@ -50,7 +50,7 @@
     {
       key: 'validation',
       label: _('entry_sidebar.validation.title'),
-      icon: 'task_alt',
+      icon: 'check_circle',
       disabled: false,
       panel: ValidationPanel,
     },
@@ -110,7 +110,7 @@
   {/if}
 </div>
 
-<style lang="scss">
+<style>
   .sidebar {
     flex: none;
     display: flex;

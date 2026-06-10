@@ -4,12 +4,17 @@ import { sanitize } from 'isomorphic-dompurify';
 import { parseInline } from 'marked';
 import { parseEntities } from 'parse-entities';
 
+import { TEMPLATE_TAG_REPLACE_REGEX } from '$lib/services/common/template/constants';
 import {
   applyTransformations,
   DATE_TRANSFORMATION_REGEX,
   TERNARY_TRANSFORMATION_REGEX,
+  TRANSFORMATION_SPLIT_REGEX,
 } from '$lib/services/common/transformations';
-import { getIndexFile, isCollectionIndexFile } from '$lib/services/contents/collection/index-file';
+import {
+  getIndexFile,
+  isCollectionIndexFile,
+} from '$lib/services/contents/collection/entries/index-file';
 import { getField, getFieldDisplayValue } from '$lib/services/contents/entry/fields';
 
 /**
@@ -41,6 +46,8 @@ import { getField, getFieldDisplayValue } from '$lib/services/contents/entry/fie
  * @property {InternalLocaleCode} defaultLocale Default locale.
  */
 
+const BODY_HEADER_REGEX = /^#+\s+(?<header>.+?)(?:\s+\{#.+?\})?\s*$/m;
+
 /**
  * Parse the given entry summary as Markdown and sanitize HTML with a few exceptions if the Markdown
  * option is enabled. Also, parse HTML character references (entities).
@@ -51,8 +58,16 @@ import { getField, getFieldDisplayValue } from '$lib/services/contents/entry/fie
  */
 export const sanitizeEntrySummary = (str, { allowMarkdown = false } = {}) => {
   str = /** @type {string} */ (parseInline(str));
+
+  if (allowMarkdown) {
+    str = parseEntities(str);
+  }
+
   str = sanitize(str, { ALLOWED_TAGS: allowMarkdown ? ['strong', 'em', 'code'] : [] });
-  str = parseEntities(str);
+
+  if (!allowMarkdown) {
+    str = parseEntities(str);
+  }
 
   return str.trim();
 };
@@ -83,7 +98,7 @@ export const getEntrySummaryFromContent = (
   // Find a header in Markdown, excluding an anchor suffix
   // https://vitepress.dev/guide/markdown#custom-anchors
   if (useBody && typeof content.body === 'string') {
-    return content.body.match(/^#+\s+(?<header>.+?)(?:\s+\{#.+?\})?\s*$/m)?.groups?.header ?? '';
+    return content.body.match(BODY_HEADER_REGEX)?.groups?.header ?? '';
   }
 
   return '';
@@ -150,7 +165,7 @@ export const replaceSub = (tag, context) => {
  */
 export const replace = (placeholder, context) => {
   const { content: valueMap, collectionName, replaceSubContext, defaultLocale } = context;
-  const [tag, ...transformations] = placeholder.split(/\s*\|\s*/);
+  const [tag, ...transformations] = placeholder.split(TRANSFORMATION_SPLIT_REGEX);
   const keyPath = tag.replace(/^fields\./, '');
   const getFieldArgs = { collectionName, valueMap, keyPath };
   let value = replaceSub(tag, replaceSubContext);
@@ -253,7 +268,7 @@ export const getEntrySummary = (
   };
 
   return sanitizeEntrySummary(
-    summaryTemplate.replace(/{{(.+?)}}/g, (_match, placeholder) =>
+    summaryTemplate.replace(TEMPLATE_TAG_REPLACE_REGEX, (_match, placeholder) =>
       replace(placeholder, replaceContext),
     ),
     { allowMarkdown },

@@ -11,7 +11,7 @@
   import QuickSearchBar from '$lib/components/global/toolbar/items/quick-search-bar.svelte';
   import SiteLogo from '$lib/components/global/toolbar/items/site-logo.svelte';
   import { hasOverlay } from '$lib/services/app/navigation';
-  import { prefs } from '$lib/services/user/prefs';
+  import { prefs } from '$lib/services/user/prefs.svelte';
 </script>
 
 <div role="none" class="toolbar-wrapper" inert={$hasOverlay}>
@@ -25,7 +25,7 @@
       <PublishButton />
       <CreateButton />
       <NotificationsButton />
-      {#if $prefs.devModeEnabled}
+      {#if prefs.devModeEnabled}
         <HelpButton />
       {/if}
       <AccountButton />
@@ -33,14 +33,14 @@
   </Toolbar>
 </div>
 
-<style lang="scss">
+<style>
   .toolbar-wrapper {
     display: contents;
 
     &[inert] {
       :global {
         .sui.search-bar {
-          // Disable the keyboard shortcut for the search bar
+          /* Disable the keyboard shortcut for the search bar */
           display: none !important;
         }
       }

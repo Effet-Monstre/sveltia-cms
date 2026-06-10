@@ -32,7 +32,7 @@
 /**
  * Cloud media storage name.
  * @typedef {'cloudinary' | 'uploadcare' | 'aws_s3' | 'cloudflare_r2' |
- * 'digitalocean_spaces'} CloudMediaLibraryName
+ * 'digitalocean_spaces' | 'scaleway_object_storage' | 'supabase_storage'} CloudMediaLibraryName
  */
 
 /**
@@ -104,11 +104,8 @@
  */
 
 /**
- * Configuration for the default media storage.
- * @typedef {object} DefaultMediaLibraryConfig
- * @property {boolean} [multiple] Whether to allow multiple file selection in the media storage.
- * This option is available for compatibility with the Cloudinary and Uploadcare media storage
- * providers, but you can simply use the `multiple` option for the File/Image field types instead.
+ * Shared options that apply to all media libraries.
+ * @typedef {object} SharedMediaLibraryOptions
  * @property {number} [max_file_size] Maximum file size in bytes that can be accepted for uploading.
  * @property {boolean} [slugify_filename] Whether to rename an original asset file when saving it,
  * according to the global `slug` option. Default: `false`, meaning that the original file name is
@@ -118,10 +115,23 @@
  * original format like `png` or `jpeg`. It can also be `raster_image` that matches any supported
  * raster image format. See the
  * [documentation](https://sveltiacms.app/en/docs/media/internal#image-optimization) for details.
+ */
+
+/**
+ * Configuration for the default media storage.
+ * @typedef {object} DefaultMediaLibraryBaseConfig
+ * @property {boolean} [multiple] Whether to allow multiple file selection in the media storage.
+ * This option is available for compatibility with the Cloudinary and Uploadcare media storage
+ * providers, but you can simply use the `multiple` option for the File/Image field types instead.
  * @see https://decapcms.org/docs/widgets/#File
  * @see https://decapcms.org/docs/widgets/#Image
  * @see https://sveltiacms.app/en/docs/fields/file
  * @see https://sveltiacms.app/en/docs/fields/image
+ */
+
+/**
+ * Configuration for the default media storage.
+ * @typedef {SharedMediaLibraryOptions & DefaultMediaLibraryBaseConfig} DefaultMediaLibraryConfig
  */
 
 /**
@@ -166,14 +176,18 @@
  */
 
 /**
- * Options for S3-compatible media libraries (Amazon S3, Cloudflare R2, DigitalOcean Spaces).
+ * Options for S3-compatible media libraries.
  * @typedef {object} S3MediaLibrary
  * @property {string} [name] Media library name (used when configuring via legacy `media_library`).
  * @property {string} access_key_id AWS access key ID or equivalent (safe to store in config).
  * @property {string} bucket Bucket name.
- * @property {string} [region] AWS region (e.g., 'us-east-1'). Required for Amazon S3 and
- * DigitalOcean Spaces.
+ * @property {string} [region] AWS region (e.g., 'us-east-1'). Required for Amazon S3, DigitalOcean
+ * Spaces, Scaleway Object Storage, and Supabase Storage.
  * @property {string} [account_id] Cloudflare account ID. Required for Cloudflare R2.
+ * @property {'default' | 'eu' | 'fedramp'} [jurisdiction] Cloudflare R2 jurisdiction. Required for
+ * buckets created in the EU or FedRAMP jurisdictions; the global endpoint returns an error for
+ * those buckets. Default: `'default'`.
+ * @property {string} [project_id] Supabase project reference ID. Required for Supabase Storage.
  * @property {string} [endpoint] Custom endpoint URL for S3-compatible services.
  * @property {string} [prefix] Path prefix within bucket.
  * @property {boolean} [force_path_style] Use path-style URLs instead of virtual-hosted-style.
@@ -212,15 +226,27 @@
  * Unified media storage option that supports multiple storage providers. See the
  * [documentation](https://sveltiacms.app/en/docs/media#configuration) for details.
  * @typedef {object} MediaLibraries
- * @property {DefaultMediaLibrary} [default] Options for the default media storage.
- * @property {CloudinaryMediaLibrary} [cloudinary] Options for the Cloudinary media storage.
- * @property {UploadcareMediaLibrary} [uploadcare] Options for the Uploadcare media storage.
- * @property {S3MediaLibrary} [aws_s3] Options for the Amazon S3 media storage.
- * @property {S3MediaLibrary} [cloudflare_r2] Options for the Cloudflare R2 media storage.
- * @property {S3MediaLibrary} [digitalocean_spaces] Options for the DigitalOcean Spaces media
- * storage.
- * @property {StockMediaLibrary} [stock_assets] Options for the unified stock photo/video media
- * library.
+ * @property {SharedMediaLibraryOptions} [all] Default options that apply to all internal and cloud
+ * media libraries, except for Cloudinary, which uses its own widget. These options can be
+ * overridden by library-specific options.
+ * @property {DefaultMediaLibrary | false} [default] Options for the default media storage. Set to
+ * `false` to explicitly disable the default (internal) storage.
+ * @property {CloudinaryMediaLibrary | false} [cloudinary] Options for the Cloudinary media storage.
+ * Set to `false` to explicitly disable.
+ * @property {UploadcareMediaLibrary | false} [uploadcare] Options for the Uploadcare media storage.
+ * Set to `false` to explicitly disable.
+ * @property {S3MediaLibrary | false} [aws_s3] Options for the Amazon S3 media storage. Set to
+ * `false` to explicitly disable.
+ * @property {S3MediaLibrary | false} [cloudflare_r2] Options for the Cloudflare R2 media storage.
+ * Set to `false` to explicitly disable.
+ * @property {S3MediaLibrary | false} [digitalocean_spaces] Options for the DigitalOcean Spaces
+ * media storage. Set to `false` to explicitly disable.
+ * @property {S3MediaLibrary | false} [scaleway_object_storage] Options for the Scaleway Object
+ * Storage media storage. Set to `false` to explicitly disable.
+ * @property {S3MediaLibrary | false} [supabase_storage] Options for the Supabase Storage media
+ * storage. Set to `false` to explicitly disable.
+ * @property {StockMediaLibrary | false} [stock_assets] Options for the unified stock photo/video
+ * media library. Set to `false` to explicitly disable.
  */
 
 /**
@@ -665,6 +691,9 @@
  * properties.
  * @property {number} [decimals] Precision of coordinates to be saved. Default: `7`.
  * @property {'Point' | 'LineString' | 'Polygon'} [type] Geometry type. Default: `Point`.
+ * @property {[number, number]} [center] Default center coordinates as `[longitude, latitude]`.
+ * Default: `[0, 0]`.
+ * @property {number} [zoom] Default zoom level. Default: `2`.
  * @see https://decapcms.org/docs/widgets/#Map
  * @see https://sveltiacms.app/en/docs/fields/map
  */
@@ -813,7 +842,12 @@
  * Entry filter options for a Relation field.
  * @typedef {object} RelationFieldFilterOptions
  * @property {FieldKeyPath} field Field name.
- * @property {any[]} values One or more values to be matched.
+ * @property {any[]} values One or more values to be matched. String values may contain template
+ * tags — `{{fields.fieldName}}` (resolved from the current entry’s field values) or `{{slug}}`
+ * (resolved from the current entry’s slug) — that are resolved against the entry currently being
+ * edited. Unresolvable templates (e.g. `{{slug}}` for a new, unsaved entry) are ignored.
+ * @property {boolean} [exclude] If `true`, entries matching this filter are excluded instead of
+ * included. Default: `false`.
  */
 
 /**
@@ -989,22 +1023,25 @@
 
 /**
  * Internationalization (i18n) file structure type.
- * @typedef {'single_file' | 'multiple_files' | 'multiple_folders' | 'multiple_folders_i18n_root' |
- * 'multiple_root_folders'} I18nFileStructure
+ * @typedef {'single_file' | 'single_file_default_root' | 'multiple_files' | 'multiple_folders' |
+ * 'multiple_folders_i18n_root' | 'multiple_root_folders'} I18nFileStructure
  * @see https://decapcms.org/docs/i18n/
  * @see https://sveltiacms.app/en/docs/i18n
  * @see https://github.com/decaporg/decap-cms/pull/7400
+ * @see https://github.com/sveltia/sveltia-cms/issues/730
  */
 
 /**
  * Global, collection-level or collection file-level i18n options. See the
  * [documentation](https://sveltiacms.app/en/docs/i18n) for details.
  * @typedef {object} I18nOptions
- * @property {I18nFileStructure} structure File structure for entry collections. File/singleton
- * collection must define the structure using `{{locale}}` in the `file` option.
- * `multiple_folders_i18n_root` has been deprecated in favor of `multiple_root_folders`. See the
+ * @property {I18nFileStructure} [structure] File structure for entry collections. **Required for
+ * the global i18n options**. File/singleton collection must define the structure using `{{locale}}`
+ * in the `file` option. `multiple_folders_i18n_root` has been deprecated in favor of
+ * `multiple_root_folders`. See the
  * [documentation](https://sveltiacms.app/en/docs/i18n#managing-content-structure) for details.
- * @property {LocaleCode[]} locales List of all available locales.
+ * @property {LocaleCode[]} [locales] List of all available locales. **Required for the global i18n
+ * options**.
  * @property {LocaleCode} [default_locale] Default locale. Default: first locale in the `locales`
  * option.
  * @property {LocaleCode[] | 'all' | 'default'} [initial_locales] Locales to be enabled when
@@ -1041,6 +1078,16 @@
  */
 
 /**
+ * Body field options for front matter formats.
+ * @typedef {object} BodyFieldOptions
+ * @property {string} [key] Field name to store the body content when using a front matter format.
+ * Default: `body`.
+ * @property {boolean} [inline] Whether to store the body content in the front matter as a field
+ * along with other fields. If `false`, the body content is stored as the main content of the file,
+ * after the front matter block. Default: `false`.
+ */
+
+/**
  * Single file in a file/singleton collection.
  * @typedef {object} CollectionFile
  * @property {string} name Unique identifier for the file.
@@ -1061,6 +1108,7 @@
  * @property {string | string[]} [frontmatter_delimiter] Delimiters to be used for the front matter
  * format. This overrides the collection-level `frontmatter_delimiter` option. Default: depends on
  * the front matter type.
+ * @property {BodyFieldOptions} [body_field] Body field options for front matter formats.
  * @property {I18nOptions | boolean} [i18n] I18n options. Default: `false`.
  * @property {string} [preview_path] Preview URL path template.
  * @property {FieldKeyPath} [preview_path_date_field] Date field name used for `preview_path`.
@@ -1255,6 +1303,7 @@
  * `yaml-frontmatter`.
  * @property {string | string[]} [frontmatter_delimiter] Delimiters to be used for the front matter
  * format. Default: depends on the front matter type.
+ * @property {BodyFieldOptions} [body_field] Body field options for front matter formats.
  * @property {I18nOptions | boolean} [i18n] I18n options. Default: `false`.
  * @property {string} [preview_path] Preview URL path template.
  * @property {string} [preview_path_date_field] Date field name used for `preview_path`.
@@ -1286,6 +1335,11 @@
  * `true`.
  * @property {boolean} [duplicate] Whether to allow users to duplicate entries in the collection.
  * Default: `true`.
+ * @property {boolean | { key: string }} [reorder] Whether to allow users to reorder entries in the
+ * collection. Default: `false`. If set to `true`, entries can be reordered with a drag-and-drop UI,
+ * and the numeric order starting from 1 is saved in an automatically generated `order` field. If an
+ * object with a `key` property is provided, e.g. `{ key: 'weight' }`, the specified field is used
+ * to save the order instead of the default `order` field.
  * @property {FileExtension} [extension] File extension. Default: `md`.
  * @property {FieldKeyPath} [identifier_field] Field name to be used as the title and slug of an
  * entry. Default: `title`.
@@ -1372,6 +1426,11 @@
  */
 
 /**
+ * Authentication method name for Git backends.
+ * @typedef {'oauth' | 'token'} AuthMethodName
+ */
+
+/**
  * Git backend properties.
  * @typedef {object} GitBackendProps
  * @property {string} [branch] Git branch name. If omitted, the default branch, usually `main` or
@@ -1392,6 +1451,13 @@
  * prefix will be added to commit messages. Default: `undefined`. See the
  * [documentation](https://sveltiacms.app/en/docs/deployments#disabling-automatic-deployments) for
  * details.
+ * @property {AuthMethodName[]} [auth_methods] Allowed authentication methods. Default: both `oauth`
+ * and `token` are allowed. To restrict sign-in options, specify only the methods you want to
+ * enable, e.g. `[oauth]` to disable access token sign-in, or `[token]` to disable OAuth sign-in. An
+ * empty array is invalid and will result in a configuration error.
+ * @property {boolean} [include_credentials] Whether to include credentials in API requests.
+ * Default: `false`. If set to `true`, credentials such as cookies will be included in API requests.
+ * This is only necessary when using cookie-based authentication with a self-hosted Git backend.
  * @see https://decapcms.org/docs/backends-overview/
  * @see https://sveltiacms.app/en/docs/backends
  */
@@ -1582,6 +1648,13 @@
  */
 
 /**
+ * Default options for fields. These options will be applied to all fields of the specified type
+ * unless they are overridden by field-specific options.
+ * @typedef {object} FieldDefaults
+ * @property {RichTextFieldBaseProps} [richtext] RichText and Markdown field default options.
+ */
+
+/**
  * CMS configuration.
  * @typedef {object} CmsConfig
  * @property {boolean} [load_config_file] Whether to load YAML/JSON CMS configuration file(s) when
@@ -1627,6 +1700,7 @@
  * @property {EditorOptions} [editor] Editor view options.
  * @property {OutputOptions} [output] Data output options. See the
  * [documentation](https://sveltiacms.app/en/docs/data-output#controlling-data-output) for details.
+ * @property {FieldDefaults} [field_defaults] Default options for fields.
  * @see https://decapcms.org/docs/configuration-options/
  * @see https://decapcms.org/docs/i18n/
  * @see https://sveltiacms.app/en/docs/i18n
@@ -1647,13 +1721,24 @@
  */
 
 /**
+ * Custom editor component mode.
+ * @typedef {'block' | 'dialog'} EditorComponentMode
+ */
+
+/**
  * Custom rich text editor component options.
  * @typedef {object} EditorComponentDefinition
  * @property {string} id Unique identifier for the component.
  * @property {string} label Label of the component to be displayed in the editor UI.
  * @property {string} [icon] Name of a [Material Symbols
  * icon](https://fonts.google.com/icons?icon.set=Material+Symbols) to be displayed in the editor UI.
- * @property {boolean} [collapsed] Whether to collapse the object by default. Default: `false`.
+ * @property {boolean} [collapsed] Whether to collapse the object by default (`block` mode only).
+ * Default: `false`.
+ * @property {EditorComponentMode} [mode] Editing mode for the component. `block` (default) renders
+ * the component within the rich text editor with an expandable field list. `dialog` renders a
+ * compact placeholder that opens a dialog when clicked.
+ * @property {string} [summary] Template for the placeholder text when `mode` is `dialog`, e.g.
+ * `{{title}} - {{videoId}}`. Falls back to the first string field value, then to the label.
  * @property {Field[]} fields Set of fields to be displayed in the component.
  * @property {RegExp} pattern Regular expression to search a block from Markdown document.
  * @property {(match: RegExpMatchArray) => Record<string, any>} [fromBlock] Function to convert the

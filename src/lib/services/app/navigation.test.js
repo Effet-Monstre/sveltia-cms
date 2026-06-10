@@ -199,6 +199,15 @@ describe('navigation', () => {
         params: { q: 'test', sort: 'date', tags: 'tag1,tag2' },
       });
     });
+
+    it('should join duplicate keys with commas', () => {
+      const result = parseLocation('https://example.com/#/search?foo=1&foo=2&foo=3');
+
+      expect(result).toEqual({
+        path: '/search',
+        params: { foo: '1,2,3' },
+      });
+    });
   });
 
   describe('updateContentFromHashChange', () => {
@@ -488,7 +497,11 @@ describe('navigation', () => {
 
       openProductionSite();
 
-      expect(window.open).toHaveBeenCalledWith('https://my-site.com', '_blank');
+      expect(window.open).toHaveBeenCalledWith(
+        'https://my-site.com',
+        '_blank',
+        'noopener,noreferrer',
+      );
     });
 
     it('should fall back to _siteURL when no display_url', () => {
@@ -498,7 +511,11 @@ describe('navigation', () => {
 
       openProductionSite();
 
-      expect(window.open).toHaveBeenCalledWith('https://fallback.com', '_blank');
+      expect(window.open).toHaveBeenCalledWith(
+        'https://fallback.com',
+        '_blank',
+        'noopener,noreferrer',
+      );
     });
 
     it('should use root path when no URLs available', () => {
@@ -506,7 +523,7 @@ describe('navigation', () => {
 
       openProductionSite();
 
-      expect(window.open).toHaveBeenCalledWith('/', '_blank');
+      expect(window.open).toHaveBeenCalledWith('/', '_blank', 'noopener,noreferrer');
     });
   });
 

@@ -10,7 +10,7 @@ vi.mock('@sveltia/utils/string', () => ({
   }),
 }));
 
-vi.mock('$lib/services/utils/misc', () => ({
+vi.mock('$lib/services/utils/regex', () => ({
   getRegex: vi.fn(),
 }));
 
@@ -21,7 +21,7 @@ describe('Test buildGroupMap()', () => {
   beforeEach(async () => {
     vi.clearAllMocks();
 
-    const { getRegex } = await import('$lib/services/utils/misc');
+    const { getRegex } = await import('$lib/services/utils/regex');
 
     getRegexMock = vi.mocked(getRegex);
     getRegexMock.mockReturnValue(null);
@@ -218,5 +218,15 @@ describe('Test sortItemsByKey()', () => {
     sortItemsByKey(items, (i) => i.v, true, undefined);
 
     expect(items.map((i) => i.v)).toEqual(['a', 'b']);
+  });
+
+  test('computes each sort key once', () => {
+    const items = [{ v: 'c' }, { v: 'a' }, { v: 'b' }];
+    const getKey = vi.fn((i) => i.v);
+
+    sortItemsByKey(items, getKey, true, 'ascending');
+
+    expect(getKey).toHaveBeenCalledTimes(items.length);
+    expect(items.map((i) => i.v)).toEqual(['a', 'b', 'c']);
   });
 });

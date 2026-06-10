@@ -1,5 +1,5 @@
 import { fillTemplate } from '$lib/services/common/template';
-import { getIndexFile } from '$lib/services/contents/collection/index-file';
+import { getIndexFile } from '$lib/services/contents/collection/entries/index-file';
 
 /**
  * @import {
@@ -139,7 +139,7 @@ export const getLocalizedSlugs = ({ draft, defaultLocaleSlug }) => {
   const {
     _i18n: {
       defaultLocale,
-      structureMap: { i18nSingleFile },
+      structureMap: { i18nSingleFile, i18nSingleFileDefaultRoot },
     },
   } = collectionFile ?? collection;
 
@@ -150,7 +150,7 @@ export const getLocalizedSlugs = ({ draft, defaultLocaleSlug }) => {
     .filter(([, , localize]) => !!localize)
     .map(([, keyPath]) => keyPath.replace(/^fields\./, ''));
 
-  if (i18nSingleFile || !localizingKeyPaths.length) {
+  if (i18nSingleFile || i18nSingleFileDefaultRoot || !localizingKeyPaths.length) {
     return undefined;
   }
 

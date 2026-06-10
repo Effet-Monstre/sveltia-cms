@@ -3,10 +3,10 @@
 
   import AssetPreview from '$lib/components/assets/shared/asset-preview.svelte';
   import { goto } from '$lib/services/app/navigation';
-  import { focusedAsset, selectedAssets } from '$lib/services/assets';
+  import { focusedAsset, selectedAssetPathSet, selectedAssets } from '$lib/services/assets';
   import { canPreviewAsset } from '$lib/services/assets/kinds';
   import { listedAssets } from '$lib/services/assets/view';
-  import { isMediumScreen, isSmallScreen } from '$lib/services/user/env';
+  import { env } from '$lib/services/user/env.svelte';
 
   /**
    * @import { Asset, ViewType } from '$lib/types/private';
@@ -60,7 +60,11 @@
     $focusedAsset = asset;
   }}
   onclick={() => {
-    if (($isSmallScreen || $isMediumScreen) && $focusedAsset && canPreviewAsset($focusedAsset)) {
+    if (
+      (env.isSmallScreen || env.isMediumScreen) &&
+      $focusedAsset &&
+      canPreviewAsset($focusedAsset)
+    ) {
       goto(`/assets/${$focusedAsset.path}`, { transitionType: 'forwards' });
     }
   }}
@@ -70,12 +74,12 @@
     }
   }}
 >
-  {#if !($isSmallScreen || $isMediumScreen)}
+  {#if !(env.isSmallScreen || env.isMediumScreen)}
     <GridCell class="checkbox">
       <Checkbox
         role="none"
         tabindex="-1"
-        checked={$selectedAssets.includes(asset)}
+        checked={$selectedAssetPathSet.has(asset.path)}
         onChange={({ detail: { checked } }) => {
           updateSelection(checked);
         }}
@@ -87,11 +91,11 @@
       {kind}
       {asset}
       variant={viewType === 'list' ? 'icon' : 'tile'}
-      cover={$isSmallScreen}
+      cover={env.isSmallScreen}
       checkerboard={kind === 'image'}
     />
   </GridCell>
-  {#if !$isSmallScreen || viewType === 'list'}
+  {#if !env.isSmallScreen || viewType === 'list'}
     <GridCell class="title">
       <div role="none" class="label">
         <TruncatedText lines={2}>
@@ -102,7 +106,7 @@
   {/if}
 </GridRow>
 
-<style lang="scss">
+<style>
   .label {
     word-break: break-all;
   }

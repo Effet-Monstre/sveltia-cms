@@ -33,6 +33,7 @@ vi.mock('$lib/services/assets', () => ({
     subscribe: vi.fn(),
     set: vi.fn(),
   },
+  getAssetByInternalPath: vi.fn(),
 }));
 
 vi.mock('$lib/services/assets/data', () => ({
@@ -78,7 +79,7 @@ vi.mock('$lib/services/contents/collection/entries', () => ({
   getEntriesByAssetURL: vi.fn(),
 }));
 
-vi.mock('$lib/services/contents/collection/index-file', () => ({
+vi.mock('$lib/services/contents/collection/entries/index-file', () => ({
   getIndexFile: vi.fn(),
   isCollectionIndexFile: vi.fn(),
 }));
@@ -409,7 +410,7 @@ describe('assets/data/move', () => {
       const { getCollectionFilesByEntry } = await import('$lib/services/contents/collection/files');
 
       const { isCollectionIndexFile, getIndexFile } =
-        await import('$lib/services/contents/collection/index-file');
+        await import('$lib/services/contents/collection/entries/index-file');
 
       const mockEntry = {
         id: 'test-entry',
@@ -450,7 +451,7 @@ describe('assets/data/move', () => {
       const { getCollectionFilesByEntry } = await import('$lib/services/contents/collection/files');
 
       const { isCollectionIndexFile } =
-        await import('$lib/services/contents/collection/index-file');
+        await import('$lib/services/contents/collection/entries/index-file');
 
       const mockEntry = {
         id: 'test-entry',
@@ -495,7 +496,7 @@ describe('assets/data/move', () => {
       const { getCollectionFilesByEntry } = await import('$lib/services/contents/collection/files');
 
       const { isCollectionIndexFile, getIndexFile } =
-        await import('$lib/services/contents/collection/index-file');
+        await import('$lib/services/contents/collection/entries/index-file');
 
       const mockEntry = {
         id: 'index-entry',
@@ -684,7 +685,7 @@ describe('assets/data/move', () => {
       const { getCollectionFilesByEntry } = await import('$lib/services/contents/collection/files');
 
       const { isCollectionIndexFile } =
-        await import('$lib/services/contents/collection/index-file');
+        await import('$lib/services/contents/collection/entries/index-file');
 
       vi.mocked(getAssociatedCollections).mockReturnValue([]);
       vi.mocked(getCollectionFilesByEntry).mockReturnValue([]);
@@ -767,7 +768,7 @@ describe('assets/data/move', () => {
       const { getCollectionFilesByEntry } = await import('$lib/services/contents/collection/files');
 
       const { isCollectionIndexFile } =
-        await import('$lib/services/contents/collection/index-file');
+        await import('$lib/services/contents/collection/entries/index-file');
 
       vi.mocked(getAssociatedCollections).mockReturnValue([]);
       vi.mocked(getCollectionFilesByEntry).mockReturnValue([]);
@@ -822,7 +823,7 @@ describe('assets/data/move', () => {
       const { getCollectionFilesByEntry } = await import('$lib/services/contents/collection/files');
 
       const { isCollectionIndexFile } =
-        await import('$lib/services/contents/collection/index-file');
+        await import('$lib/services/contents/collection/entries/index-file');
 
       vi.mocked(getAssociatedCollections).mockReturnValue([]);
       vi.mocked(getCollectionFilesByEntry).mockReturnValue([]);
@@ -877,7 +878,7 @@ describe('assets/data/move', () => {
       const { getCollectionFilesByEntry } = await import('$lib/services/contents/collection/files');
 
       const { isCollectionIndexFile } =
-        await import('$lib/services/contents/collection/index-file');
+        await import('$lib/services/contents/collection/entries/index-file');
 
       vi.mocked(getAssociatedCollections).mockReturnValue([]);
       vi.mocked(getCollectionFilesByEntry).mockReturnValue([]);
@@ -932,7 +933,7 @@ describe('assets/data/move', () => {
       const { getCollectionFilesByEntry } = await import('$lib/services/contents/collection/files');
 
       const { isCollectionIndexFile } =
-        await import('$lib/services/contents/collection/index-file');
+        await import('$lib/services/contents/collection/entries/index-file');
 
       vi.mocked(getAssociatedCollections).mockReturnValue([]);
       vi.mocked(getCollectionFilesByEntry).mockReturnValue([]);
@@ -996,7 +997,7 @@ describe('assets/data/move', () => {
       const { getCollectionFilesByEntry } = await import('$lib/services/contents/collection/files');
 
       const { isCollectionIndexFile } =
-        await import('$lib/services/contents/collection/index-file');
+        await import('$lib/services/contents/collection/entries/index-file');
 
       vi.mocked(getAssociatedCollections).mockReturnValue([]);
       vi.mocked(getCollectionFilesByEntry).mockReturnValue([]);
@@ -1027,7 +1028,10 @@ describe('assets/data/move', () => {
 
     it('should update stores after moving assets', async () => {
       const { get } = await import('svelte/store');
-      const { allAssets, focusedAsset, overlaidAsset } = await import('$lib/services/assets');
+
+      const { focusedAsset, getAssetByInternalPath, overlaidAsset } =
+        await import('$lib/services/assets');
+
       const { assetUpdatesToast } = await import('$lib/services/assets/data');
       const mockAsset1 = { path: 'old1.jpg' };
       const mockAsset2 = { path: 'old2.jpg' };
@@ -1040,14 +1044,18 @@ describe('assets/data/move', () => {
       ];
 
       vi.mocked(get).mockImplementation((store) => {
-        if (store === allAssets) return [mockNewAsset1, mockNewAsset2];
         if (store === focusedAsset) return mockAsset1;
         if (store === overlaidAsset) return mockAsset2;
         return undefined;
       });
+      vi.mocked(getAssetByInternalPath).mockImplementation((path) =>
+        path === 'new1.jpg' ? mockNewAsset1 : mockNewAsset2,
+      );
 
       updateStores({ action: 'move', movedAssets });
 
+      expect(getAssetByInternalPath).toHaveBeenCalledWith('new1.jpg');
+      expect(getAssetByInternalPath).toHaveBeenCalledWith('new2.jpg');
       expect(focusedAsset.set).toHaveBeenCalledWith(mockNewAsset1);
       expect(overlaidAsset.set).toHaveBeenCalledWith(mockNewAsset2);
       expect(assetUpdatesToast.set).toHaveBeenCalledWith({
@@ -1082,14 +1090,12 @@ describe('assets/data/move', () => {
 
     it('should handle focused asset not in movedAssets', async () => {
       const { get } = await import('svelte/store');
-      const { allAssets, focusedAsset, overlaidAsset } = await import('$lib/services/assets');
+      const { focusedAsset, overlaidAsset } = await import('$lib/services/assets');
       const mockAsset = { path: 'different.jpg' };
       const mockMovedAsset = { path: 'moved.jpg' };
-      const mockNewAsset = { path: 'new.jpg' };
       const movedAssets = [{ asset: mockMovedAsset, path: 'new.jpg' }];
 
       vi.mocked(get).mockImplementation((store) => {
-        if (store === allAssets) return [mockNewAsset];
         if (store === focusedAsset) return mockAsset;
         if (store === overlaidAsset) return undefined;
         return undefined;
@@ -1103,37 +1109,43 @@ describe('assets/data/move', () => {
 
     it('should handle focused asset found in allAssets', async () => {
       const { get } = await import('svelte/store');
-      const { allAssets, focusedAsset, overlaidAsset } = await import('$lib/services/assets');
+
+      const { focusedAsset, getAssetByInternalPath, overlaidAsset } =
+        await import('$lib/services/assets');
+
       const mockMovedAsset = { path: 'old.jpg' };
       const mockNewAsset = { path: 'new.jpg' };
-      const mockAllAssets = [mockNewAsset];
       const movedAssets = [{ asset: mockMovedAsset, path: 'new.jpg' }];
 
       vi.mocked(get).mockImplementation((store) => {
-        if (store === allAssets) return mockAllAssets;
         if (store === focusedAsset) return mockMovedAsset;
         if (store === overlaidAsset) return undefined;
         return undefined;
       });
+      vi.mocked(getAssetByInternalPath).mockReturnValue(mockNewAsset);
 
       updateStores({ action: 'move', movedAssets });
 
+      expect(getAssetByInternalPath).toHaveBeenCalledWith('new.jpg');
       // focusedAsset should be set to the matching asset from allAssets
       expect(focusedAsset.set).toHaveBeenCalledWith(mockNewAsset);
     });
 
     it('should handle focused asset not found in allAssets', async () => {
       const { get } = await import('svelte/store');
-      const { allAssets, focusedAsset, overlaidAsset } = await import('$lib/services/assets');
+
+      const { focusedAsset, getAssetByInternalPath, overlaidAsset } =
+        await import('$lib/services/assets');
+
       const mockMovedAsset = { path: 'old.jpg' };
       const movedAssets = [{ asset: mockMovedAsset, path: 'new.jpg' }];
 
       vi.mocked(get).mockImplementation((store) => {
-        if (store === allAssets) return []; // Empty array, asset not found
         if (store === focusedAsset) return mockMovedAsset;
         if (store === overlaidAsset) return undefined;
         return undefined;
       });
+      vi.mocked(getAssetByInternalPath).mockReturnValue(undefined);
 
       updateStores({ action: 'move', movedAssets });
 
@@ -1143,17 +1155,20 @@ describe('assets/data/move', () => {
 
     it('should handle overlaid asset not found in allAssets', async () => {
       const { get } = await import('svelte/store');
-      const { allAssets, focusedAsset, overlaidAsset } = await import('$lib/services/assets');
+
+      const { focusedAsset, getAssetByInternalPath, overlaidAsset } =
+        await import('$lib/services/assets');
+
       const mockMovedAsset = { path: 'old.jpg' };
       const mockFocusedAsset = { path: 'focused.jpg' };
       const movedAssets = [{ asset: mockMovedAsset, path: 'new.jpg' }];
 
       vi.mocked(get).mockImplementation((store) => {
-        if (store === allAssets) return [];
         if (store === focusedAsset) return mockFocusedAsset;
         if (store === overlaidAsset) return mockMovedAsset;
         return undefined;
       });
+      vi.mocked(getAssetByInternalPath).mockReturnValue(undefined);
 
       updateStores({ action: 'rename', movedAssets });
 
@@ -1163,21 +1178,24 @@ describe('assets/data/move', () => {
 
     it('should handle overlaid asset found in allAssets', async () => {
       const { get } = await import('svelte/store');
-      const { allAssets, focusedAsset, overlaidAsset } = await import('$lib/services/assets');
+
+      const { focusedAsset, getAssetByInternalPath, overlaidAsset } =
+        await import('$lib/services/assets');
+
       const mockMovedAsset = { path: 'old.jpg' };
       const mockNewAsset = { path: 'new.jpg' };
-      const mockAllAssets = [mockNewAsset];
       const movedAssets = [{ asset: mockMovedAsset, path: 'new.jpg' }];
 
       vi.mocked(get).mockImplementation((store) => {
-        if (store === allAssets) return mockAllAssets;
         if (store === focusedAsset) return undefined;
         if (store === overlaidAsset) return mockMovedAsset;
         return undefined;
       });
+      vi.mocked(getAssetByInternalPath).mockReturnValue(mockNewAsset);
 
       updateStores({ action: 'move', movedAssets });
 
+      expect(getAssetByInternalPath).toHaveBeenCalledWith('new.jpg');
       // overlaidAsset should be set to the matching asset from allAssets
       expect(overlaidAsset.set).toHaveBeenCalledWith(mockNewAsset);
     });

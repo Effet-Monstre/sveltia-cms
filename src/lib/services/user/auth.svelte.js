@@ -1,17 +1,16 @@
 import { _ } from '@sveltia/i18n';
 import { isObject } from '@sveltia/utils/object';
 import { LocalStorage } from '@sveltia/utils/storage';
-import { get, writable } from 'svelte/store';
+import { get } from 'svelte/store';
 
 import { goto, parseLocation } from '$lib/services/app/navigation';
 import { backend, backendName } from '$lib/services/backends';
 import { cmsConfig } from '$lib/services/config';
 import { dataLoaded } from '$lib/services/contents';
-import { user } from '$lib/services/user';
-import { prefs } from '$lib/services/user/prefs';
+import { user } from '$lib/services/user/account.svelte';
+import { prefs } from '$lib/services/user/prefs.svelte';
 
 /**
- * @import { Writable } from 'svelte/store';
  * @import { BackendService, InternalCmsConfig, User } from '$lib/types/private';
  */
 
@@ -20,29 +19,24 @@ import { prefs } from '$lib/services/user/prefs';
  * @typedef {'authentication' | 'dataFetch'} SignInErrorContext
  */
 
-/**
- * Sign-in error store.
- * @type {Writable<{ message: string, context: SignInErrorContext }>}
- */
-export const signInError = writable({ message: '', context: 'authentication' });
+const MAGIC_LINK_REGEX = /^\/signin\/(?<encodedData>.+)/;
 
-/**
- * @type {Writable<boolean>}
- */
-export const unauthenticated = writable(true);
-
-/**
- * @type {Writable<boolean>}
- */
-export const signingIn = writable(false);
+export const auth = $state({
+  /** @type {{ message: string, context: SignInErrorContext }} */
+  signInError: { message: '', context: 'authentication' },
+  /** Whether the user is not authenticated. */
+  unauthenticated: true,
+  /** Whether a sign-in is in progress. */
+  signingIn: false,
+});
 
 /**
  * Clear the cached user token so the sign-in form is shown on next load.
  */
 const clearUserCache = async () => {
   await LocalStorage.set('sveltia-cms.user', {});
-  user.set(undefined);
-  unauthenticated.set(true);
+  user.account = undefined;
+  auth.unauthenticated = true;
 };
 
 /**
@@ -62,10 +56,10 @@ const clearUserCacheIfNeeded = async (error) => {
 };
 
 /**
- * Reset the sign-in error store.
+ * Reset the sign-in error.
  */
 export const resetError = () => {
-  signInError.set({ message: '', context: 'authentication' });
+  auth.signInError = { message: '', context: 'authentication' };
 };
 
 /**
@@ -88,7 +82,7 @@ export const logError = (ex, context = 'authentication') => {
     );
   }
 
-  signInError.set({ message, context });
+  auth.signInError = { message, context };
   // eslint-disable-next-line no-console
   console.error(ex.name, ex.message, ex.cause);
 };
@@ -101,7 +95,7 @@ export const logError = (ex, context = 'authentication') => {
  */
 export const parseMagicLink = () => {
   const { path } = parseLocation();
-  const { encodedData } = path.match(/^\/signin\/(?<encodedData>.+)/)?.groups ?? {};
+  const { encodedData } = path.match(MAGIC_LINK_REGEX)?.groups ?? {};
 
   if (!encodedData) {
     return { _user: undefined, copiedPrefs: undefined };
@@ -143,11 +137,7 @@ export const getUserCache = async () => {
     (await LocalStorage.get('decap-cms-user')) ||
     (await LocalStorage.get('netlify-cms-user'));
 
-  if (isObject(userCache) && typeof userCache.backendName === 'string') {
-    return userCache;
-  }
-
-  return undefined;
+  return isObject(userCache) && typeof userCache.backendName === 'string' ? userCache : undefined;
 };
 
 /**
@@ -198,34 +188,34 @@ export const signInAutomatically = async () => {
   if (_user && _backend) {
     // Temporarily populate the `user` store with the cache, otherwise it’s not updated in
     // `refreshAccessToken`
-    user.set(/** @type {User} */ (_user));
+    user.account = /** @type {User} */ (_user);
 
     const { token, refreshToken } = _user;
 
-    signingIn.set(true);
+    auth.signingIn = true;
 
     try {
       _user = /** @type {User} */ (await _backend.signIn({ token, refreshToken, auto: true }));
     } catch {
       // The local backend may throw if the file handle permission is not given
       _user = undefined;
-      user.set(undefined);
+      user.account = undefined;
     }
   }
 
-  signingIn.set(false);
-  unauthenticated.set(!_user);
+  auth.signingIn = false;
+  auth.unauthenticated = !_user;
 
   if (!_user || !_backend) {
     return;
   }
 
   // Use the cached user to start fetching files
-  user.set(/** @type {User} */ (_user));
+  user.account = /** @type {User} */ (_user);
 
   // Copy user preferences passed with QR code
   if (copiedPrefs) {
-    prefs.update((currentPrefs) => ({ ...currentPrefs, ...copiedPrefs }));
+    Object.assign(prefs, copiedPrefs);
   }
 
   try {
@@ -235,7 +225,7 @@ export const signInAutomatically = async () => {
     // sign in again. 404 Not Found is also considered an authentication error.
     // https://docs.github.com/en/rest/overview/troubleshooting-the-rest-api#404-not-found-for-an-existing-resource
     if ([401, 403, 404].includes(ex.cause?.status)) {
-      unauthenticated.set(true);
+      auth.unauthenticated = true;
     } else {
       logError(ex, 'dataFetch');
     }
@@ -261,13 +251,13 @@ export const signInManually = async (_backendName, token) => {
 
   let _user;
 
-  signingIn.set(true);
+  auth.signingIn = true;
 
   try {
     _user = await _backend.signIn({ token, auto: false });
   } catch (/** @type {any} */ ex) {
-    signingIn.set(false);
-    unauthenticated.set(true);
+    auth.signingIn = false;
+    auth.unauthenticated = true;
 
     if (!!token && ex.cause?.status === 401) {
       // If the user is signing in using a personal access token (PAT) and the token is invalid,
@@ -282,14 +272,14 @@ export const signInManually = async (_backendName, token) => {
     return;
   }
 
-  signingIn.set(false);
-  unauthenticated.set(!_user);
+  auth.signingIn = false;
+  auth.unauthenticated = !_user;
 
   if (!_user) {
     return;
   }
 
-  user.set(_user);
+  user.account = _user;
 
   try {
     await _backend.fetchFiles();

@@ -1,7 +1,10 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 
 import { getCollection, isEntryCollection } from '$lib/services/contents/collection';
-import { getIndexFile, isCollectionIndexFile } from '$lib/services/contents/collection/index-file';
+import {
+  getIndexFile,
+  isCollectionIndexFile,
+} from '$lib/services/contents/collection/entries/index-file';
 import {
   fieldConfigCacheMap,
   getField,
@@ -11,6 +14,7 @@ import {
   hasRootField,
   isFieldMultiple,
   isFieldRequired,
+  LIST_KEY_PATH_REGEX,
 } from '$lib/services/contents/entry/fields';
 import { getDateTimeFieldDisplayValue } from '$lib/services/contents/fields/date-time/helper';
 import { getReferencedOptionLabel } from '$lib/services/contents/fields/relation/helper';
@@ -24,7 +28,7 @@ vi.mock('$lib/services/contents/collection', () => ({
   isEntryCollection: vi.fn(),
 }));
 
-vi.mock('$lib/services/contents/collection/index-file', () => ({
+vi.mock('$lib/services/contents/collection/entries/index-file', () => ({
   getIndexFile: vi.fn(),
   isCollectionIndexFile: vi.fn(),
 }));
@@ -71,6 +75,23 @@ const mockGetComponentDef = vi.mocked(getComponentDef);
 const mockGetDateTimeFieldDisplayValue = vi.mocked(getDateTimeFieldDisplayValue);
 const mockGetReferencedOptionLabel = vi.mocked(getReferencedOptionLabel);
 const mockGetOptionLabel = vi.mocked(getOptionLabel);
+
+describe('Internal helpers (exported for testing)', () => {
+  describe('LIST_KEY_PATH_REGEX', () => {
+    test('should match list key paths', () => {
+      expect(LIST_KEY_PATH_REGEX.test('field.0')).toBe(true);
+      expect(LIST_KEY_PATH_REGEX.test('field.1')).toBe(true);
+      expect(LIST_KEY_PATH_REGEX.test('field.999')).toBe(true);
+      expect(LIST_KEY_PATH_REGEX.test('nested.field.0')).toBe(true);
+    });
+
+    test('should not match non-list key paths', () => {
+      expect(LIST_KEY_PATH_REGEX.test('field')).toBe(false);
+      expect(LIST_KEY_PATH_REGEX.test('field.name')).toBe(false);
+      expect(LIST_KEY_PATH_REGEX.test('field.0.subfield')).toBe(false);
+    });
+  });
+});
 
 describe('Test getField()', () => {
   // Comprehensive mock collection that covers all test scenarios

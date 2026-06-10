@@ -7,7 +7,8 @@
   import { canEditAsset } from '$lib/services/assets/kinds';
   import { showUploadAssetsDialog } from '$lib/services/assets/view';
   import { backend } from '$lib/services/backends';
-  import { prefs } from '$lib/services/user/prefs';
+  import { prefs } from '$lib/services/user/prefs.svelte';
+  import { openNewTab } from '$lib/services/utils/window';
 
   /**
    * @import { Snippet } from 'svelte';
@@ -74,7 +75,11 @@
         aria-label={_('replace_asset')}
         disabled={!asset}
         onclick={() => {
-          $uploadingAssets = { folder: undefined, files: [], originalAsset: asset };
+          $uploadingAssets = {
+            folder: undefined,
+            files: [],
+            originalAssets: asset ? [asset] : [],
+          };
           $showUploadAssetsDialog = true;
         }}
       />
@@ -83,10 +88,10 @@
         label={_('view_on_live_site')}
         disabled={!publicURL}
         onclick={() => {
-          window.open(publicURL);
+          openNewTab(publicURL);
         }}
       />
-      {#if $prefs.devModeEnabled}
+      {#if prefs.devModeEnabled}
         <MenuItem
           disabled={!$backend?.repository || !repoBlobURL}
           label={_('view_on_x', {
@@ -94,7 +99,7 @@
             default: _('view_in_repository'),
           })}
           onclick={() => {
-            window.open(`${repoBlobURL}?plain=1`);
+            openNewTab(`${repoBlobURL}?plain=1`);
           }}
         />
       {/if}

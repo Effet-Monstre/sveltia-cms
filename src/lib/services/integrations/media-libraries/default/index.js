@@ -21,7 +21,7 @@ import { optimizeSVG, transformImage } from '$lib/services/utils/media/image/tra
  * Get normalized default media library options.
  * @param {object} [options] Options.
  * @param {MediaField} [options.fieldConfig] Field configuration.
- * @returns {{ config: DefaultMediaLibraryConfig }} Options.
+ * @returns {{ enabled: boolean, config: DefaultMediaLibraryConfig }} Options.
  */
 export const getDefaultMediaLibraryOptions = ({ fieldConfig } = {}) => {
   const options = getMediaLibraryOptions({ fieldConfig });
@@ -35,6 +35,7 @@ export const getDefaultMediaLibraryOptions = ({ fieldConfig } = {}) => {
   } = typeof options === 'boolean' ? {} : (options?.config ?? {});
 
   return {
+    enabled: options !== false,
     config: {
       max_file_size: typeof maxSize === 'number' && Number.isInteger(maxSize) ? maxSize : Infinity,
       multiple: typeof multiple === 'boolean' ? multiple : false,
@@ -59,13 +60,12 @@ export const transformFile = async (file, transformations) => {
     /** @type {RasterImageTransformationOptions | undefined} */
     let transformation;
 
-    if (subType in transformations) {
-      transformation = /** @type {Record<string, any>} */ (transformations)[subType];
-    } else if (
-      'raster_image' in transformations &&
-      /** @type {string[]} */ (RASTER_IMAGE_FORMATS).includes(subType)
-    ) {
-      transformation = transformations.raster_image;
+    if (/** @type {string[]} */ (RASTER_IMAGE_FORMATS).includes(subType)) {
+      if (subType in transformations) {
+        transformation = /** @type {Record<string, any>} */ (transformations)[subType];
+      } else if ('raster_image' in transformations) {
+        transformation = transformations.raster_image;
+      }
     }
 
     if (transformation) {

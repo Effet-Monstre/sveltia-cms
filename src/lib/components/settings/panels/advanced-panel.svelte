@@ -4,7 +4,7 @@
 
   import PrefSwitch from '$lib/components/settings/controls/pref-switch.svelte';
   import { skipCIConfigured } from '$lib/services/backends/git/shared/integration';
-  import { prefs } from '$lib/services/user/prefs';
+  import { prefs } from '$lib/services/user/prefs.svelte';
 
   /**
    * @import { SettingsPanelOnChangeArgs } from '$lib/types/private';
@@ -59,14 +59,15 @@
     </p>
     <div role="none">
       <TextInput
-        bind:value={$prefs.deployHookURL}
+        dir="ltr"
+        bind:value={prefs.deployHookURL}
         flex
         aria-label={_('prefs.advanced.deploy_hook.url.field_label')}
         showInlineLabel={true}
         onchange={() => {
           onChange?.({
             message: _(
-              $prefs.deployHookURL
+              prefs.deployHookURL
                 ? 'prefs.advanced.deploy_hook.url.saved'
                 : 'prefs.advanced.deploy_hook.url.removed',
             ),
@@ -76,14 +77,15 @@
     </div>
     <div role="none">
       <TextInput
-        bind:value={$prefs.deployHookAuthHeader}
+        dir="ltr"
+        bind:value={prefs.deployHookAuthHeader}
         flex
         aria-label={_('prefs.advanced.deploy_hook.auth.field_label')}
         showInlineLabel={true}
         onchange={() => {
           onChange?.({
             message: _(
-              $prefs.deployHookAuthHeader
+              prefs.deployHookAuthHeader
                 ? 'prefs.advanced.deploy_hook.auth.saved'
                 : 'prefs.advanced.deploy_hook.auth.removed',
             ),

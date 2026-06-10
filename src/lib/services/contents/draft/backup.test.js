@@ -6,7 +6,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { cmsConfigVersion } from '$lib/services/config';
 import { entryDraftInteracted, entryDraftModified } from '$lib/services/contents/draft';
-import { prefs } from '$lib/services/user/prefs';
+import { prefs } from '$lib/services/user/prefs.svelte';
 
 vi.mock('@sveltia/utils/storage');
 vi.mock('@sveltia/utils/file', () => ({
@@ -20,6 +20,9 @@ vi.mock('$lib/services/contents/draft');
 vi.mock('$lib/services/contents/draft/create/proxy', () => ({
   createProxy: vi.fn(({ target }) => target),
 }));
+vi.mock('$lib/services/contents/collection/entries/reorder', () => ({
+  getOrderFieldKey: vi.fn(() => undefined),
+}));
 vi.mock('$lib/services/backends', () => ({
   backend: {
     subscribe: vi.fn((callback) => {
@@ -30,8 +33,11 @@ vi.mock('$lib/services/backends', () => ({
     }),
   },
 }));
-vi.mock('$lib/services/user/prefs', () => ({
-  prefs: { subscribe: vi.fn(() => vi.fn()) },
+
+const mockPrefs = vi.hoisted(() => ({ useDraftBackup: /** @type {boolean | undefined} */ (true) }));
+
+vi.mock('$lib/services/user/prefs.svelte', () => ({
+  prefs: mockPrefs,
 }));
 vi.mock('svelte/store', async () => {
   const actual = await vi.importActual('svelte/store');
@@ -79,6 +85,7 @@ describe('draft/backup', () => {
 
   beforeEach(async () => {
     vi.clearAllMocks();
+    mockPrefs.useDraftBackup = true;
 
     // Import module (happens once, uses the mock set up above)
     const backupModule = await import('./backup');
@@ -348,6 +355,8 @@ describe('draft/backup', () => {
     });
 
     it('should not save backup when preference is disabled', async () => {
+      mockPrefs.useDraftBackup = false;
+
       mockGet.mockImplementation((store) => {
         if (store === prefs) {
           return { useDraftBackup: false };
@@ -372,6 +381,8 @@ describe('draft/backup', () => {
     });
 
     it('should default to enabled (true) when useDraftBackup is undefined', async () => {
+      mockPrefs.useDraftBackup = undefined;
+
       mockGet.mockImplementation((store) => {
         if (store === prefs) {
           // useDraftBackup is not set → `?? true` defaults to true
@@ -636,7 +647,7 @@ describe('draft/backup', () => {
       }).not.toThrow();
     });
 
-    it('should handle legacy file format (File instead of object with file property)', () => {
+    it('should skip blob URLs whose cache entry has no file property (legacy format)', () => {
       const testFile = new File(['test content'], 'test.txt', { type: 'text/plain' });
 
       const backup = {
@@ -651,9 +662,18 @@ describe('draft/backup', () => {
         files: { 'blob:http://localhost/legacy123': testFile },
       };
 
-      expect(() => {
-        restoreBackup({ backup, collectionName: 'posts', fileName: undefined });
-      }).not.toThrow();
+      /** @type {any} */
+      let updatedDraft;
+
+      vi.mocked(entryDraft.update).mockImplementation((updater) => {
+        updatedDraft = createMockDraft();
+        updater(updatedDraft);
+      });
+
+      restoreBackup({ backup, collectionName: 'posts', fileName: undefined });
+
+      // Legacy format is no longer migrated — the blob URL is skipped entirely
+      expect(Object.keys(updatedDraft.files)).toHaveLength(0);
     });
 
     it('should skip blob URLs that have no matching file in cache', () => {
@@ -842,6 +862,80 @@ describe('draft/backup', () => {
         restoreBackup({ backup, collectionName: 'posts', fileName: undefined });
       }).not.toThrow();
     });
+
+    it('reconciles a stale order field with the live entry value when originalEntry exists', async () => {
+      const { getOrderFieldKey } =
+        await import('$lib/services/contents/collection/entries/reorder');
+
+      vi.mocked(getOrderFieldKey).mockReturnValueOnce('order');
+
+      const backup = {
+        timestamp: new Date(),
+        cmsConfigVersion: 'v1.0.0',
+        collectionName: 'posts',
+        slug: 'my-post',
+        currentLocales: { en: true },
+        currentSlugs: { en: 'my-post' },
+        // Backup has stale order value 3
+        currentValues: { en: { title: 'Old Title', order: 3 } },
+        files: {},
+      };
+
+      let updatedDraft;
+
+      vi.mocked(entryDraft.update).mockImplementation((updater) => {
+        updatedDraft = createMockDraft({
+          collection: { reorder: true },
+          originalEntry: { locales: { en: { content: { title: 'Old Title', order: 7 } } } },
+        });
+
+        updater(updatedDraft);
+      });
+
+      restoreBackup({ backup, collectionName: 'posts', fileName: undefined });
+
+      // The restored order should use the live value (7), not the stale backup value (3)
+      expect(updatedDraft.currentValues.en.order).toBe(7);
+    });
+
+    it('removes the order field when originalEntry does not exist (new entry)', async () => {
+      const { getOrderFieldKey } =
+        await import('$lib/services/contents/collection/entries/reorder');
+
+      vi.mocked(getOrderFieldKey).mockReturnValueOnce('order');
+
+      const backup = {
+        timestamp: new Date(),
+        cmsConfigVersion: 'v1.0.0',
+        collectionName: 'posts',
+        slug: '',
+        currentLocales: { en: true },
+        currentSlugs: { en: '' },
+        // Backup has an order value from a previous save attempt
+        currentValues: { en: { title: 'New Post', order: 2 } },
+        files: {},
+      };
+
+      let capturedValueMap;
+
+      vi.mocked(entryDraft.update).mockImplementation((updater) => {
+        const draft = createMockDraft({
+          collection: { reorder: true },
+          originalEntry: undefined, // new entry — no live order
+          currentValues: { en: {} },
+          originalValues: { en: {} },
+        });
+
+        // Intercept the valueMap mutation
+        updater(draft);
+        capturedValueMap = backup.currentValues.en;
+      });
+
+      restoreBackup({ backup, collectionName: 'posts', fileName: undefined });
+
+      // The order field should be removed so assignManualSortOrder can recompute it at save time
+      expect('order' in capturedValueMap).toBe(false);
+    });
   });
 
   describe('stores', () => {
@@ -872,6 +966,8 @@ describe('draft/backup', () => {
 
   describe('restoreBackupIfNeeded', () => {
     it('should not restore if preference is disabled', async () => {
+      mockPrefs.useDraftBackup = false;
+
       mockGet.mockImplementation((store) => {
         if (store === prefs) {
           return { useDraftBackup: false };
@@ -886,6 +982,8 @@ describe('draft/backup', () => {
     });
 
     it('should default to enabled when useDraftBackup is undefined', async () => {
+      mockPrefs.useDraftBackup = undefined;
+
       mockGet.mockImplementation((store) => {
         if (store === prefs) {
           // useDraftBackup is not set → `?? true` defaults to true
@@ -1118,6 +1216,8 @@ describe('draft/backup', () => {
 
   describe('showBackupToastIfNeeded', () => {
     it('should not show toast if preference is disabled', async () => {
+      mockPrefs.useDraftBackup = false;
+
       mockGet.mockImplementation((store) => {
         if (store === prefs) {
           return { useDraftBackup: false };
@@ -1132,6 +1232,8 @@ describe('draft/backup', () => {
     });
 
     it('should default to enabled when useDraftBackup is undefined', async () => {
+      mockPrefs.useDraftBackup = undefined;
+
       mockGet.mockImplementation((store) => {
         if (store === prefs) {
           // useDraftBackup not set → defaults to true

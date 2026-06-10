@@ -3,6 +3,7 @@ import { get } from 'svelte/store';
 import { stringify as stringifyYAML } from 'yaml';
 
 import { cmsConfig } from '$lib/services/config';
+import { FRONTMATTER_FORMATS } from '$lib/services/contents/file';
 import { customFileFormatRegistry } from '$lib/services/contents/file/config';
 
 /**
@@ -79,11 +80,20 @@ export const formatYAML = (
  * @returns {string} Formatted front matter.
  */
 export const formatFrontMatter = ({ content, _file }) => {
-  const { format, fmDelimiters, yamlQuote = false } = _file;
-  const [sd, ed] = fmDelimiters ?? ['---', '---'];
-  const body = typeof content.body === 'string' ? content.body : '';
+  const {
+    format,
+    fmDelimiters,
+    bodyField: { key: bodyKey = 'body', inline: bodyInline = false } = {},
+    yamlQuote = false,
+  } = _file;
 
-  delete content.body;
+  const [sd, ed] = fmDelimiters ?? ['---', '---'];
+  let body = '';
+
+  if (!bodyInline && bodyKey in content) {
+    body = typeof content[bodyKey] === 'string' ? content[bodyKey] : '';
+    delete content[bodyKey];
+  }
 
   // Support Markdown without a front matter block, particularly for VitePress
   if (!Object.keys(content).length) {
@@ -103,7 +113,7 @@ export const formatFrontMatter = ({ content, _file }) => {
       return '';
     }
 
-    return `${sd}\n${head}\n${ed}\n${body ? `\n${body}\n` : ''}`;
+    return `${sd}\n${head}\n${ed}\n${!bodyInline && body ? `\n${body}\n` : ''}`;
   } catch (ex) {
     // eslint-disable-next-line no-console
     console.error(ex);
@@ -152,7 +162,7 @@ export const formatEntryFile = async ({ content, _file }) => {
     return '';
   }
 
-  if (/^(?:(?:yaml|toml|json)-)?frontmatter$/.test(format)) {
+  if (format === 'frontmatter' || FRONTMATTER_FORMATS.includes(/** @type {any} */ (format))) {
     return formatFrontMatter({ content, _file });
   }
 

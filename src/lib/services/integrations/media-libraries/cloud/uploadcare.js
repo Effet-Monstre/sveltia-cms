@@ -41,7 +41,8 @@ import { formatFileName } from '$lib/services/utils/file';
  * Get Uploadcare library options from site config.
  * @internal
  * @param {CmsConfig | MediaField} [config] CMS configuration or field configuration.
- * @returns {UploadcareMediaLibrary | undefined} Configuration object.
+ * @returns {UploadcareMediaLibrary | false | undefined} Configuration object, or `false` if
+ * explicitly disabled.
  */
 export const getLibraryOptions = (config = get(cmsConfig)) =>
   config?.media_libraries?.uploadcare ??
@@ -52,14 +53,20 @@ export const getLibraryOptions = (config = get(cmsConfig)) =>
 /**
  * Get Uploadcare public key from library options.
  * @internal
+ * @param {MediaField} [fieldConfig] Field configuration.
  * @returns {string | undefined} Public key.
  */
-export const getPublicKey = () => getLibraryOptions()?.config?.publicKey;
+export const getPublicKey = (fieldConfig) => {
+  const options = getLibraryOptions(fieldConfig) ?? getLibraryOptions();
+
+  return options ? options.config?.publicKey : undefined;
+};
 /**
  * Check if Uploadcare integration is enabled.
+ * @param {MediaField} [fieldConfig] Field configuration.
  * @returns {boolean} True if enabled, false otherwise.
  */
-export const isEnabled = () => !!getPublicKey();
+export const isEnabled = (fieldConfig) => !!getPublicKey(fieldConfig);
 
 /**
  * Parse API results into ExternalAsset format.
@@ -72,10 +79,12 @@ export const isEnabled = () => !!getPublicKey();
  * @see https://sveltiacms.app/en/docs/media/uploadcare
  */
 export const parseResults = (results, { fieldConfig } = {}) => {
+  const libOptions = getLibraryOptions(fieldConfig) ?? getLibraryOptions();
+
   const {
     settings: { autoFilename = false, defaultOperations = undefined } = {},
     config: { cdnBase = undefined } = {},
-  } = getLibraryOptions(fieldConfig) ?? getLibraryOptions() ?? {};
+  } = libOptions || {};
 
   return results.map((result) => {
     const {
@@ -117,13 +126,12 @@ export const parseResults = (results, { fieldConfig } = {}) => {
  * @see https://uploadcare.com/api-refs/rest-api/v0.7.0/#tag/File/operation/filesList
  */
 export const fetchFiles = async (options, { maxPages = 10, filter } = {}) => {
-  const publicKey = getPublicKey();
+  const { kind, fieldConfig, apiKey: secretKey } = options;
+  const publicKey = getPublicKey(fieldConfig);
 
   if (!publicKey) {
     return Promise.reject(new Error('Uploadcare public key is not configured'));
   }
-
-  const { kind, fieldConfig, apiKey: secretKey } = options;
 
   const headers = {
     Accept: 'application/vnd.uploadcare-v0.7+json',
@@ -184,7 +192,7 @@ export const fetchFiles = async (options, { maxPages = 10, filter } = {}) => {
 export const list = async (options) => fetchFiles(options);
 
 /**
- * Search files in Uploadcare. Since Uploadcare doesn't have a built-in search API,
+ * Search files in Uploadcare. Since Uploadcare doesn’t have a built-in search API,
  * this implementation fetches files and filters them client-side by filename.
  * @param {string} query Search query.
  * @param {MediaLibraryFetchOptions} options Options containing the secret key (apiKey).
@@ -242,13 +250,12 @@ export const upload = async (files, options) => {
     return [];
   }
 
-  const publicKey = getPublicKey();
+  const { fieldConfig, apiKey: secretKey } = options;
+  const publicKey = getPublicKey(fieldConfig);
 
   if (!publicKey) {
     return Promise.reject(new Error('Uploadcare public key is not configured'));
   }
-
-  const { fieldConfig, apiKey: secretKey } = options;
 
   if (!secretKey) {
     return Promise.reject(new Error('Uploadcare secret key is not provided'));

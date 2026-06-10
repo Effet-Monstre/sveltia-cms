@@ -1,6 +1,5 @@
 import { getPathInfo } from '@sveltia/utils/file';
-import { stripSlashes } from '@sveltia/utils/string';
-import equal from 'fast-deep-equal';
+import { escapeRegExp, stripSlashes } from '@sveltia/utils/string';
 import { flatten } from 'flat';
 import { derived, get, writable } from 'svelte/store';
 
@@ -10,15 +9,17 @@ import {
   globalAssetFolder,
   selectedAssetFolder,
 } from '$lib/services/assets/folders';
+import { processFile } from '$lib/services/assets/process';
 import { fillTemplate } from '$lib/services/common/template';
-import { getCollection } from '$lib/services/contents/collection';
-import { getCollectionFilesByEntry } from '$lib/services/contents/collection/files';
-import { isCollectionIndexFile } from '$lib/services/contents/collection/index-file';
-import { getAssociatedCollections } from '$lib/services/contents/entry';
 import {
-  getDefaultMediaLibraryOptions,
-  transformFile,
-} from '$lib/services/integrations/media-libraries/default';
+  ESCAPED_PLACEHOLDER_REGEX,
+  TEMPLATE_TAG_REGEX,
+} from '$lib/services/common/template/constants';
+import { getCollection } from '$lib/services/contents/collection';
+import { isCollectionIndexFile } from '$lib/services/contents/collection/entries/index-file';
+import { getCollectionFilesByEntry } from '$lib/services/contents/collection/files';
+import { getAssociatedCollections } from '$lib/services/contents/entry';
+import { getDefaultMediaLibraryOptions } from '$lib/services/integrations/media-libraries/default';
 import { createPath, decodeFilePath, resolvePath } from '$lib/services/utils/file';
 
 /**
@@ -34,6 +35,8 @@ import { createPath, decodeFilePath, resolvePath } from '$lib/services/utils/fil
  * UploadingAssets,
  * } from '$lib/types/private';
  */
+
+const ENTRY_FOLDER_REGEX = /^(?<entryFolder>.+?)(?:\/[^/]+)?$/;
 
 /**
  * List of all assets.
@@ -64,10 +67,26 @@ const getAssetPathMap = () => {
 };
 
 /**
+ * Get an asset by its internal repository path.
+ * @param {string} path Asset path.
+ * @returns {Asset | undefined} Asset.
+ */
+export const getAssetByInternalPath = (path) => getAssetPathMap().get(path);
+
+/**
  * Selected assets.
  * @type {Writable<Asset[]>}
  */
 export const selectedAssets = writable([]);
+
+/**
+ * Set of selected asset paths, for O(1) membership checks in list items.
+ * @type {import('svelte/store').Readable<Set<string>>}
+ */
+export const selectedAssetPathSet = derived(
+  selectedAssets,
+  ($selectedAssets) => new Set($selectedAssets.map((asset) => asset.path)),
+);
 
 /**
  * Asset currently focused in the UI.
@@ -112,35 +131,24 @@ export const processedAssets = derived([uploadingAssets], ([_uploadingAssets], s
   });
 
   const originalFiles = _uploadingAssets.files;
-  const transformedFileMap = new WeakMap();
-  const { max_file_size: maxSize, transformations } = getDefaultMediaLibraryOptions().config;
-  /** @type {File[]} */
-  let files = [];
+  const { config } = getDefaultMediaLibraryOptions();
 
   (async () => {
-    if (originalFiles.length && transformations) {
+    if (originalFiles.length && config.transformations) {
       update((state) => ({ ...state, processing: true }));
-
-      files = await Promise.all(
-        originalFiles.map(async (file) => {
-          const newFile = await transformFile(file, transformations);
-
-          if (newFile !== file) {
-            transformedFileMap.set(newFile, file);
-          }
-
-          return newFile;
-        }),
-      );
-    } else {
-      files = [...originalFiles];
     }
+
+    const results = await Promise.all(originalFiles.map((file) => processFile(file, config)));
 
     update(() => ({
       processing: false,
-      undersizedFiles: files.filter(({ size }) => size <= /** @type {number} */ (maxSize)),
-      oversizedFiles: files.filter(({ size }) => size > /** @type {number} */ (maxSize)),
-      transformedFileMap,
+      undersizedFiles: results.filter(({ oversized }) => !oversized).map(({ file }) => file),
+      oversizedFiles: results.filter(({ oversized }) => oversized).map(({ file }) => file),
+      transformedFileMap: new WeakMap(
+        results
+          .filter(({ originalFile }) => originalFile !== undefined)
+          .map(({ file, originalFile }) => [file, /** @type {File} */ (originalFile)]),
+      ),
     }));
   })();
 });
@@ -190,7 +198,7 @@ export const getAssetByRelativePathAndCollection = ({
   // The regex matches any non-empty string (`entryFilePath` is guaranteed non-empty above). Named
   // capture groups always produce a `groups` object, so no optional chaining needed.
   const { entryFolder } = /** @type {{ entryFolder: string }} */ (
-    /** @type {RegExpMatchArray} */ (entryFilePath.match(/(?<entryFolder>.+?)(?:\/[^/]+)?$/)).groups
+    /** @type {RegExpMatchArray} */ (entryFilePath.match(ENTRY_FOLDER_REGEX)).groups
   );
 
   // Strip the `media_folder` prefix from the stored path before joining with `mediaFolder`, to
@@ -308,9 +316,12 @@ export const getAssetByAbsolutePath = ({ path, entry, collectionName, fileName, 
     getAssetFolder({ collectionName, fileName }),
     getAssetFolder({ collectionName }),
     get(globalAssetFolder),
-    get(allAssetFolders).findLast((folder) =>
-      dirName.match(`^${(folder.publicPath ?? '').replace(/{{.+?}}/g, '.+?')}\\b`),
-    ),
+    get(allAssetFolders).findLast((folder) => {
+      const publicPath = folder.publicPath ?? '';
+      const normalizedPath = escapeRegExp(publicPath).replace(ESCAPED_PLACEHOLDER_REGEX, '.+?');
+
+      return dirName.match(`^${normalizedPath}${publicPath ? '(?=\\/|$)' : '$'}`);
+    }),
   ].filter((folder) => !!folder);
 
   // Use `find` to stop scanning folders as soon as the asset is found
@@ -319,7 +330,7 @@ export const getAssetByAbsolutePath = ({ path, entry, collectionName, fileName, 
     let { internalPath } = folder;
 
     // Deal with template tags like `/assets/images/{{slug}}`
-    if (internalPath !== undefined && /{{.+?}}/.test(internalPath)) {
+    if (internalPath !== undefined && TEMPLATE_TAG_REGEX.test(internalPath)) {
       const collection = _collectionName
         ? getCollection(_collectionName)
         : entry
@@ -397,11 +408,30 @@ export const getAssetByPath = ({ value, entry, collectionName, fileName, typedKe
 };
 
 /**
+ * Check if an asset belongs to the given asset folder.
+ * @param {Asset} asset Asset.
+ * @param {AssetFolderInfo} folder Folder info.
+ * @returns {boolean} Result.
+ */
+export const isAssetInFolder = ({ folder: assetFolder }, folder) =>
+  assetFolder === folder ||
+  (assetFolder.collectionName === folder.collectionName &&
+    assetFolder.fileName === folder.fileName &&
+    assetFolder.typedKeyPath === folder.typedKeyPath &&
+    assetFolder.isIndexFile === folder.isIndexFile &&
+    assetFolder.internalPath === folder.internalPath &&
+    assetFolder.internalSubPath === folder.internalSubPath &&
+    assetFolder.publicPath === folder.publicPath &&
+    assetFolder.entryRelative === folder.entryRelative &&
+    assetFolder.hasTemplateTags === folder.hasTemplateTags);
+
+/**
  * Get a list of assets stored in the given collection defined folder.
  * @param {AssetFolderInfo} folder Folder info.
  * @returns {Asset[]} Assets.
  */
-export const getAssetsByFolder = (folder) => get(allAssets).filter((a) => equal(a.folder, folder));
+export const getAssetsByFolder = (folder) =>
+  get(allAssets).filter((asset) => isAssetInFolder(asset, folder));
 
 /**
  * Get a list of assets stored in the given internal directory.
@@ -415,3 +445,19 @@ export const getAssetsByDirName = (dirname) =>
 selectedAssetFolder.subscribe(() => {
   focusedAsset.set(undefined);
 });
+
+/**
+ * Get a list of duplicate files based on their names compared to existing assets.
+ * @param {File[]} files The list of files to check for duplicates.
+ * @param {Asset[]} assets The list of existing assets to compare against.
+ * @returns {File[]} An array of files that have duplicate names in the existing assets.
+ */
+export const getDuplicateFiles = (files, assets) => {
+  if (!assets.length || !files.length) {
+    return [];
+  }
+
+  const existingNames = new Set(assets.map(({ name }) => name.normalize().toLowerCase()));
+
+  return files.filter((file) => existingNames.has(file.name.normalize().toLowerCase()));
+};

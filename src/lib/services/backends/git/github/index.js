@@ -23,7 +23,7 @@ import { checkStatus, STATUS_DASHBOARD_URL } from '$lib/services/backends/git/gi
 import { apiConfig, graphqlVars } from '$lib/services/backends/git/shared/api';
 import { getRepoURL } from '$lib/services/backends/git/shared/repository';
 import { cmsConfig } from '$lib/services/config';
-import { prefs } from '$lib/services/user/prefs';
+import { prefs } from '$lib/services/user/prefs.svelte';
 
 /**
  * @import { ApiEndpointConfig, BackendService, RepositoryInfo } from '$lib/types/private';
@@ -54,6 +54,7 @@ export const init = () => {
     api_root: restApiRoot = DEFAULT_API_ROOT,
     // GitHub Enterprise Server: https://HOSTNAME/api/graphql
     graphql_api_root: graphqlApiRoot = restApiRoot,
+    include_credentials: includeCredentials = false,
   } = backend;
 
   const [owner, repo] = /** @type {string} */ (projectPath).split('/');
@@ -86,12 +87,13 @@ export const init = () => {
       tokenURL: authURL.replace('/authorize', '/access_token'),
       restBaseURL: normalizeRestBaseURL(restApiRoot),
       graphqlBaseURL: normalizeGraphQLBaseURL(graphqlApiRoot),
+      includeCredentials,
     }),
   );
 
   Object.assign(graphqlVars, { owner, repo, branch });
 
-  if (get(prefs).devModeEnabled) {
+  if (prefs.devModeEnabled) {
     // eslint-disable-next-line no-console
     console.info('repositoryInfo', repository);
   }

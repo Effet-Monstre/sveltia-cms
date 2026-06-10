@@ -74,7 +74,7 @@ const fillTemplateIfNeeded = (pathString, fillSlugOptions) =>
  * suffix for nested entries (e.g., `/index`, `/_index`, or any custom filename from the `path`
  * config).
  * @param {string} entryFilePath Entry file path, e.g., `src/content/blog/hello-world.md`.
- * @param {string | undefined} subPath Collection's file subPath template, e.g., `{{slug}}/index`.
+ * @param {string | undefined} subPath Collection’s file subPath template, e.g., `{{slug}}/index`.
  * @returns {string} Entry folder path, e.g., `src/content/blog/hello-world`.
  * @example
  * // Simple files
@@ -277,6 +277,7 @@ export const getAssetSavingInfo = ({ draft, defaultLocaleSlug, folder }) => {
  * @param {object} args Arguments.
  * @param {File} args.file Raw file.
  * @param {AssetFolderInfo} args.folder Asset folder associated with the new file.
+ * @param {boolean} args.replace Whether to replace an existing file.
  * @param {string} args.blobURL Blob URL of the file.
  * @param {EntryDraft} args.draft Entry draft.
  * @param {string} args.defaultLocaleSlug Default locale’s entry slug.
@@ -284,12 +285,12 @@ export const getAssetSavingInfo = ({ draft, defaultLocaleSlug, folder }) => {
  * @param {FlattenedEntryContent} args.content Localized content.
  * @param {FileChange[]} args.changes Changeset.
  * @param {Asset[]} args.savingAssets List of assets to be saved.
- * @param {boolean} args.slugificationEnabled Whether the file name slugification is enabled.
  * @param {boolean} args.encodingEnabled Whether the file path encoding is enabled.
  */
 export const replaceBlobURL = async ({
   file,
   folder,
+  replace,
   blobURL,
   draft,
   defaultLocaleSlug,
@@ -297,7 +298,6 @@ export const replaceBlobURL = async ({
   content,
   changes,
   savingAssets,
-  slugificationEnabled,
   encodingEnabled,
 }) => {
   const sha = await getGitHash(file);
@@ -318,12 +318,20 @@ export const replaceBlobURL = async ({
   if (dupFile) {
     fileName = dupFile.name;
   } else {
-    fileName = formatFileName(file.name, { slugificationEnabled, assetNamesInSameFolder });
+    fileName = formatFileName(file.name, replace ? {} : { assetNamesInSameFolder });
 
+    const update = replace && assetNamesInSameFolder.includes(fileName);
     const assetPath = resolvedInternalPath ? `${resolvedInternalPath}/${fileName}` : fileName;
 
-    assetNamesInSameFolder.push(fileName);
-    changes.push({ action: 'create', path: assetPath, data: file });
+    if (!update) {
+      assetNamesInSameFolder.push(fileName);
+    }
+
+    changes.push({
+      action: update ? 'update' : 'create',
+      path: assetPath,
+      data: file,
+    });
 
     savingAssets.push({
       ...savingAssetProps,

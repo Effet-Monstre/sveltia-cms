@@ -1,3 +1,7 @@
+/* eslint-disable jsdoc/require-returns-description */
+/* eslint-disable jsdoc/require-param-description */
+/* eslint-disable jsdoc/require-description */
+
 import { get } from 'svelte/store';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -6,30 +10,40 @@ import {
   editingAsset,
   focusedAsset,
   getAssetByAbsolutePath,
+  getAssetByInternalPath,
   getAssetByPath,
   getAssetByRelativePath,
   getAssetByRelativePathAndCollection,
   getAssetsByDirName,
   getAssetsByFolder,
+  getDuplicateFiles,
+  isAssetInFolder,
   isRelativePath,
   overlaidAsset,
   processedAssets,
   renamingAsset,
+  selectedAssetPathSet,
   selectedAssets,
   uploadingAssets,
 } from '.';
 
 // Mock all dependencies
 vi.mock('@sveltia/utils/file');
-vi.mock('@sveltia/utils/string');
-vi.mock('fast-deep-equal');
+vi.mock('@sveltia/utils/string', async () => {
+  const actual = await vi.importActual('@sveltia/utils/string');
+
+  return {
+    ...actual,
+    stripSlashes: vi.fn(),
+  };
+});
 vi.mock('flat');
 vi.mock('$lib/services/integrations/media-libraries/default');
 vi.mock('$lib/services/common/slug');
 vi.mock('$lib/services/common/template');
 vi.mock('$lib/services/contents/collection');
 vi.mock('$lib/services/contents/collection/files');
-vi.mock('$lib/services/contents/collection/index-file');
+vi.mock('$lib/services/contents/collection/entries/index-file');
 vi.mock('$lib/services/contents/entry');
 vi.mock('$lib/services/utils/file');
 
@@ -70,6 +84,16 @@ describe('assets/index', () => {
 
     it('should initialize selectedAssets as empty array', () => {
       expect(get(selectedAssets)).toEqual([]);
+    });
+
+    it('should derive selectedAssetPathSet from selectedAssets', () => {
+      selectedAssets.set([
+        /** @type {any} */ ({ path: 'a.jpg' }),
+        /** @type {any} */ ({ path: 'b.jpg' }),
+      ]);
+      expect(get(selectedAssetPathSet)).toEqual(new Set(['a.jpg', 'b.jpg']));
+      selectedAssets.set([]);
+      expect(get(selectedAssetPathSet)).toEqual(new Set());
     });
 
     it('should initialize focusedAsset as undefined', () => {
@@ -118,6 +142,7 @@ describe('assets/index', () => {
       transformFileMock = vi.mocked(transformFile);
 
       getDefaultMediaLibraryOptionsMock.mockReturnValue({
+        enabled: true,
         config: {
           max_file_size: 1000000, // 1MB
           multiple: false,
@@ -148,6 +173,12 @@ describe('assets/index', () => {
       Object.defineProperty(smallFile, 'size', { value: 500000 });
       Object.defineProperty(largeFile, 'size', { value: 1500000 });
 
+      let latestState = /** @type {any} */ (null);
+
+      const unsubscribe = processedAssets.subscribe((state) => {
+        latestState = state;
+      });
+
       uploadingAssets.set({
         folder: undefined,
         files: [smallFile, largeFile],
@@ -155,14 +186,14 @@ describe('assets/index', () => {
 
       // Wait for async processing
       await new Promise((resolve) => {
-        setTimeout(resolve, 0);
+        setTimeout(resolve, 50);
       });
 
-      const result = get(processedAssets);
+      unsubscribe();
 
-      expect(result.processing).toBe(false);
-      expect(result.undersizedFiles).toEqual([smallFile]);
-      expect(result.oversizedFiles).toEqual([largeFile]);
+      expect(latestState.processing).toBe(false);
+      expect(latestState.undersizedFiles).toEqual([smallFile]);
+      expect(latestState.oversizedFiles).toEqual([largeFile]);
     });
 
     it('should handle file transformations', async () => {
@@ -173,6 +204,7 @@ describe('assets/index', () => {
       Object.defineProperty(transformedFile, 'size', { value: 300000 });
 
       getDefaultMediaLibraryOptionsMock.mockReturnValue({
+        enabled: true,
         config: {
           max_file_size: 1000000,
           multiple: false,
@@ -181,6 +213,12 @@ describe('assets/index', () => {
       });
 
       transformFileMock.mockResolvedValue(transformedFile);
+
+      let latestState = /** @type {any} */ (null);
+
+      const unsubscribe = processedAssets.subscribe((state) => {
+        latestState = state;
+      });
 
       uploadingAssets.set({
         folder: undefined,
@@ -192,11 +230,11 @@ describe('assets/index', () => {
         setTimeout(resolve, 50);
       });
 
-      const result = get(processedAssets);
+      unsubscribe();
 
-      expect(result.processing).toBe(false);
+      expect(latestState.processing).toBe(false);
       // original file since no transformations
-      expect(result.undersizedFiles).toEqual([originalFile]);
+      expect(latestState.undersizedFiles).toEqual([originalFile]);
       expect(transformFileMock).not.toHaveBeenCalled();
     });
 
@@ -212,6 +250,7 @@ describe('assets/index', () => {
       });
 
       getDefaultMediaLibraryOptionsMock.mockReturnValue({
+        enabled: true,
         config: {
           max_file_size: 1000000,
           multiple: false,
@@ -253,6 +292,7 @@ describe('assets/index', () => {
       Object.defineProperty(transformedFile, 'size', { value: 300000 });
 
       getDefaultMediaLibraryOptionsMock.mockReturnValue({
+        enabled: true,
         config: {
           max_file_size: 1000000,
           multiple: false,
@@ -293,6 +333,7 @@ describe('assets/index', () => {
       Object.defineProperty(originalFile, 'size', { value: 500000 });
 
       getDefaultMediaLibraryOptionsMock.mockReturnValue({
+        enabled: true,
         config: {
           max_file_size: 1000000,
           multiple: false,
@@ -331,6 +372,7 @@ describe('assets/index', () => {
       const file = new File(['content'], 'test.jpg', { type: 'image/jpeg' });
 
       getDefaultMediaLibraryOptionsMock.mockReturnValue({
+        enabled: true,
         config: {
           max_file_size: 1000000,
           multiple: false,
@@ -367,6 +409,7 @@ describe('assets/index', () => {
 
     it('should handle empty files array with transformations undefined', async () => {
       getDefaultMediaLibraryOptionsMock.mockReturnValue({
+        enabled: true,
         config: {
           max_file_size: 1000000,
           multiple: false,
@@ -401,19 +444,48 @@ describe('assets/index', () => {
       Object.defineProperty(file2, 'size', { value: 1000001 }); // Just over max size
       Object.defineProperty(file3, 'size', { value: 999999 }); // Just under max size
 
+      let latestState = /** @type {any} */ (null);
+
+      const unsubscribe = processedAssets.subscribe((state) => {
+        latestState = state;
+      });
+
       uploadingAssets.set({
         folder: undefined,
         files: [file1, file2, file3],
       });
 
       await new Promise((resolve) => {
-        setTimeout(resolve, 0);
+        setTimeout(resolve, 50);
       });
 
-      const result = get(processedAssets);
+      unsubscribe();
 
-      expect(result.undersizedFiles).toEqual([file1, file3]);
-      expect(result.oversizedFiles).toEqual([file2]);
+      expect(latestState.undersizedFiles).toEqual([file1, file3]);
+      expect(latestState.oversizedFiles).toEqual([file2]);
+    });
+  });
+
+  describe('getAssetByInternalPath', () => {
+    it('should return an asset by internal path', () => {
+      const asset = /** @type {any} */ ({ path: 'assets/photo.jpg', name: 'photo.jpg' });
+
+      allAssets.set([asset]);
+
+      expect(getAssetByInternalPath('assets/photo.jpg')).toBe(asset);
+    });
+
+    it('should rebuild the path map when allAssets changes', () => {
+      const oldAsset = /** @type {any} */ ({ path: 'assets/old.jpg', name: 'old.jpg' });
+      const newAsset = /** @type {any} */ ({ path: 'assets/new.jpg', name: 'new.jpg' });
+
+      allAssets.set([oldAsset]);
+      expect(getAssetByInternalPath('assets/old.jpg')).toBe(oldAsset);
+
+      allAssets.set([newAsset]);
+
+      expect(getAssetByInternalPath('assets/old.jpg')).toBeUndefined();
+      expect(getAssetByInternalPath('assets/new.jpg')).toBe(newAsset);
     });
   });
 
@@ -680,10 +752,7 @@ describe('assets/index', () => {
   });
 
   describe('getAssetsByFolder', () => {
-    it('should return assets matching the folder', async () => {
-      const { default: equal } = await import('fast-deep-equal');
-      const equalMock = vi.mocked(equal);
-
+    it('should return assets matching the folder', () => {
       const folder = {
         internalPath: 'assets',
         publicPath: '/assets',
@@ -718,18 +787,36 @@ describe('assets/index', () => {
 
       allAssets.set([matchingAsset, nonMatchingAsset]);
 
-      // Mock equal to return true only for the matching folder
-      equalMock.mockImplementation((a, b) => a === b);
-
       const result = getAssetsByFolder(folder);
 
       expect(result).toEqual([matchingAsset]);
     });
 
-    it('should return empty array when no assets match', async () => {
-      const { default: equal } = await import('fast-deep-equal');
-      const equalMock = vi.mocked(equal);
+    it('should return assets with equivalent folder info', () => {
+      const folder = {
+        internalPath: 'assets',
+        publicPath: '/assets',
+        collectionName: undefined,
+        entryRelative: false,
+        hasTemplateTags: false,
+      };
 
+      const matchingAsset = {
+        path: 'assets/image.jpg',
+        name: 'image.jpg',
+        kind: /** @type {import('$lib/types/private').AssetKind} */ ('image'),
+        sha: 'abc123',
+        size: 1024,
+        folder: { ...folder },
+      };
+
+      allAssets.set([matchingAsset]);
+
+      expect(isAssetInFolder(/** @type {any} */ (matchingAsset), folder)).toBe(true);
+      expect(getAssetsByFolder(folder)).toEqual([matchingAsset]);
+    });
+
+    it('should return empty array when no assets match', () => {
       const folder = {
         internalPath: 'nonexistent',
         publicPath: '/nonexistent',
@@ -754,7 +841,6 @@ describe('assets/index', () => {
       };
 
       allAssets.set([asset]);
-      equalMock.mockReturnValue(false);
 
       const result = getAssetsByFolder(folder);
 
@@ -3085,10 +3171,7 @@ describe('assets/index', () => {
   });
 
   describe('additional edge cases and scenarios', () => {
-    it('should handle getAssetsByFolder with multiple matching folders', async () => {
-      const { default: equal } = await import('fast-deep-equal');
-      const equalMock = vi.mocked(equal);
-
+    it('should handle getAssetsByFolder with multiple matching folders', () => {
       const folder1 = {
         internalPath: 'assets/images',
         publicPath: '/assets/images',
@@ -3133,13 +3216,6 @@ describe('assets/index', () => {
       };
 
       allAssets.set([asset1, asset2, asset3]);
-
-      // Mock equal to match folder1 only
-      equalMock.mockImplementation((a, b) => {
-        if (a === folder1 && b === folder1) return true;
-        if (a === folder2 && b === folder2) return true;
-        return false;
-      });
 
       const result = getAssetsByFolder(folder1);
 
@@ -3332,11 +3408,18 @@ describe('assets/index', () => {
         await import('$lib/services/integrations/media-libraries/default');
 
       vi.mocked(getDefaultMediaLibraryOptions).mockReturnValue({
+        enabled: true,
         config: {
           max_file_size: 1000000,
           multiple: false,
           transformations: undefined,
         },
+      });
+
+      let latestState = /** @type {any} */ (null);
+
+      const unsubscribe = processedAssets.subscribe((state) => {
+        latestState = state;
       });
 
       uploadingAssets.set({
@@ -3345,15 +3428,15 @@ describe('assets/index', () => {
       });
 
       await new Promise((resolve) => {
-        setTimeout(resolve, 0);
+        setTimeout(resolve, 50);
       });
 
-      const result = get(processedAssets);
+      unsubscribe();
 
-      expect(result.undersizedFiles).toEqual([smallFile1, smallFile2]);
-      expect(result.oversizedFiles).toEqual([largeFile1, largeFile2]);
-      expect(result.undersizedFiles.length).toBe(2);
-      expect(result.oversizedFiles.length).toBe(2);
+      expect(latestState.undersizedFiles).toEqual([smallFile1, smallFile2]);
+      expect(latestState.oversizedFiles).toEqual([largeFile1, largeFile2]);
+      expect(latestState.undersizedFiles.length).toBe(2);
+      expect(latestState.oversizedFiles.length).toBe(2);
     });
 
     it('should handle getAssetByAbsolutePath with global asset folder fallback', async () => {
@@ -3614,6 +3697,76 @@ describe('assets/index', () => {
       allAssetFolders.set([]);
     });
 
+    it('should treat regex metacharacters in publicPath as literals', async () => {
+      const { stripSlashes } = await import('@sveltia/utils/string');
+      const { getPathInfo } = await import('@sveltia/utils/file');
+      const { getAssetFolder, allAssetFolders } = await import('$lib/services/assets/folders');
+      const { createPath } = await import('$lib/services/utils/file');
+
+      vi.mocked(stripSlashes).mockReturnValue('/(a+)+/image.jpg');
+      vi.mocked(getPathInfo).mockReturnValue({
+        dirname: '/(a+)+',
+        basename: 'image.jpg',
+        filename: 'image',
+        extension: '.jpg',
+      });
+      vi.mocked(getAssetFolder).mockReturnValue(undefined);
+      vi.mocked(createPath).mockReturnValue('uploads/(a+)+/image.jpg');
+
+      const mockAsset = {
+        path: 'uploads/(a+)+/image.jpg',
+        name: 'image.jpg',
+        sha: 'abc123',
+        size: 1024,
+        kind: /** @type {import('$lib/types/private').AssetKind} */ ('image'),
+        folder: {
+          internalPath: 'uploads/(a+)+',
+          publicPath: '/(a+)+',
+          collectionName: undefined,
+          entryRelative: false,
+          hasTemplateTags: false,
+        },
+      };
+
+      // Set up folder with regex metacharacters in publicPath
+      allAssetFolders.set([mockAsset.folder]);
+      allAssets.set([mockAsset]);
+
+      const result = getAssetByAbsolutePath({
+        path: '/(a+)+/image.jpg',
+        entry: undefined,
+        collectionName: '',
+        fileName: undefined,
+      });
+
+      expect(result).toEqual(mockAsset);
+
+      // Now test that it doesn't match a path that would match if interpreted as regex
+      vi.clearAllMocks();
+      vi.mocked(stripSlashes).mockReturnValue('/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaA/image.jpg');
+      vi.mocked(getPathInfo).mockReturnValue({
+        dirname: '/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaA',
+        basename: 'image.jpg',
+        filename: 'image',
+        extension: '.jpg',
+      });
+      vi.mocked(getAssetFolder).mockReturnValue(undefined);
+      // When the folder doesn't match, createPath might be called with different args or not at all
+      vi.mocked(createPath).mockReturnValue('some/other/path/image.jpg');
+
+      const nonMatchResult = getAssetByAbsolutePath({
+        path: '/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaA/image.jpg',
+        entry: undefined,
+        collectionName: '',
+        fileName: undefined,
+      });
+
+      expect(nonMatchResult).toBeUndefined();
+
+      // Restore allAssetFolders
+      allAssetFolders.set([]);
+    });
+
     it('resolves template-tagged internalPath via entry associated collection', async () => {
       // Covers line 255 idx 1: _collectionName is falsy but entry is truthy,
       // so collection is resolved via getAssociatedCollections(entry)?.[0].
@@ -3625,7 +3778,7 @@ describe('assets/index', () => {
       const { fillTemplate } = await import('$lib/services/common/template');
 
       const { isCollectionIndexFile } =
-        await import('$lib/services/contents/collection/index-file');
+        await import('$lib/services/contents/collection/entries/index-file');
 
       const mockEntry = /** @type {any} */ ({
         id: 'my-post',
@@ -3778,6 +3931,91 @@ describe('assets/index', () => {
       expect(isRelativePath('@assets/images/photo.jpg')).toBe(false);
       expect(isRelativePath('@/images/icon.svg')).toBe(false);
       expect(isRelativePath('@media/file.txt')).toBe(false);
+    });
+  });
+
+  describe('getDuplicateFiles', () => {
+    /**
+     * @param {string} name
+     * @returns {File}
+     */
+    const makeFile = (name) => new File([], name);
+    /**
+     * @param {string} name
+     * @returns {import('$lib/types/private').Asset}
+     */
+    const makeAsset = (name) => /** @type {any} */ ({ name });
+
+    it('should return empty array when files list is empty', () => {
+      expect(getDuplicateFiles([], [makeAsset('photo.jpg')])).toEqual([]);
+    });
+
+    it('should return empty array when assets list is empty', () => {
+      expect(getDuplicateFiles([makeFile('photo.jpg')], [])).toEqual([]);
+    });
+
+    it('should return empty array when both lists are empty', () => {
+      expect(getDuplicateFiles([], [])).toEqual([]);
+    });
+
+    it('should return duplicate files whose names match an existing asset', () => {
+      const file = makeFile('photo.jpg');
+      const result = getDuplicateFiles([file], [makeAsset('photo.jpg')]);
+
+      expect(result).toEqual([file]);
+    });
+
+    it('should return only the files that match existing asset names', () => {
+      const dup = makeFile('photo.jpg');
+      const unique = makeFile('new-image.png');
+
+      const result = getDuplicateFiles(
+        [dup, unique],
+        [makeAsset('photo.jpg'), makeAsset('other.gif')],
+      );
+
+      expect(result).toEqual([dup]);
+    });
+
+    it('should perform case-insensitive name comparison', () => {
+      const file = makeFile('Photo.JPG');
+      const result = getDuplicateFiles([file], [makeAsset('photo.jpg')]);
+
+      expect(result).toEqual([file]);
+    });
+
+    it('should handle asset names with different casing', () => {
+      const file = makeFile('photo.jpg');
+      const result = getDuplicateFiles([file], [makeAsset('PHOTO.JPG')]);
+
+      expect(result).toEqual([file]);
+    });
+
+    it('should return no duplicates when no names match', () => {
+      const result = getDuplicateFiles(
+        [makeFile('new1.jpg'), makeFile('new2.png')],
+        [makeAsset('existing.jpg'), makeAsset('other.gif')],
+      );
+
+      expect(result).toEqual([]);
+    });
+
+    it('should return all files when all match existing assets', () => {
+      const file1 = makeFile('a.jpg');
+      const file2 = makeFile('b.png');
+      const result = getDuplicateFiles([file1, file2], [makeAsset('a.jpg'), makeAsset('b.png')]);
+
+      expect(result).toEqual([file1, file2]);
+    });
+
+    it('should apply Unicode normalization when comparing names', () => {
+      // Compose vs decompose: both represent the same character
+      const composed = '\u00e9'; // é (NFC)
+      const decomposed = 'e\u0301'; // é (NFD)
+      const file = makeFile(`caf${decomposed}.jpg`);
+      const result = getDuplicateFiles([file], [makeAsset(`caf${composed}.jpg`)]);
+
+      expect(result).toEqual([file]);
     });
   });
 });

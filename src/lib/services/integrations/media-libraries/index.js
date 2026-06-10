@@ -11,14 +11,37 @@ import { cmsConfig } from '$lib/services/config';
  * @param {object} [options] Options.
  * @param {MediaLibraryName} [options.libraryName] Library name.
  * @param {MediaField} [options.fieldConfig] Field configuration.
- * @returns {Record<string, any>} Options.
+ * @returns {Record<string, any> | false} Options, or `false` if the library is explicitly disabled.
  */
 export const getMediaLibraryOptions = ({ libraryName = 'default', fieldConfig } = {}) => {
   const _cmsConfig = get(cmsConfig);
 
-  // Priority 1: fieldConfig.media_libraries
-  if (fieldConfig?.media_libraries?.[libraryName]) {
-    return fieldConfig.media_libraries[libraryName];
+  // `all` provides shared defaults merged into the `default` library’s `config`. Other libraries
+  // (e.g. Cloudinary) pass `config` directly to their SDK, so we must not pollute it.
+  const sharedConfig =
+    libraryName === 'default'
+      ? { ..._cmsConfig?.media_libraries?.all, ...fieldConfig?.media_libraries?.all }
+      : undefined;
+
+  // Merge shared options into the library config’s `config` property (default library only).
+  /**
+   * Merge shared (`all`) options into library-specific options.
+   * @param {Record<string, any> | null | undefined} opts Library-specific options.
+   * @returns {Record<string, any>} Merged options.
+   */
+  const withShared = (opts) => ({
+    ...opts,
+    ...(sharedConfig &&
+      Object.keys(sharedConfig).length > 0 && {
+        config: { ...sharedConfig, ...opts?.config },
+      }),
+  });
+
+  // Priority 1: fieldConfig.media_libraries (including explicit `false` to disable)
+  if (fieldConfig?.media_libraries && libraryName in fieldConfig.media_libraries) {
+    const opts = fieldConfig.media_libraries[libraryName];
+
+    return opts === false ? false : withShared(opts);
   }
 
   // Priority 2: fieldConfig.media_library (legacy)
@@ -31,19 +54,21 @@ export const getMediaLibraryOptions = ({ libraryName = 'default', fieldConfig } 
       siteLibName === libraryName &&
       (fieldLibName === libraryName || fieldLibName === undefined)
     ) {
-      return fieldLib;
+      return withShared(fieldLib);
     }
   }
 
-  // Priority 3: cmsConfig.media_libraries
-  if (_cmsConfig?.media_libraries?.[libraryName]) {
-    return _cmsConfig.media_libraries[libraryName];
+  // Priority 3: cmsConfig.media_libraries (including explicit `false` to disable)
+  if (_cmsConfig?.media_libraries && libraryName in _cmsConfig.media_libraries) {
+    const opts = _cmsConfig.media_libraries[libraryName];
+
+    return opts === false ? false : withShared(opts);
   }
 
   // Priority 4: cmsConfig.media_library (legacy)
   if (_cmsConfig?.media_library?.name === libraryName) {
-    return _cmsConfig.media_library;
+    return withShared(_cmsConfig.media_library);
   }
 
-  return {};
+  return withShared(null);
 };

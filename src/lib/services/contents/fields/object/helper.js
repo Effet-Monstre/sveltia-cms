@@ -1,5 +1,7 @@
 import { escapeRegExp } from '@sveltia/utils/string';
 
+import { TEMPLATE_TAG_REPLACE_REGEX } from '$lib/services/common/template/constants';
+import { TRANSFORMATION_SPLIT_REGEX } from '$lib/services/common/transformations';
 import {
   getFieldDisplayValue,
   getVisibleFieldDisplayValue,
@@ -52,8 +54,17 @@ export const formatSummary = ({
     return getVisibleFieldDisplayValue({ valueMap, locale, keyPath, keyPathRegex, getFieldArgs });
   }
 
-  return summaryTemplate.replaceAll(/{{(.+?)}}/g, (_match, /** @type {string} */ placeholder) => {
-    const [tag, ...transformations] = placeholder.split(/\s*\|\s*/);
+  /**
+   * Replacer function for template tags in the summary template. It extracts the field value based
+   * on the placeholder, applies any transformations, and returns the display value to replace the
+   * tag.
+   * @param {string} _match The entire matched template tag, e.g. `{{fields.slug | upper}}`. Unused
+   * in the function but required by the `replace` method.
+   * @param {string} placeholder The content inside the template tag, e.g. `fields.slug | upper`.
+   * @returns {string} The display value to replace the template tag.
+   */
+  const replacer = (_match, placeholder) => {
+    const [tag, ...transformations] = placeholder.split(TRANSFORMATION_SPLIT_REGEX);
 
     return getFieldDisplayValue({
       ...getFieldArgs,
@@ -61,5 +72,7 @@ export const formatSummary = ({
       locale,
       transformations,
     });
-  });
+  };
+
+  return summaryTemplate.replaceAll(TEMPLATE_TAG_REPLACE_REGEX, replacer);
 };

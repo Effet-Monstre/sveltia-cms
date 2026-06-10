@@ -3,17 +3,18 @@
   import { MenuItem } from '@sveltia/ui';
 
   import { version } from '$lib/services/app';
-  import { prefs } from '$lib/services/user/prefs';
+  import { prefs } from '$lib/services/user/prefs.svelte';
+  import { openNewTab } from '$lib/services/utils/window';
 </script>
 
 <MenuItem
   label={_('release_notes')}
   onclick={() => {
-    window.open('https://github.com/sveltia/sveltia-cms/releases', '_blank');
+    openNewTab('https://github.com/sveltia/sveltia-cms/releases');
   }}
 >
   {#snippet endIcon()}
-    {#if $prefs.devModeEnabled}
+    {#if prefs.devModeEnabled}
       <span class="version" aria-label="({_('version_x', { values: { version } })})">
         v{version}
       </span>
@@ -21,7 +22,7 @@
   {/snippet}
 </MenuItem>
 
-<style lang="scss">
+<style>
   .version {
     border-radius: 4px;
     padding: 0 6px;

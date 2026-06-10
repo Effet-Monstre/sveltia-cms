@@ -5,6 +5,7 @@
     Button,
     EmptyState,
     Group,
+    Icon,
     ResizableHandle,
     ResizablePane,
     ResizablePaneGroup,
@@ -37,7 +38,7 @@
   import { entryEditorSettings } from '$lib/services/contents/editor/settings';
   import { getLocaleLabel } from '$lib/services/contents/i18n';
   import { DEFAULT_I18N_CONFIG } from '$lib/services/contents/i18n/config';
-  import { isMediumScreen, isSmallScreen } from '$lib/services/user/env';
+  import { env } from '$lib/services/user/env.svelte';
 
   /**
    * @import { EntryDraft, InternalLocaleCode } from '$lib/types/private';
@@ -58,6 +59,8 @@
 
   let restoring = false;
   let switching = false;
+  let swapDragStartX = 0;
+  let swapDragStartY = 0;
 
   let hidden = $state(true);
   /** @type {HTMLElement | undefined} */
@@ -141,7 +144,7 @@
     restoring = true;
     await tick();
     $editorFirstPane = _editorFirstPane;
-    $editorSecondPane = $isSmallScreen || $isMediumScreen ? null : _editorSecondPane;
+    $editorSecondPane = env.isSmallScreen || env.isMediumScreen ? null : _editorSecondPane;
     await tick();
     restoring = false;
 
@@ -166,7 +169,7 @@
 
     $editorFirstPane = { mode: 'edit', locale: $editorFirstPane?.locale ?? defaultLocale };
 
-    if ($isSmallScreen || $isMediumScreen) {
+    if (env.isSmallScreen || env.isMediumScreen) {
       $editorSecondPane = null;
     } else if (!showPreview || !canPreview) {
       const otherLocales = i18nEnabled
@@ -306,6 +309,11 @@
    * @param {MessageEvent} event The message event.
    */
   const onmessage = (event) => {
+    // Only accept messages from the same window to prevent potential security issues
+    if (event.source !== window) {
+      return;
+    }
+
     if (event.data?.type === 'highlight-editor-field' && event.data.payload) {
       highlightEditorField(event.data.payload);
     }
@@ -332,7 +340,7 @@
   });
 
   $effect(() => {
-    void [collection, showPreview, canPreview, $isSmallScreen, $isMediumScreen];
+    void [collection, showPreview, canPreview, env.isSmallScreen, env.isMediumScreen];
 
     untrack(() => {
       switchPanes();
@@ -461,7 +469,34 @@
                   <ResizablePane defaultSize={firstPaneSize} minSize={minPaneSize}>
                     {@render firstPane()}
                   </ResizablePane>
-                  <ResizableHandle />
+                  <ResizableHandle>
+                    <Button
+                      class="swap-button"
+                      iconic
+                      size="small"
+                      variant="tertiary"
+                      aria-label={_('swap_panes')}
+                      onpointerdown={(e) => {
+                        swapDragStartX = e.clientX;
+                        swapDragStartY = e.clientY;
+                      }}
+                      onclick={(e) => {
+                        if (
+                          Math.abs(e.clientX - swapDragStartX) > 5 ||
+                          Math.abs(e.clientY - swapDragStartY) > 5
+                        ) {
+                          return;
+                        }
+
+                        [$editorFirstPane, $editorSecondPane] = [
+                          $editorSecondPane,
+                          $editorFirstPane,
+                        ];
+                      }}
+                    >
+                      <Icon name="swap_horiz" />
+                    </Button>
+                  </ResizableHandle>
                   <ResizablePane defaultSize={secondPaneSize} minSize={minPaneSize}>
                     {@render secondPane()}
                   </ResizablePane>
@@ -476,7 +511,7 @@
             {/if}
           </div>
           <!-- @todo Enable sidebar for mobile -->
-          {#if !$isSmallScreen}
+          {#if !env.isSmallScreen}
             <Sidebar />
           {/if}
         {/key}
@@ -493,7 +528,7 @@
   </Alert>
 </Toast>
 
-<style lang="scss">
+<style>
   .wrapper {
     position: fixed;
     inset: 0;
@@ -528,12 +563,25 @@
     background-color: var(--sui-primary-background-color);
 
     &:not(:only-child) {
-      border-start-end-radius: 16px; // sidebar is present
+      border-start-end-radius: 16px; /* sidebar is present */
     }
 
     :global {
       .sui.resizable-handle {
-        background-color: var(--sui-secondary-background-color); // same as toolbar
+        background-color: var(--sui-secondary-background-color); /* same as toolbar */
+
+        .swap-button {
+          position: absolute;
+          top: calc(50% - 12px);
+          margin: 0;
+          border-radius: 50%;
+          opacity: 0.5;
+
+          &:hover,
+          &:focus-visible {
+            opacity: 1;
+          }
+        }
       }
     }
   }

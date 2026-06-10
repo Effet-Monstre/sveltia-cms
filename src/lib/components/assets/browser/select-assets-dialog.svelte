@@ -14,38 +14,41 @@
     TextInput,
   } from '@sveltia/ui';
   import { getHash } from '@sveltia/utils/crypto';
-  import { getPathInfo } from '@sveltia/utils/file';
-  import equal from 'fast-deep-equal';
 
   import CloudinaryPanel from '$lib/components/assets/browser/cloudinary-panel.svelte';
   import ExternalAssetsPanel from '$lib/components/assets/browser/external-assets-panel.svelte';
   import InternalAssetsPanel from '$lib/components/assets/browser/internal-assets-panel.svelte';
   import ViewSwitcher from '$lib/components/common/page-toolbar/view-switcher.svelte';
-  import { allAssets } from '$lib/services/assets';
   import { selectAssetsView, showContentOverlay } from '$lib/services/contents/editor';
+  import { checkDuplicates } from '$lib/services/contents/fields/file/duplicates.svelte';
+  import {
+    getTargetFolderPath,
+    hasSameAsset,
+    listAssets,
+  } from '$lib/services/contents/fields/file/helper';
   import {
     convertFileItemToAsset,
     getUnsavedAssets,
   } from '$lib/services/contents/fields/file/process';
-  import { allCloudStorageServices } from '$lib/services/integrations/media-libraries/cloud';
+  import { getMediaLibraryOptions } from '$lib/services/integrations/media-libraries';
   import {
     allStockAssetProviders,
     getStockAssetMediaLibraryOptions,
   } from '$lib/services/integrations/media-libraries/stock';
   import { normalize } from '$lib/services/search/util';
-  import { isSmallScreen } from '$lib/services/user/env';
-  import { prefs } from '$lib/services/user/prefs';
+  import { env } from '$lib/services/user/env.svelte';
+  import { prefs } from '$lib/services/user/prefs.svelte';
   import { SUPPORTED_IMAGE_TYPES } from '$lib/services/utils/media/image';
 
   /**
    * @import { Writable } from 'svelte/store';
    * @import {
    * Asset,
-   * AssetFolderInfo,
    * AssetLibraryFolderMap,
    * AssetLibraryFolderMapKey,
    * EntryDraft,
    * MediaLibraryAssetKind,
+   * MediaLibraryService,
    * SelectAssetsView,
    * SelectedResource,
    * } from '$lib/types/private';
@@ -62,6 +65,11 @@
    * @property {Writable<EntryDraft | null | undefined>} [entryDraft] Associated entry draft.
    * @property {MediaField} [fieldConfig] Field configuration.
    * @property {AssetLibraryFolderMap} assetLibraryFolderMap Default asset library folder map.
+   * @property {[string, MediaLibraryService][]} enabledCloudServiceEntries List of enabled cloud
+   * storage services.
+   * @property {File[]} [pendingFiles] Files to be uploaded to the cloud service panel when the
+   * dialog opens. These are typically files dropped on the file editor when only a cloud service is
+   * available.
    * @property {(resources: SelectedResource[]) => void} [onSelect] Custom `Select` event handler
    * that will be called when the dialog is closed with the Insert button.
    */
@@ -78,7 +86,9 @@
     entryDraft,
     fieldConfig,
     assetLibraryFolderMap,
+    enabledCloudServiceEntries,
     onSelect = undefined,
+    pendingFiles = $bindable([]),
     /* eslint-enable prefer-const */
   } = $props();
 
@@ -116,7 +126,8 @@
   );
   const searchTerms = $derived(normalize(rawSearchTerms));
   const isDefaultLibraryEnabled = $derived(
-    Object.values(assetLibraryFolderMap).some(({ enabled }) => enabled),
+    getMediaLibraryOptions({ fieldConfig }) !== false &&
+      Object.values(assetLibraryFolderMap).some(({ enabled }) => enabled),
   );
   const isDefaultLibrary = $derived(libraryName.startsWith('default-'));
   const selectedFolder = $derived.by(() => {
@@ -129,35 +140,11 @@
 
     return folder;
   });
-  const targetFolderPath = $derived.by(() => {
-    const { originalEntry } = $entryDraft ?? {};
-    const { entryRelative, internalPath, internalSubPath } = selectedFolder ?? {};
-
-    if (!entryRelative) {
-      // @todo FIXME: Replace all template tags in the path, not just `{{slug}}`
-      return internalPath?.replace('{{slug}}', originalEntry?.slug ?? '-');
-    }
-
-    // A non-empty `internalSubPath` means the field has its own `media_folder` subfolder (e.g.
-    // `media_folder: "images1"`). Append it so that only assets in that specific subfolder are
-    // shown, not assets from sibling field folders (e.g. `images2`).
-    const subPath = internalSubPath || undefined;
-
-    if (originalEntry) {
-      const entryDir = getPathInfo(Object.values(originalEntry.locales)[0].path).dirname;
-
-      return subPath ? `${entryDir}/${subPath}` : entryDir;
-    }
-
-    // Append a placeholder because the complete path is not determined until the entry is saved
-    return subPath ? `${internalPath}/${subPath}/-` : `${internalPath}/-`;
-  });
+  const targetFolderPath = $derived(
+    getTargetFolderPath({ entry: $entryDraft?.originalEntry, folder: selectedFolder }),
+  );
   const listedAssets = $derived(
-    [...$allAssets, ...unsavedAssets]
-      .filter((asset) => !kind || kind === asset.kind)
-      .sort((a, b) => a.name.localeCompare(b.name))
-      // Unsaved assets should go first
-      .sort((a, b) => Number(!!b.unsaved) - Number(!!a.unsaved)),
+    listAssets({ kind, folder: selectedFolder, folderPath: targetFolderPath, unsavedAssets }),
   );
   const enabledStockAssetProviderEntries = $derived.by(() => {
     const { providers = [] } = getStockAssetMediaLibraryOptions({ fieldConfig });
@@ -175,11 +162,8 @@
   const isEnabledMediaService = $derived(
     enabledStockAssetProviderEntries.some(
       ([serviceId, { authType }]) =>
-        serviceId === libraryName && (authType === 'none' || !!$prefs?.apiKeys?.[libraryName]),
+        serviceId === libraryName && (authType === 'none' || !!prefs.apiKeys?.[libraryName]),
     ),
-  );
-  const enabledCloudServiceEntries = $derived(
-    Object.entries(allCloudStorageServices).filter(([, { isEnabled }]) => isEnabled?.() ?? true),
   );
   const enabledExternalServiceEntries = $derived(
     [...enabledCloudServiceEntries, ...enabledStockAssetProviderEntries].sort(sortServicesByName),
@@ -192,76 +176,19 @@
       .map(([serviceId]) => serviceId)
       .includes(/** @type {any} */ (libraryName)),
   );
-  const Selector = $derived($isSmallScreen ? Select : Listbox);
-
-  /**
-   * Check if a given path is in the target folder or its subfolders.
-   * @param {string} path Path to check.
-   * @returns {boolean} `true` if the path is in the target folder.
-   */
-  const isInTargetFolder = (path) =>
-    targetFolderPath !== undefined &&
-    (path === targetFolderPath ||
-      // Handle the case where the target folder is a template with an unresolved placeholder
-      `${path}/-` === targetFolderPath ||
-      path.startsWith(`${targetFolderPath}/`));
-
-  /**
-   * Check if an asset is in the selected folder.
-   * @param {Asset} asset Asset to check.
-   * @returns {boolean} `true` if the asset is in the selected folder.
-   */
-  const isAssetInSelectedFolder = (asset) => {
-    if (
-      selectedFolder === undefined ||
-      asset.folder?.internalPath !== selectedFolder.internalPath ||
-      asset.folder?.entryRelative !== selectedFolder.entryRelative
-    ) {
-      return false;
-    }
-
-    if (!selectedFolder.entryRelative) {
-      return isInTargetFolder(asset.path);
-    }
-
-    const { dirname } = getPathInfo(asset.path);
-
-    if (dirname === undefined) {
-      return false;
-    }
-
-    return isInTargetFolder(dirname);
-  };
-
-  /**
-   * Check if an asset with the same hash and folder already exists in the unsaved assets.
-   * @param {object} args Arguments.
-   * @param {string} args.hash Hash of the file.
-   * @param {AssetFolderInfo | undefined} args.folder Asset folder.
-   * @returns {Promise<boolean>} `true` if the asset already exists.
-   */
-  const hasSameAsset = async ({ hash, folder }) => {
-    const results = await Promise.all(
-      unsavedAssets.map(
-        async (asset) =>
-          !!asset.file && equal(asset.folder, folder) && (await getHash(asset.file)) === hash,
-      ),
-    );
-
-    return results.includes(true);
-  };
+  const Selector = $derived(env.isSmallScreen ? Select : Listbox);
 
   /**
    * Process a dropped file.
    * @param {File} file File to be processed.
-   * @returns {Promise<SelectedResource | undefined>} Processed asset or `undefined` if the file
-   * already exists.
+   * @returns {Promise<Asset | undefined>} Processed asset or `undefined` if the file already
+   * exists.
    */
   const processFile = async (file) => {
     const hash = await getHash(file);
     const folder = selectedFolder;
 
-    if (await hasSameAsset({ hash, folder })) {
+    if (await hasSameAsset({ hash, folder, unsavedAssets })) {
       return undefined;
     }
 
@@ -269,7 +196,7 @@
 
     droppedAssets.push(asset);
 
-    return { asset };
+    return asset;
   };
 
   /**
@@ -277,7 +204,16 @@
    * @param {File[]} files File list.
    */
   const onDrop = async (files) => {
-    selectedResources = (await Promise.all(files.map(processFile))).filter((r) => !!r);
+    const replace = await checkDuplicates({ files, listedAssets });
+
+    if (replace === undefined) {
+      // User cancelled the dialog
+      return;
+    }
+
+    selectedResources = (await Promise.all(files.map((file) => processFile(file))))
+      .filter((asset) => !!asset)
+      .map((asset) => ({ asset, replace }));
   };
 
   /**
@@ -300,18 +236,18 @@
     }
 
     const resources = $state.snapshot(selectedResources).map((resource) => {
-      const { unsaved, file, folder } = resource.asset ?? {};
+      const { asset: { unsaved, file, folder } = {}, replace } = resource;
 
-      return unsaved ? { file, folder } : resource;
+      return unsaved ? { file, folder, replace } : resource;
     });
 
     onSelect?.(resources);
   };
 
   $effect.pre(() => {
-    const firstDefaultLibraryId = Object.entries(assetLibraryFolderMap).find(
-      ([, { enabled }]) => enabled,
-    )?.[0];
+    const firstDefaultLibraryId = isDefaultLibraryEnabled
+      ? Object.entries(assetLibraryFolderMap).find(([, { enabled }]) => enabled)?.[0]
+      : undefined;
 
     if (firstDefaultLibraryId) {
       // Select the first enabled folder
@@ -342,6 +278,14 @@
       open = false;
     }
   });
+
+  // Upload pending files (e.g. dropped on the file editor) to the cloud service panel once mounted
+  $effect(() => {
+    if (externalAssetsPanel && pendingFiles.length) {
+      externalAssetsPanel.uploadFiles(pendingFiles);
+      pendingFiles = [];
+    }
+  });
 </script>
 
 {#snippet headerItems()}
@@ -353,7 +297,8 @@
       />
     {/if}
     <SearchBar
-      flex={$isSmallScreen}
+      dir="auto"
+      flex={env.isSmallScreen}
       bind:value={rawSearchTerms}
       debounce={!isDefaultLibrary}
       disabled={selectedResources.some((r) => r.file)}
@@ -389,7 +334,7 @@
   }}
 >
   {#snippet headerExtra()}
-    {#if !$isSmallScreen}
+    {#if !env.isSmallScreen}
       {@render headerItems()}
     {/if}
   {/snippet}
@@ -398,7 +343,7 @@
       {@const { showServiceLink, serviceLabel, serviceURL } =
         allStockAssetProviders[/** @type {StockAssetProviderName} */ (libraryName)] ?? {}}
       {#if showServiceLink}
-        <a href={serviceURL}>
+        <a href={serviceURL} class="service-link">
           {_('prefs.media.stock_photos.credit', { values: { service: serviceLabel } })}
         </a>
       {/if}
@@ -452,7 +397,7 @@
           </OptionGroup>
         {/if}
       </Selector>
-      {#if $isSmallScreen}
+      {#if env.isSmallScreen}
         <div role="none" class="filter-tools">
           {@render headerItems()}
         </div>
@@ -463,7 +408,7 @@
         <InternalAssetsPanel
           {accept}
           {multiple}
-          assets={listedAssets.filter(isAssetInSelectedFolder)}
+          assets={listedAssets}
           bind:selectedResources
           {searchTerms}
           basePath={selectedFolder.internalPath}
@@ -480,6 +425,7 @@
               : _('assets_dialog.enter_file_url')}
           </div>
           <TextInput
+            dir="ltr"
             bind:value={enteredURL}
             flex
             oninput={() => {
@@ -546,7 +492,7 @@
   }}
 />
 
-<style lang="scss">
+<style>
   .wrapper {
     display: flex;
     gap: 16px;
@@ -561,6 +507,7 @@
     }
 
     .nav {
+      flex: none;
       display: flex;
       gap: 4px;
 
@@ -578,6 +525,10 @@
       overflow: auto;
       flex: auto;
     }
+  }
+
+  .service-link {
+    font-size: var(--sui-font-size-small);
   }
 
   .filter-tools {

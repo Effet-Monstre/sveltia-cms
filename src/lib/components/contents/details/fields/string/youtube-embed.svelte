@@ -21,13 +21,23 @@
 
   const embedURL = $derived(getYouTubeEmbedURL(url));
 
+  /**
+   * Listener for Content Security Policy violations. Hide the iframe if CSP is violated.
+   * @param {SecurityPolicyViolationEvent} event Event.
+   */
+  const onViolation = ({ blockedURI, violatedDirective }) => {
+    if (blockedURI === new URL(embedURL).origin && violatedDirective === 'frame-src') {
+      embeddable = false;
+      window.removeEventListener('securitypolicyviolation', onViolation);
+    }
+  };
+
   onMount(() => {
-    // Hide the iframe if CSP is violated
-    window.addEventListener('securitypolicyviolation', ({ blockedURI, violatedDirective }) => {
-      if (blockedURI === new URL(embedURL).origin && violatedDirective === 'frame-src') {
-        embeddable = false;
-      }
-    });
+    window.addEventListener('securitypolicyviolation', onViolation);
+
+    return () => {
+      window.removeEventListener('securitypolicyviolation', onViolation);
+    };
   });
 </script>
 
@@ -48,7 +58,7 @@
   {/if}
 </div>
 
-<style lang="scss">
+<style>
   iframe {
     display: block;
     margin: 0 auto;

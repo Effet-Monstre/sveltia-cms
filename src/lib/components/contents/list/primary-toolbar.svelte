@@ -12,13 +12,18 @@
   import { marked } from 'marked';
 
   import BackButton from '$lib/components/common/page-toolbar/back-button.svelte';
+  import ReorderControls from '$lib/components/contents/list/reorder-controls.svelte';
   import DeleteEntriesDialog from '$lib/components/contents/shared/delete-entries-dialog.svelte';
   import CreateEntryButton from '$lib/components/contents/toolbar/create-entry-button.svelte';
   import { goBack } from '$lib/services/app/navigation';
   import { getCollectionLabel, selectedCollection } from '$lib/services/contents/collection';
   import { selectedEntries } from '$lib/services/contents/collection/entries';
-  import { collectionState, listedEntries } from '$lib/services/contents/collection/view';
-  import { isSmallScreen } from '$lib/services/user/env';
+  import {
+    collectionState,
+    listedEntries,
+    reordering,
+  } from '$lib/services/contents/collection/view';
+  import { env } from '$lib/services/user/env.svelte';
 
   let showDeleteDialog = $state(false);
 
@@ -43,6 +48,7 @@
     isEntryCollection,
     canCreate,
     canDelete,
+    canReorder,
     quota,
     remaining,
     nearingQuota,
@@ -52,7 +58,7 @@
 
 {#if $selectedCollection}
   <Toolbar variant="primary" aria-label={_('collection')}>
-    {#if $isSmallScreen}
+    {#if env.isSmallScreen}
       <BackButton
         aria-label={_('back_to_collection_list')}
         onclick={() => {
@@ -61,7 +67,7 @@
       />
     {/if}
     <h2 role="none">{collectionLabel}</h2>
-    {#if $isSmallScreen}
+    {#if env.isSmallScreen}
       <Spacer flex />
     {:else}
       <div role="none" class="description">
@@ -70,8 +76,10 @@
         </TruncatedText>
       </div>
     {/if}
-    {#if isEntryCollection}
-      {#if !$isSmallScreen}
+    {#if isEntryCollection && $reordering}
+      <ReorderControls />
+    {:else if isEntryCollection}
+      {#if !env.isSmallScreen}
         <Button
           variant="ghost"
           label={_('delete')}
@@ -82,11 +90,22 @@
           }}
         />
       {/if}
+      {#if canReorder}
+        <Button
+          variant="ghost"
+          label={_('reorder')}
+          aria-label={_('reorder_entries')}
+          disabled={!$listedEntries.length}
+          onclick={() => {
+            $reordering = true;
+          }}
+        />
+      {/if}
       <FloatingActionButtonWrapper>
-        {#if !$isSmallScreen || ($listedEntries.length && !creationDisabled)}
+        {#if !env.isSmallScreen || ($listedEntries.length && !creationDisabled)}
           <CreateEntryButton
             collectionName={name}
-            label={$isSmallScreen ? undefined : _('create')}
+            label={env.isSmallScreen ? undefined : _('create')}
             keyShortcuts="Accel+E"
           />
         {/if}
@@ -112,7 +131,7 @@
 
 <DeleteEntriesDialog bind:open={showDeleteDialog} />
 
-<style lang="scss">
+<style>
   h2 {
     flex: none !important;
   }

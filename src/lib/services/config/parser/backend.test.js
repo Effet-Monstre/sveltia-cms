@@ -18,6 +18,8 @@ const mockI18nStrings = {
   'config.error.oauth_implicit_flow': 'OAuth implicit flow is not supported',
   'config.error.github_pkce_unsupported': 'GitHub does not support PKCE authentication',
   'config.error.oauth_no_app_id': 'OAuth app ID is required',
+  'config.warning.oauth_no_app_id':
+    'OAuth application ID is not defined. Users are required to provide an access token to sign in.',
 };
 
 /**
@@ -291,7 +293,7 @@ describe('parseBackendConfig', () => {
       expect(collectors.errors.size).toBe(0);
     });
 
-    it('should require app_id for Gitea backend (checked in OAuth section)', async () => {
+    it('should warn when Gitea backend has no app_id and auth_type is not set', async () => {
       const { parseBackendConfig } = await import('./backend.js');
       const collectors = createCollectors();
 
@@ -305,7 +307,13 @@ describe('parseBackendConfig', () => {
 
       parseBackendConfig(config, collectors);
 
-      expect(collectors.errors.size).toBe(1);
+      // Token auth is allowed by default; a warning is issued and the Sign In button is disabled
+      expect(collectors.errors.size).toBe(0);
+      expect(collectors.warnings.size).toBe(1);
+
+      const [warning] = [...collectors.warnings];
+
+      expect(warning).toContain('OAuth application ID is not defined');
     });
 
     it('should error when repository is undefined for GitHub', async () => {
@@ -372,7 +380,25 @@ describe('parseBackendConfig', () => {
       expect(error).toBe('Invalid repository format');
     });
 
-    it('should allow repository format with multiple slashes (regex matches)', async () => {
+    it('should accept repository format with multiple slashes (GitLab nested groups)', async () => {
+      const { parseBackendConfig } = await import('./backend.js');
+      const collectors = createCollectors();
+
+      /** @type {any} */
+      const config = {
+        backend: {
+          name: 'gitlab',
+          repo: 'owner/group/subgroup/repo',
+        },
+      };
+
+      parseBackendConfig(config, collectors);
+
+      // The regex ^[^/:]+(?:\/[^/:]+)+$ allows multiple slash-separated segments
+      expect(collectors.errors.size).toBe(0);
+    });
+
+    it('should reject full repository URL (contains colon)', async () => {
       const { parseBackendConfig } = await import('./backend.js');
       const collectors = createCollectors();
 
@@ -380,16 +406,59 @@ describe('parseBackendConfig', () => {
       const config = {
         backend: {
           name: 'github',
-          repo: 'owner/repo/extra',
+          repo: 'https://github.com/owner/repo',
         },
       };
 
       parseBackendConfig(config, collectors);
 
-      // The regex /(.+)\/([^/]+)$/ matches 'owner/repo/extra' as:
-      // (.+) = 'owner/repo', \/ = '/', ([^/]+) = 'extra'
-      // So this is actually valid
-      expect(collectors.errors.size).toBe(0);
+      expect(collectors.errors.size).toBe(1);
+
+      const [error] = [...collectors.errors];
+
+      expect(error).toBe('Invalid repository format');
+    });
+
+    it('should reject repository starting with slash', async () => {
+      const { parseBackendConfig } = await import('./backend.js');
+      const collectors = createCollectors();
+
+      /** @type {any} */
+      const config = {
+        backend: {
+          name: 'github',
+          repo: '/owner/repo',
+        },
+      };
+
+      parseBackendConfig(config, collectors);
+
+      expect(collectors.errors.size).toBe(1);
+
+      const [error] = [...collectors.errors];
+
+      expect(error).toBe('Invalid repository format');
+    });
+
+    it('should reject repository ending with slash', async () => {
+      const { parseBackendConfig } = await import('./backend.js');
+      const collectors = createCollectors();
+
+      /** @type {any} */
+      const config = {
+        backend: {
+          name: 'github',
+          repo: 'owner/repo/',
+        },
+      };
+
+      parseBackendConfig(config, collectors);
+
+      expect(collectors.errors.size).toBe(1);
+
+      const [error] = [...collectors.errors];
+
+      expect(error).toBe('Invalid repository format');
     });
   });
 
@@ -416,7 +485,7 @@ describe('parseBackendConfig', () => {
       expect(error).toBe('OAuth implicit flow is not supported');
     });
 
-    it('should require app_id for Gitea backend', async () => {
+    it('should warn when Gitea backend has no app_id and auth_type is not set', async () => {
       const { parseBackendConfig } = await import('./backend.js');
       const collectors = createCollectors();
 
@@ -430,11 +499,83 @@ describe('parseBackendConfig', () => {
 
       parseBackendConfig(config, collectors);
 
+      // Token auth is allowed by default; a warning is issued and the Sign In button is disabled
+      expect(collectors.errors.size).toBe(0);
+      expect(collectors.warnings.size).toBe(1);
+
+      const [warning] = [...collectors.warnings];
+
+      expect(warning).toContain('OAuth application ID is not defined');
+    });
+
+    it('should warn when Gitea backend has no app_id with PKCE auth_type (token auth allowed)', async () => {
+      const { parseBackendConfig } = await import('./backend.js');
+      const collectors = createCollectors();
+
+      /** @type {any} */
+      const config = {
+        backend: {
+          name: 'gitea',
+          repo: 'owner/repo',
+          auth_type: 'pkce',
+        },
+      };
+
+      parseBackendConfig(config, collectors);
+
+      // Token auth is still allowed; warning issued, not an error
+      expect(collectors.errors.size).toBe(0);
+      expect(collectors.warnings.size).toBe(1);
+
+      const [warning] = [...collectors.warnings];
+
+      expect(warning).toContain('OAuth application ID is not defined');
+    });
+
+    it('should error when Gitea backend has no app_id and auth_methods excludes token', async () => {
+      const { parseBackendConfig } = await import('./backend.js');
+      const collectors = createCollectors();
+
+      /** @type {any} */
+      const config = {
+        backend: {
+          name: 'gitea',
+          repo: 'owner/repo',
+          auth_methods: ['oauth'],
+        },
+      };
+
+      parseBackendConfig(config, collectors);
+
       expect(collectors.errors.size).toBe(1);
+      expect(collectors.warnings.size).toBe(0);
 
       const [error] = [...collectors.errors];
 
       expect(error).toBe('OAuth app ID is required');
+    });
+
+    it('should error when auth_methods is an empty array', async () => {
+      const { parseBackendConfig } = await import('./backend.js');
+      const collectors = createCollectors();
+
+      /** @type {any} */
+      const config = {
+        backend: {
+          name: 'github',
+          repo: 'owner/repo',
+          auth_methods: [],
+        },
+      };
+
+      parseBackendConfig(config, collectors);
+
+      expect(collectors.errors.size).toBe(1);
+      expect(collectors.warnings.size).toBe(0);
+
+      const [error] = [...collectors.errors];
+
+      expect(error).toContain('auth_methods');
     });
 
     it('should accept Gitea backend with app_id', async () => {
@@ -515,12 +656,12 @@ describe('parseBackendConfig', () => {
 
       parseBackendConfig(config, collectors);
 
-      expect(collectors.errors.size).toBe(2);
+      // Only the GitHub PKCE error; oauth_no_app_id is skipped because name === 'github'
+      expect(collectors.errors.size).toBe(1);
 
-      const errors = [...collectors.errors];
+      const [error] = [...collectors.errors];
 
-      expect(errors.some((e) => e === 'GitHub does not support PKCE authentication')).toBe(true);
-      expect(errors.some((e) => e === 'OAuth app ID is required')).toBe(true);
+      expect(error).toBe('GitHub does not support PKCE authentication');
     });
   });
 

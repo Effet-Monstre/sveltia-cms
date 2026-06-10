@@ -1,8 +1,9 @@
-import { get } from 'svelte/store';
-
-import { cmsConfig } from '$lib/services/config';
-
-import { listS3Objects, searchS3Objects, uploadToS3 } from './core';
+import {
+  getLibraryOptions as getS3LibraryOptions,
+  listS3Objects,
+  searchS3Objects,
+  uploadToS3,
+} from './core';
 
 /**
  * @import {
@@ -17,22 +18,36 @@ import { listS3Objects, searchS3Objects, uploadToS3 } from './core';
  * Get Amazon S3 library options from site config.
  * @internal
  * @param {CmsConfig | MediaField} [config] CMS configuration or field configuration.
- * @returns {S3MediaLibrary | undefined} Configuration object.
+ * @returns {S3MediaLibrary | false | undefined} Configuration object, or `false` if explicitly
+ * disabled.
  */
-export const getLibraryOptions = (config = get(cmsConfig)) =>
-  config?.media_libraries?.aws_s3 ??
-  (config?.media_library?.name === 'aws_s3'
-    ? /** @type {S3MediaLibrary} */ (config?.media_library)
-    : undefined);
+export const getLibraryOptions = (config) => getS3LibraryOptions('aws_s3', config);
 
 /**
  * Check if Amazon S3 integration is enabled.
+ * @param {MediaField} [fieldConfig] Field configuration.
  * @returns {boolean} True if enabled, false otherwise.
  */
-export const isEnabled = () => {
-  const options = getLibraryOptions();
+export const isEnabled = (fieldConfig) => {
+  const options = getLibraryOptions(fieldConfig) ?? getLibraryOptions();
 
-  return !!(options?.access_key_id && options?.bucket && options?.region);
+  return !!(options && options.access_key_id && options.bucket && options.region);
+};
+
+/**
+ * Get the resolved library options for the given field or global S3 config.
+ * @param {MediaLibraryFetchOptions} options Options containing the configuration.
+ * @returns {S3MediaLibrary} Resolved config, or throws if unavailable.
+ * @throws {Error} If the Amazon S3 configuration is not available.
+ */
+const getConfig = ({ fieldConfig }) => {
+  const libOptions = getLibraryOptions(fieldConfig) ?? getLibraryOptions();
+
+  if (!libOptions) {
+    throw new Error('Amazon S3 configuration is not available');
+  }
+
+  return libOptions;
 };
 
 /**
@@ -40,16 +55,7 @@ export const isEnabled = () => {
  * @param {MediaLibraryFetchOptions} options Options containing the configuration.
  * @returns {Promise<ExternalAsset[]>} Assets.
  */
-export const list = async (options) => {
-  const { fieldConfig } = options;
-  const libOptions = getLibraryOptions(fieldConfig) ?? getLibraryOptions();
-
-  if (!libOptions) {
-    return Promise.reject(new Error('Amazon S3 configuration is not available'));
-  }
-
-  return listS3Objects(libOptions, options);
-};
+export const list = async (options) => listS3Objects(getConfig(options), options);
 
 /**
  * Search files in Amazon S3.
@@ -57,16 +63,7 @@ export const list = async (options) => {
  * @param {MediaLibraryFetchOptions} options Options containing the configuration.
  * @returns {Promise<ExternalAsset[]>} Assets.
  */
-export const search = async (query, options) => {
-  const { fieldConfig } = options;
-  const libOptions = getLibraryOptions(fieldConfig) ?? getLibraryOptions();
-
-  if (!libOptions) {
-    return Promise.reject(new Error('Amazon S3 configuration is not available'));
-  }
-
-  return searchS3Objects(query, libOptions, options);
-};
+export const search = async (query, options) => searchS3Objects(query, getConfig(options), options);
 
 /**
  * Upload files to Amazon S3.
@@ -74,16 +71,7 @@ export const search = async (query, options) => {
  * @param {MediaLibraryFetchOptions} options Options containing the configuration.
  * @returns {Promise<ExternalAsset[]>} Uploaded assets.
  */
-export const upload = async (files, options) => {
-  const { fieldConfig } = options;
-  const libOptions = getLibraryOptions(fieldConfig) ?? getLibraryOptions();
-
-  if (!libOptions) {
-    return Promise.reject(new Error('Amazon S3 configuration is not available'));
-  }
-
-  return uploadToS3(files, libOptions, options);
-};
+export const upload = async (files, options) => uploadToS3(files, getConfig(options), options);
 
 /**
  * Amazon S3 media library service integration.

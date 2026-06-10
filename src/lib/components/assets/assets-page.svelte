@@ -31,7 +31,7 @@
     showAssetOverlay,
   } from '$lib/services/assets/view';
   import { isSearchRoute } from '$lib/services/search/navigation';
-  import { isSmallScreen } from '$lib/services/user/env';
+  import { env } from '$lib/services/user/env.svelte';
 
   const ROUTE_REGEX = /^\/assets(?:\/(?<folderPath>.+?)(?:\/(?<fileName>[^/]+\.[A-Za-z0-9]+))?)?$/;
 
@@ -59,7 +59,7 @@
 
     if (!match?.groups) {
       $showAssetOverlay = false;
-      // Check if it's the search page, which has a different URL pattern (`#/search/{query}`)
+      // Check if it’s the search page, which has a different URL pattern (`#/search/{query}`)
       isSearchPage = isSearchRoute(path);
 
       return; // Different page
@@ -68,7 +68,7 @@
     const { folderPath, fileName } = match.groups;
 
     if (!folderPath) {
-      if ($isSmallScreen) {
+      if (env.isSmallScreen) {
         // Show the asset folder list only
         $selectedAssetFolder = undefined;
         $showAssetOverlay = false;
@@ -136,16 +136,16 @@
   }}
 />
 
-<PageContainer aria-label={_('asset_library')}>
+<PageContainer uiSettingsKey="assets-page" aria-label={_('asset_library')}>
   {#snippet primarySidebar()}
-    {#if !$isSmallScreen || isIndexPage}
+    {#if !env.isSmallScreen || isIndexPage}
       <PrimarySidebar {isSearchPage} />
     {/if}
   {/snippet}
   {#snippet main()}
     {#if isSearchPage}
       <SearchMainArea />
-    {:else if !$isSmallScreen || !isIndexPage}
+    {:else if !env.isSmallScreen || !isIndexPage}
       <PageContainerMainArea
         id="assets-container"
         aria-label={_('x_asset_folder', { values: { folder: selectedAssetFolderLabel } })}

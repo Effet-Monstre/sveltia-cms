@@ -1,6 +1,16 @@
 import { sanitize } from 'isomorphic-dompurify';
 
 /**
+ * Escape a string for safe use as an HTML attribute value inside double quotes. Bare `&` characters
+ * are encoded as `&amp;`, but pre-existing HTML entities (e.g. `&amp;`, `&quot;`) are left
+ * untouched to avoid double-encoding.
+ * @param {string} str Raw string.
+ * @returns {string} Escaped string.
+ */
+export const escapeAttr = (str) =>
+  str.replace(/&(?![a-zA-Z0-9#]+;)/g, '&amp;').replaceAll('"', '&quot;');
+
+/**
  * Sanitization options for anchor tag links.
  */
 const LINK_SANITIZE_OPTIONS = {
@@ -15,4 +25,7 @@ const LINK_SANITIZE_OPTIONS = {
  * @returns {string} Linked and sanitized HTML string.
  */
 export const makeLink = (str, href) =>
-  sanitize(str.replace('<a>', `<a href="${href}" target="_blank">`), LINK_SANITIZE_OPTIONS);
+  sanitize(
+    str.replace('<a>', `<a href="${escapeAttr(href)}" target="_blank" rel="noopener noreferrer">`),
+    LINK_SANITIZE_OPTIONS,
+  );

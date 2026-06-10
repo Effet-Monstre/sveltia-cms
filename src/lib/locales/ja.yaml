@@ -27,6 +27,9 @@ copy: コピー
 download: ダウンロード
 duplicate: 複製
 delete: 削除
+reorder: 並び替え
+cancel: キャンセル
+done: 完了
 save: 保存
 saving: 保存中…
 publish: 公開
@@ -66,11 +69,10 @@ powered_by: Powered by {$name}
 loading_cms_config: CMS 設定を読み込んでいます…
 loading_site_data: サイトデータを読み込んでいます…
 loading_site_data_error: サイトデータの読み込み中にエラーが発生しました。
-sign_in_with_x: "{$service} でログイン"
-sign_in_with_x_using_token: "{$service} でトークンを使用してログイン"
-sign_in_using_pat_title: 個人用アクセストークンでログイン
-sign_in_using_pat_description: 以下にトークンを入力してください。レポジトリコンテンツへの読み取り・書き込みアクセスが必要です。
-sign_in_using_pat_link: <a>{$service} ユーザー設定ページ</a> でトークンを生成できます。
+sign_in_with_x: "{$service} にログイン"
+sign_in_using_access_token: アクセストークンを使用してログイン
+sign_in_using_access_token_description: 以下にトークンを入力してください。レポジトリコンテンツへの読み取り・書き込みアクセスが必要です。
+sign_in_using_access_token_link: <a>{$service} ユーザー設定ページ</a> でトークンを生成できます。
 personal_access_token: 個人用アクセストークン
 authorizing: 認証中…
 signing_in: ログイン中…
@@ -125,6 +127,7 @@ version_x: バージョン {$version}
 report_issue: 問題を報告
 share_feedback: フィードバックを共有
 get_help: サポート
+donate: 寄付
 join_discord: Discord チャンネルに参加
 bluesky: Bluesky でフォロー
 mobile_promo_title: Sveltia CMS がモバイルに対応しました！
@@ -169,8 +172,8 @@ list_view: リストビュー
 grid_view: グリッドビュー
 switch_to_list_view: リストビューに切り替え
 switch_to_grid_view: グリッドビューに切り替え
-sort: 並び替え
-sorting_options: 並べ替えオプション
+sort: 表示順
+sorting_options: 表示順オプション
 sort_keys:
   none: なし
   name: 名前
@@ -178,6 +181,7 @@ sort_keys:
   commit_author: 更新者
   commit_date: 更新日時
   _summary: サマリー
+  _manual: 手動
 ascending: "{$label} (A–Z)"
 ascending_date: "{$label} (古い順)"
 descending: "{$label} (Z–A)"
@@ -284,20 +288,37 @@ confirm_deleting_selected_entries_with_assets: |
     *   {{ 選択された {$count} 個のエントリーと関連アセットを削除してもよろしいですか？ }}
 confirm_deleting_all_entries: すべてのエントリーを削除してもよろしいですか？
 confirm_deleting_all_entries_with_assets: すべてのエントリーと関連アセットを削除してもよろしいですか？
+reorder_entries: エントリーを並び替え
+done_reordering_entries: エントリーの並び替えを完了
+cancel_reordering_entries: エントリーの並び替えをキャンセル
+saving_reorder_failed: エントリーの並び替えを保存できませんでした。再度お試しください。
 processing_files: ファイルを処理しています。これには時間がかかる場合があります。
 uploading_files: アップロード対象ファイル
-confirm_replacing_file: 「{$name}」を以下のファイルと差し替えてもよろしいですか？
+confirm_replacing_file: "「{$name}」がこのファイルと置き換えられます:"
 confirm_uploading_files: |
   .input {$count :integer}
   .match $count
-    one {{ 以下のファイルを「{$folder}」フォルダーに保存してもよろしいですか？ }}
-    *   {{ 以下の {$count} 個のファイルを「{$folder}」フォルダーに保存してもよろしいですか？ }}
+    one {{ このファイルを「{$folder}」フォルダーに保存します: }}
+    *   {{ これら {$count} 個のファイルを「{$folder}」フォルダーに保存します: }}
 oversized_files: サイズ超過ファイル
 warning_oversized_files: |
   .input {$count :integer}
   .match $count
     one {{ このファイルは最大サイズ {$size} を超えているため、アップロードできません。サイズを縮小するか、他のファイルを選んでください。 }}
     *   {{ これらのファイルは最大サイズ {$size} を超えているため、アップロードできません。サイズを縮小するか、他のファイルを選んでください。 }}
+file_name_conflict_confirmation: |
+  .input {$count :integer}
+  .match $count
+    one {{ 同じ名前のファイルがこのフォルダーに既に存在します。置き換えますか？ }}
+    *   {{ {$count} 個のファイルが同じ名前でこのフォルダーに既に存在します。置き換えますか？ }}
+file_name_conflict_confirmation_with_name: |
+  .input {$count :integer}
+  .input {$name :string}
+  .match $count
+    one {{ "{$name}" という名前のファイルはこのフォルダーに既に存在します。置き換えますか？ }}
+    *   {{ {$count} 個のファイルが同じ名前でこのフォルダーに既に存在します。置き換えますか？ }}
+file_name_conflict_resolution: ファイル名の競合解決
+keep_both: 両方とも残す
 uploading_files_progress: ファイルをアップロード中…
 uploading_files_failed: ファイルをアップロードできませんでした
 file_meta: "{$type} · {$size}"
@@ -316,8 +337,16 @@ entry_validation_errors: |
   .match $count
     one {{ ひとつのフィールドにエラーがあります。エントリーを保存するには問題を修正してください。 }}
     *   {{ {$count} 個のフィールドにエラーがあります。エントリーを保存するには問題を修正してください。 }}
-entry_saved: エントリーが保存されました。
-entry_saved_and_published: エントリーが保存、公開されました。
+entry_saved: |
+  .input {$count :integer}
+  .match $count
+    one {{ エントリーが保存されました。 }}
+    *   {{ {$count} 件のエントリーが保存されました。 }}
+entry_saved_and_published: |
+  .input {$count :integer}
+  .match $count
+    one {{ エントリーが保存、公開されました。 }}
+    *   {{ {$count} 件のエントリーが保存、公開されました。 }}
 entries_deleted: |
   .input {$count :integer}
   .match $count
@@ -393,6 +422,7 @@ locale_content_disabled_short: (無効)
 locale_content_error_short: (エラー)
 edit: 編集
 preview: プレビュー
+swap_panes: ペインを入れ替える
 edit_x_locale: "{$locale} コンテンツを編集"
 preview_x_locale: "{$locale} コンテンツをプレビュー"
 content_preview: コンテンツプレビュー
@@ -626,9 +656,10 @@ config:
     unsupported_backend_suggestion: "[サポートされているバックエンド](https://sveltiacms.app/en/docs/backends#supported-backends) のいずれかを使用してください。"
     missing_repository: レポジトリが定義されていません。
     invalid_repository: 設定されているレポジトリが正しくありません。この設定は「owner/repo」形式でなければなりません。
-    oauth_implicit_flow: 設定されている認証方式 (暗黙的フロー) は Sveltia CMS では非対応です。代わりに PKCE 認証を使用してください。
+    oauth_implicit_flow: 設定されている認証方式 (暗黙的フロー) は Sveltia CMS では非対応です。代わりに他の [認証方法](https://sveltiacms.app/en/docs/backends/BACKEND_NAME#authentication) を使用してください。
     github_pkce_unsupported: GitHub の制約により PKCE 認証はまだサポートされていません。代わりに他の [認証方法](https://sveltiacms.app/en/docs/backends/github#authentication) を使用してください。
     oauth_no_app_id: " OAuth アプリケーション ID が定義されていません。"
+    no_auth_methods: "`auth_methods` オプションには少なくとも 1 つの認証方法を含める必要があります。"
     missing_media_folder: メディアフォルダーが定義されていません。
     invalid_media_folder: 設定されているメディアフォルダーが正しくありません。この設定は文字列でなければなりません。
     invalid_public_folder: 設定されているパブリックフォルダーが正しくありません。この設定は文字列でなければなりません。
@@ -646,6 +677,7 @@ config:
     duplicate_collection_file_name: コレクションファイル名は一意でなければなりませんが、`{$name}` が複数回使用されています。
     collection_no_fields: コレクションには少なくとも 1 つのフィールドを定義する必要があります。
     collection_file_no_fields: コレクションファイルには少なくとも 1 つのフィールドを定義する必要があります。
+    collection_file_i18n_required: コレクションファイルには、`file` パスで `locale` プレースホルダーを使用する場合、`i18n` オプションを定義する必要があります。
     missing_field_name: フィールド {$count} には `name` オプションを空でない文字列として定義する必要があります。
     invalid_field_name: フィールド名 `{$name}` は無効です。特殊文字を含めることはできません。ネストされたフィールドを作成したい場合は、[ドット表記ではなくオブジェクトフィールドを使用してください](https://sveltiacms.app/en/docs/troubleshooting#using-proper-naming-conventions)。
     duplicate_field_name: フィールド名は一意でなければなりませんが、`{$name}` が複数回使用されています。
@@ -665,6 +697,7 @@ config:
     relation_field_invalid_value_field: 参照されている値フィールド `{$field}` は無効であるか定義されていません。
     unexpected: 予期せぬ問題
   warning:
+    oauth_no_app_id: OAuth アプリケーション ID が定義されていません。ユーザーがログインするにはアクセストークンを入力する必要があります。
     editorial_workflow_unsupported: Sveltia CMS ではまだエディトリアルワークフローはサポートされていません。
     open_authoring_unsupported: Sveltia CMS ではまだオープンオーサリングはサポートされていません。
     nested_collections_unsupported: Sveltia CMS ではネストされたコレクションはまだサポートされていません。

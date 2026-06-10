@@ -1,5 +1,7 @@
 import { isObjectArray } from '@sveltia/utils/array';
 
+import { isNumeric } from '$lib/services/utils/number';
+
 /**
  * @import { FlattenedEntryContent } from '$lib/types/private';
  * @import { FieldKeyPath, SelectField } from '$lib/types/public';
@@ -9,6 +11,28 @@ import { isObjectArray } from '@sveltia/utils/array';
  * @type {Map<string, any | any[]>}
  */
 const labelCacheMap = new Map();
+/**
+ * Cache of stringified `options` arrays, keyed on the array reference itself so the expensive
+ * serialization only runs once per field configuration.
+ * @type {WeakMap<object[], string>}
+ */
+const optionsKeyCache = new WeakMap();
+
+/**
+ * Get a stable cache key fragment for a field’s `options` array.
+ * @param {any[]} options Field options.
+ * @returns {string} Cache key.
+ */
+const getOptionsKey = (options) => {
+  let key = optionsKeyCache.get(options);
+
+  if (key === undefined) {
+    key = JSON.stringify(options);
+    optionsKeyCache.set(options, key);
+  }
+
+  return key;
+};
 
 /**
  * Get the display value for an option.
@@ -29,13 +53,15 @@ export const getOptionLabel = ({ fieldConfig, valueMap, keyPath }) => {
     const prefix = `${keyPath}.`;
 
     rawValues = Object.entries(valueMap)
-      .filter(([key]) => key.startsWith(prefix) && /^\d+$/.test(key.slice(prefix.length)))
+      .filter(([key]) => key.startsWith(prefix) && isNumeric(key.slice(prefix.length)))
       .map(([, _value]) => _value);
   }
 
+  const optionsKey = getOptionsKey(options);
+
   const cacheKey = multiple
-    ? `${keyPath}|${JSON.stringify(options)}|${JSON.stringify(rawValues)}`
-    : `${keyPath}|${JSON.stringify(options)}|${String(valueMap[keyPath])}`;
+    ? `${keyPath}|${optionsKey}|${JSON.stringify(rawValues)}`
+    : `${keyPath}|${optionsKey}|${String(valueMap[keyPath])}`;
 
   const cache = labelCacheMap.get(cacheKey);
 

@@ -7,9 +7,11 @@ import { derived, get } from 'svelte/store';
 import { appLocaleStore } from '$lib/services/app/i18n';
 import { allEntries } from '$lib/services/contents';
 import { selectedCollection } from '$lib/services/contents/collection';
+import { getOrderFieldKey } from '$lib/services/contents/collection/entries/reorder';
 import { currentView } from '$lib/services/contents/collection/view';
 import { entryListSettings } from '$lib/services/contents/collection/view/settings';
 import { getField } from '$lib/services/contents/entry/fields';
+import { isNumeric } from '$lib/services/utils/number';
 
 /**
  * @import { Readable } from 'svelte/store';
@@ -27,6 +29,18 @@ import { getField } from '$lib/services/contents/entry/fields';
 export const DEFAULT_SORT_KEYS = ['title', 'name', 'date', 'author', 'description'];
 
 /**
+ * Supported sort orders.
+ * @type {SortOrder[]}
+ */
+export const SORT_ORDERS = ['ascending', 'descending'];
+
+/**
+ * Common date field keys that require special handling in sorting.
+ * @type {string[]}
+ */
+export const DATE_FIELDS = ['date', 'commit_date'];
+
+/**
  * Map of special sort keys and their types.
  * @type {Record<string, StringConstructor | DateConstructor>}
  */
@@ -35,6 +49,7 @@ export const SPECIAL_SORT_KEY_TYPES = {
   commit_author: String,
   commit_date: Date,
   _summary: String,
+  _manual: String,
 };
 
 /**
@@ -166,6 +181,22 @@ export const getSortConfig = ({ collection, isCommitAuthorAvailable, isCommitDat
       !!key && (SPECIAL_SORT_KEYS.includes(key) || !!getField({ collectionName, keyPath: key })),
   );
 
+  // If the collection allows reordering, expose a single special `_manual` sort key that maps to
+  // the order field. We hide the raw order field key from the dropdown — even if the user listed it
+  // in `sortable_fields` — to avoid showing two equivalent options.
+  const orderKey = getOrderFieldKey(collection);
+
+  if (orderKey) {
+    keys = keys.filter((key) => key !== orderKey);
+
+    if (!keys.includes('_manual')) {
+      keys.unshift('_manual');
+    }
+
+    defaultKey = '_manual';
+    defaultOrder = 'ascending';
+  }
+
   defaultKey = defaultKey && keys.includes(defaultKey) ? defaultKey : keys[0];
   defaultOrder ??= defaultKey ? 'ascending' : undefined;
 
@@ -223,20 +254,20 @@ export const getSortKeyLabel = ({ collection, key }) => {
     return key
       .split('.')
       .map((_key, index, arr) => {
-        if (/^\d+$/.test(_key)) {
+        if (isNumeric(_key)) {
           return undefined;
         }
 
         const keyPath = arr.slice(0, index + 1).join('.');
 
-        // @ts-ignore Hidden field doesn't have `label` property
+        // @ts-ignore Hidden field doesn’t have `label` property
         return getField({ collectionName: collection.name, keyPath })?.label || _key;
       })
       .filter(Boolean)
       .join(' – ');
   }
 
-  // @ts-ignore Hidden field doesn't have `label` property
+  // @ts-ignore Hidden field doesn’t have `label` property
   return collection.fields?.find(({ name }) => name === key)?.label || key;
 };
 

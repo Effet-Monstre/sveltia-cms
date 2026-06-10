@@ -8,6 +8,8 @@ import { cmsConfig } from '$lib/services/config';
  * @import { Readable } from 'svelte/store';
  */
 
+const IMAGE_DATA_URL_REGEX = /^data:(image\/[a-zA-Z0-9.+-]+);base64,/;
+
 /**
  * Default title for the CMS, used when `app_title` is not specified in the configuration.
  */
@@ -20,7 +22,7 @@ export const DEFAULT_APP_TITLE = 'Sveltia CMS';
 export const DEFAULT_APP_LOGO_URL = `data:image/svg+xml;base64,${btoa(SveltiaLogo)}`;
 
 /**
- * The app title, derived from the CMS configuration's `app_title` field.
+ * The app title, derived from the CMS configuration’s `app_title` field.
  * @type {Readable<string>}
  */
 export const appTitle = derived([cmsConfig], ([config]) => config?.app_title || DEFAULT_APP_TITLE);
@@ -41,7 +43,7 @@ export const appLogoURL = derived(
  * @type {Readable<string | undefined>}
  */
 export const appLogoType = derived(appLogoURL, (url) => {
-  const match = url.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,/);
+  const match = url.match(IMAGE_DATA_URL_REGEX);
 
   if (match) {
     return match[1];

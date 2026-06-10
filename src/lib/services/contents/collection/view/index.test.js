@@ -8,7 +8,14 @@ import { groupEntries } from '$lib/services/contents/collection/view/group';
 import { initSettings } from '$lib/services/contents/collection/view/settings';
 import { sortEntries } from '$lib/services/contents/collection/view/sort';
 
-import { collectionState, currentView, entryGroups, listedEntries } from '.';
+import {
+  collectionState,
+  currentView,
+  entryGroups,
+  listedEntries,
+  reorderedEntries,
+  reordering,
+} from '.';
 
 /**
  * Real writable stores hoisted so they are available when vi.mock factories run.
@@ -76,8 +83,8 @@ const {
     _locale: w('en'),
     /** @type {import('svelte/store').Writable<any[]>} */
     _selectedEntries: w(/** @type {any[]} */ ([])),
-    /** @type {import('svelte/store').Writable<any>} */
-    _prefs: w(/** @type {any} */ ({ devModeEnabled: false })),
+    /** @type {any} */
+    _prefs: /** @type {any} */ ({ devModeEnabled: false }),
     /** @type {import('svelte/store').Writable<any>} */
     _backend: w(/** @type {any} */ (null)),
     /** @type {import('svelte/store').Writable<any>} */
@@ -119,7 +126,7 @@ vi.mock('$lib/services/contents/collection/view/sort', () => ({
   sortEntries: vi.fn((entries) => entries),
 }));
 
-vi.mock('$lib/services/user/prefs', () => ({
+vi.mock('$lib/services/user/prefs.svelte', () => ({
   prefs: _prefs,
 }));
 
@@ -138,7 +145,7 @@ describe('collection/view/index', () => {
     _allEntries.set(undefined);
     _selectedCollection.set(undefined);
     _locale.set('en');
-    _prefs.set({ devModeEnabled: false });
+    _prefs.devModeEnabled = false;
     _backend.set(null);
     _entryListSettings.set(undefined);
     currentView.set({ type: 'list' });
@@ -391,6 +398,38 @@ describe('collection/view/index', () => {
     expect(entryGroups).toBeDefined();
   });
 
+  test('entryGroups does not emit an empty reset before populated groups', () => {
+    const mockCollection = { name: 'posts', folder: '_posts' };
+
+    /** @type {any} */
+    const mockEntries = [
+      { id: '1', slug: 'post-1', locales: { _default: { content: {} } }, collectionName: 'posts' },
+    ];
+
+    const mockGroups = [{ name: 'All', entries: mockEntries }];
+
+    vi.mocked(getEntriesByCollection).mockReturnValue(mockEntries);
+    vi.mocked(getCollectionFilesByEntry).mockReturnValue([]);
+    vi.mocked(groupEntries).mockReturnValue(mockGroups);
+
+    _selectedCollection.set(/** @type {any} */ (mockCollection));
+    _allEntries.set(mockEntries);
+
+    /** @type {any[]} */
+    const values = [];
+
+    const unsubscribe = entryGroups.subscribe((value) => {
+      values.push(value);
+    });
+
+    values.length = 0;
+    currentView.set(/** @type {any} */ ({ type: 'grid' }));
+
+    unsubscribe();
+
+    expect(values).toEqual([mockGroups]);
+  });
+
   test('listedEntries resets selectedEntries when entries change', async () => {
     /** @type {any} */
     const mockEntries = [{ id: '1', slug: 'post-1', locales: {}, collectionName: 'posts' }];
@@ -411,7 +450,7 @@ describe('collection/view/index', () => {
     const consoleInfoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
 
     // Update prefs to enable dev mode
-    _prefs.set({ devModeEnabled: true });
+    _prefs.devModeEnabled = true;
     _selectedCollection.set(/** @type {any} */ ({ name: 'posts' }));
 
     consoleInfoSpy.mockRestore();
@@ -531,7 +570,7 @@ describe('collection/view/index', () => {
   test('listedEntries logs to console when devModeEnabled is true', () => {
     const consoleInfoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
 
-    _prefs.set({ devModeEnabled: true });
+    _prefs.devModeEnabled = true;
 
     /** @type {any[]} */
     const mockEntries = [
@@ -555,7 +594,7 @@ describe('collection/view/index', () => {
   test('selectedCollection logs to console when devModeEnabled is true and collection exists', () => {
     const consoleInfoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
 
-    _prefs.set({ devModeEnabled: true });
+    _prefs.devModeEnabled = true;
 
     const mockCollection = { name: 'posts', folder: '_posts' };
 
@@ -771,7 +810,7 @@ describe('collection/view/index', () => {
   test('selectedCollection subscription with devModeEnabled true', () => {
     const consoleInfoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
 
-    _prefs.set({ devModeEnabled: true });
+    _prefs.devModeEnabled = true;
 
     const mockCollection = { name: 'posts', folder: '_posts' };
 
@@ -824,6 +863,7 @@ describe('collection/view/index', () => {
         isEntryCollection: false,
         canCreate: false,
         canDelete: false,
+        canReorder: false,
         quota: Infinity,
         remaining: Infinity,
         nearingQuota: false,
@@ -839,6 +879,7 @@ describe('collection/view/index', () => {
         isEntryCollection: false,
         canCreate: false,
         canDelete: false,
+        canReorder: false,
         quota: Infinity,
         remaining: Infinity,
         nearingQuota: false,
@@ -1206,5 +1247,97 @@ describe('collection/view/index', () => {
     currentView.set(viewRef);
 
     unsubscribe();
+  });
+
+  test('reordering store does not clear reorderedEntries while truthy', () => {
+    reorderedEntries.set([/** @type {any} */ ({ id: 'pending' })]);
+    reordering.set(true);
+
+    // The truthy branch of `if (!value)` does NOT reset the pending entries.
+    expect(get(reorderedEntries)).toEqual([{ id: 'pending' }]);
+
+    reordering.set(false);
+
+    // The falsy branch resets the pending entries.
+    expect(get(reorderedEntries)).toEqual([]);
+  });
+
+  test('entering reorder mode forces the entry list to be sorted by manual order', () => {
+    currentView.set({ type: 'list', sort: { key: 'title', order: 'descending' } });
+
+    reordering.set(true);
+
+    expect(get(currentView).sort).toEqual({ key: '_manual', order: 'ascending' });
+
+    reordering.set(false);
+  });
+
+  test('entering reorder mode does not re-set currentView when already sorted by manual order', () => {
+    const view = {
+      type: /** @type {const} */ ('list'),
+      sort: { key: '_manual', order: /** @type {const} */ ('ascending') },
+    };
+
+    currentView.set(view);
+
+    reordering.set(true);
+
+    // Reference is preserved because we skip the redundant set.
+    expect(get(currentView)).toBe(view);
+
+    reordering.set(false);
+  });
+
+  test('entering reorder mode clears active filters to avoid order collisions', () => {
+    currentView.set({
+      type: 'list',
+      sort: { key: '_manual', order: 'ascending' },
+      filters: [{ field: 'category', pattern: 'news' }],
+    });
+
+    reordering.set(true);
+
+    const view = get(currentView);
+
+    expect(view.filters).toEqual([]);
+    expect(view.sort).toEqual({ key: '_manual', order: 'ascending' });
+
+    reordering.set(false);
+  });
+
+  test('entering reorder mode clears active grouping to produce a single flat list', () => {
+    currentView.set({
+      type: 'list',
+      sort: { key: '_manual', order: 'ascending' },
+      group: { field: 'category' },
+    });
+
+    reordering.set(true);
+
+    const view = get(currentView);
+
+    expect(view.group).toBeNull();
+    expect(view.sort).toEqual({ key: '_manual', order: 'ascending' });
+
+    reordering.set(false);
+  });
+
+  test('entering reorder mode applies sort, filter, and group overrides together', () => {
+    currentView.set({
+      type: 'list',
+      sort: { key: 'title', order: 'descending' },
+      filters: [{ field: 'category', pattern: 'news' }],
+      group: { field: 'year' },
+    });
+
+    reordering.set(true);
+
+    const view = get(currentView);
+
+    expect(view.sort).toEqual({ key: '_manual', order: 'ascending' });
+    expect(view.filters).toEqual([]);
+    expect(view.group).toBeNull();
+
+    reordering.set(false);
   });
 });

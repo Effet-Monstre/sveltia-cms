@@ -23,7 +23,7 @@
   } from '$lib/services/contents/editor/expanders';
   import { formatSummary } from '$lib/services/contents/fields/object/helper';
   import { DEFAULT_I18N_CONFIG } from '$lib/services/contents/i18n/config';
-  import { isSmallScreen } from '$lib/services/user/env';
+  import { env } from '$lib/services/user/env.svelte';
 
   /**
    * @import { EntryDraft, FieldEditorContext, FieldEditorProps } from '$lib/types/private';
@@ -259,7 +259,7 @@
         {@const formattedSummary = _formatSummary()}
         {#if formattedSummary}
           <div role="none" class="summary" id="object-{fieldId}-summary">
-            <TruncatedText lines={$isSmallScreen ? 2 : 1}>
+            <TruncatedText lines={env.isSmallScreen ? 2 : 1}>
               {formattedSummary}
             </TruncatedText>
           </div>
@@ -269,16 +269,16 @@
   </div>
 {/if}
 
-<style lang="scss">
+<style>
   .wrapper {
     border-width: 2px;
     border-color: var(--sui-secondary-border-color);
     border-radius: var(--sui-control-medium-border-radius);
+  }
 
-    :global(.sui.checkbox) + & {
-      & > :global(.group) {
-        margin-top: 8px;
-      }
+  :global(.sui.checkbox) + .wrapper {
+    & > :global(.group) {
+      margin-top: 8px;
     }
   }
 

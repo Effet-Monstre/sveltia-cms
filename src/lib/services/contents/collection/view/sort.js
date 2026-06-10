@@ -1,5 +1,6 @@
 import { sortItemsByKey } from '$lib/services/common/view';
-import { getIndexFile } from '$lib/services/contents/collection/index-file';
+import { getIndexFile } from '$lib/services/contents/collection/entries/index-file';
+import { getOrderFieldKey } from '$lib/services/contents/collection/entries/reorder';
 import { getSortKeyType } from '$lib/services/contents/collection/view/sort-keys';
 import { getField, getPropertyValue } from '$lib/services/contents/entry/fields';
 import { getEntrySummary } from '$lib/services/contents/entry/summary';
@@ -16,7 +17,7 @@ import { removeMarkdownSyntax } from '$lib/services/utils/markdown';
  * includes `title`, `summary`, and `description`, which are commonly used in entry collections.
  * @type {string[]}
  */
-export const markdownFieldKeys = ['title', 'summary', 'description'];
+export const MARKDOWN_FIELD_KEYS = ['title', 'summary', 'description'];
 
 /**
  * Get a function that computes the sort key for a single entry. Pre-computing this once (O(n))
@@ -94,8 +95,15 @@ export const sortEntries = (entries, collection, { key, order } = {}) => {
     _i18n: { defaultLocale: locale },
   } = collection;
 
-  const fieldConfig = getField({ collectionName, keyPath: key });
-  const type = getSortKeyType({ key, fieldConfig });
+  // The `_manual` special key sorts by the collection’s reorder field. Resolve it to the actual
+  // field key so value lookup works for entries.
+  const orderFieldKey = getOrderFieldKey(collection);
+  const resolvedKey = key === '_manual' ? (orderFieldKey ?? key) : key;
+  const fieldConfig = getField({ collectionName, keyPath: resolvedKey });
+  // The reorder field stores numeric values but may not be defined under the collection’s `fields`,
+  // so it would default to a string sort. Force a numeric sort for it.
+  const isOrderKey = key === '_manual' || resolvedKey === orderFieldKey;
+  const type = isOrderKey ? Number : getSortKeyType({ key, fieldConfig });
 
   const dateFieldConfig =
     fieldConfig?.widget === 'datetime' ? /** @type {DateTimeField} */ (fieldConfig) : undefined;
@@ -105,10 +113,10 @@ export const sortEntries = (entries, collection, { key, order } = {}) => {
   const isMarkdownField =
     fieldConfig?.widget === 'richtext' ||
     fieldConfig?.widget === 'markdown' ||
-    markdownFieldKeys.includes(key);
+    MARKDOWN_FIELD_KEYS.includes(key);
 
   const getSortKey = getSortKeyGetter({
-    key,
+    key: resolvedKey,
     type,
     collection,
     locale,

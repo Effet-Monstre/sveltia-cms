@@ -23,9 +23,12 @@
   import SimpleImageGrid from '$lib/components/assets/browser/simple-image-grid.svelte';
   import AssetPreview from '$lib/components/assets/shared/asset-preview.svelte';
   import DropZone from '$lib/components/assets/shared/drop-zone.svelte';
+  import OversizeAlertDialog from '$lib/components/assets/shared/oversize-alert-dialog.svelte';
+  import { processFile } from '$lib/services/assets/process';
+  import { cmsConfig } from '$lib/services/config';
   import { selectAssetsView } from '$lib/services/contents/editor';
-  import { isSmallScreen } from '$lib/services/user/env';
-  import { prefs } from '$lib/services/user/prefs';
+  import { env } from '$lib/services/user/env.svelte';
+  import { prefs } from '$lib/services/user/prefs.svelte';
 
   /**
    * @import {
@@ -82,6 +85,12 @@
   // view relies on the description to show asset information.
   const viewType = $derived(serviceId === 'picsum' ? 'grid' : $selectAssetsView?.type);
   const isStockAssets = $derived(serviceType === 'stock_assets');
+  const allMediaLibraryOptions = $derived(
+    fieldConfig?.media_libraries?.all ?? $cmsConfig?.media_libraries?.all ?? {},
+  );
+  const maxSize = $derived(
+    /** @type {number} */ (allMediaLibraryOptions.max_file_size ?? Infinity),
+  );
 
   const input = $state({ userName: '', password: '' });
   let hasConfig = $state(true);
@@ -97,6 +106,9 @@
   let error = $state();
   /** @type {{ show: boolean, status: 'info' | 'error', length: number }} */
   let uploadingToast = $state({ show: false, status: 'info', length: 0 });
+  /** @type {string[]} */
+  let oversizedFileNames = $state([]);
+  let showOversizeAlert = $state(false);
 
   /** @type {MediaLibraryFetchOptions} */
   const listFetchOptions = $derived({ kind, fieldConfig, apiKey, userName, password });
@@ -116,25 +128,6 @@
       error = 'search_fetch_failed';
       // eslint-disable-next-line no-console
       console.error(ex);
-    }
-  };
-
-  /**
-   * Handle `Drop` event to upload files.
-   * @param {File[]} files Dropped files.
-   */
-  export const uploadFiles = async (files) => {
-    if (!upload) {
-      return;
-    }
-
-    uploadingToast = { show: true, status: 'info', length: files.length };
-
-    try {
-      await upload(files, listFetchOptions);
-      getAssets();
-    } catch {
-      uploadingToast = { show: true, status: 'error', length: files.length };
     }
   };
 
@@ -174,6 +167,44 @@
   };
 
   /**
+   * Handle `Drop` event to upload files.
+   * @param {File[]} files Dropped files.
+   */
+  export const uploadFiles = async (files) => {
+    if (!upload) {
+      return;
+    }
+
+    const processed = await Promise.all(files.map((f) => processFile(f, allMediaLibraryOptions)));
+
+    files = processed.filter(({ oversized }) => !oversized).map(({ file }) => file);
+
+    oversizedFileNames = processed
+      .filter(({ oversized }) => oversized)
+      .map(({ file }) => file.name);
+
+    if (oversizedFileNames.length) {
+      showOversizeAlert = true;
+    }
+
+    if (!files.length) {
+      return;
+    }
+
+    uploadingToast = { show: true, status: 'info', length: files.length };
+
+    try {
+      const uploaded = await upload(files, listFetchOptions);
+      const resources = await Promise.all(uploaded.map((asset) => getResource(asset)));
+
+      selectedResources = resources.filter((r) => !!r).slice(0, multiple ? undefined : 1);
+      listedAssets = [...uploaded, ...(listedAssets ?? [])];
+    } catch {
+      uploadingToast = { show: true, status: 'error', length: files.length };
+    }
+  };
+
+  /**
    * Check if the given asset is already selected.
    * @param {ExternalAsset} asset The asset to check.
    * @returns {boolean} `true` if the asset is selected, `false` otherwise.
@@ -210,8 +241,8 @@
         return;
       }
 
-      apiKey = $prefs.apiKeys?.[serviceId] ?? '';
-      [userName, password] = ($prefs.logins?.[serviceId] ?? '').split(' ');
+      apiKey = prefs.apiKeys?.[serviceId] ?? '';
+      [userName, password] = (prefs.logins?.[serviceId] ?? '').split(' ');
       hasAuthInfo = authType === 'none' || !!apiKey || !!password;
       listedAssets = null;
     })();
@@ -238,38 +269,40 @@
       <span role="alert">{_('no_files_found')}</span>
     </EmptyState>
   {:else}
-    <SimpleImageGrid {viewType} {gridId} {multiple}>
-      <InfiniteScroll items={listedAssets ?? []} itemKey="id">
-        {#snippet renderItem(/** @type {ExternalAsset} */ asset)}
-          {#await sleep() then}
-            {@const { id, previewURL, description, kind: _kind } = asset}
-            <SimpleImageGridItem
-              value={id}
-              {viewType}
-              {multiple}
-              selected={isSelected(asset)}
-              onChange={({ detail: { selected } }) => {
-                onSelectionChange(asset, selected);
-              }}
-            >
-              <AssetPreview
-                kind={_kind}
-                src={previewURL}
-                alt={description}
-                variant="tile"
-                crossorigin="anonymous"
-              />
-              {#if viewType === 'list' || (!$isSmallScreen && !isStockAssets)}
-                <AssetPath
-                  path={isStockAssets ? undefined : description}
-                  caption={isStockAssets ? description : undefined}
+    <div role="none" class="grid-wrapper">
+      <SimpleImageGrid {viewType} {gridId} {multiple}>
+        <InfiniteScroll items={listedAssets ?? []} itemKey="id">
+          {#snippet renderItem(/** @type {ExternalAsset} */ asset)}
+            {#await sleep() then}
+              {@const { id, previewURL, description, kind: _kind } = asset}
+              <SimpleImageGridItem
+                value={id}
+                {viewType}
+                {multiple}
+                selected={isSelected(asset)}
+                onChange={({ detail: { selected } }) => {
+                  onSelectionChange(asset, selected);
+                }}
+              >
+                <AssetPreview
+                  kind={_kind}
+                  src={previewURL}
+                  alt={description}
+                  variant="tile"
+                  crossorigin="anonymous"
                 />
-              {/if}
-            </SimpleImageGridItem>
-          {/await}
-        {/snippet}
-      </InfiniteScroll>
-    </SimpleImageGrid>
+                {#if viewType === 'list' || (!env.isSmallScreen && !isStockAssets)}
+                  <AssetPath
+                    path={isStockAssets ? undefined : description}
+                    caption={isStockAssets ? description : undefined}
+                  />
+                {/if}
+              </SimpleImageGridItem>
+            {/await}
+          {/snippet}
+        </InfiniteScroll>
+      </SimpleImageGrid>
+    </div>
   {/if}
 {/snippet}
 
@@ -296,7 +329,9 @@
               homeHref: `href="${developerURL}"`,
               apiKeyHref: `href="${apiKeyURL}"`,
             },
-          }),
+          })
+            // Remove invisible characters used for link detection in the locale string
+            .replace(/[\u2068\u2069]/g, ''),
           { ALLOWED_TAGS: ['a'], ALLOWED_ATTR: ['href', 'target', 'rel'] },
         )}
       {/if}
@@ -319,6 +354,7 @@
     {#if authType === 'api_key'}
       <div role="none" class="input-outer">
         <TextInput
+          dir="ltr"
           flex
           monospace
           spellcheck="false"
@@ -331,8 +367,8 @@
             if (apiKeyPattern?.test(_value)) {
               apiKey = _value;
               hasAuthInfo = true;
-              $prefs.apiKeys ??= {};
-              $prefs.apiKeys[serviceId] = apiKey;
+              prefs.apiKeys ??= {};
+              prefs.apiKeys[serviceId] = apiKey;
               getAssets();
             }
           }}
@@ -342,6 +378,7 @@
     {#if authType === 'password'}
       <div role="none" class="input-outer">
         <TextInput
+          dir="ltr"
           flex
           spellcheck="false"
           aria-label={_('user_name')}
@@ -371,8 +408,8 @@
               userName = input.userName;
               password = input.password;
               hasAuthInfo = true;
-              $prefs.logins ??= {};
-              $prefs.logins[serviceId] = [userName, password].join(' ');
+              prefs.logins ??= {};
+              prefs.logins[serviceId] = [userName, password].join(' ');
               getAssets();
             } else {
               authState = 'error';
@@ -399,7 +436,14 @@
   </Alert>
 </Toast>
 
-<style lang="scss">
+<OversizeAlertDialog bind:open={showOversizeAlert} {oversizedFileNames} {maxSize} />
+
+<style>
+  .grid-wrapper {
+    overflow-y: auto;
+    height: 100%;
+  }
+
   p {
     margin: 0 0 8px;
   }

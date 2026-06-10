@@ -122,7 +122,7 @@
     <h4>{_('public_url')}</h4>
     <p>
       {#if publicURL}
-        <a href={publicURL} target="_blank">{publicURL}</a>
+        <a href={publicURL} target="_blank" rel="noopener noreferrer">{publicURL}</a>
       {:else}
         –
       {/if}
@@ -193,7 +193,7 @@
   {/if}
 </div>
 
-<style lang="scss">
+<style>
   .detail {
     flex: none;
     overflow-x: hidden;

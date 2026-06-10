@@ -52,7 +52,7 @@ vi.mock('$lib/services/contents/collection', () => ({
   getCollection: mockGetCollection,
 }));
 
-vi.mock('$lib/services/contents/collection/index-file', () => ({
+vi.mock('$lib/services/contents/collection/entries/index-file', () => ({
   isCollectionIndexFile: mockIsCollectionIndexFile,
 }));
 
@@ -106,6 +106,7 @@ describe('getEntryThumbnail', () => {
       structure: 'single_file',
       structureMap: {
         i18nSingleFile: true,
+        i18nSingleFileDefaultRoot: false,
         i18nMultiFile: false,
         i18nMultiFolder: false,
         i18nMultiRootFolder: false,

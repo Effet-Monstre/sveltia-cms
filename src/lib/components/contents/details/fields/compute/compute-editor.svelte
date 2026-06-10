@@ -7,9 +7,11 @@
   import { TextInput } from '@sveltia/ui';
   import { getContext, untrack } from 'svelte';
 
+  import { TEMPLATE_TAG_REPLACE_REGEX } from '$lib/services/common/template/constants';
   import { entryDraft } from '$lib/services/contents/draft';
   import { getFieldDisplayValue } from '$lib/services/contents/entry/fields';
   import { getListFormatter } from '$lib/services/contents/i18n';
+  import { isNumeric } from '$lib/services/utils/number';
 
   /**
    * @import { FieldEditorContext, FieldEditorProps } from '$lib/types/private';
@@ -54,7 +56,7 @@
   const getIndex = () => {
     const [index] = keyPath.split('.').splice(-2, 1);
 
-    return index?.match(/^\d+$/) ? Number(index) : undefined;
+    return index && isNumeric(index) ? Number(index) : undefined;
   };
 
   /**
@@ -72,7 +74,7 @@
         return getIndex() ?? '';
       }
 
-      return valueTemplate.replaceAll(/{{(.+?)}}/g, (_match, tagName) => {
+      return valueTemplate.replaceAll(TEMPLATE_TAG_REPLACE_REGEX, (_match, tagName) => {
         if (tagName === 'index') {
           return String(getIndex() ?? '');
         }
@@ -110,6 +112,7 @@
 </script>
 
 <TextInput
+  dir="auto"
   value={String(currentValue)}
   flex
   {readonly}

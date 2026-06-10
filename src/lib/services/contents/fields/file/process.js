@@ -6,13 +6,15 @@ import { get } from 'svelte/store';
 import { allAssets } from '$lib/services/assets';
 import { getAssetPublicURL } from '$lib/services/assets/info';
 import { getAssetKind } from '$lib/services/assets/kinds';
-import { transformFile } from '$lib/services/integrations/media-libraries/default';
+import { processFile } from '$lib/services/assets/process';
 import { getGitHash } from '$lib/services/utils/file';
 
 /**
  * @import { Asset, AssetFolderInfo, EntryDraft, SelectedResource } from '$lib/types/private';
  * @import { DefaultMediaLibraryConfig } from '$lib/types/public';
  */
+
+const FOLDER_PATH_REGEX = /(?<path>.+?)(?:\/[^/]+)?$/;
 
 /**
  * Get the blob URL of an unsaved file that matches the given file.
@@ -84,6 +86,44 @@ export const getUnsavedAssets = async ({ draft, targetFolderPath }) =>
   );
 
 /**
+ * Get the saved assets relevant to the current entry draft and folder. For entry-relative folders,
+ * the result is filtered to only include assets within the current entry’s own folder, preventing
+ * false duplicate detection across entries that share the same folder config template.
+ * @param {EntryDraft} draft Entry draft.
+ * @param {AssetFolderInfo | undefined} folder Asset folder associated with the field.
+ * @returns {Asset[]} Filtered saved assets.
+ */
+const getSavedAssetsForEntry = (draft, folder) => {
+  const savedAssets = get(allAssets);
+
+  if (!folder?.entryRelative) {
+    return savedAssets;
+  }
+
+  const { originalEntry, defaultLocale, collection } = draft;
+  const entryFilePath = originalEntry?.locales[defaultLocale]?.path;
+
+  if (!entryFilePath) {
+    // New entry — no saved assets exist for this entry yet
+    return [];
+  }
+
+  const subPath = collection._type === 'entry' ? collection._file.subPath : undefined;
+  const lastSubPathSegment = subPath?.includes('/') ? subPath.split('/').at(-1) : undefined;
+  // Strip the file extension and any fixed nested filename suffix (e.g., `{{slug}}/index` → remove
+  // the trailing `index` segment) to get the entry folder path.
+  let entryFolderPath = entryFilePath.substring(0, entryFilePath.lastIndexOf('.'));
+
+  if (lastSubPathSegment && !lastSubPathSegment.includes('{{')) {
+    entryFolderPath = entryFolderPath.match(FOLDER_PATH_REGEX)?.groups?.path ?? entryFolderPath;
+  }
+
+  const expectedPrefix = [entryFolderPath, folder.internalSubPath].filter(Boolean).join('/');
+
+  return savedAssets.filter((a) => a.path.startsWith(`${expectedPrefix}/`));
+};
+
+/**
  * Process a selected resource.
  * @param {object} args Arguments.
  * @param {EntryDraft} args.draft Entry draft containing the resource.
@@ -93,8 +133,7 @@ export const getUnsavedAssets = async ({ draft, targetFolderPath }) =>
  * undefined }>} Processed resource value, credit, and file name if the file is oversized.
  */
 export const processResource = async ({ draft, resource, libraryConfig }) => {
-  const { transformations, max_file_size: maxSize } = libraryConfig ?? {};
-  const { url, credit } = resource;
+  const { url, credit, replace = false } = resource;
   let { asset, file } = resource;
   /** @type {string | undefined} */
   let value = '';
@@ -108,31 +147,32 @@ export const processResource = async ({ draft, resource, libraryConfig }) => {
     if (existingBlobURL) {
       value = existingBlobURL;
     } else {
-      if (transformations) {
-        file = await transformFile(file, transformations);
-      }
+      const { file: processedFile, oversized } = await processFile(file, libraryConfig ?? {});
+
+      file = processedFile;
 
       const sha = await getGitHash(file);
 
       // Check if the selected file has already been uploaded or is pending upload, otherwise
       // duplicate files lead to an `each_key_duplicate` error in Svelte
-      const existingAsset = [...get(allAssets), ...(await getUnsavedAssets({ draft }))].find(
-        (a) => a.sha === sha && equal(a.folder, folder),
-      );
+      const existingAsset = [
+        ...getSavedAssetsForEntry(draft, folder),
+        ...(await getUnsavedAssets({ draft })),
+      ].find((a) => a.sha === sha && equal(a.folder, folder));
 
       if (existingAsset) {
         // If the selected file has already been uploaded, use the existing asset instead of
         // uploading the same file twice
         asset = existingAsset;
         file = undefined;
-      } else if (file.size > /** @type {number} */ (maxSize)) {
+      } else if (oversized) {
         oversizedFileName = file.name;
         file = undefined;
       } else {
         // Set a temporary blob URL, which will be later replaced with the actual file path
         value = URL.createObjectURL(file);
         // Cache the file itself for later upload
-        draft.files[value] = { file, folder };
+        draft.files[value] = { file, folder, replace };
       }
     }
   }

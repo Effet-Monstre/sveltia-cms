@@ -27,6 +27,9 @@ copy: Copy
 download: Download
 duplicate: Duplicate
 delete: Delete
+reorder: Reorder
+cancel: Cancel
+done: Done
 save: Save
 saving: Saving…
 publish: Publish
@@ -67,10 +70,9 @@ loading_cms_config: Loading CMS Configuration…
 loading_site_data: Loading Site Data…
 loading_site_data_error: There was an error while loading site data.
 sign_in_with_x: Sign In with {$service}
-sign_in_with_x_using_token: Sign In with {$service} Using Token
-sign_in_using_pat_title: Sign In Using Personal Access Token
-sign_in_using_pat_description: Enter your token below. It must have read/write access to the repository content.
-sign_in_using_pat_link: You can generate a token on the <a>{$service} user settings page</a>.
+sign_in_using_access_token: Sign In Using Access Token
+sign_in_using_access_token_description: Enter your token below. It must have read/write access to the repository content.
+sign_in_using_access_token_link: You can generate a token on the <a>{$service} user settings page</a>.
 personal_access_token: Personal Access Token
 authorizing: Authorizing…
 signing_in: Signing in…
@@ -131,6 +133,7 @@ version_x: Version {$version}
 report_issue: Report Issue
 share_feedback: Share Feedback
 get_help: Get Help
+donate: Donate
 join_discord: Join Us on Discord
 bluesky: Follow Us on Bluesky
 update_available: The latest version of Sveltia CMS is available.
@@ -182,6 +185,7 @@ sort_keys:
   commit_author: Updated by
   commit_date: Updated on
   _summary: Summary
+  _manual: Manual
 ascending: "{$label}, A to Z"
 ascending_date: "{$label}, old to new"
 descending: "{$label}, Z to A"
@@ -340,24 +344,41 @@ confirm_deleting_selected_entries_with_assets: |
     *   {{ Are you sure you want to delete the selected {$count} entries and associated assets? }}
 confirm_deleting_all_entries: Are you sure you want to delete all the entries?
 confirm_deleting_all_entries_with_assets: Are you sure you want to delete all the entries and associated assets?
+reorder_entries: Reorder Entries
+done_reordering_entries: Done Reordering Entries
+cancel_reordering_entries: Cancel Reordering Entries
+saving_reorder_failed: Failed to save the new entry order. Please try again.
 processing_files: |
   .input {$count :integer}
   .match $count
     one {{ Processing a file. This may take a while. }}
     *   {{ Processing files. This may take a while. }}
 uploading_files: Uploading Files
-confirm_replacing_file: Are you sure you want to replace “{$name}” with the following file?
+confirm_replacing_file: "“{$name}” will be replaced with this file:"
 confirm_uploading_files: |
   .input {$count :integer}
   .match $count
-    one {{ Are you sure you want to save the following file to the “{$folder}” folder? }}
-    *   {{ Are you sure you want to save the following {$count} files to the “{$folder}” folder? }}
+    one {{ This file will be saved to the “{$folder}” folder: }}
+    *   {{ These {$count} files will be saved to the “{$folder}” folder: }}
 oversized_files: Oversized Files
 warning_oversized_files: |
   .input {$count :integer}
   .match $count
     one {{ This file cannot be uploaded because it exceeds the maximum size of {$size}. Please reduce the size or select a different file. }}
     *   {{ These files cannot be uploaded because they exceed the maximum size of {$size}. Please reduce the sizes or select different files. }}
+file_name_conflict_confirmation: |
+  .input {$count :integer}
+  .match $count
+    one {{ A file with the same name already exists in this folder. Do you want to replace it? }}
+    *   {{ {$count} files with the same names already exist in this folder. Do you want to replace them? }}
+file_name_conflict_confirmation_with_name: |
+  .input {$count :integer}
+  .input {$name :string}
+  .match $count
+    one {{ A file named “{$name}” already exists in this folder. Do you want to replace it? }}
+    *   {{ {$count} files with the same names already exist in this folder. Do you want to replace them? }}
+file_name_conflict_resolution: File Name Conflict Resolution
+keep_both: Keep Both
 uploading_files_progress: |
   .input {$count :integer}
   .match $count
@@ -384,8 +405,16 @@ entry_validation_errors: |
   .match $count
     one {{ One field has an error. Please correct it to save the entry. }}
     *   {{ {$count} fields have an error. Please correct them to save the entry. }}
-entry_saved: Entry has been saved.
-entry_saved_and_published: Entry has been saved and published.
+entry_saved: |
+  .input {$count :integer}
+  .match $count
+    one {{ Entry has been saved. }}
+    *   {{ {$count} entries have been saved. }}
+entry_saved_and_published: |
+  .input {$count :integer}
+  .match $count
+    one {{ Entry has been saved and published. }}
+    *   {{ {$count} entries have been saved and published. }}
 entries_deleted: |
   .input {$count :integer}
   .match $count
@@ -460,6 +489,7 @@ locale_content_disabled_short: (disabled)
 locale_content_error_short: (error)
 edit: Edit
 preview: Preview
+swap_panes: Swap Panes
 edit_x_locale: Edit {$locale} Content
 preview_x_locale: Preview {$locale} Content
 content_preview: Content Preview
@@ -741,9 +771,10 @@ config:
     unsupported_backend_suggestion: Use one of the [supported backends](https://sveltiacms.app/en/docs/backends#supported-backends) instead.
     missing_repository: The repository is not defined.
     invalid_repository: The configured repository is invalid. It must be in “owner/repo” format.
-    oauth_implicit_flow: The configured authentication method (implicit flow) is not supported in Sveltia CMS. Use PKCE authorization instead.
-    github_pkce_unsupported: PKCE authorization is not yet supported due to GitHub’s limitations. Use other [authentication methods](https://sveltiacms.app/en/docs/backends/github#authentication) instead.
+    oauth_implicit_flow: The configured authentication method (implicit flow) is not supported in Sveltia CMS. Use a different [authentication method](https://sveltiacms.app/en/docs/backends/BACKEND_NAME#authentication) instead.
+    github_pkce_unsupported: PKCE authorization is not yet supported due to GitHub’s limitations. Use a different [authentication method](https://sveltiacms.app/en/docs/backends/github#authentication) instead.
     oauth_no_app_id: OAuth application ID is not defined.
+    no_auth_methods: The `auth_methods` option must contain at least one method.
     missing_media_folder: The media folder is not defined.
     invalid_media_folder: The configured media folder is invalid. It must be a string.
     invalid_public_folder: The configured public folder is invalid. It must be a string.
@@ -761,6 +792,7 @@ config:
     duplicate_collection_file_name: Collection file names must be unique, but `{$name}` is used more than once.
     collection_no_fields: The collection must have the `fields` option defined with at least one field.
     collection_file_no_fields: The collection file must have the `fields` option defined with at least one field.
+    collection_file_i18n_required: The collection file must have the `i18n` option defined if the `locale` placeholder is used in the `file` path.
     missing_field_name: The field {$count} must have the `name` option defined as a non-empty string.
     invalid_field_name: The field name `{$name}` is invalid. It must not contain special characters. If you want to nest fields, [use Object fields instead of dot notation](https://sveltiacms.app/en/docs/troubleshooting#using-proper-naming-conventions).
     duplicate_field_name: Field names must be unique, but `{$name}` is used more than once.
@@ -780,6 +812,7 @@ config:
     relation_field_invalid_value_field: The referenced value field `{$field}` is invalid or not defined.
     unexpected: Unexpected error
   warning:
+    oauth_no_app_id: OAuth application ID is not defined. Users are required to provide an access token to sign in.
     editorial_workflow_unsupported: Editorial workflow is not yet supported in Sveltia CMS.
     open_authoring_unsupported: Open authoring is not yet supported in Sveltia CMS.
     nested_collections_unsupported: Nested collections are not yet supported in Sveltia CMS.

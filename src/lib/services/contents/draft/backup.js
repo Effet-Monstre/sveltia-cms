@@ -5,6 +5,7 @@ import { get, writable } from 'svelte/store';
 
 import { backend } from '$lib/services/backends';
 import { cmsConfigVersion } from '$lib/services/config';
+import { getOrderFieldKey } from '$lib/services/contents/collection/entries/reorder';
 import {
   entryDraft,
   entryDraftInteracted,
@@ -12,7 +13,7 @@ import {
   i18nAutoDupEnabled,
 } from '$lib/services/contents/draft';
 import { createProxy } from '$lib/services/contents/draft/create/proxy';
-import { prefs } from '$lib/services/user/prefs';
+import { prefs } from '$lib/services/user/prefs.svelte';
 
 /**
  * @import { Writable } from 'svelte/store';
@@ -76,8 +77,7 @@ export const getBackup = async (collectionName, slug = '') => {
     return null;
   }
 
-  // @todo Remove the legacy `siteConfigVersion` check prior to the 1.0 release
-  if ((backup.siteConfigVersion ?? backup.cmsConfigVersion) === get(cmsConfigVersion)) {
+  if (backup.cmsConfigVersion === get(cmsConfigVersion)) {
     return backup;
   }
 
@@ -93,7 +93,7 @@ export const getBackup = async (collectionName, slug = '') => {
  * @param {EntryDraft} draft Draft.
  */
 export const saveBackup = async (draft) => {
-  if (!(get(prefs).useDraftBackup ?? true) || !get(entryDraftInteracted)) {
+  if (!(prefs.useDraftBackup ?? true) || !get(entryDraftInteracted)) {
     return;
   }
 
@@ -151,23 +151,34 @@ export const restoreBackup = ({ backup, collectionName, fileName }) => {
       draft.currentLocales = currentLocales;
       draft.currentSlugs = currentSlugs;
 
+      // Reconcile a stale manual-sort order field. The backup may have been taken before another
+      // reorder/renumber operation rewrote this entry’s `order`. For existing entries, prefer the
+      // value persisted on the live entry; for new entries, drop the field entirely so
+      // `assignManualSortOrder` can compute a fresh value at save time. Without this, restoring an
+      // old backup would clobber the latest order with a stale one.
+      const orderKey = getOrderFieldKey(draft.collection);
+
       Object.entries(currentValues).forEach(([locale, valueMap]) => {
+        if (orderKey && orderKey in valueMap) {
+          const liveOrder = draft.originalEntry?.locales[locale]?.content?.[orderKey];
+
+          if (liveOrder !== undefined) {
+            valueMap[orderKey] = liveOrder;
+          } else {
+            delete valueMap[orderKey];
+          }
+        }
+
         Object.entries(valueMap).forEach(([keyPath, value]) => {
           if (typeof value === 'string') {
             [...value.matchAll(getBlobRegex('g'))].forEach(([blobURL]) => {
-              let cache = files[blobURL];
+              const cache = files[blobURL];
+              const { file } = cache ?? {};
 
-              // Support `LegacyEntryFileMap`
-              // @todo Remove this before the 1.0 release
-              if (cache instanceof File) {
-                cache = { file: cache, folder: undefined };
-              }
-
-              if (!cache) {
+              if (!cache || !file) {
                 return;
               }
 
-              const { file } = cache;
               let newURL = '';
 
               if (fileURLs.has(file)) {
@@ -217,7 +228,7 @@ export const restoreBackup = ({ backup, collectionName, fileName }) => {
  * @param {string} [args.slug] Entry slug. Existing entry only.
  */
 export const restoreBackupIfNeeded = async ({ collectionName, fileName, slug = '' }) => {
-  if (!(get(prefs).useDraftBackup ?? true)) {
+  if (!(prefs.useDraftBackup ?? true)) {
     return;
   }
 
@@ -228,12 +239,13 @@ export const restoreBackupIfNeeded = async ({ collectionName, fileName, slug = '
   }
 
   const { timestamp } = backup;
+  const { promise, resolve } = Promise.withResolvers();
 
+  restoreDialogState.set({ show: true, timestamp, resolve });
+
+  // The promise will be resolved once the Restore or Discard button is clicked on the dialog
   /** @type {boolean | undefined} */
-  const doRestore = await new Promise((resolve) => {
-    // The promise will be resolved once the Restore or Discard button is clicked on the dialog
-    restoreDialogState.set({ show: true, timestamp, resolve });
-  });
+  const doRestore = await promise;
 
   if (doRestore === undefined) {
     return;
@@ -253,7 +265,7 @@ export const restoreBackupIfNeeded = async ({ collectionName, fileName, slug = '
  * Check if the current entry’s draft backup has been saved, and if so, show a toast notification.
  */
 export const showBackupToastIfNeeded = async () => {
-  if (!(get(prefs).useDraftBackup ?? true)) {
+  if (!(prefs.useDraftBackup ?? true)) {
     return;
   }
 

@@ -5,10 +5,10 @@
 -->
 <script>
   import { _ } from '@sveltia/i18n';
-  import { sanitize } from 'isomorphic-dompurify';
   import { mount } from 'svelte';
 
   import Placeholder from '$lib/components/common/placeholder.svelte';
+  import { escapeAttr } from '$lib/services/utils/string';
 
   /**
    * @import { Snippet } from 'svelte';
@@ -43,10 +43,10 @@
    */
   const generateHTML = () => `
     <!DOCTYPE html>
-    <html lang="${sanitize(locale)}">
+    <html lang="${escapeAttr(locale)}">
     <head>
       <meta charset="UTF-8">
-      ${styleURLs.map((url) => `<link rel="stylesheet" href="${sanitize(url)}">`).join('\n')}
+      ${styleURLs.map((url) => `<link rel="stylesheet" href="${escapeAttr(url)}">`).join('\n')}
     </head>
     <body></body>
     </html>
@@ -69,8 +69,19 @@
    */
   const initializeIframe = () => {
     if (iframe) {
-      iframe.addEventListener('load', mountPlaceholder, { once: true });
-      iframe.src = URL.createObjectURL(new Blob([generateHTML()], { type: 'text/html' }));
+      const blobURL = URL.createObjectURL(new Blob([generateHTML()], { type: 'text/html' }));
+
+      iframe.addEventListener(
+        'load',
+        () => {
+          mountPlaceholder();
+          // The iframe has loaded the HTML document, so the blob URL is no longer needed
+          URL.revokeObjectURL(blobURL);
+        },
+        { once: true },
+      );
+
+      iframe.src = blobURL;
     }
   };
 
@@ -81,9 +92,14 @@
   });
 </script>
 
-<iframe class="preview" title={_('content_preview')} bind:this={iframe}></iframe>
+<iframe
+  class="preview"
+  title={_('content_preview')}
+  sandbox="allow-same-origin allow-scripts"
+  bind:this={iframe}
+></iframe>
 
-<style lang="scss">
+<style>
   iframe {
     display: block;
     border: none;

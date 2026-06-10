@@ -59,7 +59,10 @@
    * corresponding field in the editor.
    */
   const highlightEditorField = () => {
-    window.postMessage({ type: 'highlight-editor-field', payload: { locale, keyPath } });
+    window.postMessage(
+      { type: 'highlight-editor-field', payload: { locale, keyPath } },
+      window.location.origin,
+    );
   };
 </script>
 
@@ -93,7 +96,7 @@
   </section>
 {/if}
 
-<style lang="scss">
+<style>
   :global([role='document']) section {
     overflow: hidden;
     margin: 8px 0;

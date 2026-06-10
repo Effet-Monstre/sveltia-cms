@@ -5,17 +5,13 @@ import { TomlDate } from 'smol-toml';
 import { get } from 'svelte/store';
 
 import { cmsConfig } from '$lib/services/config';
+import { getOrderFieldKey } from '$lib/services/contents/collection/entries/reorder';
 import { INTERNAL_PROP_REGEX } from '$lib/services/contents/draft';
 import { createKeyPathList } from '$lib/services/contents/draft/save/key-path';
 import { getField, hasRootField, isFieldRequired } from '$lib/services/contents/entry/fields';
 import { parseDateTimeConfig } from '$lib/services/contents/fields/date-time/helper';
+import { TOML_FORMATS } from '$lib/services/contents/file';
 import { getOrCreate } from '$lib/services/utils/cache';
-
-/**
- * Cache of wildcard key-path regexes used in {@link finalizeContent}, keyed by `keyPath`.
- * @type {Map<string, RegExp>}
- */
-const wildcardKeyPathRegexCache = new Map();
 
 /**
  * @import {
@@ -26,6 +22,12 @@ const wildcardKeyPathRegexCache = new Map();
  * } from '$lib/types/private';
  * @import { DateTimeField, Field, RawEntryContent } from '$lib/types/public';
  */
+
+/**
+ * Cache of wildcard key-path regexes used in {@link finalizeContent}, keyed by `keyPath`.
+ * @type {Map<string, RegExp>}
+ */
+const wildcardKeyPathRegexCache = new Map();
 
 /**
  * Check whether a value is empty, such as `undefined`, `null`, an empty string, an empty array, or
@@ -124,6 +126,8 @@ export const copyProperty = ({
  * @param {InternalLocaleCode} args.locale Locale code.
  * @param {FlattenedEntryContent} args.valueMap Flattened entry content.
  * @param {string} [args.canonicalSlugKey] Property name of a canonical slug.
+ * @param {string} [args.orderKey] Property name of the entry order field. Placed right after the
+ * canonical slug, ahead of all configured fields, when present in the value map.
  * @param {boolean} [args.isIndexFile] Whether the corresponding entry is the collection’s special
  * index file used specifically in Hugo.
  * @param {boolean} [args.isTomlOutput] Whether the output it TOML format.
@@ -136,6 +140,7 @@ const finalizeContent = ({
   locale,
   valueMap,
   canonicalSlugKey,
+  orderKey,
   isIndexFile = false,
   isTomlOutput = false,
 }) => {
@@ -153,6 +158,11 @@ const finalizeContent = ({
   // Add the slug first
   if (canonicalSlugKey && canonicalSlugKey in unsortedMap) {
     copyProperty({ ...copyArgs, key: canonicalSlugKey });
+  }
+
+  // Add the order field next so it appears at the top of the output
+  if (orderKey && orderKey in unsortedMap) {
+    copyProperty({ ...copyArgs, key: orderKey });
   }
 
   // Move the listed properties to a new object
@@ -187,7 +197,7 @@ const finalizeContent = ({
         .filter((_keyPath) => regex.test(_keyPath))
         .sort(([a, b]) => compare(a, b))
         .forEach((_keyPath) => {
-          // When the wildcard path couldn't resolve a typed list field, resolve with the concrete
+          // When the wildcard path couldn’t resolve a typed list field, resolve with the concrete
           // key path so that field metadata (e.g. `required`) is available to `copyProperty`
           const resolvedField = field ?? getField({ ...getFieldArgs, keyPath: _keyPath });
 
@@ -224,7 +234,7 @@ export const serializeContent = ({ draft, locale, valueMap }) => {
     },
   } = collectionFile ?? /** @type {InternalEntryCollection} */ (collection);
 
-  const isTomlOutput = ['toml', 'toml-frontmatter'].includes(_file.format);
+  const isTomlOutput = TOML_FORMATS.includes(_file.format);
 
   const content = finalizeContent({
     collectionName,
@@ -233,6 +243,7 @@ export const serializeContent = ({ draft, locale, valueMap }) => {
     locale,
     valueMap,
     canonicalSlugKey,
+    orderKey: getOrderFieldKey(collection),
     isIndexFile,
     isTomlOutput,
   });

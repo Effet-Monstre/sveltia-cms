@@ -5,8 +5,11 @@ import {
   DATE_TRANSFORMATION_REGEX,
 } from '$lib/services/common/transformations';
 import { getCollection } from '$lib/services/contents/collection';
+import {
+  getIndexFile,
+  isCollectionIndexFile,
+} from '$lib/services/contents/collection/entries/index-file';
 import { getCollectionFile } from '$lib/services/contents/collection/files';
-import { getIndexFile, isCollectionIndexFile } from '$lib/services/contents/collection/index-file';
 import { MEDIA_FIELD_TYPES, MULTI_VALUE_FIELD_TYPES } from '$lib/services/contents/fields';
 import { getDateTimeFieldDisplayValue } from '$lib/services/contents/fields/date-time/helper';
 import { getReferencedOptionLabel } from '$lib/services/contents/fields/relation/helper';
@@ -15,6 +18,7 @@ import { getOptionLabel } from '$lib/services/contents/fields/select/helper';
 import { getCanonicalLocale, getListFormatter } from '$lib/services/contents/i18n';
 import { isMultiple } from '$lib/services/integrations/media-libraries/shared';
 import { getOrCreate } from '$lib/services/utils/cache';
+import { isNumeric } from '$lib/services/utils/number';
 
 /**
  * @import {
@@ -42,6 +46,16 @@ import { getOrCreate } from '$lib/services/utils/cache';
  * SelectField,
  * } from '$lib/types/public';
  */
+
+const TYPE_MATCH_REGEX = /^(.*?)<([^>]+)>(.*)$/;
+const NUMERIC_INDEX_REGEX = /(?:^|\.)(\d+)(?:\.|$)/;
+
+/**
+ * Regular expression to match the list key path, e.g. `field.0`, `field.1`, etc.
+ * @type {RegExp}
+ * @internal
+ */
+export const LIST_KEY_PATH_REGEX = /\.\d+$/;
 
 /**
  * @type {Map<string, Field | undefined>}
@@ -90,7 +104,7 @@ export const isFieldMultiple = (fieldConfig) => {
  */
 const parseExplicitType = (key) => {
   // Match patterns like "*<type>", "<type>", or "0<type>" or "fieldName<type>"
-  const match = key.match(/^(.*?)<([^>]+)>(.*)$/);
+  const match = key.match(TYPE_MATCH_REGEX);
 
   if (!match) {
     return { cleanKey: key };
@@ -131,7 +145,7 @@ const resolveNextSegment = ({
   const { cleanKey, typeName } = parseExplicitType(key);
   const { widget: fieldType = 'text' } = field;
   const explicitType = typeName != null ? typeName : pendingExplicitType;
-  const isNumericKey = /^\d+$/.test(cleanKey);
+  const isNumericKey = isNumeric(cleanKey);
   const isWildcardKey = cleanKey === '*';
 
   // Handle multi-value field types with numeric keys, e.g. `authors.0`
@@ -219,13 +233,13 @@ export const getField = (args) => {
     isIndexFile = false,
   } = args;
 
-  // `valueMap` is only consulted during traversal when a keyPath segment is numeric or a wildcard
-  // (to resolve variable-type list/object fields). For all other paths — the vast majority of calls
-  // — it is irrelevant and we can build a much cheaper string cache key that avoids serializing the
-  // full entry content.
-  const hasIndexOrWildcard = /(?:^|\.)(\d+|\*)(?:\.|$)/.test(keyPath);
+  // `valueMap` is only consulted during traversal when a keyPath segment is a numeric index (to
+  // resolve variable-type list/object fields). Wildcard paths (e.g. `sections.*.type`) never match
+  // a real flat-entry key, so the lookup always returns `undefined` and the result is identical
+  // regardless of entry content — no need to serialize `valueMap` into the cache key.
+  const hasNumericIndex = NUMERIC_INDEX_REGEX.test(keyPath);
 
-  const cacheKey = hasIndexOrWildcard
+  const cacheKey = hasNumericIndex
     ? JSON.stringify(args)
     : `${collectionName}|${fileName ?? ''}|${componentName ?? ''}|${keyPath}|${isIndexFile ? '1' : '0'}`;
 

@@ -14,7 +14,7 @@ import {
 
 // Mock the dependencies
 vi.mock('$lib/services/config');
-vi.mock('$lib/services/contents/collection/index-file');
+vi.mock('$lib/services/contents/collection/entries/index-file');
 vi.mock('$lib/services/common/template');
 vi.mock('$lib/services/contents');
 vi.mock('$lib/services/contents/collection');
@@ -89,6 +89,7 @@ describe('Test getEntryPreviewURL()', () => {
       structure: 'single_file',
       structureMap: {
         i18nSingleFile: true,
+        i18nSingleFileDefaultRoot: false,
         i18nMultiFile: false,
         i18nMultiFolder: false,
         i18nMultiRootFolder: false,
@@ -159,7 +160,8 @@ describe('Test getEntryPreviewURL()', () => {
     });
 
     // Mock index file functions
-    const { isCollectionIndexFile } = await import('$lib/services/contents/collection/index-file');
+    const { isCollectionIndexFile } =
+      await import('$lib/services/contents/collection/entries/index-file');
 
     vi.mocked(isCollectionIndexFile).mockReturnValue(false);
 
@@ -194,7 +196,8 @@ describe('Test getEntryPreviewURL()', () => {
     });
 
     // Mock index file functions
-    const { isCollectionIndexFile } = await import('$lib/services/contents/collection/index-file');
+    const { isCollectionIndexFile } =
+      await import('$lib/services/contents/collection/entries/index-file');
 
     vi.mocked(isCollectionIndexFile).mockReturnValue(false);
 
@@ -216,7 +219,8 @@ describe('Test getEntryPreviewURL()', () => {
     });
 
     // Mock index file functions
-    const { isCollectionIndexFile } = await import('$lib/services/contents/collection/index-file');
+    const { isCollectionIndexFile } =
+      await import('$lib/services/contents/collection/entries/index-file');
 
     vi.mocked(isCollectionIndexFile).mockReturnValue(false);
 
@@ -238,7 +242,8 @@ describe('Test getEntryPreviewURL()', () => {
     });
 
     // Mock index file functions
-    const { isCollectionIndexFile } = await import('$lib/services/contents/collection/index-file');
+    const { isCollectionIndexFile } =
+      await import('$lib/services/contents/collection/entries/index-file');
 
     vi.mocked(isCollectionIndexFile).mockReturnValue(false);
 
@@ -273,7 +278,8 @@ describe('Test getEntryPreviewURL()', () => {
     };
 
     // Mock index file functions
-    const { isCollectionIndexFile } = await import('$lib/services/contents/collection/index-file');
+    const { isCollectionIndexFile } =
+      await import('$lib/services/contents/collection/entries/index-file');
 
     vi.mocked(isCollectionIndexFile).mockReturnValue(false);
 
@@ -331,7 +337,8 @@ describe('Test getEntryPreviewURL()', () => {
     };
 
     // Mock index file functions
-    const { isCollectionIndexFile } = await import('$lib/services/contents/collection/index-file');
+    const { isCollectionIndexFile } =
+      await import('$lib/services/contents/collection/entries/index-file');
 
     vi.mocked(isCollectionIndexFile).mockReturnValue(false);
 
@@ -410,7 +417,8 @@ describe('Test getEntryPreviewURL()', () => {
     };
 
     // Mock index file functions
-    const { isCollectionIndexFile } = await import('$lib/services/contents/collection/index-file');
+    const { isCollectionIndexFile } =
+      await import('$lib/services/contents/collection/entries/index-file');
 
     vi.mocked(isCollectionIndexFile).mockReturnValue(false);
 
@@ -449,7 +457,7 @@ describe('Test getEntryPreviewURL()', () => {
 
     // Mock index file functions
     const { isCollectionIndexFile, getIndexFile } =
-      await import('$lib/services/contents/collection/index-file');
+      await import('$lib/services/contents/collection/entries/index-file');
 
     vi.mocked(isCollectionIndexFile).mockReturnValue(true);
     vi.mocked(getIndexFile).mockReturnValue({
@@ -505,6 +513,7 @@ describe('Test getEntryPreviewURL()', () => {
         structure: 'single_file',
         structureMap: {
           i18nSingleFile: true,
+          i18nSingleFileDefaultRoot: false,
           i18nMultiFile: false,
           i18nMultiFolder: false,
           i18nMultiRootFolder: false,
@@ -516,7 +525,8 @@ describe('Test getEntryPreviewURL()', () => {
     };
 
     // Mock index file functions
-    const { isCollectionIndexFile } = await import('$lib/services/contents/collection/index-file');
+    const { isCollectionIndexFile } =
+      await import('$lib/services/contents/collection/entries/index-file');
 
     vi.mocked(isCollectionIndexFile).mockReturnValue(false);
 
@@ -545,7 +555,8 @@ describe('Test getEntryPreviewURL()', () => {
     });
 
     // Mock index file functions
-    const { isCollectionIndexFile } = await import('$lib/services/contents/collection/index-file');
+    const { isCollectionIndexFile } =
+      await import('$lib/services/contents/collection/entries/index-file');
 
     vi.mocked(isCollectionIndexFile).mockReturnValue(false);
 
@@ -579,7 +590,8 @@ describe('Test getEntryPreviewURL()', () => {
     };
 
     // Mock index file functions
-    const { isCollectionIndexFile } = await import('$lib/services/contents/collection/index-file');
+    const { isCollectionIndexFile } =
+      await import('$lib/services/contents/collection/entries/index-file');
 
     vi.mocked(isCollectionIndexFile).mockReturnValue(false);
 
@@ -601,7 +613,8 @@ describe('Test getEntryPreviewURL()', () => {
     });
 
     // Mock index file functions
-    const { isCollectionIndexFile } = await import('$lib/services/contents/collection/index-file');
+    const { isCollectionIndexFile } =
+      await import('$lib/services/contents/collection/entries/index-file');
 
     vi.mocked(isCollectionIndexFile).mockReturnValue(false);
 
@@ -620,7 +633,8 @@ describe('Test getEntryPreviewURL()', () => {
     (await import('$lib/services/config')).cmsConfig = writable(null);
 
     // Mock index file functions
-    const { isCollectionIndexFile } = await import('$lib/services/contents/collection/index-file');
+    const { isCollectionIndexFile } =
+      await import('$lib/services/contents/collection/entries/index-file');
 
     vi.mocked(isCollectionIndexFile).mockReturnValue(false);
 
@@ -649,7 +663,8 @@ describe('Test getEntryPreviewURL()', () => {
     };
 
     // Mock index file functions
-    const { isCollectionIndexFile } = await import('$lib/services/contents/collection/index-file');
+    const { isCollectionIndexFile } =
+      await import('$lib/services/contents/collection/entries/index-file');
 
     vi.mocked(isCollectionIndexFile).mockReturnValue(false);
 
@@ -689,7 +704,8 @@ describe('Test getEntryPreviewURL()', () => {
     };
 
     // Mock index file functions
-    const { isCollectionIndexFile } = await import('$lib/services/contents/collection/index-file');
+    const { isCollectionIndexFile } =
+      await import('$lib/services/contents/collection/entries/index-file');
 
     vi.mocked(isCollectionIndexFile).mockReturnValue(false);
 
@@ -728,7 +744,8 @@ describe('Test getEntryPreviewURL()', () => {
     };
 
     // Mock index file functions
-    const { isCollectionIndexFile } = await import('$lib/services/contents/collection/index-file');
+    const { isCollectionIndexFile } =
+      await import('$lib/services/contents/collection/entries/index-file');
 
     vi.mocked(isCollectionIndexFile).mockReturnValue(false);
 
@@ -768,7 +785,8 @@ describe('Test getEntryPreviewURL()', () => {
     };
 
     // Mock index file functions
-    const { isCollectionIndexFile } = await import('$lib/services/contents/collection/index-file');
+    const { isCollectionIndexFile } =
+      await import('$lib/services/contents/collection/entries/index-file');
 
     vi.mocked(isCollectionIndexFile).mockReturnValue(false);
 
@@ -838,6 +856,7 @@ describe('Test getAssociatedCollections()', () => {
         structure: 'single_file',
         structureMap: {
           i18nSingleFile: true,
+          i18nSingleFileDefaultRoot: false,
           i18nMultiFile: false,
           i18nMultiFolder: false,
           i18nMultiRootFolder: false,

@@ -12,7 +12,6 @@ import { createEntryPath } from '$lib/services/contents/draft/save/entry-path';
 import { serializeContent } from '$lib/services/contents/draft/save/serialize';
 import { getField } from '$lib/services/contents/entry/fields';
 import { formatEntryFile } from '$lib/services/contents/file/format';
-import { getDefaultMediaLibraryOptions } from '$lib/services/integrations/media-libraries/default';
 
 /**
  * @import {
@@ -65,18 +64,10 @@ export const createBaseSavingEntryData = async ({
   const changes = [];
   /** @type {Asset[]} */
   const savingAssets = [];
-  const { slugify_filename: slugificationEnabled = false } = getDefaultMediaLibraryOptions().config;
   const { encode_file_path: encodingEnabled = false } = get(cmsConfig)?.output ?? {};
   /** @type {GetFieldArgs} */
   const getFieldArgs = { collectionName, fileName, keyPath: '', valueMap: {}, isIndexFile };
-
-  const replaceBlobBaseArgs = {
-    draft,
-    defaultLocaleSlug,
-    changes,
-    savingAssets,
-    slugificationEnabled,
-  };
+  const replaceBlobBaseArgs = { draft, defaultLocaleSlug, changes, savingAssets };
 
   const localizedEntryMap = Object.fromEntries(
     await Promise.all(
@@ -89,8 +80,12 @@ export const createBaseSavingEntryData = async ({
           return [locale, { path }];
         }
 
-        // Add the canonical slug
-        content[canonicalSlugKey] = canonicalSlug;
+        // Add the canonical slug only when it’s defined; if it’s undefined (e.g. the slug template
+        // has no `| localize` filter), skip the assignment to avoid wiping a user-defined field
+        // that happens to share the same key (e.g. `translationKey`).
+        if (canonicalSlug !== undefined) {
+          content[canonicalSlugKey] = canonicalSlug;
+        }
 
         // Normalize data
         await Promise.all(
@@ -130,10 +125,10 @@ export const createBaseSavingEntryData = async ({
             // Replace blob URLs in File/Image fields with asset paths
             await Promise.all(
               matches.map(async ([blobURL]) => {
-                const { file, folder = _globalAssetFolder } = files[blobURL] ?? {};
+                const { file, folder = _globalAssetFolder, replace } = files[blobURL] ?? {};
 
                 if (file) {
-                  await replaceBlobURL({ ...replaceBlobArgs, file, folder, blobURL });
+                  await replaceBlobURL({ ...replaceBlobArgs, file, folder, replace, blobURL });
                 }
               }),
             );
@@ -180,12 +175,49 @@ export const getSingleFileChange = async ({ draft, savingEntry, cacheDB }) => {
 
   const {
     _file,
-    _i18n: { i18nEnabled, defaultLocale },
+    _i18n: { i18nEnabled, defaultLocale, structureMap: { i18nSingleFileDefaultRoot } = {} },
   } = collectionFile ?? /** @type {InternalEntryCollection} */ (collection);
 
   const { slug, path, content } = savingEntry.locales[defaultLocale];
   const renamed = !isNew && (originalSlugs?.[defaultLocale] ?? originalSlugs?._) !== slug;
   const previousPath = originalEntry?.locales[defaultLocale]?.path;
+
+  /**
+   * Build the serialized content for the file. For `single_file_default_root`, the default locale’s
+   * fields are written at the root level and non-default locales are nested under their locale key.
+   * @returns {object} Serialized content object.
+   */
+  const buildFileContent = () => {
+    if (!i18nEnabled) {
+      return serializeContent({ draft, locale: '_default', valueMap: content });
+    }
+
+    const localeContents = Object.fromEntries(
+      Object.entries(savingEntry.locales)
+        .filter(([, le]) => !!le.content)
+        .map(([locale, le]) => [locale, serializeContent({ draft, locale, valueMap: le.content })]),
+    );
+
+    if (i18nSingleFileDefaultRoot) {
+      // Remove `lang` from default content to avoid stale/duplicate values; it’s always
+      // auto-generated from the configured locales.
+      const { lang: _lang, ...defaultContent } = localeContents[defaultLocale] ?? {};
+
+      const nonDefaultContent = Object.fromEntries(
+        Object.entries(localeContents).filter(([locale]) => locale !== defaultLocale),
+      );
+
+      return {
+        // Add `lang` field at the root level as per Lume’s convention for single-file i18n
+        // @see https://lume.land/plugins/multilanguage/#multilanguage-pages-from-a-single-file
+        lang: [defaultLocale, ...Object.keys(nonDefaultContent)],
+        ...defaultContent,
+        ...nonDefaultContent,
+      };
+    }
+
+    return localeContents;
+  };
 
   return {
     action: isNew ? 'create' : renamed ? 'move' : 'update',
@@ -194,16 +226,7 @@ export const getSingleFileChange = async ({ draft, savingEntry, cacheDB }) => {
     previousPath: renamed ? previousPath : undefined,
     previousSha: await getPreviousSha({ cacheDB, previousPath }),
     data: await formatEntryFile({
-      content: i18nEnabled
-        ? Object.fromEntries(
-            Object.entries(savingEntry.locales)
-              .filter(([, le]) => !!le.content)
-              .map(([locale, le]) => [
-                locale,
-                serializeContent({ draft, locale, valueMap: le.content }),
-              ]),
-          )
-        : serializeContent({ draft, locale: '_default', valueMap: content }),
+      content: buildFileContent(),
       _file,
     }),
   };
@@ -282,7 +305,7 @@ export const createSavingEntryData = async ({ draft, slugs }) => {
       i18nEnabled,
       allLocales,
       defaultLocale,
-      structureMap: { i18nSingleFile },
+      structureMap: { i18nSingleFile, i18nSingleFileDefaultRoot },
     },
   } = collectionFile ?? /** @type {InternalEntryCollection} */ (collection);
 
@@ -308,7 +331,7 @@ export const createSavingEntryData = async ({ draft, slugs }) => {
   const cacheDB = databaseName ? new IndexedDB(databaseName, 'file-cache') : undefined;
   const getFileChangeArgs = { draft, savingEntry, cacheDB };
 
-  if (!i18nEnabled || i18nSingleFile) {
+  if (!i18nEnabled || i18nSingleFile || i18nSingleFileDefaultRoot) {
     changes.push(await getSingleFileChange({ ...getFileChangeArgs }));
   } else {
     await Promise.all(

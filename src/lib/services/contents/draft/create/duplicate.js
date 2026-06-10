@@ -1,9 +1,10 @@
 import { get } from 'svelte/store';
 
+import { getOrderFieldKey } from '$lib/services/contents/collection/entries/reorder';
 import { entryDraft } from '$lib/services/contents/draft';
 import { getSlugEditorProp } from '$lib/services/contents/draft/create';
 import { showDuplicateToast } from '$lib/services/contents/editor';
-import { getField } from '$lib/services/contents/entry/fields';
+import { getField, LIST_KEY_PATH_REGEX } from '$lib/services/contents/entry/fields';
 import { getDefaultValueMap as getHiddenFieldDefaultValueMap } from '$lib/services/contents/fields/hidden/defaults';
 import { getInitialValue as getInitialUuidValue } from '$lib/services/contents/fields/uuid/helper';
 
@@ -33,9 +34,17 @@ export const duplicateDraft = () => {
     canonicalSlug: { key: canonicalSlugKey },
   } = (collectionFile ?? collection)._i18n;
 
+  const orderFieldKey = getOrderFieldKey(collection);
+
   Object.entries(currentValues).forEach(([locale, valueMap]) => {
     // Remove the canonical slug
     delete valueMap[canonicalSlugKey];
+
+    // Drop the manual sort order; a fresh value will be assigned at save time so the duplicate gets
+    // a unique order even after backup/restore round trips
+    if (orderFieldKey) {
+      delete valueMap[orderFieldKey];
+    }
 
     const getFieldArgs = { collectionName, fileName, valueMap, isIndexFile };
 
@@ -51,9 +60,9 @@ export const duplicateDraft = () => {
 
       if (fieldConfig?.widget === 'hidden') {
         // The value could be array; normalize the key path, e.g. `tags.0` -> `tags`
-        if (Array.isArray(fieldConfig.default) && keyPath.match(/\.\d+$/)) {
+        if (Array.isArray(fieldConfig.default) && LIST_KEY_PATH_REGEX.test(keyPath)) {
           delete valueMap[keyPath];
-          keyPath = keyPath.replace(/\.\d+$/, '');
+          keyPath = keyPath.replace(LIST_KEY_PATH_REGEX, '');
 
           if (keyPath in valueMap) {
             return;

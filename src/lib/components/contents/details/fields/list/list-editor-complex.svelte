@@ -30,7 +30,7 @@
   import { getField } from '$lib/services/contents/entry/fields';
   import { formatSummary, getListFieldInfo } from '$lib/services/contents/fields/list/helper';
   import { DEFAULT_I18N_CONFIG } from '$lib/services/contents/i18n/config';
-  import { isSmallScreen } from '$lib/services/user/env';
+  import { env } from '$lib/services/user/env.svelte';
 
   /**
    * @import { FieldEditorContext, FieldEditorProps } from '$lib/types/private';
@@ -113,6 +113,14 @@
     }),
   );
   const hasMaxItems = $derived(items.length >= max);
+  const hasEditableSubFields = $derived(
+    locale === defaultLocale ||
+      (hasVariableTypes
+        ? (types?.flatMap(({ fields: typeFields = [] }) => typeFields) ?? [])
+        : (fields ?? (field ? [field] : []))
+      ).some(({ i18n: subI18n = false }) => subI18n === true || subI18n === 'translate'),
+  );
+  const isAddDisabled = $derived(isDuplicateField || !hasEditableSubFields);
 
   /**
    * List item thumbnails.
@@ -270,7 +278,16 @@
       return undefined;
     }
 
-    const thumbnailKeyPath = `${keyPath}.${index}.${thumbnailFieldName.replace(/^fields\./, '')}`;
+    const fieldNameNormalized = thumbnailFieldName.replace(/^fields\./, '');
+    const itemKeyPath = `${keyPath}.${index}`;
+
+    // For single-subfield lists (`field:` option), values are stored at the item key path directly
+    // (without the field name). `getField(itemKeyPath)` already traverses into the subfield, so we
+    // use it to validate the name match too.
+    const thumbnailKeyPath = hasSingleSubField
+      ? itemKeyPath
+      : `${itemKeyPath}.${fieldNameNormalized}`;
+
     const thumbnailValue = valueMap[thumbnailKeyPath];
 
     if (!thumbnailValue) {
@@ -285,7 +302,10 @@
       isIndexFile,
     });
 
-    if (thumbnailFieldConfig?.widget !== 'image') {
+    if (
+      thumbnailFieldConfig?.widget !== 'image' ||
+      (hasSingleSubField && thumbnailFieldConfig.name !== fieldNameNormalized)
+    ) {
       return undefined;
     }
 
@@ -294,7 +314,9 @@
       entry: $entryDraft?.originalEntry,
       collectionName,
       fileName,
-      typedKeyPath: `${typedKeyPath}.*.${thumbnailFieldName.replace(/^fields\./, '')}`,
+      typedKeyPath: hasSingleSubField
+        ? `${typedKeyPath}.*`
+        : `${typedKeyPath}.*.${fieldNameNormalized}`,
     });
   };
 
@@ -395,7 +417,7 @@
 </div>
 {#if allowAdd && (addToTop || !items.length)}
   <div role="none" class="toolbar top add">
-    <AddItemButton disabled={isDuplicateField} {fieldConfig} {items} {addItem} />
+    <AddItemButton disabled={isAddDisabled} {fieldConfig} {items} {addItem} />
   </div>
 {/if}
 <div role="none" id="list-{fieldId}-item-list" class="item-list" class:collapsed={!parentExpanded}>
@@ -455,7 +477,7 @@
                 iconic
                 popupPosition="bottom-right"
                 aria-label={_('list_item_options')}
-                disabled={isDuplicateField}
+                disabled={isAddDisabled}
               >
                 {#snippet popup()}
                   <Menu aria-label={_('list_item_options')}>
@@ -507,7 +529,7 @@
               {#if thumbnails[index]}
                 <Image src={thumbnails[index]} variant="icon" cover />
               {/if}
-              <TruncatedText lines={$isSmallScreen ? 2 : 1}>
+              <TruncatedText lines={env.isSmallScreen ? 2 : 1}>
                 {_formatSummary(index, summaryTemplate)}
               </TruncatedText>
             </div>
@@ -519,12 +541,12 @@
 </div>
 {#if allowAdd && !addToTop && items.length}
   <div role="none" class="toolbar bottom add">
-    <AddItemButton disabled={isDuplicateField} {fieldConfig} {items} {addItem} />
+    <AddItemButton disabled={isAddDisabled} {fieldConfig} {items} {addItem} />
     <Spacer flex />
   </div>
 {/if}
 
-<style lang="scss">
+<style>
   .toolbar {
     display: flex;
     align-items: center;

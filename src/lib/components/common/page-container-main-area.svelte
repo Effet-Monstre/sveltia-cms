@@ -34,20 +34,17 @@
   </div>
 </div>
 
-<style lang="scss">
+<style>
   .wrapper {
     flex: auto;
     display: flex;
     flex-direction: column;
     overflow: hidden;
+    height: 100%;
     background-color: var(--sui-primary-background-color);
 
     @media (768px <= width) {
       view-transition-name: page-main;
-    }
-
-    &:not(:first-child) {
-      border-start-start-radius: 16px;
     }
 
     :global {
@@ -59,6 +56,10 @@
         }
       }
     }
+  }
+
+  :global(.resizable-pane) > .wrapper {
+    border-start-start-radius: 16px;
   }
 
   .main-inner {

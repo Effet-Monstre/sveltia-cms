@@ -4,8 +4,8 @@ import { get } from 'svelte/store';
 import { allAssets } from '$lib/services/assets';
 import { backend } from '$lib/services/backends';
 import { allEntries } from '$lib/services/contents';
-import { user } from '$lib/services/user';
-import { prefs } from '$lib/services/user/prefs';
+import { user } from '$lib/services/user/account.svelte';
+import { prefs } from '$lib/services/user/prefs.svelte';
 import { getBlob } from '$lib/services/utils/file';
 
 /**
@@ -29,7 +29,7 @@ import { getBlob } from '$lib/services/utils/file';
  * and `login`. `undefined` for the local and test-repo backends.
  */
 export const getCommitAuthor = () => {
-  const userData = /** @type {User} */ (get(user));
+  const userData = /** @type {User} */ (user.account);
 
   if (!userData) {
     return undefined;
@@ -104,20 +104,25 @@ export const updateCache = async ({ changes, commit }) => {
  * @param {Asset[]} args.savedAssets Assets that have been saved.
  */
 export const updateStores = ({ changes, savedEntries, savedAssets }) => {
-  const savedEntryIds = savedEntries.map((e) => e.id);
+  const savedEntryIds = new Set(savedEntries.map((e) => e.id));
 
   allEntries.update((entries) => [
-    ...entries.filter((e) => !savedEntryIds.includes(e.id)),
+    ...entries.filter((e) => !savedEntryIds.has(e.id)),
     ...savedEntries,
   ]);
 
-  const savedAssetsPaths = savedAssets.map((a) => a.path);
-  const movedAssetPaths = changes.filter((c) => c.action === 'move').map((c) => c.previousPath);
-  const deletedAssetPaths = changes.filter((c) => c.action === 'delete').map((c) => c.path);
-  const excludingPaths = [...savedAssetsPaths, ...movedAssetPaths, ...deletedAssetPaths];
+  const excludingPaths = new Set(savedAssets.map((a) => a.path));
+
+  changes.forEach((c) => {
+    if (c.action === 'move' && c.previousPath) {
+      excludingPaths.add(c.previousPath);
+    } else if (c.action === 'delete') {
+      excludingPaths.add(c.path);
+    }
+  });
 
   allAssets.update((assets) => [
-    ...assets.filter((a) => !excludingPaths.includes(a.path)),
+    ...assets.filter((a) => !excludingPaths.has(a.path)),
     ...savedAssets,
   ]);
 };
@@ -141,7 +146,7 @@ export const saveChanges = async ({ changes, savingEntries = [], savingAssets = 
     author: getCommitAuthor(),
   };
 
-  if (get(prefs).devModeEnabled) {
+  if (prefs.devModeEnabled) {
     // eslint-disable-next-line no-console
     console.debug('Commit changes:', changes);
     // eslint-disable-next-line no-console

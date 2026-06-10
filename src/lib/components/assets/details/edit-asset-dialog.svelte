@@ -51,7 +51,7 @@
         {
           folder: asset.folder,
           files: [new File([currentValue], asset.name, { type: blob.type })],
-          originalAsset: asset,
+          originalAssets: [asset],
         },
         { commitType: 'uploadMedia' },
       );
@@ -86,14 +86,14 @@
   }}
 >
   <div role="none" class="wrapper" class:wrap>
-    <TextArea bind:value={currentValue} flex />
+    <TextArea dir="auto" bind:value={currentValue} flex />
   </div>
   {#snippet footerExtra()}
     <Switch label={_('wrap_long_lines')} bind:checked={wrap} />
   {/snippet}
 </Dialog>
 
-<style lang="scss">
+<style>
   .wrapper {
     display: contents;
 

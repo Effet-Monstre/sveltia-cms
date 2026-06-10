@@ -5,6 +5,7 @@ import { derived, get, writable } from 'svelte/store';
 import { showAssetOverlay } from '$lib/services/assets/view';
 import { cmsConfig } from '$lib/services/config';
 import { showContentOverlay } from '$lib/services/contents/editor';
+import { openNewTab } from '$lib/services/utils/window';
 
 /**
  * @import { Readable, Writable } from 'svelte/store';
@@ -56,7 +57,12 @@ export const parseLocation = (href = window.location.href) => {
 
   return {
     path: decodeURIComponent(pathname),
-    params: Object.fromEntries(searchParams),
+    params: Object.fromEntries(
+      // Merge multiple values of the same key with a comma, e.g. `?a=1&a=2` becomes `{ a: '1,2' }`.
+      // This is to support both `?tags=tag1,tag2` and `?tags=tag1&tags=tag2` formats for dynamic
+      // default values.
+      [...new Set(searchParams.keys())].map((key) => [key, searchParams.getAll(key).join(',')]),
+    ),
   };
 };
 
@@ -160,7 +166,7 @@ export const goto = async (
 ) => {
   const { path: currentPath } = parseLocation();
 
-  // If we're already on this page AND not updating state, don't navigate or trigger a transition
+  // If we’re already on this page AND not updating state, don’t navigate or trigger a transition
   if (currentPath === path && !Object.keys(state).length && !replaceState) {
     return;
   }
@@ -209,5 +215,5 @@ export const openProductionSite = () => {
     get(cmsConfig)
   );
 
-  window.open(displayURL || siteURL || '/', '_blank');
+  openNewTab(displayURL || siteURL || '/');
 };

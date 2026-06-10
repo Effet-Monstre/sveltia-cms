@@ -11,10 +11,11 @@ import {
   contentUpdatesToast,
   UPDATE_TOAST_DEFAULT_STATE,
 } from '$lib/services/contents/collection/data';
+import { buildRenumberChanges } from '$lib/services/contents/collection/entries/reorder';
 import { getPreviousSha } from '$lib/services/contents/draft/save/changes';
 
 /**
- * @import { Asset, Entry, FileChange } from '$lib/types/private';
+ * @import { Asset, Entry, FileChange, InternalEntryCollection } from '$lib/types/private';
  */
 
 /**
@@ -25,8 +26,9 @@ import { getPreviousSha } from '$lib/services/contents/draft/save/changes';
  */
 export const updateStores = ({ ids, assetPaths }) => {
   const _allEntries = get(allEntries);
+  const idSet = new Set(ids);
 
-  allEntries.set(_allEntries.filter((file) => !ids.includes(file.id)));
+  allEntries.set(_allEntries.filter((file) => !idSet.has(file.id)));
 
   contentUpdatesToast.set({
     ...UPDATE_TOAST_DEFAULT_STATE,
@@ -35,7 +37,9 @@ export const updateStores = ({ ids, assetPaths }) => {
   });
 
   if (assetPaths.length) {
-    allAssets.update((assets) => assets.filter((asset) => !assetPaths.includes(asset.path)));
+    const assetPathSet = new Set(assetPaths);
+
+    allAssets.update((assets) => assets.filter((asset) => !assetPathSet.has(asset.path)));
   }
 };
 
@@ -73,8 +77,22 @@ export const deleteEntries = async (entries, assets = []) => {
     return path;
   });
 
+  // When the collection has manual reordering enabled, bundle the renumber updates of the remaining
+  // entries into the same commit so that delete + renumber is one atomic operation. The same
+  // file-cache handle is reused to avoid opening a second IndexedDB connection.
+  const collection = /** @type {InternalEntryCollection | undefined} */ (get(selectedCollection));
+
+  const { changes: renumberChanges, savingEntries: renumberSavingEntries } =
+    await buildRenumberChanges(collection, {
+      excludeIds: new Set(entries.map(({ id }) => id)),
+      cacheDB,
+    });
+
+  changes.push(...renumberChanges);
+
   await saveChanges({
     changes,
+    savingEntries: renumberSavingEntries,
     options: {
       commitType: 'delete',
       collection: get(selectedCollection),

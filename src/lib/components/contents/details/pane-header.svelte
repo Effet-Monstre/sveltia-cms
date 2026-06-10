@@ -15,8 +15,9 @@
   import { getEntryPreviewURL, getEntryRepoBlobURL } from '$lib/services/contents/entry';
   import { getLocaleLabel } from '$lib/services/contents/i18n';
   import { DEFAULT_I18N_CONFIG } from '$lib/services/contents/i18n/config';
-  import { isMediumScreen, isSmallScreen } from '$lib/services/user/env';
-  import { prefs } from '$lib/services/user/prefs';
+  import { env } from '$lib/services/user/env.svelte';
+  import { prefs } from '$lib/services/user/prefs.svelte';
+  import { openNewTab } from '$lib/services/utils/window';
 
   /**
    * @import { Writable } from 'svelte/store';
@@ -74,10 +75,10 @@
   <Toolbar variant="secondary" aria-label={_('secondary')}>
     {#if i18nEnabled && allLocales.length > 1}
       <LocaleSwitcher {id} {thisPane} {thatPane} />
-      {#if ($isSmallScreen || $isMediumScreen) && canPreview}
+      {#if (env.isSmallScreen || env.isMediumScreen) && canPreview}
         <PreviewButton {thisPane} />
       {/if}
-    {:else if !($isSmallScreen || $isMediumScreen)}
+    {:else if !(env.isSmallScreen || env.isMediumScreen)}
       <h3 role="none">{$thisPane?.mode === 'preview' ? _('preview') : _('edit')}</h3>
     {:else if canPreview}
       <PreviewButton {thisPane} />
@@ -125,17 +126,17 @@
                 }}
               />
             {/if}
-            {#if originalEntry && (previewURL || $prefs.devModeEnabled)}
+            {#if originalEntry && (previewURL || prefs.devModeEnabled)}
               <Divider />
               {#if previewURL}
                 <MenuItem
                   label={_('view_on_live_site')}
                   onclick={() => {
-                    window.open(previewURL);
+                    openNewTab(previewURL);
                   }}
                 />
               {/if}
-              {#if $prefs.devModeEnabled}
+              {#if prefs.devModeEnabled}
                 <MenuItem
                   disabled={!$backend?.repository?.blobBaseURL}
                   label={_('view_on_x', {
@@ -144,7 +145,7 @@
                   })}
                   onclick={() => {
                     if (originalEntry && $thisPane) {
-                      window.open(getEntryRepoBlobURL(originalEntry, $thisPane.locale));
+                      openNewTab(getEntryRepoBlobURL(originalEntry, $thisPane.locale));
                     }
                   }}
                 />
@@ -157,7 +158,7 @@
   </Toolbar>
 </div>
 
-<style lang="scss">
+<style>
   .header {
     flex: none !important;
 

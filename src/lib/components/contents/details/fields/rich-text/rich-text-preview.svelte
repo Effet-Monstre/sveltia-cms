@@ -14,6 +14,7 @@
   import { SvelteMap } from 'svelte/reactivity';
 
   import { getMediaFieldURL } from '$lib/services/assets/info';
+  import { cmsConfig } from '$lib/services/config';
   import { entryDraft } from '$lib/services/contents/draft';
   import { BUILTIN_COMPONENTS } from '$lib/services/contents/fields/rich-text';
   import {
@@ -62,6 +63,7 @@
    * @property {string | undefined} currentValue Field value.
    */
 
+  const defaultConfig = $cmsConfig?.field_defaults?.richtext ?? {};
   /** @type {SvelteMap<HTMLElement, import('react-dom/client').Root>} */
   const reactRoots = new SvelteMap();
 
@@ -84,11 +86,11 @@
   const collectionName = $derived($entryDraft?.collectionName ?? '');
   const fileName = $derived($entryDraft?.fileName);
   const {
-    sanitize_preview: doSanitize = true,
-    editor_components:
+    sanitize_preview: doSanitize = defaultConfig.sanitize_preview ?? true,
+    editor_components: _editorComponents = defaultConfig.editor_components ??
       // Include all built-in and custom components by default
-      _editorComponents = [...BUILTIN_COMPONENTS, ...customComponentRegistry.keys()],
-    linked_images: linkedImagesEnabled = true,
+      [...BUILTIN_COMPONENTS, ...customComponentRegistry.keys()],
+    linked_images: linkedImagesEnabled = defaultConfig.linked_images ?? true,
   } = $derived(fieldConfig);
   const componentDefs = $derived(
     _editorComponents
@@ -129,7 +131,7 @@
       reactRoots.set(element, root);
       root.render(preview);
     } else {
-      // Remove the placeholder if there's no valid preview to render
+      // Remove the placeholder if there’s no valid preview to render
       element.remove();
     }
   };
@@ -239,7 +241,7 @@
   {/if}
 </div>
 
-<style lang="scss">
+<style>
   :global([role='document']) div {
     :global {
       :is(h1, h2, h3, h4, h5, h6, p, ul, ol) {

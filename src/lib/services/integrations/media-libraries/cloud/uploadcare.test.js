@@ -125,7 +125,7 @@ describe('integrations/media-libraries/cloud/uploadcare', () => {
       const options = getLibraryOptions();
 
       expect(options).toBeDefined();
-      expect(options?.config?.publicKey).toBe(mockPublicKey);
+      expect(/** @type {any} */ (options)?.config?.publicKey).toBe(mockPublicKey);
     });
 
     it('should return undefined when config is missing', () => {
@@ -149,7 +149,7 @@ describe('integrations/media-libraries/cloud/uploadcare', () => {
       const options = getLibraryOptions();
 
       expect(options).toBeDefined();
-      expect(options?.config?.publicKey).toBe('legacy-public-key');
+      expect(/** @type {any} */ (options)?.config?.publicKey).toBe('legacy-public-key');
     });
 
     it('should return undefined for non-uploadcare media_library', () => {
@@ -195,6 +195,42 @@ describe('integrations/media-libraries/cloud/uploadcare', () => {
       });
 
       expect(isEnabled()).toBe(false);
+    });
+
+    it('should return true when field-level config is present', () => {
+      vi.mocked(get).mockReturnValue({});
+
+      expect(
+        isEnabled(
+          /** @type {any} */ ({
+            widget: 'file',
+            media_libraries: {
+              uploadcare: {
+                config: {
+                  publicKey: mockPublicKey,
+                },
+              },
+            },
+          }),
+        ),
+      ).toBe(true);
+    });
+
+    it('should return false when field-level config has missing public key', () => {
+      vi.mocked(get).mockReturnValue({});
+
+      expect(
+        isEnabled(
+          /** @type {any} */ ({
+            widget: 'file',
+            media_libraries: {
+              uploadcare: {
+                config: {},
+              },
+            },
+          }),
+        ),
+      ).toBe(false);
     });
   });
 

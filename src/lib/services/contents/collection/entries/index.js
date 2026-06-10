@@ -2,17 +2,20 @@
 /* eslint-disable no-await-in-loop */
 /* eslint-disable no-restricted-syntax */
 
-import { get, writable } from 'svelte/store';
+import { derived, get, writable } from 'svelte/store';
 
 import { getMediaFieldURL } from '$lib/services/assets/info';
 import { cmsConfig } from '$lib/services/config';
 import { allEntries, allEntryFolders } from '$lib/services/contents';
 import { getCollection } from '$lib/services/contents/collection';
+import {
+  getIndexFile,
+  isCollectionIndexFile,
+} from '$lib/services/contents/collection/entries/index-file';
 import { getCollectionFilesByEntry } from '$lib/services/contents/collection/files';
-import { getIndexFile, isCollectionIndexFile } from '$lib/services/contents/collection/index-file';
 import { getAssociatedCollections } from '$lib/services/contents/entry';
 import { getField, getPropertyValue } from '$lib/services/contents/entry/fields';
-import { getRegex } from '$lib/services/utils/misc';
+import { getRegex } from '$lib/services/utils/regex';
 
 /**
  * @import { Writable } from 'svelte/store';
@@ -34,6 +37,15 @@ export const MARKDOWN_IMAGE_REGEX = /!\[.*?\]\((.+?)(?:\s+".*?")?\)/g;
  * @type {Writable<Entry[]>}
  */
 export const selectedEntries = writable([]);
+
+/**
+ * Set of selected entry IDs, for O(1) membership checks in list items.
+ * @type {import('svelte/store').Readable<Set<string>>}
+ */
+export const selectedEntryIdSet = derived(
+  selectedEntries,
+  ($selectedEntries) => new Set($selectedEntries.map((entry) => entry.id)),
+);
 
 /**
  * Get entries by the given collection name, while applying a filer if needed.
@@ -209,7 +221,7 @@ export const getEntriesByAssetURL = async (
       for (const { content } of Object.values(locales)) {
         for (const [keyPath, value] of Object.entries(content)) {
           if (typeof value !== 'string' || !value) continue;
-          // Pre-filter: skip values that can't possibly contain the asset URL, avoiding the
+          // Pre-filter: skip values that can’t possibly contain the asset URL, avoiding the
           // expensive getField() call for the vast majority of fields.
           if (!isBlobURL && !value.includes(assetURL)) continue;
 

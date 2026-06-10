@@ -1,8 +1,7 @@
 import { _ } from '@sveltia/i18n';
-import { get } from 'svelte/store';
 
-import { user } from '$lib/services/user';
-import { sendRequest } from '$lib/services/utils/networking';
+import { user } from '$lib/services/user/account.svelte';
+import { isSecureURL, sendRequest } from '$lib/services/utils/networking';
 
 /**
  * @import { ApiEndpointConfig, AuthTokens, FetchApiOptions } from '$lib/types/private';
@@ -20,6 +19,7 @@ const API_CONFIG_INFO_PLACEHOLDER = {
   authScheme: 'token',
   restBaseURL: '',
   graphqlBaseURL: '',
+  includeCredentials: false,
 };
 
 /**
@@ -46,6 +46,10 @@ export const refreshAccessToken = async ({ clientId, tokenURL, refreshToken }) =
   let response;
   let token = '';
 
+  if (!isSecureURL(tokenURL)) {
+    throw new Error(_('sign_in_error.TOKEN_REFRESH_FAILED'));
+  }
+
   try {
     response = await fetch(tokenURL, {
       method: 'POST',
@@ -58,6 +62,7 @@ export const refreshAccessToken = async ({ clientId, tokenURL, refreshToken }) =
         client_id: clientId,
         refresh_token: refreshToken,
       }),
+      ...(apiConfig.includeCredentials && { credentials: 'include' }),
     });
   } catch {
     //
@@ -70,7 +75,7 @@ export const refreshAccessToken = async ({ clientId, tokenURL, refreshToken }) =
   ({ access_token: token, refresh_token: refreshToken } = await response.json());
 
   // Update the user store with the new token and refresh token
-  user.update((_user) => (_user ? { ..._user, token, refreshToken } : _user));
+  user.account = user.account ? { ...user.account, token, refreshToken } : user.account;
 
   return { token, refreshToken };
 };
@@ -102,8 +107,16 @@ export const fetchAPI = async (
     refreshToken = undefined,
   } = {},
 ) => {
-  const { clientId, tokenURL, restBaseURL, graphqlBaseURL, authScheme = 'token' } = apiConfig;
-  const _user = get(user);
+  const {
+    clientId,
+    tokenURL,
+    restBaseURL,
+    graphqlBaseURL,
+    authScheme = 'token',
+    includeCredentials,
+  } = apiConfig;
+
+  const _user = user.account;
   const baseURL = isGraphQL ? graphqlBaseURL : restBaseURL;
 
   token ??= _user?.token;
@@ -112,7 +125,12 @@ export const fetchAPI = async (
 
   return sendRequest(
     `${baseURL}${path}`,
-    { method, headers, body },
+    {
+      method,
+      headers,
+      body,
+      ...(includeCredentials && { credentials: 'include' }),
+    },
     {
       responseType,
       refreshAccessToken: refreshToken

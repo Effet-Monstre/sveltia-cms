@@ -77,6 +77,7 @@
         {/if}
         <div role="none">
           <TextInput
+            dir="auto"
             flex
             bind:value={updatedSlugs[locale]}
             oninput={() => {
@@ -103,7 +104,7 @@
   </div>
 </Dialog>
 
-<style lang="scss">
+<style>
   p:not(:empty) {
     margin-top: 0;
   }

@@ -1,15 +1,18 @@
 import { getPathInfo } from '@sveltia/utils/file';
 import { get } from 'svelte/store';
 
-import { allAssets, focusedAsset, overlaidAsset } from '$lib/services/assets';
+import { focusedAsset, getAssetByInternalPath, overlaidAsset } from '$lib/services/assets';
 import { assetUpdatesToast } from '$lib/services/assets/data';
 import { getAssetFoldersByPath, globalAssetFolder } from '$lib/services/assets/folders';
 import { getAssetBlob, getAssetPublicURL } from '$lib/services/assets/info';
 import { saveChanges } from '$lib/services/backends/save';
 import { UPDATE_TOAST_DEFAULT_STATE } from '$lib/services/contents/collection/data';
 import { getEntriesByAssetURL } from '$lib/services/contents/collection/entries';
+import {
+  getIndexFile,
+  isCollectionIndexFile,
+} from '$lib/services/contents/collection/entries/index-file';
 import { getCollectionFilesByEntry } from '$lib/services/contents/collection/files';
-import { getIndexFile, isCollectionIndexFile } from '$lib/services/contents/collection/index-file';
 import { createSavingEntryData } from '$lib/services/contents/draft/save/changes';
 import { getSlugs } from '$lib/services/contents/draft/slugs';
 import { getAssociatedCollections } from '$lib/services/contents/entry';
@@ -181,7 +184,6 @@ export const collectEntryChangesFromAsset = async ({
  * @param {MovingAsset[]} args.movedAssets The assets that have been moved or renamed.
  */
 export const updateStores = ({ action, movedAssets }) => {
-  const _allAssets = get(allAssets);
   const focusedAssetPath = get(focusedAsset)?.path;
   const _focusedAsset = movedAssets.find((a) => a.asset.path === focusedAssetPath);
   const overlaidAssetPath = get(overlaidAsset)?.path;
@@ -189,12 +191,12 @@ export const updateStores = ({ action, movedAssets }) => {
 
   // Replace the existing asset
   if (_focusedAsset) {
-    focusedAsset.set(_allAssets.find((a) => a.path === _focusedAsset.path));
+    focusedAsset.set(getAssetByInternalPath(_focusedAsset.path));
   }
 
   // Replace the existing asset
   if (_overlaidAsset) {
-    overlaidAsset.set(_allAssets.find((a) => a.path === _overlaidAsset.path));
+    overlaidAsset.set(getAssetByInternalPath(_overlaidAsset.path));
   }
 
   assetUpdatesToast.set({

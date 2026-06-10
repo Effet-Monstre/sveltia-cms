@@ -8,6 +8,7 @@
   import { entryDraft } from '$lib/services/contents/draft';
   import { fetchEntryHistory } from '$lib/services/contents/entry/history';
   import { formatDate } from '$lib/services/utils/date';
+  import { openNewTab } from '$lib/services/utils/window';
 
   /**
    * @import { FileCommit } from '$lib/types/private';
@@ -56,7 +57,7 @@
           disabled={!commitURL}
           onclick={() => {
             if (commitURL) {
-              window.open(commitURL, '_blank', 'noopener,noreferrer');
+              openNewTab(commitURL);
             }
           }}
         >
@@ -84,7 +85,7 @@
   {/if}
 </PanelContainer>
 
-<style lang="scss">
+<style>
   .commits {
     padding: 4px;
   }

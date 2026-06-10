@@ -14,6 +14,7 @@ vi.mock('$lib/services/contents/editor', () => ({
 }));
 
 vi.mock('$lib/services/contents/entry/fields', () => ({
+  LIST_KEY_PATH_REGEX: /\.\d+$/,
   getField: vi.fn(),
 }));
 
@@ -27,6 +28,10 @@ vi.mock('$lib/services/contents/fields/uuid/helper', () => ({
 
 vi.mock('$lib/services/contents/draft/create', () => ({
   getSlugEditorProp: vi.fn(),
+}));
+
+vi.mock('$lib/services/contents/collection/entries/reorder', () => ({
+  getOrderFieldKey: vi.fn(),
 }));
 
 describe('contents/draft/create/duplicate', () => {
@@ -116,6 +121,61 @@ describe('contents/draft/create/duplicate', () => {
 
       expect(setCallArg.currentValues.en.translationKey).toBeUndefined();
       expect(setCallArg.currentValues.ja.translationKey).toBeUndefined();
+    });
+
+    it('should drop the manual sort order field from all locales when reorder is enabled', async () => {
+      const { getOrderFieldKey } =
+        await import('$lib/services/contents/collection/entries/reorder');
+
+      vi.mocked(getOrderFieldKey).mockReturnValue('order');
+
+      mockEntryDraft.currentValues.en.order = 5;
+      mockEntryDraft.currentValues.ja.order = 5;
+
+      const { duplicateDraft } = await import('./duplicate.js');
+
+      duplicateDraft();
+
+      const setCallArg = mockEntryDraftSet.mock.calls[0][0];
+
+      expect(setCallArg.currentValues.en.order).toBeUndefined();
+      expect(setCallArg.currentValues.ja.order).toBeUndefined();
+    });
+
+    it('should drop a custom-keyed sort order field when reorder uses a custom key', async () => {
+      const { getOrderFieldKey } =
+        await import('$lib/services/contents/collection/entries/reorder');
+
+      vi.mocked(getOrderFieldKey).mockReturnValue('weight');
+
+      mockEntryDraft.currentValues.en.weight = 7;
+      mockEntryDraft.currentValues.ja.weight = 7;
+
+      const { duplicateDraft } = await import('./duplicate.js');
+
+      duplicateDraft();
+
+      const setCallArg = mockEntryDraftSet.mock.calls[0][0];
+
+      expect(setCallArg.currentValues.en.weight).toBeUndefined();
+      expect(setCallArg.currentValues.ja.weight).toBeUndefined();
+    });
+
+    it('should not touch any field when reorder is disabled', async () => {
+      const { getOrderFieldKey } =
+        await import('$lib/services/contents/collection/entries/reorder');
+
+      vi.mocked(getOrderFieldKey).mockReturnValue(undefined);
+
+      mockEntryDraft.currentValues.en.order = 5;
+
+      const { duplicateDraft } = await import('./duplicate.js');
+
+      duplicateDraft();
+
+      const setCallArg = mockEntryDraftSet.mock.calls[0][0];
+
+      expect(setCallArg.currentValues.en.order).toBe(5);
     });
 
     it('should reset uuid field values', async () => {

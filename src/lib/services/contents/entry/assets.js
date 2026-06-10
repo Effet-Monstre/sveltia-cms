@@ -6,7 +6,7 @@ import { allAssets, getAssetByPath, isRelativePath } from '$lib/services/assets'
 import { getAssetFolder, getAssetFoldersByPath } from '$lib/services/assets/folders';
 import { getMediaFieldURL } from '$lib/services/assets/info';
 import { getCollection } from '$lib/services/contents/collection';
-import { isCollectionIndexFile } from '$lib/services/contents/collection/index-file';
+import { isCollectionIndexFile } from '$lib/services/contents/collection/entries/index-file';
 import { getField } from '$lib/services/contents/entry/fields';
 
 /**
@@ -34,13 +34,17 @@ export const getEntryThumbnail = async (collection, entry) => {
     return undefined;
   }
 
+  const contentKeys = _thumbnailFieldNames.some((name) => name.includes('*'))
+    ? Object.keys(content)
+    : undefined;
+
   /** @type {FieldKeyPath[]} */
   const keyPathList = _thumbnailFieldNames.flatMap((name) => {
     // Support a wildcard in the key path, e.g. `images.*.src`
     if (name.includes('*')) {
       const regex = new RegExp(`^${escapeRegExp(name).replace('\\*', '.+')}$`);
 
-      return Object.keys(content).filter((keyPath) => regex.test(keyPath));
+      return /** @type {string[]} */ (contentKeys).filter((keyPath) => regex.test(keyPath));
     }
 
     return name;
@@ -92,13 +96,13 @@ export const getAssociatedAssets = ({ entry, collectionName, fileName, relative 
     Object.values(locales)
       .flatMap(({ content }) =>
         Object.entries(content ?? {}).map(([keyPath, value]) => {
-          if (
-            typeof value === 'string' &&
-            (relative ? isRelativePath(value) : true) &&
-            ['image', 'file'].includes(
-              getField({ collectionName, keyPath, isIndexFile })?.widget ?? 'string',
-            )
-          ) {
+          if (typeof value === 'string' && (relative ? isRelativePath(value) : true)) {
+            const widget = getField({ collectionName, keyPath, isIndexFile })?.widget ?? 'string';
+
+            if (widget !== 'image' && widget !== 'file') {
+              return undefined;
+            }
+
             const asset = getAssetByPath({ value, entry, collectionName, fileName });
 
             if (

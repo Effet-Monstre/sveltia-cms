@@ -1,20 +1,22 @@
 import { getPathInfo } from '@sveltia/utils/file';
 import { escapeRegExp, stripSlashes } from '@sveltia/utils/string';
 
+import { ESCAPED_PLACEHOLDER_REGEX } from '$lib/services/common/template/constants';
 import { warnDeprecation } from '$lib/services/config/deprecations';
 import { isEntryCollection } from '$lib/services/contents/collection';
-import { getIndexFile } from '$lib/services/contents/collection/index-file';
+import { getIndexFile } from '$lib/services/contents/collection/entries/index-file';
+import {
+  EXTENSION_FORMAT_MAP,
+  FORMAT_EXTENSION_MAP,
+  FRONTMATTER_DELIMITER_MAP,
+  MARKDOWN_EXTENSIONS,
+} from '$lib/services/contents/file';
 import { getLocalePath } from '$lib/services/contents/i18n';
 
 /**
  * @import { CustomFileFormat, FileConfig, InternalI18nOptions, CustomPreviewRenderer } from '$lib/types/private';
  * @import { Collection, CollectionFile, FileExtension, FileFormat } from '$lib/types/public';
  */
-
-/**
- * Regex to match escaped `{{variable}}` placeholders.
- */
-export const ESCAPED_PLACEHOLDER_REGEX = /\\\{\\\{.+?\\\}\\\}/g;
 
 /**
  * @type {Map<string, CustomFileFormat>}
@@ -46,20 +48,8 @@ export const detectFileExtension = ({ extension, format }) => {
     return extension;
   }
 
-  if (format === 'raw') {
-    return 'txt';
-  }
-
-  if (format === 'yaml' || format === 'yml') {
-    return 'yml';
-  }
-
-  if (format === 'toml') {
-    return 'toml';
-  }
-
-  if (format === 'json') {
-    return 'json';
+  if (format) {
+    return FORMAT_EXTENSION_MAP[format] ?? 'md';
   }
 
   return 'md';
@@ -79,28 +69,16 @@ export const detectFileFormat = ({ extension, format }) => {
     return format; // supported or custom format
   }
 
-  if (extension === 'yaml' || extension === 'yml') {
-    return 'yaml';
-  }
-
-  if (extension === 'toml') {
-    return 'toml';
-  }
-
-  if (extension === 'json') {
-    return 'json';
-  }
-
-  if (['md', 'mkd', 'mkdn', 'mdwn', 'mdown', 'markdown'].includes(extension)) {
+  if (MARKDOWN_EXTENSIONS.includes(extension)) {
     return 'frontmatter'; // auto detect
   }
 
-  return 'yaml-frontmatter';
+  return EXTENSION_FORMAT_MAP[extension] ?? 'yaml-frontmatter';
 };
 
 /**
  * Get the file path matcher pattern for the regex. The path pattern in the middle should match the
- * filename (without extension), possibly with the parent directory. If the collection's `path` is
+ * filename (without extension), possibly with the parent directory. If the collection’s `path` is
  * configured, use it to generate a pattern, so that unrelated files are excluded. Note that the
  * `path` may contain `{{variable}}` placeholders, which should be replaced with a non-greedy
  * wildcard that excludes slashes. It may also contain brackets, like `app/(pages)`, which are used
@@ -168,7 +146,7 @@ export const getEntryPathRegEx = ({
     getFilePathMatcher(subPath, indexFileName),
     i18nMultiFile ? localeFileMatcher : '',
     '\\.',
-    detectFileExtension({ format, extension }),
+    escapeRegExp(detectFileExtension({ format, extension })),
     '$',
   ].join('');
 
@@ -194,19 +172,7 @@ export const getFrontMatterDelimiters = ({ format, delimiter }) => {
     return /** @type {[string, string]} */ (delimiter);
   }
 
-  if (format === 'json-frontmatter') {
-    return ['{', '}'];
-  }
-
-  if (format === 'toml-frontmatter') {
-    return ['+++', '+++'];
-  }
-
-  if (format === 'yaml-frontmatter') {
-    return ['---', '---'];
-  }
-
-  return undefined;
+  return FRONTMATTER_DELIMITER_MAP[format] ?? undefined;
 };
 
 /**
@@ -227,6 +193,7 @@ export const getFileConfig = ({ rawCollection, file, _i18n }) => {
     extension: _extension,
     format: _format,
     frontmatter_delimiter: _delimiter,
+    body_field: bodyField,
     yaml_quote: yamlQuote,
   } = rawCollection;
 
@@ -258,6 +225,7 @@ export const getFileConfig = ({ rawCollection, file, _i18n }) => {
       ? getLocalePath({ _i18n, locale: _i18n.defaultLocale, path: filePath })
       : undefined,
     fmDelimiters: getFrontMatterDelimiters({ format, delimiter }),
+    bodyField: file?.body_field ?? bodyField,
     yamlQuote: !!yamlQuote,
   };
 };

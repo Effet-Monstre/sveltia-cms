@@ -12,9 +12,9 @@
   import { backend } from '$lib/services/backends';
   import { cmsConfigLoaded, DEV_SITE_URL, initCmsConfig } from '$lib/services/config';
   import { dataLoaded } from '$lib/services/contents';
-  import { user } from '$lib/services/user';
-  import { initUserEnvDetection } from '$lib/services/user/env';
-  import { signInManually } from '$lib/services/user/auth';
+  import { user } from '$lib/services/user/account.svelte';
+  import { initUserEnvDetection } from '$lib/services/user/env.svelte';
+  import { signInManually } from '$lib/services/user/auth.svelte';
 
   /**
    * @import { CmsConfig } from '$lib/types/public';
@@ -85,7 +85,7 @@
   let transitioned = $state(false);
 
   $effect(() => {
-    if ($dataLoaded && $user) {
+    if ($dataLoaded && user.account) {
       startViewTransition('forwards', () => {
         transitioned = true;
       });
@@ -117,6 +117,7 @@
 
       // Open external links and links to different paths in a new tab
       if (origin !== window.location.origin || pathname !== window.location.pathname) {
+        link.rel = 'noopener noreferrer';
         link.target = '_blank';
       }
     }
@@ -131,7 +132,7 @@
         <BackendStatusIndicator />
       {/if}
       <div role="none" class="main">
-        {#if $user && $dataLoaded && transitioned}
+        {#if user.account && $dataLoaded && transitioned}
           <MainRouter />
         {:else}
           <EntrancePage />
@@ -142,7 +143,7 @@
   {/if}
 </AppShell>
 
-<style lang="scss">
+<style>
   @view-transition {
     navigation: auto;
   }
@@ -195,7 +196,7 @@
     }
   }
 
-  // RTL-specific keyframes that mirror the depth effect
+  /* RTL-specific keyframes that mirror the depth effect */
   @keyframes slide-out-to-left-rtl {
     from {
       transform: translateX(0);

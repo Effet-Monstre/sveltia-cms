@@ -1,6 +1,11 @@
 import { get } from 'svelte/store';
 
-import { allAssets, focusedAsset, getAssetsByDirName, overlaidAsset } from '$lib/services/assets';
+import {
+  focusedAsset,
+  getAssetByInternalPath,
+  getAssetsByDirName,
+  overlaidAsset,
+} from '$lib/services/assets';
 import { assetUpdatesToast } from '$lib/services/assets/data';
 import { getAssetKind } from '$lib/services/assets/kinds';
 import { skipCIConfigured, skipCIEnabled } from '$lib/services/backends/git/shared/integration';
@@ -22,7 +27,7 @@ import { formatFileName } from '$lib/services/utils/file';
  * object.
  */
 export const createFileList = (uploadingAssets) => {
-  const { files, folder, originalAsset } = uploadingAssets;
+  const { files, folder, originalAssets } = uploadingAssets;
   const { slugify_filename: slugificationEnabled = false } = getDefaultMediaLibraryOptions().config;
 
   const assetNamesInSameFolder =
@@ -31,6 +36,10 @@ export const createFileList = (uploadingAssets) => {
       : [];
 
   return files.map((file) => {
+    const originalAsset = originalAssets?.find(
+      (a) => a.name.normalize().toLowerCase() === file.name.normalize().toLowerCase(),
+    );
+
     const fileName =
       originalAsset?.name ??
       formatFileName(file.name, { slugificationEnabled, assetNamesInSameFolder });
@@ -61,12 +70,12 @@ export const updatedStores = ({ count }) => {
 
   // Replace the existing asset
   if (_focusedAsset) {
-    focusedAsset.set(get(allAssets).find((a) => a.path === _focusedAsset.path));
+    focusedAsset.set(getAssetByInternalPath(_focusedAsset.path));
   }
 
   // Replace the existing asset
   if (_overlaidAsset) {
-    overlaidAsset.set(get(allAssets).find((a) => a.path === _overlaidAsset.path));
+    overlaidAsset.set(getAssetByInternalPath(_overlaidAsset.path));
   }
 
   assetUpdatesToast.set({

@@ -1,13 +1,13 @@
 <script>
   import { _ } from '@sveltia/i18n';
-  import { Icon, Option, Select, SelectButton, SelectButtonGroup } from '@sveltia/ui';
+  import { Divider, Icon, Option, Select, SelectButton, SelectButtonGroup } from '@sveltia/ui';
   import { writable } from 'svelte/store';
 
   import { entryDraft } from '$lib/services/contents/draft';
   import { entryEditorSettings } from '$lib/services/contents/editor/settings';
   import { getLocaleLabel } from '$lib/services/contents/i18n';
   import { DEFAULT_I18N_CONFIG } from '$lib/services/contents/i18n/config';
-  import { isMediumScreen, isSmallScreen } from '$lib/services/user/env';
+  import { env } from '$lib/services/user/env.svelte';
 
   /**
    * @import { Writable } from 'svelte/store';
@@ -34,7 +34,7 @@
   const collectionFile = $derived($entryDraft?.collectionFile);
   const { allLocales } = $derived((collectionFile ?? collection)?._i18n ?? DEFAULT_I18N_CONFIG);
   const listedLocales = $derived(
-    $isSmallScreen || $isMediumScreen
+    env.isSmallScreen || env.isMediumScreen
       ? [...allLocales]
       : allLocales.filter((locale) => !($thatPane?.mode === 'edit' && $thatPane.locale === locale)),
   );
@@ -46,15 +46,23 @@
     ),
   );
   const canPreview = $derived($entryDraft?.canPreview ?? true);
-  const useDropDown = $derived($isSmallScreen || $isMediumScreen || allLocales.length >= 5);
+  const useDropDown = $derived(env.isSmallScreen || env.isMediumScreen || allLocales.length >= 5);
   const SelectComponent = $derived(useDropDown ? Select : SelectButtonGroup);
   const OptionComponent = $derived(useDropDown ? Option : SelectButton);
   const variant = $derived(useDropDown ? undefined : 'tertiary');
   const size = $derived(useDropDown ? undefined : 'small');
+  const currentValue = $derived(
+    $thisPane?.mode === 'edit'
+      ? $thisPane.locale
+      : $thisPane?.mode === 'preview'
+        ? 'preview'
+        : undefined,
+  );
 </script>
 
 <div role="none" class="wrapper">
   <SelectComponent
+    value={currentValue}
     class={hasAnyError && useDropDown ? 'error' : undefined}
     aria-label={_('switch_locale')}
     aria-controls={id.replace('-header', '-body')}
@@ -71,6 +79,7 @@
           {variant}
           {size}
           {label}
+          value={locale}
           aria-label="{label} {disabled
             ? _('locale_content_disabled_short')
             : hasError
@@ -97,10 +106,14 @@
         </OptionComponent>
       {/each}
       {#if $thatPane?.mode === 'edit' && canPreview && $entryEditorSettings?.showPreview}
+        {#if useDropDown}
+          <Divider />
+        {/if}
         <OptionComponent
           {variant}
           {size}
           label={_('preview')}
+          value="preview"
           selected={$thisPane?.mode === 'preview'}
           data-mode="preview"
           onSelect={() => {
@@ -112,7 +125,7 @@
   </SelectComponent>
 </div>
 
-<style lang="scss">
+<style>
   .wrapper {
     display: contents;
 

@@ -7,12 +7,14 @@
   import { uploadingAssets } from '$lib/services/assets';
   import { targetAssetFolder } from '$lib/services/assets/folders';
   import { showAssetOverlay, showUploadAssetsDialog } from '$lib/services/assets/view';
-  import { hasMouse } from '$lib/services/user/env';
+  import { env } from '$lib/services/user/env.svelte';
 
   /** @type {FilePicker | undefined} */
   let filePicker = $state();
 
-  const { originalAsset } = $derived($uploadingAssets);
+  const { originalAssets } = $derived($uploadingAssets);
+  // Use the first asset because replacement only supports one asset for now
+  const originalAsset = $derived(originalAssets?.[0]);
   const multiple = $derived(!originalAsset);
   const accept = $derived(
     originalAsset ? (mime.getType(originalAsset.name) ?? undefined) : undefined,
@@ -30,14 +32,14 @@
     $uploadingAssets = {
       folder: originalAsset ? originalAsset.folder : $targetAssetFolder,
       files,
-      originalAsset,
+      originalAssets,
     };
     $showUploadAssetsDialog = false;
   };
 
   $effect(() => {
     // Open the file picker directly if drag & drop is not supported (on mobile)
-    if (!$hasMouse && $showUploadAssetsDialog) {
+    if (!env.hasMouse && $showUploadAssetsDialog) {
       filePicker?.open();
     }
   });
@@ -49,7 +51,7 @@
   });
 </script>
 
-{#if $hasMouse}
+{#if env.hasMouse}
   <Dialog
     title={originalAsset
       ? _('replace_x', { values: { name: originalAsset.name } })

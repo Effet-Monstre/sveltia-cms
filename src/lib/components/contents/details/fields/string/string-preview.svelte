@@ -8,7 +8,7 @@
   import { isURL } from '@sveltia/utils/string';
 
   import YouTubeEmbed from '$lib/components/contents/details/fields/string/youtube-embed.svelte';
-  import { getCanonicalLocale } from '$lib/services/contents/i18n';
+  import { getCanonicalLocale, getDirection } from '$lib/services/contents/i18n';
   import { isYouTubeVideoURL } from '$lib/services/utils/media/video/youtube';
 
   /**
@@ -32,15 +32,23 @@
   } = $props();
 
   const { name: fieldName, type = 'text' } = $derived(fieldConfig);
+
+  const SAFE_PROTOCOL_REGEX = /^(?:https|mailto|tel):/;
 </script>
 
 {#if typeof currentValue === 'string' && currentValue.trim()}
-  <p lang={getCanonicalLocale(locale)} dir="auto" class:title={fieldName === 'title'}>
+  <p
+    lang={getCanonicalLocale(locale)}
+    dir={getDirection(locale)}
+    class:title={fieldName === 'title'}
+  >
     {#if type === 'url' || isURL(currentValue)}
       {#if isYouTubeVideoURL(currentValue)}
         <YouTubeEmbed url={currentValue} />
-      {:else}
+      {:else if SAFE_PROTOCOL_REGEX.test(currentValue)}
         <a href={encodeURI(currentValue)}>{currentValue}</a>
+      {:else}
+        {currentValue}
       {/if}
     {:else if type === 'email'}
       <a href="mailto:{encodeURI(currentValue)}">{currentValue}</a>
@@ -50,18 +58,16 @@
   </p>
 {/if}
 
-<style lang="scss">
+<style>
   .title {
     font-size: var(--sui-font-size-xxx-large);
     font-weight: var(--sui-font-weight-bold);
   }
 
-  // Remove the padding to make the iframe full-width on small screens
+  /* Remove the padding to make the iframe full-width on small screens */
   @media (width < 768px) {
-    p:has(:global(iframe)) {
-      :global([role='document'] section) > & {
-        margin-inline: calc(var(--entry-preview-padding-inline) * -1);
-      }
+    :global([role='document'] section) > p:has(:global(iframe)) {
+      margin-inline: calc(var(--entry-preview-padding-inline) * -1);
     }
   }
 </style>

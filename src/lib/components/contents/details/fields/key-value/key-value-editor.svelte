@@ -17,6 +17,7 @@
     savePairs,
     validatePairs,
   } from '$lib/services/contents/fields/key-value/helper';
+  import { getDirection } from '$lib/services/contents/i18n';
 
   /**
    * @import { Writable } from 'svelte/store';
@@ -56,6 +57,9 @@
 
   /** @type {[string, string][]} */
   let pairs = $state([]);
+  /** @type {number[]} */
+  let pairIds = $state([]);
+  let nextPairId = 0;
   /** @type {HTMLTableRowElement[]} */
   const rowElements = $state([]);
   /** @type {boolean[]} */
@@ -76,6 +80,16 @@
 
     if (!equal(pairs, updatedPairs)) {
       pairs = [...updatedPairs];
+      // Preserve existing IDs for unchanged positions; assign new IDs for new pairs
+      pairIds = updatedPairs.map((_pair, i) => {
+        if (i < pairIds.length) {
+          return pairIds[i];
+        }
+
+        nextPairId += 1;
+
+        return nextPairId - 1;
+      });
       edited = updatedPairs.map(() => false);
     }
 
@@ -101,6 +115,8 @@
     });
 
     pairs.push(['', '']);
+    pairIds.push(nextPairId);
+    nextPairId += 1;
     edited.push(false);
 
     window.requestAnimationFrame(() => {
@@ -116,6 +132,7 @@
    */
   const removePair = (index) => {
     pairs.splice(index, 1);
+    pairIds.splice(index, 1);
     edited.splice(index, 1);
   };
 
@@ -163,10 +180,11 @@
       </tr>
     </thead>
     <tbody>
-      {#each pairs as pair, index (`${pair[0]}-${index}`)}
+      {#each pairs as pair, index (pairIds[index])}
         <tr bind:this={rowElements[index]}>
           <td class="key">
             <TextInput
+              dir="ltr"
               {readonly}
               flex
               bind:value={pair[0]}
@@ -188,6 +206,7 @@
           </td>
           <td class="value">
             <TextInput
+              dir={getDirection(locale)}
               {readonly}
               flex
               bind:value={pair[1]}
@@ -251,7 +270,7 @@
   />
 </div>
 
-<style lang="scss">
+<style>
   table {
     width: -moz-available;
     width: -webkit-fill-available;

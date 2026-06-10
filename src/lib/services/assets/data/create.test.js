@@ -7,6 +7,7 @@ vi.mock('$lib/services/assets', () => ({
   allAssets: { subscribe: vi.fn() },
   focusedAsset: { set: vi.fn() },
   overlaidAsset: { set: vi.fn() },
+  getAssetByInternalPath: vi.fn(),
   getAssetsByDirName: vi.fn(),
 }));
 
@@ -84,6 +85,7 @@ vi.mock('$lib/services/assets', () => ({
     set: vi.fn(),
     subscribe: vi.fn(() => vi.fn()),
   },
+  getAssetByInternalPath: vi.fn(),
   getAssetsByDirName: vi.fn().mockReturnValue([]),
 }));
 
@@ -146,7 +148,7 @@ describe('assets/data/create', () => {
           entryRelative: false,
           hasTemplateTags: false,
         },
-        originalAsset: undefined,
+        originalAssets: undefined,
       };
 
       const result = createFileList(uploadingAssets);
@@ -174,7 +176,7 @@ describe('assets/data/create', () => {
           entryRelative: false,
           hasTemplateTags: false,
         },
-        originalAsset: undefined,
+        originalAssets: undefined,
       };
 
       // Mock getAssetsByDirName to return some existing assets with full Asset structure
@@ -216,8 +218,8 @@ describe('assets/data/create', () => {
       expect(result[0].name).toBe('test.jpg');
     });
 
-    it('should create file list for asset updates', () => {
-      const mockFile = new File(['content'], 'updated.jpg', { type: 'image/jpeg' });
+    it('should create file list for asset updates when file name matches', () => {
+      const mockFile = new File(['content'], 'original.jpg', { type: 'image/jpeg' });
 
       const uploadingAssets = {
         files: [mockFile],
@@ -228,20 +230,22 @@ describe('assets/data/create', () => {
           entryRelative: false,
           hasTemplateTags: false,
         },
-        originalAsset: {
-          name: 'original.jpg',
-          path: '/images/original.jpg',
-          sha: 'abc123',
-          size: 1024,
-          kind: /** @type {import('$lib/types/private').AssetKind} */ ('image'),
-          folder: {
-            internalPath: '/images',
-            collectionName: 'assets',
-            publicPath: '/images',
-            entryRelative: false,
-            hasTemplateTags: false,
+        originalAssets: [
+          {
+            name: 'original.jpg',
+            path: '/images/original.jpg',
+            sha: 'abc123',
+            size: 1024,
+            kind: /** @type {import('$lib/types/private').AssetKind} */ ('image'),
+            folder: {
+              internalPath: '/images',
+              collectionName: 'assets',
+              publicPath: '/images',
+              entryRelative: false,
+              hasTemplateTags: false,
+            },
           },
-        },
+        ],
       };
 
       const result = createFileList(uploadingAssets);
@@ -254,6 +258,157 @@ describe('assets/data/create', () => {
           file: mockFile,
         },
       ]);
+    });
+
+    it('should use create action when file name does not match any original asset', () => {
+      const mockFile = new File(['content'], 'new-photo.jpg', { type: 'image/jpeg' });
+
+      const uploadingAssets = {
+        files: [mockFile],
+        folder: {
+          internalPath: '/images',
+          collectionName: 'assets',
+          publicPath: '/images',
+          entryRelative: false,
+          hasTemplateTags: false,
+        },
+        originalAssets: [
+          {
+            name: 'original.jpg',
+            path: '/images/original.jpg',
+            sha: 'abc123',
+            size: 1024,
+            kind: /** @type {import('$lib/types/private').AssetKind} */ ('image'),
+            folder: {
+              internalPath: '/images',
+              collectionName: 'assets',
+              publicPath: '/images',
+              entryRelative: false,
+              hasTemplateTags: false,
+            },
+          },
+        ],
+      };
+
+      const result = createFileList(uploadingAssets);
+
+      expect(result).toEqual([
+        {
+          action: 'create',
+          name: 'new-photo.jpg',
+          path: '/images/new-photo.jpg',
+          file: mockFile,
+        },
+      ]);
+    });
+
+    it('should match original assets case-insensitively', () => {
+      const mockFile = new File(['content'], 'Photo.JPG', { type: 'image/jpeg' });
+
+      const uploadingAssets = {
+        files: [mockFile],
+        folder: {
+          internalPath: '/images',
+          collectionName: 'assets',
+          publicPath: '/images',
+          entryRelative: false,
+          hasTemplateTags: false,
+        },
+        originalAssets: [
+          {
+            name: 'photo.jpg',
+            path: '/images/photo.jpg',
+            sha: 'abc123',
+            size: 1024,
+            kind: /** @type {import('$lib/types/private').AssetKind} */ ('image'),
+            folder: {
+              internalPath: '/images',
+              collectionName: 'assets',
+              publicPath: '/images',
+              entryRelative: false,
+              hasTemplateTags: false,
+            },
+          },
+        ],
+      };
+
+      const result = createFileList(uploadingAssets);
+
+      expect(result).toEqual([
+        {
+          action: 'update',
+          name: 'photo.jpg',
+          path: '/images/photo.jpg',
+          file: mockFile,
+        },
+      ]);
+    });
+
+    it('should handle multiple files with mixed matching against originalAssets', async () => {
+      const { getAssetsByDirName } = await import('$lib/services/assets');
+
+      vi.mocked(getAssetsByDirName).mockReturnValue([
+        {
+          name: 'existing.jpg',
+          path: '/images/existing.jpg',
+          sha: 'abc123',
+          size: 1024,
+          kind: 'image',
+          folder: {
+            internalPath: '/images',
+            collectionName: 'assets',
+            publicPath: '/images',
+            entryRelative: false,
+            hasTemplateTags: false,
+          },
+        },
+      ]);
+
+      const file1 = new File(['content1'], 'existing.jpg', { type: 'image/jpeg' });
+      const file2 = new File(['content2'], 'new.jpg', { type: 'image/jpeg' });
+
+      const uploadingAssets = {
+        files: [file1, file2],
+        folder: {
+          internalPath: '/images',
+          collectionName: 'assets',
+          publicPath: '/images',
+          entryRelative: false,
+          hasTemplateTags: false,
+        },
+        originalAssets: [
+          {
+            name: 'existing.jpg',
+            path: '/images/existing.jpg',
+            sha: 'abc123',
+            size: 1024,
+            kind: /** @type {import('$lib/types/private').AssetKind} */ ('image'),
+            folder: {
+              internalPath: '/images',
+              collectionName: 'assets',
+              publicPath: '/images',
+              entryRelative: false,
+              hasTemplateTags: false,
+            },
+          },
+        ],
+      };
+
+      const result = createFileList(uploadingAssets);
+
+      expect(result).toHaveLength(2);
+      expect(result[0]).toEqual({
+        action: 'update',
+        name: 'existing.jpg',
+        path: '/images/existing.jpg',
+        file: file1,
+      });
+      expect(result[1]).toEqual({
+        action: 'create',
+        name: 'new.jpg',
+        path: '/images/new.jpg',
+        file: file2,
+      });
     });
 
     it('should handle multiple files', () => {
@@ -269,7 +424,7 @@ describe('assets/data/create', () => {
           entryRelative: false,
           hasTemplateTags: false,
         },
-        originalAsset: undefined,
+        originalAssets: undefined,
       };
 
       const result = createFileList(uploadingAssets);
@@ -311,7 +466,7 @@ describe('assets/data/create', () => {
           entryRelative: false,
           hasTemplateTags: false,
         },
-        originalAsset: undefined,
+        originalAssets: undefined,
       };
 
       const result = createFileList(uploadingAssets);
@@ -335,7 +490,7 @@ describe('assets/data/create', () => {
           entryRelative: false,
           hasTemplateTags: false,
         },
-        originalAsset: undefined,
+        originalAssets: undefined,
       };
 
       const result = createFileList(uploadingAssets);
@@ -353,7 +508,7 @@ describe('assets/data/create', () => {
       const uploadingAssets = {
         files: [mockFile],
         folder: undefined,
-        originalAsset: undefined,
+        originalAssets: undefined,
       };
 
       const result = createFileList(uploadingAssets);
@@ -429,7 +584,7 @@ describe('assets/data/create', () => {
     });
 
     it('should update focusedAsset when it exists', async () => {
-      const { focusedAsset, allAssets } = await import('$lib/services/assets');
+      const { focusedAsset, getAssetByInternalPath } = await import('$lib/services/assets');
       const { get } = await import('svelte/store');
 
       const oldAsset = {
@@ -448,17 +603,18 @@ describe('assets/data/create', () => {
 
       vi.mocked(get).mockImplementation((store) => {
         if (store === focusedAsset) return oldAsset;
-        if (store === allAssets) return [newAsset];
         return undefined;
       });
+      vi.mocked(getAssetByInternalPath).mockReturnValue(/** @type {any} */ (newAsset));
 
       updatedStores({ count: 1 });
 
+      expect(getAssetByInternalPath).toHaveBeenCalledWith('/images/old.jpg');
       expect(focusedAsset.set).toHaveBeenCalledWith(newAsset);
     });
 
     it('should update overlaidAsset when it exists', async () => {
-      const { overlaidAsset, allAssets } = await import('$lib/services/assets');
+      const { overlaidAsset, getAssetByInternalPath } = await import('$lib/services/assets');
       const { get } = await import('svelte/store');
 
       const oldAsset = {
@@ -477,17 +633,20 @@ describe('assets/data/create', () => {
 
       vi.mocked(get).mockImplementation((store) => {
         if (store === overlaidAsset) return oldAsset;
-        if (store === allAssets) return [newAsset];
         return undefined;
       });
+      vi.mocked(getAssetByInternalPath).mockReturnValue(/** @type {any} */ (newAsset));
 
       updatedStores({ count: 1 });
 
+      expect(getAssetByInternalPath).toHaveBeenCalledWith('/images/old.jpg');
       expect(overlaidAsset.set).toHaveBeenCalledWith(newAsset);
     });
 
     it('should update both focusedAsset and overlaidAsset when they exist', async () => {
-      const { focusedAsset, overlaidAsset, allAssets } = await import('$lib/services/assets');
+      const { focusedAsset, getAssetByInternalPath, overlaidAsset } =
+        await import('$lib/services/assets');
+
       const { get } = await import('svelte/store');
 
       const oldFocused = {
@@ -515,12 +674,16 @@ describe('assets/data/create', () => {
       vi.mocked(get).mockImplementation((store) => {
         if (store === focusedAsset) return oldFocused;
         if (store === overlaidAsset) return oldOverlaid;
-        if (store === allAssets) return [newFocused, newOverlaid];
         return undefined;
       });
+      vi.mocked(getAssetByInternalPath).mockImplementation(
+        (path) => /** @type {any} */ (path === '/images/focused.jpg' ? newFocused : newOverlaid),
+      );
 
       updatedStores({ count: 2 });
 
+      expect(getAssetByInternalPath).toHaveBeenCalledWith('/images/focused.jpg');
+      expect(getAssetByInternalPath).toHaveBeenCalledWith('/images/overlaid.jpg');
       expect(focusedAsset.set).toHaveBeenCalledWith(newFocused);
       expect(overlaidAsset.set).toHaveBeenCalledWith(newOverlaid);
     });
@@ -539,7 +702,7 @@ describe('assets/data/create', () => {
           entryRelative: false,
           hasTemplateTags: false,
         },
-        originalAsset: undefined,
+        originalAssets: undefined,
       };
 
       const { saveChanges } = await import('$lib/services/backends/save');
@@ -591,7 +754,7 @@ describe('assets/data/create', () => {
           entryRelative: false,
           hasTemplateTags: false,
         },
-        originalAsset: undefined,
+        originalAssets: undefined,
       };
 
       const { saveChanges } = await import('$lib/services/backends/save');

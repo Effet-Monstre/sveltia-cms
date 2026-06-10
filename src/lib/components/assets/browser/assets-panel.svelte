@@ -10,7 +10,7 @@
   import SimpleImageGrid from '$lib/components/assets/browser/simple-image-grid.svelte';
   import AssetPreview from '$lib/components/assets/shared/asset-preview.svelte';
   import { normalize } from '$lib/services/search/util';
-  import { isSmallScreen } from '$lib/services/user/env';
+  import { env } from '$lib/services/user/env.svelte';
 
   /**
    * @import { Asset, SelectedResource, ViewType } from '$lib/types/private';
@@ -99,7 +99,7 @@
                 <div role="none" class="unsaved">{_('assets_dialog.unsaved')}</div>
               {/if}
               <AssetPreview {kind} {asset} alt={relPath} variant="tile" {checkerboard} />
-              {#if !$isSmallScreen || viewType === 'list'}
+              {#if !env.isSmallScreen || viewType === 'list'}
                 <AssetPath path={relPath}>
                   {#if viewType === 'list' && unsaved}
                     <div role="none" class="unsaved">{_('assets_dialog.unsaved')}</div>
@@ -118,7 +118,7 @@
   </EmptyState>
 {/if}
 
-<style lang="scss">
+<style>
   .grid-wrapper {
     overflow-y: auto;
     height: 100%;

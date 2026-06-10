@@ -44,15 +44,13 @@
   </Listbox>
 </div>
 
-<style lang="scss">
+<style>
   .wrapper {
     display: contents;
 
     :global {
       .listbox {
         gap: 4px;
-        overflow-x: hidden;
-        overflow-y: auto;
         border-width: 0;
         max-height: calc(100% - var(--sui-focus-ring-width) * 2);
 

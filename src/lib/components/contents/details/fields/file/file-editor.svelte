@@ -8,24 +8,31 @@
 -->
 <script>
   import { _ } from '@sveltia/i18n';
-  import { AlertDialog, ConfirmationDialog, TextArea } from '@sveltia/ui';
+  import { ConfirmationDialog, TextArea } from '@sveltia/ui';
   import { flushSync, getContext } from 'svelte';
 
   import SelectAssetsDialog from '$lib/components/assets/browser/select-assets-dialog.svelte';
+  import ConflictResolutionDialog from '$lib/components/assets/shared/conflict-resolution-dialog.svelte';
   import DropZone from '$lib/components/assets/shared/drop-zone.svelte';
+  import OversizeAlertDialog from '$lib/components/assets/shared/oversize-alert-dialog.svelte';
   import FileEditorItem from '$lib/components/contents/details/fields/file/file-editor-item.svelte';
   import UploadButton from '$lib/components/contents/details/fields/file/upload-button.svelte';
   import { entryDraft } from '$lib/services/contents/draft';
-  import { getAssetLibraryFolderMap } from '$lib/services/contents/fields/file/helper';
-  import { processResource } from '$lib/services/contents/fields/file/process';
+  import { checkDuplicates } from '$lib/services/contents/fields/file/duplicates.svelte';
+  import {
+    getAssetLibraryFolderMap,
+    getTargetFolderPath,
+    listAssets,
+  } from '$lib/services/contents/fields/file/helper';
+  import { getUnsavedAssets, processResource } from '$lib/services/contents/fields/file/process';
   import { allCloudStorageServices } from '$lib/services/integrations/media-libraries/cloud';
   import { getDefaultMediaLibraryOptions } from '$lib/services/integrations/media-libraries/default';
   import { isMultiple } from '$lib/services/integrations/media-libraries/shared';
-  import { formatSize } from '$lib/services/utils/file';
   import { SUPPORTED_IMAGE_TYPES } from '$lib/services/utils/media/image';
 
   /**
    * @import {
+   * Asset,
    * AssetFolderInfo,
    * FieldEditorContext,
    * FieldEditorProps,
@@ -62,7 +69,7 @@
   let showSelectAssetsDialog = $state(false);
   let replaceMode = $state(false);
   let replaceIndex = $state(-1);
-  let showSizeLimitDialog = $state(false);
+  let showOversizeAlert = $state(false);
   let showPhotoCreditDialog = $state(false);
   let photoCredit = $state('');
   /** @type {DropZone | undefined} */
@@ -70,6 +77,10 @@
   let processing = $state(false);
   /** @type {string[]} */
   let oversizedFileNames = $state([]);
+  /** @type {File[]} */
+  let pendingFiles = $state([]);
+  /** @type {Asset[]} */
+  let unsavedAssets = $state([]);
 
   const {
     widget: fieldType,
@@ -83,7 +94,9 @@
   const fileName = $derived($entryDraft?.fileName);
   const isIndexFile = $derived($entryDraft?.isIndexFile ?? false);
   const isImageField = $derived(fieldType === 'image');
-  const libraryConfig = $derived(getDefaultMediaLibraryOptions({ fieldConfig }).config);
+  const kind = $derived(isImageField ? 'image' : undefined);
+  const defaultLibraryOptions = $derived(getDefaultMediaLibraryOptions({ fieldConfig }));
+  const libraryConfig = $derived(defaultLibraryOptions.config);
   const assetLibraryFolderMap = $derived(
     getAssetLibraryFolderMap({ collectionName, fileName, typedKeyPath, isIndexFile }),
   );
@@ -91,6 +104,12 @@
     /** @type {AssetFolderInfo} */ (
       Object.values(assetLibraryFolderMap).find(({ enabled }) => enabled)?.folder
     ),
+  );
+  const targetFolderPath = $derived(
+    getTargetFolderPath({ entry: $entryDraft?.originalEntry, folder: targetFolder }),
+  );
+  const listedAssets = $derived(
+    listAssets({ kind, folder: targetFolder, folderPath: targetFolderPath, unsavedAssets }),
   );
   // Ignore the `multiple` option when the field is used in a rich text editor component
   const multiple = $derived(isMultiple(fieldConfig) && !inEditorComponent);
@@ -112,12 +131,25 @@
     entry,
   });
   const enabledCloudServiceEntries = $derived(
-    Object.entries(allCloudStorageServices).filter(([, { isEnabled }]) => isEnabled?.() ?? true),
+    Object.entries(allCloudStorageServices).filter(
+      ([, { isEnabled }]) => isEnabled?.(fieldConfig) ?? true,
+    ),
   );
   /**
-   * Disable the drop zone if there are cloud services configured to avoid confusion.
+   * Whether the default (internal) media library is available as a storage provider.
    */
-  const allowDrop = $derived(!enabledCloudServiceEntries.length);
+  const isDefaultLibraryAvailable = $derived(defaultLibraryOptions.enabled && !!targetFolder);
+  /**
+   * The total number of available media storage providers (default and/or cloud).
+   */
+  const totalProviders = $derived(
+    (isDefaultLibraryAvailable ? 1 : 0) + enabledCloudServiceEntries.length,
+  );
+  /**
+   * Disable the drop zone if there are no providers or multiple providers are available, to avoid
+   * confusion about where dropped files will be stored.
+   */
+  const allowDrop = $derived(totalProviders === 1);
 
   /**
    * Reset the current selection.
@@ -140,6 +172,9 @@
       return;
     }
 
+    // Save the current value so we can restore it if all resources fail validation
+    const previousValue = multiple ? undefined : currentValue;
+
     resetSelection();
     processing = true;
     oversizedFileNames = [];
@@ -152,6 +187,7 @@
 
     /** @type {string[]} */
     const credits = [];
+    let hasValidResource = false;
 
     const lastIndex = multiple
       ? (Object.keys($entryDraft.currentValues[locale])
@@ -162,6 +198,8 @@
 
     resources.forEach(({ value, credit, oversizedFileName }, index) => {
       if (value) {
+        hasValidResource = true;
+
         if (multiple) {
           const targetIndex = replaceMode ? replaceIndex : lastIndex + 1 + index;
 
@@ -182,6 +220,12 @@
       }
     });
 
+    // Restore the previous value if no valid resources were processed, so that a failed
+    // upload/replace doesn’t leave an empty or invalid reference in the YAML
+    if (!hasValidResource && !multiple && previousValue !== undefined) {
+      currentValue = previousValue;
+    }
+
     if (credits.length) {
       photoCredit = credits.join('\n');
       showPhotoCreditDialog = true;
@@ -190,7 +234,7 @@
     }
 
     if (oversizedFileNames.length) {
-      showSizeLimitDialog = true;
+      showOversizeAlert = true;
     }
 
     processing = false;
@@ -201,12 +245,25 @@
    * @param {object} detail Drop event detail.
    * @param {File[]} detail.files Dropped files.
    */
-  const onDrop = ({ files }) => {
+  const onDrop = async ({ files }) => {
     if (!files.length) {
       return;
     }
 
-    onResourcesSelect(files.map((file) => ({ file, folder: targetFolder })));
+    if (isDefaultLibraryAvailable) {
+      const replace = await checkDuplicates({ files, listedAssets });
+
+      if (replace === undefined) {
+        // User cancelled the dialog
+        return;
+      }
+
+      onResourcesSelect(files.map((file) => ({ file, folder: targetFolder, replace })));
+    } else {
+      // Open the dialog and pass files to the cloud service panel for upload
+      pendingFiles = files;
+      showSelectAssetsDialog = true;
+    }
   };
 
   /**
@@ -258,6 +315,16 @@
       $entryDraft.currentValues[locale][`${keyPath}.${index}`],
     ];
   };
+
+  $effect(() => {
+    (async () => {
+      if ($entryDraft?.files) {
+        unsavedAssets = await getUnsavedAssets({ draft: $entryDraft, targetFolderPath });
+      } else {
+        unsavedAssets = [];
+      }
+    })();
+  });
 </script>
 
 {#snippet uploadButton()}
@@ -333,22 +400,22 @@
 {/if}
 
 <SelectAssetsDialog
-  kind={isImageField ? 'image' : undefined}
+  {kind}
   multiple={replaceMode ? false : multiple}
   {accept}
   {canEnterURL}
   {entryDraft}
   {fieldConfig}
   {assetLibraryFolderMap}
+  {enabledCloudServiceEntries}
   bind:open={showSelectAssetsDialog}
+  bind:pendingFiles
   onSelect={onResourcesSelect}
 />
 
-<AlertDialog bind:open={showSizeLimitDialog} title={_('assets_dialog.large_file.title')}>
-  {_('warning_oversized_files', {
-    values: { count: oversizedFileNames.length, size: formatSize(maxSize) },
-  })}
-</AlertDialog>
+<ConflictResolutionDialog />
+
+<OversizeAlertDialog bind:open={showOversizeAlert} {oversizedFileNames} {maxSize} />
 
 <ConfirmationDialog
   bind:open={showPhotoCreditDialog}
@@ -361,6 +428,7 @@
   <div role="none">{_('assets_dialog.photo_credit.description')}</div>
   <div role="none">
     <TextArea
+      dir="auto"
       flex
       readonly
       value={photoCredit}
@@ -372,7 +440,7 @@
   </div>
 </ConfirmationDialog>
 
-<style lang="scss">
+<style>
   .item-list {
     display: flex;
     flex-direction: column;
