@@ -16,17 +16,17 @@ Upstream ships a `CLAUDE.md`. Keep this line directly under its first heading, a
 
 Bring the project up per `ci/tasks/setup.md` after the merge, then run every gate, in full, and get each one green.
 
-1. **Static checks.** Every `pnpm check:*` script except `check:audit`, each on its own so one failure does not hide another. Fix what they report in fork code. Before the first sync these already failed on fork code, so expect to clean up `preview-renderer.svelte`, `insert-table-dialog.svelte`, `rich-text-editor.svelte` and `files2.js`; that is fixing code, not touching a gate.
-2. **Unit and component tests.** `pnpm test`.
-3. **Build.** `pnpm build`.
-4. **End-to-end tests.** `pnpm test:e2e`, against the bundle the build just wrote. This includes the fork’s own specs in `e2e/specs/fork/`.
+1. **Static checks.** Every `pnpm check:*` script except `check:audit`, each on its own so one failure does not hide another. Fix what they report in fork code.
+2. **Build.** `pnpm build`. It comes before the tests because `vite.config.js` loads the configuration schema from the committed `package/schema/sveltia-cms.json`: until the build rewrites it, the tests validate against the schema of the previous release and fail on upstream’s new options.
+3. **Unit and component tests.** `pnpm test`.
+4. **End-to-end tests.** `pnpm test:e2e`, against the bundle the build wrote. This includes the fork’s own specs in `e2e/specs/fork/`.
 5. **Screenshots.** See below.
 
 `pnpm check:audit` is not a gate. Put what it reports in the summary.
 
 ## The fork’s end-to-end specs
 
-`e2e/specs/fork/` holds one spec file per row of the customization table in `docs/fork.md`, written with upstream’s harness in `e2e/` (read `e2e/README.md`). If a row has no spec yet, which is the case for every row on the first sync, write it in this run. Each spec drives the built bundle the way a user would and checks what the user sees or what the CMS writes:
+`e2e/specs/fork/` holds one spec file per row of the customization table in `docs/fork.md`, written with upstream’s harness in `e2e/` (read `e2e/README.md`). If a row has no spec yet, write it in this run. Each spec drives the built bundle the way a user would and checks what the user sees or what the CMS writes:
 
 - **`api` backend and automatic sign-in**: a config with `backend: { name: api }` opens straight on the collections, with no sign-in screen.
 - **Custom preview renderers**: a renderer registered with `CMS.registerCustomPreviewRenderer` before `init`, returning HTML built from the entry values, shows that HTML in the preview pane and updates it when a field changes.
