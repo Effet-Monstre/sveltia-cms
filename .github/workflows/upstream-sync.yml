@@ -37,6 +37,13 @@ jobs:
         uses: actions/checkout@v6.0.2
         with:
           persist-credentials: false
+      - name: Check that SYNC_TOKEN can push
+        run: |
+          git push --dry-run --quiet "https://x-access-token:$GH_TOKEN@github.com/$GITHUB_REPOSITORY.git" \
+            HEAD:refs/heads/kranq-access-check || {
+            echo "SYNC_TOKEN cannot push to $GITHUB_REPOSITORY: it needs Contents, Pull requests and Workflows, read and write" >&2
+            exit 1
+          }
       - name: Install the kranq key
         run: |
           install -d -m 700 ~/.ssh
