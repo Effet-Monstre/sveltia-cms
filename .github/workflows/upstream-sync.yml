@@ -36,6 +36,7 @@ jobs:
       - name: Checkout the branch
         uses: actions/checkout@v6.0.2
         with:
+          fetch-depth: 0
           persist-credentials: false
       - name: Check that SYNC_TOKEN can push
         run: |
