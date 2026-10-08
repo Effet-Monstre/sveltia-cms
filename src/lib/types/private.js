@@ -1,6 +1,5 @@
 /**
  * @import { Component } from 'svelte';
- * @import { Writable } from 'svelte/store';
  * @import {
  * BackendName,
  * BodyFieldOptions,
@@ -8,6 +7,7 @@
  * Collection,
  * CollectionDivider,
  * CollectionFile,
+ * CustomField,
  * DateTimeFieldProps,
  * DateTimeInputType,
  * EntryCollection,
@@ -27,6 +27,7 @@
  * S3MediaLibrary,
  * SelectField,
  * SelectFieldValue,
+ * ViewComparisonOptions,
  * } from './public';
  */
 
@@ -69,6 +70,7 @@
  * @property {string} [email] User email.
  * @property {string} [avatarURL] Avatar URL.
  * @property {string} [profileURL] Profile URL.
+ * @property {boolean} [bot] Whether the user is a service account.
  */
 
 /**
@@ -77,8 +79,10 @@
  * @property {Record<string, string>} [apiKeys] API keys for integrations.
  * @property {Record<string, string>} [logins] Log-in credentials (user name and password) for
  * integrations.
- * @property {string} [theme] Selected UI theme, either `dark` or `light`.
- * @property {InternalLocaleCode} [locale] Selected UI locale, e.g. `en`.
+ * @property {'auto' | 'dark' | 'light'} [theme] Selected UI theme, or `auto` to follow the system’s
+ * color scheme.
+ * @property {InternalLocaleCode | 'auto'} [locale] Selected UI locale, e.g. `en-US`, or `auto` to
+ * follow the browser’s language settings.
  * @property {boolean} [useDraftBackup] Whether to use the entry draft backup mechanism.
  * @property {boolean} [closeOnSave] Whether to close the entry editor after saving a draft.
  * @property {boolean} [closeWithEscape] Whether to close the entry editor by pressing the Escape
@@ -129,6 +133,24 @@
  */
 
 /**
+ * The owner and name of a repository, which is all that’s needed to address it in an API request.
+ * Used for the fork an Open Authoring contributor writes to, which is a different repository from
+ * the configured one described by {@link RepositoryInfo}.
+ * @typedef {object} RepositoryPath
+ * @property {string} owner Owner name, which could be either an organization or individual user.
+ * @property {string} repo Repository name.
+ */
+
+/**
+ * An outstanding request for the user’s permission to fork the configured repository, which the UI
+ * turns into a confirmation dialog.
+ * @typedef {object} ForkPermissionRequest
+ * @property {string} repo Repository path to be forked, e.g. `owner/repo`.
+ * @property {(granted: boolean) => void} respond Function to answer the request, which resolves the
+ * promise the sign-in flow is waiting on.
+ */
+
+/**
  * API endpoint configuration.
  * @typedef {object} ApiEndpointConfig
  * @property {string} clientId OAuth client ID.
@@ -164,6 +186,14 @@
  * @property {InternalCollection} [collection] Collection of the corresponding entry or asset.
  * @property {boolean} [skipCI] Whether to disable automatic deployments for the commit. Used only
  * for Git backends.
+ * @property {string} [branch] Branch to commit to. Default: the branch configured in the site
+ * configuration. Used only for Git backends with Editorial Workflow enabled.
+ * @property {string} [headOid] Git object ID the branch is known to point at. It saves the backend
+ * a round trip to look the head up itself, which the caller can provide when it has just created
+ * the branch. Used only for Git backends with Editorial Workflow enabled.
+ * @property {string} [startBranch] Branch to create the `branch` from as part of the commit, which
+ * saves the round trip of creating it beforehand. The commit is rejected if the branch already
+ * exists. Used only for Git backends with Editorial Workflow enabled.
  */
 
 /**
@@ -184,6 +214,88 @@
  * @property {CommitResults} commit Commit results.
  * @property {Entry[]} savedEntries List of saved entries.
  * @property {Asset[]} savedAssets List of saved assets.
+ */
+
+/**
+ * What someone else’s commits have changed on the configured branch, as found by a check made after
+ * the site data was loaded. A modified entry is listed as it is now; a deleted one as it was.
+ * @typedef {object} RemoteChanges
+ * @property {Entry[]} addedEntries Entries that weren’t there before.
+ * @property {Entry[]} modifiedEntries Entries whose files have changed.
+ * @property {Entry[]} deletedEntries Entries whose files are gone.
+ * @property {Asset[]} addedAssets Assets that weren’t there before.
+ * @property {Asset[]} modifiedAssets Assets whose files have changed.
+ * @property {Asset[]} deletedAssets Assets whose files are gone.
+ */
+
+/**
+ * State of a deployment created by a CI/CD provider connected to the Git backend.
+ * - `checking`: a request to the backend is in flight, or nothing has been reported yet for a
+ * commit made moments ago and the provider is being given time to post its first status.
+ * - `pending`: the build is queued or running, or the page is not live yet.
+ * - `ready`: the build succeeded and the page is live.
+ * - `error`: the build failed.
+ * - `unknown`: no CI/CD provider reported anything, or the lookup itself failed. The UI falls back
+ * to the plain site preview link in this case.
+ * @typedef {'checking' | 'pending' | 'ready' | 'error' | 'unknown'} DeployState
+ */
+
+/**
+ * A commit to look up a deployment for.
+ * @typedef {object} DeployTarget
+ * @property {string} sha Git object ID (SHA-1 hash) of the commit.
+ * @property {string} branch Branch the commit is on. It’s needed by services that can only filter
+ * deployments by ref, such as GitLab.
+ * @property {'production' | 'preview'} kind Kind of deployment expected for the commit, used to
+ * break ties between environments. A commit on the production branch gets `production`, while an
+ * Editorial Workflow pull request gets `preview`.
+ */
+
+/**
+ * A deployment resolved from a backend’s CI/CD integration.
+ * @typedef {object} DeployStatus
+ * @property {DeployState} state Current state.
+ * @property {string} [url] Base URL of the deployment, without a trailing slash. It can be
+ * `undefined` while the build is still `pending`, because a URL isn’t always assigned upfront.
+ * @property {string} [context] Commit status context or deployment environment the URL came from.
+ * @property {number} checkedTime Time when the backend was last queried, as a Unix timestamp in
+ * milliseconds.
+ */
+
+/**
+ * What the last commit on the production branch is expected to have done, worked out without asking
+ * the CI/CD provider.
+ * @typedef {object} PublishHint
+ * @property {boolean} published Whether the commit is expected to have started a deployment.
+ * @property {number} time When the expectation was formed, as a Unix timestamp in milliseconds. A
+ * deployment read before this point describes an earlier state of the same commit, so it’s ignored
+ * until the next lookup.
+ */
+
+/**
+ * Result of a liveness check against a fully composed preview URL.
+ * - `ready`: the page returned a 2xx status.
+ * - `pending`: the page returned 404, meaning it hasn’t been built yet.
+ * - `unknown`: the response couldn’t be read. The URL is cross-origin, so the check was skipped, or
+ * the server returned some other status.
+ * @typedef {'ready' | 'pending' | 'unknown'} PageLiveness
+ */
+
+/**
+ * A preview link resolved for one entry and locale, composed from the site configuration and the
+ * deployment stores.
+ * @typedef {object} EntryPreviewLink
+ * @property {string} [url] URL to open. It’s `undefined` while a build has no URL yet, in which
+ * case the UI shows a disabled control instead of a link.
+ * @property {DeployState} state Current state, as reported by the CI/CD provider. The liveness of
+ * the URL is not folded in here; apply `refineState()` to do that.
+ * @property {boolean} isDeployPreview Whether the URL points at a deploy preview rather than the
+ * production site.
+ * @property {boolean} awaitingPreview Whether a deploy preview is expected for the entry but hasn’t
+ * been reported yet. The URL, if any, leads to the published version or nowhere, so the control
+ * reports the wait rather than offering it.
+ * @property {boolean} pingable Whether the URL is worth checking for liveness. It’s `false` for a
+ * page that can’t be live yet, such as an unpublished entry falling back to the production site.
  */
 
 /**
@@ -221,16 +333,176 @@
  * @property {() => RepositoryInfo | undefined} init Function to initialize the backend.
  * @property {(options: SignInOptions) => Promise<User | void>} signIn Function to sign in.
  * @property {() => Promise<void>} signOut Function to sign out.
- * @property {() => Promise<void>} fetchFiles Function to fetch files.
+ * @property {(options?: { lastCommit?: { hash: string, message: string } }) => Promise<void>}
+ * fetchFiles Function to fetch files. Calling it again once the site data has been loaded brings
+ * the stores up to date with the repository, fetching only what has changed. A Git backend takes
+ * the branch’s last commit, if the caller has just fetched it, so it isn’t fetched again.
+ * @property {() => Promise<{ hash: string, message: string }>} [fetchLastCommit] Function to fetch
+ * the configured branch’s head commit, to tell whether the repository has changed since the site
+ * data was loaded. Git backends only.
  * @property {(asset: Asset) => Promise<Blob>} [fetchBlob] Function to fetch an asset as a Blob. Git
  * backends only.
- * @property {(changes: FileChange[], options: CommitOptions) =>
- * Promise<CommitResults>} commitChanges Function to save file changes, including additions and
- * deletions, and return the commit hash and a map of committed files.
+ * @property {(changes: FileChange[], options: CommitOptions) => Promise<CommitResults>}
+ * commitChanges Function to save file changes, including additions and deletions, and return the
+ * commit hash and a map of committed files.
  * @property {() => Promise<Response>} [triggerDeployment] Function to manually trigger a new
  * deployment on any connected CI/CD provider. GitHub only.
+ * @property {() => Promise<string | undefined>} [fetchBranchHeadSHA] Function to resolve the head
+ * commit of the configured branch, which is the production deployment target. Git backends only.
+ * @property {(targets: DeployTarget[]) => Promise<Record<string, DeployStatus>>} [fetchDeployments]
+ * Function to resolve the deployment status and URL for the given commits, keyed by commit SHA. Git
+ * backends only, and only when the service exposes deployment or commit status information.
  * @property {(paths: string[]) => Promise<FileCommit[]>} [fetchFileCommits] Function to fetch
  * commit history for given file paths. Git backends only.
+ * @property {WorkflowBackendService} [workflow] Editorial Workflow implementation. Git backends
+ * only, and only when the backend supports the feature.
+ */
+
+/**
+ * Editorial Workflow status of an unpublished entry. The status is stored as a label on the
+ * corresponding pull request, prefixed with the `cms_label_prefix` backend option value.
+ * @typedef {'draft' | 'pending_review' | 'pending_publish' | 'pending_deletion'} WorkflowStatus
+ * @see https://decapcms.org/docs/editorial-workflows/
+ * @see https://sveltiacms.app/en/docs/workflows/editorial#statuses
+ */
+
+/**
+ * An entry whose pull request has been merged, and whose change is on its way to the site.
+ * @typedef {object} DeployingEntry
+ * @property {UnpublishedEntry} entry Entry as it was published, with the workflow properties it
+ * had: the status says whether the merge removed the entry from the site rather than putting it
+ * there, and the pull request’s `updatedDate` is when the merge landed.
+ * @property {string} sha Head commit of the configured branch once the merge had landed, which the
+ * site is being built from.
+ */
+
+/**
+ * A file included in an Editorial Workflow pull request.
+ * @typedef {object} WorkflowFile
+ * @property {string} path File path relative to the project’s root directory.
+ * @property {string} sha Git object ID (SHA-1 hash) of the file blob.
+ * @property {number} size File size in bytes.
+ * @property {string} [text] Raw text content. `undefined` for binary files.
+ * @property {boolean} deleted Whether the file has been deleted in the pull request.
+ * @property {boolean} [renamed] Whether the pull request renamed the file, which happens when the
+ * entry’s slug is edited. GitHub’s GraphQL API reports this without the previous path, so it marks
+ * the pull requests that need a follow-up REST request.
+ * @property {string} [previousPath] Path the file had before the pull request renamed it.
+ */
+
+/**
+ * A pull request that holds an unpublished entry created with Editorial Workflow.
+ * @typedef {object} WorkflowPullRequest
+ * @property {number} [number] Pull request number. It’s `undefined` for an Open Authoring draft,
+ * which is a branch in the contributor’s fork that no pull request has been opened for yet.
+ * @property {string} [nodeId] Global node ID used with the backend’s GraphQL API. `undefined` in
+ * the same case as `number`.
+ * @property {string} [url] Pull request URL on the backend service. `undefined` in the same case as
+ * `number`.
+ * @property {string} title Pull request title.
+ * @property {string} branch Head branch name, e.g. `cms/posts/hello-world`.
+ * @property {WorkflowStatus} status Current status determined by the pull request’s labels.
+ * @property {Date} createdDate Date when the pull request was created.
+ * @property {Date} updatedDate Date when the pull request was last updated.
+ * @property {CommitAuthor} [author] Author of the pull request.
+ * @property {string} [headSHA] Git object ID (SHA-1 hash) of the head commit on the pull request’s
+ * branch. It’s used to look up the deploy preview created for the pull request.
+ * @property {WorkflowFile[]} files Files changed in the pull request.
+ * @property {boolean} [canMerge] Whether the signed-in user can merge the pull request, which
+ * decides whether the entry can be published. `undefined` when the backend doesn’t tell, in which
+ * case the merge is offered and left to the backend to allow or refuse.
+ */
+
+/**
+ * Editorial Workflow properties attached to an unpublished entry.
+ * @typedef {object} UnpublishedEntryProps
+ * @property {WorkflowPullRequest} pullRequest Pull request holding the entry.
+ * @property {WorkflowStatus} status Current status. Same as `pullRequest.status`, duplicated here
+ * for convenience and reactivity.
+ * @property {string} collectionName Collection name the entry belongs to.
+ * @property {string} [fileName] Collection file name. File/singleton collection only.
+ * @property {string[]} [previousPaths] File paths the entry occupied before the pull request
+ * renamed it, which happens when the slug is edited. They’re used to match the draft with its
+ * published counterpart, which would otherwise be listed as a separate entry.
+ */
+
+/**
+ * An entry that has not been published yet, backed by an open pull request. It’s a regular
+ * {@link Entry} with extra Editorial Workflow information, so it can be passed to the existing
+ * entry editor and list components as is.
+ * @typedef {Entry & { workflow: UnpublishedEntryProps }} UnpublishedEntry
+ */
+
+/**
+ * A file changed by a pull request, as read by {@link WorkflowBackendService.fetchMergeState}.
+ * @typedef {object} WorkflowChangedFile
+ * @property {string} path File path relative to the project’s root directory.
+ * @property {'added' | 'modified' | 'removed' | 'renamed'} status How the pull request changes the
+ * file.
+ * @property {string} [previousPath] Path a renamed file had before.
+ * @property {string} [mode] Git file mode at the head commit, as an octal string, e.g. `100644`
+ * for a regular file, `120000` for a symbolic link or `160000` for a submodule. Missing for a
+ * removed file.
+ */
+
+/**
+ * State of a pull request read right before it’s merged.
+ * @typedef {object} WorkflowMergeState
+ * @property {string | undefined} headSHA Git object ID of the commit the pull request’s branch
+ * points at.
+ * @property {boolean} onConfiguredBranches Whether the pull request goes from a branch of the
+ * configured repository, rather than a fork, to the configured branch, which its base branch can be
+ * changed from on the Git service.
+ * @property {WorkflowChangedFile[]} files Files the pull request changes as of `headSHA`.
+ * @property {boolean} complete Whether `files` lists every changed file. The Git services cap the
+ * list, and a pull request over the cap can’t be checked.
+ */
+
+/**
+ * Arguments for the `saveEntry` function on {@link WorkflowBackendService}.
+ * @typedef {object} WorkflowSaveOptions
+ * @property {FileChange[]} changes Changes to be committed on the workflow branch.
+ * @property {CommitOptions} options Commit options.
+ * @property {string} branch Workflow branch name.
+ * @property {string} title Pull request title.
+ * @property {WorkflowStatus} status Status to open the pull request with. An edit starts as a
+ * draft, while a removal goes straight to `pending_deletion`, so it isn’t opened as a draft and
+ * relabelled a moment later.
+ * @property {WorkflowPullRequest} [pullRequest] Existing pull request, if the entry has already
+ * been saved once.
+ */
+
+/**
+ * Editorial Workflow implementation provided by a backend service.
+ * @typedef {object} WorkflowBackendService
+ * @property {() => Promise<WorkflowPullRequest[]>} fetchPullRequests Function to fetch all the open
+ * pull requests managed by the CMS, along with the changed files.
+ * @property {(args: WorkflowSaveOptions) => Promise<{ commit: CommitResults, pullRequest:
+ * WorkflowPullRequest }>} savePullRequest Function to commit changes on the workflow branch,
+ * creating the branch and the pull request if needed.
+ * @property {(pullRequest: WorkflowPullRequest, status: WorkflowStatus) =>
+ * Promise<WorkflowPullRequest>} updateStatus Function to update the pull request’s status label and
+ * draft state.
+ * @property {(branch: string) => Promise<string | undefined>} fetchBranchHead Function to fetch
+ * the commit the workflow branch points at, or `undefined` if the branch is gone. Two editors
+ * working on the same entry share its branch, so a save compares this with the head it last
+ * committed to find out whether someone else has written to it meanwhile.
+ * @property {(pullRequest: WorkflowPullRequest) => Promise<WorkflowMergeState>} fetchMergeState
+ * Function to read the pull request afresh right before it’s merged: where it goes, the commit its
+ * branch points at, and every file it changes as of that commit. Publishing checks this against
+ * what the CMS has shown for the entry, so a change it hasn’t shown can’t be merged along with it.
+ * @property {(args: { headSHA: string, paths: string[] }) => Promise<string[]>} fetchUnchangedPaths
+ * Function to find which of the given files are the same at the given commit as on the configured
+ * branch, missing from both counting as the same. A merge leaves such a file as it is, so it can’t
+ * publish anything; an answer the service can’t vouch for leaves the file out.
+ * @property {(pullRequest: WorkflowPullRequest) => Promise<void>} publish Function to merge the
+ * pull request and delete the workflow branch. The merge is pinned to the pull request’s
+ * `headSHA`, so it fails if the branch has moved on since. The service may leave the merge to the
+ * Git service when a required check is still running, in which case it resolves once the merge has
+ * landed, and rejects if it won’t — the check has failed, say — so the entry isn’t taken for
+ * published.
+ * @property {(pullRequest: WorkflowPullRequest) => Promise<void>} discard Function to close the
+ * pull request and delete the workflow branch.
  */
 
 /**
@@ -259,12 +531,16 @@
  * cloud storage services.
  * @property {string} [password] Password for services that require user authentication, such as
  * cloud storage services.
+ * @property {string} [dirPath] Directory the uploaded files go to, relative to the configured
+ * prefix, e.g. `2024/summer`. An empty string or `undefined` for the prefix itself. Only a cloud
+ * storage service that stores files at paths reads it.
  */
 
 /**
  * Resolved S3 configuration passed to core request helpers. Extends the public `S3MediaLibrary`
- * with internal fields that providers set in their `getConfig` functions.
- * @typedef {S3MediaLibrary & { acl?: string | false }} S3Config
+ * with internal fields that the service sets: `acl` is the canned ACL sent in the `x-amz-acl`
+ * header when creating an object, if the service needs one to make it publicly readable.
+ * @typedef {S3MediaLibrary & { acl?: string }} S3Config
  */
 
 /**
@@ -286,15 +562,52 @@
  * @property {RegExp} [apiKeyPattern] API key pattern.
  * @property {(fieldConfig?: MediaField) => boolean} [isEnabled] Whether the service is enabled.
  * It’s determined by whether the service is defined in the CMS or field configuration.
+ * @property {(url: string) => boolean} [isAssetURL] Whether the given URL points to a file on the
+ * service, given the site configuration, so that such a file can be told apart from one linked from
+ * elsewhere.
  * @property {() => Promise<boolean>} [init] Function to initialize the service.
  * @property {(userName: string, password: string) => Promise<boolean>} [signIn] Function to sign in
  * to the service.
- * @property {(query: string, options: MediaLibraryFetchOptions) =>
- * Promise<ExternalAsset[]>} [search] Function to search files.
+ * @property {(query: string, options: MediaLibraryFetchOptions) => Promise<ExternalAsset[]>}
+ * [search] Function to search files.
  * @property {(options: MediaLibraryFetchOptions) => Promise<ExternalAsset[]>} [list] Function to
  * list files. For stock asset services, it should return popular or curated images.
- * @property {(files: File[], options: MediaLibraryFetchOptions) =>
- * Promise<ExternalAsset[]>} [upload] Function to upload files to the cloud storage service.
+ * @property {(files: File[], options: MediaLibraryFetchOptions) => Promise<ExternalAsset[]>}
+ * [upload] Function to upload files to the cloud storage service.
+ * @property {(assets: ExternalAsset[], options: MediaLibraryFetchOptions) => Promise<void>}
+ * [delete] Function to delete files from the cloud storage service.
+ * @property {(asset: ExternalAsset, newName: string, options: MediaLibraryFetchOptions) =>
+ * Promise<ExternalAsset>} [rename] Function to rename a file on the cloud storage service. Omitted
+ * when the service’s API can’t rename a file.
+ * @property {(asset: ExternalAsset, file: File, options: MediaLibraryFetchOptions) =>
+ * Promise<ExternalAsset>} [replace] Function to replace a file on the cloud storage service with a
+ * new file, keeping the file name and URL. Omitted when the service assigns a new URL to every
+ * uploaded file.
+ * @property {(options: MediaLibraryFetchOptions) => Promise<ExternalFolderListing>} [browse]
+ * Function to list the files on a cloud storage service that stores them at paths, along with the
+ * empty folders it keeps. The Asset Library and the asset picker then browse the service folder by
+ * folder, reading the folders off the file paths in `description`. Omitted when the service has no
+ * folders, like Uploadcare, or handles them in its own widget, like Cloudinary.
+ * @property {(dirPath: string, options: MediaLibraryFetchOptions) => Promise<void>}
+ * [createFolder] Function to create an empty folder on the service, which keeps a placeholder
+ * object for it, as object storage has no folders of its own. The path is relative to the
+ * configured prefix.
+ * @property {(dirPath: string, options: MediaLibraryFetchOptions) => Promise<void>}
+ * [deleteFolder] Function to remove the placeholder object of a folder once the files in it have
+ * been deleted or moved. A folder without a placeholder is as good as removed.
+ * @property {(asset: ExternalAsset, newPath: string, options: MediaLibraryFetchOptions) =>
+ * Promise<ExternalAsset>} [move] Function to move a file to another path on the service, relative
+ * to the configured prefix, which is how a folder is renamed. Omitted when the service can’t move
+ * a file.
+ */
+
+/**
+ * Files and folders on a cloud storage service that stores files at paths.
+ * @typedef {object} ExternalFolderListing
+ * @property {ExternalAsset[]} assets Files.
+ * @property {string[]} folders Paths of the folders kept by a placeholder object, relative to the
+ * configured prefix, e.g. `2024/summer`. The folders that hold files are read off the file paths
+ * instead.
  */
 
 /**
@@ -304,10 +617,12 @@
  * @property {string} model Model name.
  * @property {string} systemPrompt System/instruction prompt.
  * @property {string} userMessage User message content.
- * @property {number} [temperature] Sampling temperature (0–1). Default is 0.3.
+ * @property {number} [temperature] Sampling temperature (0–1). Default is 0.3. The OpenAI and
+ * Anthropic APIs don’t get this parameter, as GPT-6 and Claude Haiku 5.5 reject it.
  * @property {number} [maxTokens] Maximum output tokens. Default is 4000.
- * @property {boolean} [reasoning] Whether to enable reasoning mode. Only supported by certain
- * providers (e.g., DeepSeek, Mistral AI). Default varies by provider.
+ * @property {'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'} [reasoning]
+ * Reasoning effort. Only supported by certain providers (e.g., DeepSeek, Mistral AI). Default
+ * varies by provider. Anthropic Claude only supports `none`, which disables thinking.
  */
 
 /**
@@ -352,8 +667,7 @@
 
 /**
  * Git commit type.
- * @typedef {'create' | 'update' | 'delete' | 'uploadMedia' | 'deleteMedia' |
- * 'openAuthoring'} CommitType
+ * @typedef {'create' | 'update' | 'delete' | 'uploadMedia' | 'deleteMedia'} CommitType
  */
 
 /**
@@ -374,7 +688,9 @@
  * @property {string} sha Git object ID (SHA-1 hash) for the file.
  * @property {number} size File size in bytes.
  * @property {string} [text] Raw text for a plaintext file, like HTML or Markdown.
- * @property {RepositoryFileMetadata} meta Metadata from the repository.
+ * @property {RepositoryFileMetadata} [meta] Metadata from the repository. Missing while it’s still
+ * being fetched separately from the text, or if that fetch failed; such a file counts as not fully
+ * fetched yet.
  */
 
 /**
@@ -394,11 +710,17 @@
  * collection only.
  * @property {RegExp} [fullPathRegEx] Regular expression that matches full entry paths, taking the
  * i18n structure into account. Entry collection only.
- * @property {string} [fullPath] File path of the default locale. File/singleton collection only.
+ * @property {string} [fullPath] File path of the default locale. File/singleton collection, or
+ * entry collection storing all the entries in one file.
+ * @property {boolean} [arrayFile] Whether the entry collection stores all the entries in one file,
+ * defined with the `file` option, as an array of objects.
  * @property {[string, string]} [fmDelimiters] Front matter delimiters.
  * @property {BodyFieldOptions} [bodyField] Body field options for front matter formats.
  * @property {boolean} [yamlQuote] YAML quote configuration. DEPRECATED in favor of the global YAML
  * format options.
+ * @property {FileConfig} [indexFile] Configuration for the collection’s special index file, when
+ * it has an `extension` or `format` of its own. It shares everything else with the entries,
+ * including `fullPathRegEx`, which matches both. Entry collection only.
  */
 
 /**
@@ -419,33 +741,52 @@
  * @property {string} collectionName Collection name.
  * @property {string} [fileName] Collection file name. File/singleton collection only.
  * @property {Record<InternalLocaleCode, string>} [filePathMap] File path map. The key is a locale,
- * and the value is the corresponding file path. File/singleton collection only.
+ * and the value is the corresponding file path. File/singleton collection, or entry collection
+ * storing all the entries in one file.
  * @property {string} [folderPath] Folder path. Entry collection only.
  * @property {Record<InternalLocaleCode, string>} [folderPathMap] Folder path map. Entry collection
  * only. Paths in `folderPathMap` are prefixed with a locale if the `multiple_root_folders` i18n
- * structure is used, while `folderPath` is a bare collection `folder` path.
+ * structure is used, or have the `{{locale}}` placeholder filled in if the collection `folder`
+ * option has one, while `folderPath` is a bare collection `folder` path.
  */
 
 /**
- * Custom preview renderer definition.
- * @typedef {object} CustomPreviewRenderer
- * @property {string} name Renderer name.
- * @property {any} [fn] Renderer function.
+ * Custom entry preview renderer registered with the `CMS.registerCustomPreviewRenderer` API. This
+ * is an Effet Monstre fork addition; see `docs/fork.md`. The factory receives the container element
+ * and returns a function that receives the entry values and resolves to an HTML string, which is
+ * shown in an iframe in the preview pane.
+ * @typedef {(element: HTMLElement | undefined) => CustomPreviewRenderFunction}
+ * CustomPreviewRenderer
+ */
+
+/**
+ * Function returned by a {@link CustomPreviewRenderer} factory, which turns the entry values of one
+ * locale into the HTML shown in the preview pane.
+ * @typedef {(args: { value: Record<string, any>, locale: InternalLocaleCode }) =>
+ * Promise<string> | string} CustomPreviewRenderFunction
  */
 
 /**
  * Global, collection-level, file-level or field-level asset folder information.
  * @typedef {object} AssetFolderInfo
  * @property {string | undefined} collectionName Collection name or `undefined` for the All Assets
- * and Global Assets folders.
+ * and Global Assets folders as well as field-level asset folders in custom editor components.
  * @property {string} [fileName] Collection file name. File/singleton collection only.
  * @property {TypedFieldKeyPath} [typedKeyPath] Field key path for a field-level asset folder.
  * @property {boolean} [isIndexFile] Whether the asset folder is for the special index file used
  * specifically in Hugo. It works only for field-level asset folders in an entry collection.
+ * @property {string[]} [localeFolderNames] Names of the locale folders that can precede
+ * `internalPath`, for an entry-relative folder in a site using the `multiple_root_folders` i18n
+ * structure, or stand in for the `{{locale}}` placeholder in `internalPath`, for an entry-relative
+ * folder of a collection whose `folder` option has one. Unset when the site has no i18n
+ * configuration.
+ * @property {string} [componentName] Custom editor component name for a field-level asset folder,
+ * registered with `CMS.registerEditorComponent()`.
  * @property {string | undefined} internalPath Folder path on the repository/filesystem, relative to
  * the project root directory. It can be a partial path if the collection’s `media_folder` property
- * is a relative path, because the complete path is entry-specific in that case. It will be
- * `undefined` for the All Assets folder.
+ * is a relative path, because the complete path is entry-specific in that case; it’s then the
+ * collection `folder` path, which may include the `{{locale}}` placeholder. It will be `undefined`
+ * for the All Assets folder.
  * @property {string | undefined} [internalSubPath] Subfolder below the `internalPath`, relative to
  * the entry folder. It will be set when `entryRelative` is `true`.
  * @property {string | undefined} publicPath Absolute folder path that will appear in the public
@@ -456,6 +797,12 @@
  * associated entry.
  * @property {boolean} hasTemplateTags Whether the `internalPath` contains template tags like
  * `/assets/images/{{slug}}`, which require special handling like `entryRelative`.
+ * @property {string} [label] Label for the asset folder. Asset collections only.
+ * @property {string} [icon] Icon for the asset folder. Asset collections only.
+ * @property {boolean} [readonly] Whether the folder is read-only, because the collection or
+ * collection file it belongs to is, or the whole CMS is. Assets can’t be uploaded to, changed or
+ * deleted from the folder then. Only set when `true`.
+ * @property {boolean} [isAssetCollection] Whether the asset folder is for an asset collection.
  * @see https://decapcms.org/docs/collection-folder/#media-and-public-folder
  * @see https://sveltiacms.app/en/docs/media/internal#configuring-folder-paths
  */
@@ -540,14 +887,36 @@
  * @typedef {object} EntryCollectionExtraProps
  * @property {Extract<CollectionType, "entry">} _type Collection type.
  * @property {FileConfig} _file Entry file configuration.
- * @property {FieldKeyPath[]} _thumbnailFieldNames A list of field key paths to be used to find an
- * entry thumbnail. See {@link Collection.thumbnail} for details.
+ * @property {FieldKeyPath[]} _thumbnailFieldNames A list of field key paths, or file path templates
+ * starting with a slash, to be used to find an entry thumbnail. See {@link Collection.thumbnail}
+ * for details.
+ */
+
+/**
+ * Normalized entry slug options of an entry collection, whether the `slug` option is a template
+ * string or an object.
+ * @typedef {object} InternalSlugOptions
+ * @property {string} template Slug template to fill for a new entry. It’s the configured template,
+ * the legacy `{{fields._slug}}` tag when the slug is only given with the slug editor, or the
+ * identifier field tag by default.
+ * @property {boolean} editorRequired Whether the template takes the slug from the slug editor, in
+ * which case the slug editor must be filled in. Otherwise, a filled-in slug editor takes over from
+ * the template.
+ * @property {boolean} editorValueIsSlug Whether the slug editor’s value is the whole slug. It’s
+ * only a part of it with a legacy template that puts the value among other tags, e.g.
+ * `{{year}}-{{fields._slug}}`.
+ * @property {{ create: boolean, update: boolean }} editable Whether the slug can be edited when an
+ * entry is created, and once it has been saved.
+ * @property {boolean} localized Whether each locale has a slug editor of its own, and every field
+ * tag in the template is filled with the locale’s own value.
+ * @property {string} [hint] Short description shown with the slug editor.
+ * @property {[string | RegExp, string]} [pattern] Validation format of the slug.
  */
 
 /**
  * An entry collection definition.
- * @typedef {EntryCollection & EntryCollectionExtraProps &
- * CollectionExtraProps} InternalEntryCollection
+ * @typedef {EntryCollection & EntryCollectionExtraProps & CollectionExtraProps}
+ * InternalEntryCollection
  */
 
 /**
@@ -560,8 +929,8 @@
 
 /**
  * A file/singleton collection definition.
- * @typedef {FileCollection & FileCollectionExtraProps &
- * CollectionExtraProps} InternalFileCollection
+ * @typedef {FileCollection & FileCollectionExtraProps & CollectionExtraProps}
+ * InternalFileCollection
  */
 
 /**
@@ -614,11 +983,23 @@
  * @property {string} subPath File name for a file/singleton collection, or file path without an
  * extension for an entry collection. Same as `slug` in most cases.
  * @property {LocalizedEntryMap} locales Localized entry map.
+ * @property {number} [arrayIndex] Position of the entry in the array stored in the file, for an
+ * entry collection storing all the entries in one file. The `slug` and `subPath` are the same
+ * number as a string.
  */
 
 /**
  * Entry item.
  * @typedef {EntryProps & RepositoryFileMetadata} Entry
+ */
+
+/**
+ * Search result for an entry.
+ * @typedef {object} EntrySearchResult
+ * @property {Entry} entry Entry that matched the search terms.
+ * @property {number} points Points scored for the entry based on matches.
+ * @property {InternalLocaleCode} [locale] First matching locale, if available.
+ * @property {FieldKeyPath} [keyPath] First matching key path, if available.
  */
 
 /**
@@ -643,8 +1024,26 @@
  * @typedef {object} EntryFileItem
  * @property {File} file File to be uploaded.
  * @property {AssetFolderInfo | undefined} folder Target asset folder information.
+ * @property {string} [subfolderPath] Path of the subfolder below the target folder that the file is
+ * saved to, relative to it, when the file was picked while browsing a subfolder in the asset
+ * picker. Empty or `undefined` for the folder root.
  * @property {boolean} replace Whether to replace the existing file if there’s a file with the same
  * name in the target folder.
+ * @property {AssetNameTemplate} [nameTemplate] Template to name the file with when the entry is
+ * saved, if the `filename_template` media library option is set. It’s removed once the file is
+ * renamed by hand, and not set for a file replacing an existing one, which keeps its name.
+ */
+
+/**
+ * Template to name an uploaded file with, along with the values that must stay the same from the
+ * name shown while editing to the one saved.
+ * @typedef {object} AssetNameTemplate
+ * @property {string} template The `filename_template` media library option.
+ * @property {boolean} [slugificationEnabled] Whether the filled name is slugified, according to the
+ * `slugify_filename` media library option.
+ * @property {Map<string, string>} randomValues Random values generated for the tags so far, such
+ * as the one for a `{{uuid}}` tag.
+ * @property {Record<string, string>} dateTimeParts Date/time parts of the time the file was added.
  */
 
 /**
@@ -655,8 +1054,9 @@
 
 /**
  * Validation state of a field value. The key is a validation property name, and the value is a
- * boolean. These are the same properties as the native HTML5 constraint validation.
- * @typedef {Record<string, boolean>} EntryValidityState
+ * boolean. These are the same properties as the native HTML5 constraint validation, plus custom
+ * widget validation support.
+ * @typedef {Record<string, boolean> & { customErrorMessage?: string }} EntryValidityState
  * @see https://developer.mozilla.org/en-US/docs/Web/API/ValidityState
  */
 
@@ -731,6 +1131,12 @@
  * @property {LocaleStateMap} currentLocales Current locale state.
  * @property {LocaleSlugMap} originalSlugs Key is a locale code, value is the original slug.
  * @property {LocaleSlugMap} currentSlugs Key is a locale code, value is the current slug.
+ * @property {string} [originalPath] Folder the entry is stored in, relative to the collection
+ * folder, at the time of draft creation. Only set when the collection’s `meta.path` option is
+ * enabled. An empty string for the collection’s root folder.
+ * @property {string} [currentPath] Folder the entry will be stored in, relative to the collection
+ * folder, as edited with the path editor. Only set when the collection’s `meta.path` option is
+ * enabled.
  * @property {LocaleContentMap} originalValues Key is a locale code, value is a flattened object
  * containing all the original field values.
  * @property {LocaleContentMap} currentValues Key is a locale code, value is a flattened, proxified
@@ -746,6 +1152,26 @@
  * containing the expander UI state.
  * @property {Record<LocaleCode, boolean | 'readonly'>} slugEditor Whether to show the slug editor
  * for each locale.
+ * @property {boolean} interacted Whether the user has manually interacted with the entry editor.
+ * This prevents auto-backup from triggering when only programmatic changes (e.g. Lexical markdown
+ * reformatting) have occurred.
+ * @property {PendingEntry[]} pendingEntries Entries created from a Relation field while editing
+ * this entry, to be saved along with it.
+ */
+
+/**
+ * An entry created with the quick-add dialog of a Relation field while another entry is being
+ * edited. It’s kept on that entry’s draft and saved in the same commit as the entry, rather than on
+ * its own, so the two never go out of sync. Everything needed to commit it is prepared as soon as
+ * it’s added, because the preparation replaces the blob URLs in the content with asset paths, which
+ * can only be done once.
+ * @typedef {object} PendingEntry
+ * @property {string} collectionName Name of the collection the entry belongs to.
+ * @property {Entry} entry Entry as it will be saved.
+ * @property {FileChange[]} changes File changes to be committed along with the parent entry.
+ * @property {Asset[]} savingAssets Assets to be saved along with the entry.
+ * @property {any[]} values Values the Relation field that created the entry stores for it, in any
+ * of the parent entry’s locales. The entry is only saved while one of them is still there.
  */
 
 /**
@@ -761,6 +1187,8 @@
  * @property {LocaleContentMap} currentValues Key is a locale code, value is a flattened object
  * containing all the current field values while editing.
  * @property {EntryFileMap} files Files to be uploaded.
+ * @property {PendingEntry[]} [pendingEntries] Entries created from a Relation field, to be saved
+ * along with the entry. Missing from a backup taken before they were introduced.
  */
 
 /**
@@ -783,6 +1211,22 @@
  * @property {string | File} [data] File data. `undefined` for a deleted file, or a file object for
  * a new or updated file. It can also be a string for a text file like Markdown or HTML, which is
  * automatically converted to a Blob.
+ * @property {ArrayItemTarget} [arrayItem] Item that an `update` or `delete` change applies to, in
+ * a file storing all the entries of an entry collection. The `data` of an `update` or `create`
+ * change is then the item alone, and a `create` change adds it to the end of the array. The changes
+ * made to the same file are combined into one before being committed.
+ * @property {ArrayItemTarget[]} [arrayOrder] Items in a file storing all the entries of an entry
+ * collection, in their new order. The items take the positions the listed items occupy now.
+ */
+
+/**
+ * Item in a file storing all the entries of an entry collection, which a {@link FileChange} applies
+ * to.
+ * @typedef {object} ArrayItemTarget
+ * @property {number} index Position of the item in the array, as the user has seen it.
+ * @property {LocalizedEntryMap} [locales] Content of the item as the user has seen it. The change
+ * is refused if the item at the position has been changed since, e.g. by someone else, so that it
+ * doesn’t overwrite another item. `undefined` to skip the check.
  */
 
 /**
@@ -793,6 +1237,17 @@
  * @property {boolean} moved Whether the items have been moved.
  * @property {boolean} renamed Whether the items have been renamed.
  * @property {boolean} deleted Whether the items have been deleted.
+ * @property {boolean} [folderCreated] Whether a subfolder has been created in an asset folder.
+ * @property {boolean} [folderRenamed] Whether a subfolder of an asset folder has been renamed.
+ * @property {boolean} [folderDeleted] Whether a subfolder of an asset folder has been deleted.
+ * @property {boolean} [deletionPending] Whether the removal awaits publication rather than having
+ * taken effect, which is how Editorial Workflow deletes a published entry.
+ * @property {boolean} [discarded] Whether the items’ unpublished changes have been thrown away,
+ * leaving the published version on the site.
+ * @property {boolean} [deletionCancelled] Whether a pending removal has been called off, leaving
+ * the items on the site.
+ * @property {boolean} [alreadyPublished] Whether an Open Authoring contributor’s entry turned out
+ * to have been published by a maintainer when its status was changed, which closes the editor.
  * @property {boolean} published Whether the items have been published. This is `true` only when
  * automatic deployments are enabled and triggered.
  */
@@ -801,8 +1256,15 @@
  * Asset to be uploaded.
  * @typedef {object} UploadingAssets
  * @property {AssetFolderInfo | undefined} folder Target asset folder info.
+ * @property {string} [subfolderPath] Path of the subfolder below the target folder’s
+ * `internalPath` that the files are saved to, relative to it. Empty or `undefined` for the folder
+ * root.
  * @property {File[]} files File list.
- * @property {Asset[]} [originalAssets] Assets to be replaced.
+ * @property {Asset[]} [originalAssets] Assets the user picked to be replaced. Each file replaces
+ * the asset at the same index, taking over its name and path, so an asset can be replaced with a
+ * file that’s named differently.
+ * @property {boolean} [replaceDuplicates] Whether a file that has the same name as an existing
+ * asset in the target folder overwrites it. Otherwise the file is saved under a unique name.
  */
 
 /**
@@ -827,11 +1289,56 @@
  * @property {string} [text] Raw text for a plaintext file, like HTML or Markdown.
  * @property {AssetFolderInfo} folder Asset folder info.
  * @property {boolean} [unsaved] Whether the asset is unsaved.
+ * @property {boolean} [replace] Whether the asset overwrites an existing asset with the same name
+ * once the entry is saved. Unsaved files only.
+ * @property {UnpublishedAssetProps} [workflow] Editorial Workflow information. It’s only set while
+ * the asset lives on a workflow branch, and removed once the entry has been published.
+ */
+
+/**
+ * Editorial Workflow properties attached to an asset committed to a workflow branch. Such an asset
+ * is added to the regular asset list so it can be previewed before the entry is published.
+ * @typedef {object} UnpublishedAssetProps
+ * @property {string} branch Workflow branch the asset was committed to.
+ * @property {Asset} [replacedAsset] Published asset at the same path that this asset temporarily
+ * shadows in the asset list. It’s restored when the draft is discarded.
  */
 
 /**
  * Asset item.
  * @typedef {AssetProps & RepositoryFileMetadata} Asset
+ */
+
+/**
+ * Item in a breadcrumb trail of folders.
+ * @typedef {object} BreadcrumbItem
+ * @property {string} label Folder name.
+ * @property {() => void} [onClick] Called when the folder is selected. Not needed for the current
+ * folder, which is shown as text.
+ */
+
+/**
+ * What the folder info panel in the Asset Library describes: the listed subfolder focused with a
+ * click or the keyboard, if any, or else the folder being browsed.
+ * @typedef {object} AssetFolderSummary
+ * @property {string} name Folder name.
+ * @property {string} [path] Folder path. Omitted for a location without a path, like the All Assets
+ * folder.
+ * @property {number} [folderCount] Number of subfolders. Omitted for a location that isn’t browsed
+ * by subfolder, which lists every asset below it at once.
+ * @property {number} assetCount Number of assets.
+ */
+
+/**
+ * Direction to move in between the listed assets in the asset details overlay.
+ * @typedef {'previous' | 'next'} AssetNavigationDirection
+ */
+
+/**
+ * Subfolder of an asset folder, listed in the Asset Library ahead of the assets.
+ * @typedef {object} AssetSubfolder
+ * @property {string} name Folder name.
+ * @property {string} path Folder path, relative to the project root directory.
  */
 
 /**
@@ -849,7 +1356,7 @@
  */
 
 /**
- * Asset library folder map key.
+ * Asset library folder map key for standard folders.
  * @typedef {'field' | 'entry' | 'file' | 'collection' | 'global'} AssetLibraryFolderMapKey
  */
 
@@ -861,8 +1368,10 @@
  */
 
 /**
- * Information about all the default asset library folders and whether these are enabled.
- * @typedef {Record<AssetLibraryFolderMapKey, AssetLibraryFolderMapValue>} AssetLibraryFolderMap
+ * Information about all the default asset library folders and whether these are enabled. The map
+ * includes standard folder keys ('field', 'entry', 'file', 'collection', 'global') and dynamic keys
+ * for asset collections (e.g., 'assets:icons', 'assets:logos').
+ * @typedef {Record<string, AssetLibraryFolderMapValue>} AssetLibraryFolderMap
  */
 
 /**
@@ -903,7 +1412,11 @@
  * @property {File} [file] File selected from the user’s computer, or an image file downloaded from
  * a stock asset provider.
  * @property {AssetFolderInfo} [folder] Target asset folder info for the `file`.
+ * @property {string} [subfolderPath] Path of the subfolder below the target folder that the `file`
+ * is saved to, relative to it. Empty or `undefined` for the folder root.
  * @property {string} [url] URL from direct input or a hotlinking stock asset.
+ * @property {string} [folderPath] Public path of a folder selected in place of a file, for a File
+ * field with the `select_folder` option.
  * @property {string} [credit] Attribution HTML string for a stock asset, including the photographer
  * name/link and service name/link.
  * @property {boolean} [replace] Whether to replace an existing file.
@@ -915,31 +1428,54 @@
  */
 
 /**
+ * Sort key shown in the Sort menu.
+ * @typedef {object} SortKey
+ * @property {string} key Key, such as a field name or a special key like `commit_date`.
+ * @property {string} label Localized label.
+ * @property {'date' | 'number'} [type] Value type that determines the wording of the sort order
+ * labels, e.g. “new to old” for a date. A key that is a well-known date field, or a DateTime field
+ * of the collection, is treated as a date even if this is omitted.
+ */
+
+/**
  * Entry/Asset sorting conditions.
  * @typedef {object} SortingConditions
  * @property {string} [key] Target field name.
  * @property {SortOrder} [order] Sort order.
  * @see https://decapcms.org/docs/configuration-options/#sortable_fields
- * @see https://sveltiacms.app/en/docs/collections/entries#sorting
+ * @see https://sveltiacms.app/en/docs/collections/entries/views#sorting
+ */
+
+/**
+ * Entry/Asset filtering conditions: what an entry collection’s view filter defines, minus its name
+ * and label. An asset filter only has a field and pattern.
+ * @typedef {object} FilteringConditionsProps
+ * @property {FieldKeyPath} field Target field name.
+ * @property {string | RegExp | boolean} [pattern] Regular expression matching pattern or exact
+ * value. Required unless a comparison operator is defined.
+ * @see https://decapcms.org/docs/configuration-options/#view_filters
+ * @see https://sveltiacms.app/en/docs/collections/entries/views#filtering
  */
 
 /**
  * Entry/Asset filtering conditions.
- * @typedef {object} FilteringConditions
- * @property {FieldKeyPath} field Target field name.
- * @property {string | RegExp | boolean} pattern Regular expression matching pattern or exact value.
- * @see https://decapcms.org/docs/configuration-options/#view_filters
- * @see https://sveltiacms.app/en/docs/collections/entries#filtering
+ * @typedef {FilteringConditionsProps & ViewComparisonOptions} FilteringConditions
  */
 
 /**
- * Entry/Asset grouping conditions.
- * @typedef {object} GroupingConditions
+ * Entry/Asset grouping conditions: what an entry collection’s view group defines, minus its name
+ * and label. An asset group only has a field and pattern.
+ * @typedef {object} GroupingConditionsProps
  * @property {FieldKeyPath} field Target field name.
  * @property {string | RegExp | boolean} [pattern] Regular expression matching pattern or exact
  * value.
  * @see https://decapcms.org/docs/configuration-options/#view_groups
- * @see https://sveltiacms.app/en/docs/collections/entries#grouping
+ * @see https://sveltiacms.app/en/docs/collections/entries/views#grouping
+ */
+
+/**
+ * Entry/Asset grouping conditions.
+ * @typedef {GroupingConditionsProps & ViewComparisonOptions} GroupingConditions
  */
 
 /**
@@ -955,6 +1491,8 @@
  * @property {FilteringConditions} [filter] Filtering conditions. Deprecated in favour of `filters`.
  * @property {FilteringConditions[]} [filters] One or more filtering conditions.
  * @property {GroupingConditions | null} [group] Grouping conditions.
+ * @property {Record<string, string[]>} [collapsedGroups] Names of the groups whose entries are
+ * hidden, under each grouping condition’s key. See `getGroupingKey()`.
  * @property {boolean} [showMedia] Whether to show the Media pane.
  */
 
@@ -976,6 +1514,9 @@
 /**
  * Entry editor view settings.
  * @typedef {object} EntryEditorView
+ * @property {boolean} [showSecondPane] Whether to show the second pane, which holds either the
+ * preview or another locale’s editor. Called the “second” rather than the “right” pane because the
+ * panes are laid out in the writing direction, which is reversed for RTL locales.
  * @property {boolean} [showPreview] Whether to show the preview pane.
  * @property {boolean} [syncScrolling] Whether to sync the scrolling position between the editor and
  * preview panes.
@@ -993,7 +1534,9 @@
  * @property {SortingConditions} [sort] Sorting conditions.
  * @property {FilteringConditions} [filter] Filtering conditions.
  * @property {FilteringConditions[]} [filters] Unused.
- * @property {GroupingConditions} [group] Grouping conditions.
+ * @property {GroupingConditions | null} [group] Grouping conditions.
+ * @property {Record<string, string[]>} [collapsedGroups] Names of the groups whose assets are
+ * hidden, under each grouping condition’s key. See `getGroupingKey()`.
  * @property {boolean} [showInfo] Whether to show the Info pane.
  */
 
@@ -1020,9 +1563,12 @@
  * Context for a field editor.
  * @typedef {object} FieldEditorContext
  * @property {FieldContext} [fieldContext] Where the field is rendered.
+ * @property {string[]} parentComponentNames Names of the parent rich text editor components. If
+ * nested, the first element is the top-level component, and the last element is the immediate
+ * parent component. If the field is not in a rich text editor component, the array is empty.
  * @property {DraftValueStoreKey} valueStoreKey Key to store the values in {@link EntryDraft}.
- * @property {Writable<Component>} [extraHint] Component to render an extra hint in the field
- * editor.
+ * @property {{ current: Component | undefined }} [extraHint] Component to render an extra hint in
+ * the field editor.
  */
 
 /**
@@ -1059,6 +1605,10 @@
  * @property {boolean} dateOnly Whether the field is date only.
  * @property {boolean} timeOnly Whether the field is time only.
  * @property {boolean} utc Whether the field’s picker is UTC.
+ * @property {'local' | 'utc' | string} inputTimeZone Timezone used by the date input.
+ * @property {boolean} outputUTC Whether to convert stored values to UTC.
+ * @property {string | undefined} singleCustomTimeZone The custom timezone to use for input
+ * processing and display when exactly one custom timezone is configured, or undefined otherwise.
  */
 
 /**
@@ -1090,6 +1640,35 @@
  * @property {InternalLocaleCode} locale Locale.
  * @property {InternalLocaleCode} defaultLocale Default locale of the entry draft.
  * @property {Record<string, string>} dynamicValues Dynamic default values.
+ */
+
+/**
+ * Index of a flattened entry content, which tells in constant time whether a key path holds
+ * anything at all and which list items exist under it.
+ * @typedef {object} ContentIndex
+ * @property {Map<FieldKeyPath, Set<string>>} childSegmentMap Direct child key segments found under
+ * each key path. For example, content holding only `colors.0.name` yields `colors` → `0` and
+ * `colors.0` → `name`.
+ */
+
+/**
+ * Index of the list items in a flattened entry content: the key path holding a list mapped to the
+ * indexes of the items stored under it.
+ * @typedef {Map<FieldKeyPath, Set<number>>} ListItemIndex
+ */
+
+/**
+ * @typedef {object} NormalizeContentArgs
+ * @property {Field[]} fields Field list of a collection, collection file or index file.
+ * @property {FlattenedEntryContent} content Flattened entry content, modified in place.
+ * @property {InternalLocaleCode} locale Locale of the content.
+ * @property {InternalLocaleCode} defaultLocale Default locale of the entry draft.
+ * @property {FlattenedEntryContent} [defaultLocaleContent] Already normalized content for the
+ * default locale, used as the source for fields with the `duplicate` i18n strategy.
+ * @property {boolean} [fillDefaults] Whether to fill in the values missing from the content.
+ * Default: `true`. Set to `false` to only reconcile the values that are already there, which is
+ * what rich text editor components need: their values live in the document text, so filling in
+ * defaults would rewrite the document just by opening the entry.
  */
 
 /**
@@ -1128,6 +1707,12 @@
  * is `preview_path`.
  * @property {boolean} [isIndexFile] Whether the corresponding entry is the collection’s special
  * index file used specifically in Hugo.
+ * @property {Map<string, string>} [randomValues] Random values generated for the entry so far,
+ * such as the one for a `{{uuid}}` tag, to be reused instead of generating new ones. It keeps a new
+ * entry’s slug the same between the one shown while editing and the one saved.
+ * @property {string} [assetFileName] Original name of the asset file being named with the
+ * `filename_template` media library option. The `{{filename}}` and `{{extension}}` tags then stand
+ * for its name without the extension and its extension.
  */
 
 /**
@@ -1156,13 +1741,23 @@
  */
 
 /**
- * Shape of the `processedAssets` store.
+ * Shape of the `processedAssets` state.
  * @typedef {object} ProcessedAssets
  * @property {boolean} processing Whether the files are being processed.
- * @property {File[]} undersizedFiles Files that can be uploaded.
+ * @property {File[]} validFiles Files that can be uploaded.
  * @property {File[]} oversizedFiles Files that cannot be uploaded due to the size limit.
+ * @property {File[]} invalidFiles Files that cannot be uploaded because they’re corrupt or
+ * mislabeled, such as a HEIC image saved with a `.jpg` extension.
  * @property {WeakMap<File, File>} transformedFileMap Mapping of transformed files and the
  * originals.
+ */
+
+/**
+ * The file an image/file field value points to.
+ * @typedef {object} MediaFieldSource
+ * @property {string} [url] Complete URL of a file on an external location, including a Cloudinary
+ * asset referenced by its relative path.
+ * @property {Asset} [asset] Asset in the repository. Exclusive with {@link MediaFieldSource.url}.
  */
 
 /**
@@ -1193,7 +1788,8 @@
  * Collected Media field during config parsing. It will be processed later to enable field-specific
  * asset folders.
  * @typedef {object} CollectedMediaField
- * @property {MediaField} fieldConfig File/Image field config.
+ * @property {MediaField | CustomField} fieldConfig File/Image field config, or the config of a
+ * custom field whose control can add files to the entry draft.
  * @property {ConfigParserContext} context Field parser context.
  */
 
@@ -1206,12 +1802,96 @@
  */
 
 /**
+ * A Relation field that points at a given collection, resolved down to everything needed to locate
+ * its stored values within the entries holding the field.
+ * @typedef {object} ResolvedRelationField
+ * @property {RelationField} fieldConfig Relation field config.
+ * @property {InternalCollection} sourceCollection Collection holding the Relation field.
+ * @property {InternalCollectionFile} [sourceCollectionFile] Collection file holding the Relation
+ * field, for file/singleton collections.
+ * @property {FieldKeyPath} keyPath Key path of the field within an entry’s flattened content. May
+ * contain `*` wildcards when the field is nested in a list.
+ * @property {RegExp} [valuePattern] Pattern matching the concrete key paths a wildcard `keyPath`
+ * expands to. `undefined` when the key path has no wildcard.
+ * @property {boolean} multiple Whether the field accepts multiple values.
+ */
+
+/**
+ * An entry that references another entry through a Relation field, with its references already
+ * updated or removed, along with where it lives so its file(s) can be written back.
+ * @typedef {object} CascadeTarget
+ * @property {Entry} entry Updated entry.
+ * @property {InternalCollection} collection Collection the entry belongs to.
+ * @property {InternalCollectionFile} [collectionFile] Collection file, for file/singleton
+ * collections.
+ */
+
+/**
+ * A Relation field that would no longer be valid once its references to the entries being deleted
+ * are removed, e.g. a required field with nothing left selected, which is what stops the deletion.
+ * @typedef {object} CascadeDeleteBlockerProps
+ * @property {InternalLocaleCode} locale Locale the field was found invalid in. A field invalid in
+ * several locales is reported once, for the first of them.
+ * @property {FieldKeyPath} keyPath Key path of the invalid field.
+ * @property {string[]} messages Validation messages, one per violated constraint.
+ */
+
+/**
+ * @typedef {EntryBacklink & CascadeDeleteBlockerProps} CascadeDeleteBlocker
+ */
+
+/**
+ * A field holding a reference to an asset: an Image or File field storing its path, or a Markdown
+ * or rich text field embedding it as an image.
+ * @typedef {object} AssetReference
+ * @property {Entry} entry Entry holding the field.
+ * @property {InternalCollection} collection Collection the field is resolved in.
+ * @property {InternalCollectionFile} [collectionFile] Collection file, for file/singleton
+ * collections.
+ * @property {InternalLocaleCode} locale Locale of the content holding the field.
+ * @property {FieldKeyPath} keyPath Key path of the value holding the reference. For a multi-value
+ * field, that of the item, e.g. `images.1`.
+ * @property {Field} fieldConfig Field config.
+ */
+
+/**
+ * Everything the deletion of one or more entries entails for the entries referencing them through
+ * Relation fields.
+ * @typedef {object} CascadeDeletePlan
+ * @property {CascadeTarget[]} targets Referencing entries with the references removed, to be
+ * rewritten along with the deletion.
+ * @property {CascadeDeleteBlocker[]} blockers Fields that would be left invalid. The deletion can
+ * only go ahead if this is empty.
+ */
+
+/**
  * Collectors used during config parsing.
  * @typedef {object} ConfigParserCollectors
  * @property {Set<string>} errors Collected error messages.
  * @property {Set<string>} warnings Collected warning messages.
  * @property {Set<CollectedMediaField>} mediaFields Collected media fields.
  * @property {Set<CollectedRelationField>} relationFields Collected relation fields.
+ */
+
+/**
+ * A schema violation, in the shape the configuration error reporter works with. It mirrors the part
+ * of Ajv’s error object the reporter used to read, so that the validator can be swapped without the
+ * reporting having to change.
+ * @typedef {object} SchemaValidationError
+ * @property {string} instancePath JSON pointer to the offending value within the configuration.
+ * @property {string} keyword Schema keyword that was violated.
+ * @property {Record<string, any>} params Details of the constraint, such as the allowed values.
+ */
+
+/**
+ * The two variants of the configuration schema the validator uses. An unknown property is only
+ * worth a warning, but it fails the object holding it all the same, so the violations that are real
+ * errors are collected from the variant that accepts it.
+ * @typedef {object} ConfigSchemas
+ * @property {Record<string, any>} strict Schema that rejects a property it doesn’t describe, used
+ * to find the options the schema doesn’t know about.
+ * @property {Record<string, any>} lenient Same schema with every `additionalProperties: false`
+ * removed, used to find everything else.
  */
 
 /**
@@ -1244,6 +1924,13 @@
  * @typedef {object} SettingsPanelOnChangeArgs
  * @property {string} message Message to show in a toast notification after the change is applied.
  * @property {'success' | 'error'} [status] Status of the change. Default: `success`.
+ */
+
+/**
+ * Parsed transformation descriptor used by template placeholders and summary rendering.
+ * @typedef {object} StringTransformation
+ * @property {string} method The transformation name.
+ * @property {Record<string, string>} args Transformation arguments.
  */
 
 export {};

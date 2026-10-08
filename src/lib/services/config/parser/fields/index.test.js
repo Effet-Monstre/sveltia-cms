@@ -1,5 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { parseFields } from '.';
+
 /**
  * @import { ConfigParserCollectors } from '$lib/types/private';
  */
@@ -14,7 +16,7 @@ const mockI18nStrings = {};
  * @param {object & { values?: Record<string, string> }} [options] Options.
  * @returns {string} Translated string.
  */
-const mockTranslate = (key, options) => {
+function mockTranslate(key, options) {
   let message = mockI18nStrings[key] || key;
 
   if (options?.values) {
@@ -24,7 +26,7 @@ const mockTranslate = (key, options) => {
   }
 
   return message;
-};
+}
 
 vi.mock('@sveltia/i18n', () => ({
   _: mockTranslate,
@@ -32,10 +34,6 @@ vi.mock('@sveltia/i18n', () => ({
 }));
 
 const mockGetStore = vi.fn();
-
-vi.mock('svelte/store', () => ({
-  get: mockGetStore,
-}));
 
 /**
  * Create a fresh collectors object for testing.
@@ -58,8 +56,7 @@ describe('Field Collectors', () => {
   });
 
   describe('Media field collection in nested structures', () => {
-    it('should collect media fields at top level', async () => {
-      const { parseFields } = await import('.');
+    it('should collect media fields at top level', () => {
       const collectors = createCollectors();
 
       /** @type {any} */
@@ -91,8 +88,42 @@ describe('Field Collectors', () => {
       expect(mediaField.context.typedKeyPath).toBe('cover_image');
     });
 
-    it('should collect media fields in object field subfields', async () => {
-      const { parseFields } = await import('.');
+    it('should collect media fields of custom field types', () => {
+      const collectors = createCollectors();
+
+      /** @type {any} */
+      const context = {
+        cmsConfig: {},
+        collection: { name: 'posts' },
+        typedKeyPath: '',
+      };
+
+      /** @type {any} */
+      const fields = [
+        {
+          name: 'photo',
+          widget: 'derived-image',
+          media_folder: '/uploads/photos',
+        },
+        {
+          // A `media_folder` on a built-in field type that doesn’t support it is left alone
+          name: 'title',
+          widget: 'string',
+          media_folder: '/uploads/titles',
+        },
+      ];
+
+      parseFields(fields, context, collectors);
+
+      expect(collectors.mediaFields.size).toBe(1);
+
+      const [mediaField] = [...collectors.mediaFields];
+
+      expect(mediaField.fieldConfig).toBe(fields[0]);
+      expect(mediaField.context.typedKeyPath).toBe('photo');
+    });
+
+    it('should collect media fields in object field subfields', () => {
       const collectors = createCollectors();
 
       /** @type {any} */
@@ -130,8 +161,7 @@ describe('Field Collectors', () => {
       expect(mediaField.context.typedKeyPath).toBe('content.featured_image');
     });
 
-    it('should collect media fields in nested object fields', async () => {
-      const { parseFields } = await import('.');
+    it('should collect media fields in nested object fields', () => {
       const collectors = createCollectors();
 
       /** @type {any} */
@@ -171,8 +201,7 @@ describe('Field Collectors', () => {
       expect(mediaField.context.typedKeyPath).toBe('meta.settings.thumbnail');
     });
 
-    it('should collect media fields in list field subfields', async () => {
-      const { parseFields } = await import('.');
+    it('should collect media fields in list field subfields', () => {
       const collectors = createCollectors();
 
       /** @type {any} */
@@ -206,8 +235,7 @@ describe('Field Collectors', () => {
       expect(mediaField.context.typedKeyPath).toBe('gallery.*.image');
     });
 
-    it('should collect media fields in list with single field', async () => {
-      const { parseFields } = await import('.');
+    it('should collect media fields in list with single field', () => {
       const collectors = createCollectors();
 
       /** @type {any} */
@@ -239,8 +267,7 @@ describe('Field Collectors', () => {
       expect(mediaField.context.typedKeyPath).toBe('photos.*.photo');
     });
 
-    it('should collect media fields in nested list and object structures', async () => {
-      const { parseFields } = await import('.');
+    it('should collect media fields in nested list and object structures', () => {
       const collectors = createCollectors();
 
       /** @type {any} */
@@ -281,8 +308,7 @@ describe('Field Collectors', () => {
       expect(mediaField.context.typedKeyPath).toBe('sections.*.details.media');
     });
 
-    it('should collect multiple media fields at different depths', async () => {
-      const { parseFields } = await import('.');
+    it('should collect multiple media fields at different depths', () => {
       const collectors = createCollectors();
 
       /** @type {any} */
@@ -335,8 +361,7 @@ describe('Field Collectors', () => {
   });
 
   describe('Relation field collection in nested structures', () => {
-    it('should collect relation fields at top level', async () => {
-      const { parseFields } = await import('.');
+    it('should collect relation fields at top level', () => {
       const collectors = createCollectors();
 
       /** @type {any} */
@@ -366,8 +391,7 @@ describe('Field Collectors', () => {
       expect(relationField.context.typedKeyPath).toBe('author');
     });
 
-    it('should collect relation fields in object field', async () => {
-      const { parseFields } = await import('.');
+    it('should collect relation fields in object field', () => {
       const collectors = createCollectors();
 
       /** @type {any} */
@@ -403,8 +427,7 @@ describe('Field Collectors', () => {
       expect(relationField.context.typedKeyPath).toBe('meta.related_post');
     });
 
-    it('should collect relation fields in list field', async () => {
-      const { parseFields } = await import('.');
+    it('should collect relation fields in list field', () => {
       const collectors = createCollectors();
 
       /** @type {any} */
@@ -438,8 +461,7 @@ describe('Field Collectors', () => {
       expect(relationField.context.typedKeyPath).toBe('team_members.*.member');
     });
 
-    it('should collect relation fields in deeply nested structures', async () => {
-      const { parseFields } = await import('.');
+    it('should collect relation fields in deeply nested structures', () => {
       const collectors = createCollectors();
 
       /** @type {any} */
@@ -484,8 +506,7 @@ describe('Field Collectors', () => {
   });
 
   describe('Variable type fields with collectors', () => {
-    it('should collect media fields in list with variable types', async () => {
-      const { parseFields } = await import('.');
+    it('should collect media fields in list with variable types', () => {
       const collectors = createCollectors();
 
       /** @type {any} */
@@ -534,8 +555,7 @@ describe('Field Collectors', () => {
       expect(mediaField.context.typedKeyPath).toBe('blocks.*<image_block>.image');
     });
 
-    it('should collect relation fields in object with variable types', async () => {
-      const { parseFields } = await import('.');
+    it('should collect relation fields in object with variable types', () => {
       const collectors = createCollectors();
 
       /** @type {any} */
@@ -586,8 +606,7 @@ describe('Field Collectors', () => {
       expect(relationField.context.typedKeyPath).toBe('components<featured_post>.post_ref');
     });
 
-    it('should collect fields from multiple variable types', async () => {
-      const { parseFields } = await import('.');
+    it('should collect fields from multiple variable types', () => {
       const collectors = createCollectors();
 
       /** @type {any} */
@@ -641,8 +660,7 @@ describe('Field Collectors', () => {
       expect(relationField.context.typedKeyPath).toBe('content_blocks.*<related_posts>.post');
     });
 
-    it('should handle complex nested variable type structures', async () => {
-      const { parseFields } = await import('.');
+    it('should handle complex nested variable type structures', () => {
       const collectors = createCollectors();
 
       /** @type {any} */
@@ -710,8 +728,7 @@ describe('Field Collectors', () => {
   });
 
   describe('parseFields with undefined/null fields', () => {
-    it('should handle undefined fields gracefully without throwing', async () => {
-      const { parseFields } = await import('.');
+    it('should handle undefined fields gracefully without throwing', () => {
       const collectors = createCollectors();
 
       /** @type {any} */
@@ -727,8 +744,7 @@ describe('Field Collectors', () => {
       expect(collectors.errors.size).toBe(0);
     });
 
-    it('should handle null fields gracefully without throwing', async () => {
-      const { parseFields } = await import('.');
+    it('should handle null fields gracefully without throwing', () => {
       const collectors = createCollectors();
 
       /** @type {any} */
@@ -746,8 +762,7 @@ describe('Field Collectors', () => {
   });
 
   describe('Deprecated date widget type (line 55)', () => {
-    it('should add an error when widget is "date" (deprecated)', async () => {
-      const { parseFields } = await import('.');
+    it('should add an error when widget is "date" (deprecated)', () => {
       const collectors = createCollectors();
 
       /** @type {any} */
@@ -773,8 +788,7 @@ describe('Field Collectors', () => {
   });
 
   describe('Field name validation (checkName false branch)', () => {
-    it('should skip parseFieldConfig when field has no name', async () => {
-      const { parseFields } = await import('.');
+    it('should skip parseFieldConfig when field has no name', () => {
       const collectors = createCollectors();
 
       /** @type {any} */
@@ -788,14 +802,16 @@ describe('Field Collectors', () => {
       const fields = [
         {
           // name is missing → checkName returns false → parseFieldConfig is NOT called
-          widget: 'string',
+          widget: 'datetime',
+          dateFormat: 'YYYY',
         },
       ];
 
       parseFields(fields, context, collectors);
 
-      // checkName should have added an error for missing name
-      expect(collectors.errors.size).toBeGreaterThan(0);
+      // A missing name is reported against the JSON schema, so nothing is collected here — and the
+      // field is skipped, so its deprecated `dateFormat` option goes unreported too
+      expect(collectors.errors.size).toBe(0);
     });
   });
 });

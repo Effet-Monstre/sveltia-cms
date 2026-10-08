@@ -1,12 +1,15 @@
-import { IndexedDB } from '@sveltia/utils/storage';
-import { get } from 'svelte/store';
-
-import { allAssets } from '$lib/services/assets';
+import { cacheAssetBlob } from '$lib/services/assets/info';
+import { allAssets } from '$lib/services/assets/state';
 import { backend } from '$lib/services/backends';
+import { repositoryHead } from '$lib/services/backends/git/shared/fetch';
+import { checkForRemoteChanges, suspendChecksWhile } from '$lib/services/backends/refresh';
 import { allEntries } from '$lib/services/contents';
+import { combineArrayFileChanges, createArrayFileEntries } from '$lib/services/contents/file/array';
+import { productionSHA } from '$lib/services/deployments';
 import { user } from '$lib/services/user/account.svelte';
 import { prefs } from '$lib/services/user/prefs.svelte';
-import { getBlob } from '$lib/services/utils/file';
+import { getRepositoryDatabase } from '$lib/services/utils/database';
+import { getByteSize } from '$lib/services/utils/file';
 
 /**
  * @import {
@@ -46,30 +49,26 @@ export const getCommitAuthor = () => {
 
 /**
  * Update the file cache with the given changes. This will update the file cache with the latest
- * file content and metadata, such as SHA and size, for Git-based backends.
+ * file content and metadata, such as SHA and size, for Git-based backends. The cache stands for the
+ * state of the repository as the user knows it, so a later fetch can tell the user’s own changes
+ * from someone else’s by the SHA; that’s why an asset, which has no text to cache, is recorded too.
  * @param {object} args Arguments.
  * @param {FileChange[]} args.changes Committed changes.
  * @param {CommitResults} args.commit Commit results.
  */
 export const updateCache = async ({ changes, commit }) => {
-  const { databaseName } = get(backend)?.repository ?? {};
+  const cacheDB = getRepositoryDatabase(backend.current?.repository, 'file-cache');
 
-  if (!databaseName) {
+  if (!cacheDB) {
     return;
   }
 
-  const cacheDB = new IndexedDB(databaseName, 'file-cache');
   const { files, author: commitAuthor, date: commitDate } = commit;
   const meta = { commitAuthor, commitDate };
 
   await Promise.all(
     changes.map(async (change) => {
-      const { action, slug, path, previousPath, data } = change;
-
-      // Skip if the change is made to an asset; we only handle entries
-      if (typeof data !== 'string' || !slug) {
-        return;
-      }
+      const { action, path, previousPath, data } = change;
 
       // Delete the file from the cache if the action is `delete`
       if (action === 'delete') {
@@ -85,8 +84,9 @@ export const updateCache = async ({ changes, commit }) => {
       /** @type {RepositoryFileInfo} */
       const fileInfo = {
         sha: files[path]?.sha,
-        size: getBlob(data).size,
-        text: data,
+        // Only a deletion, handled above, comes without data
+        size: getByteSize(/** @type {string | File} */ (data)),
+        text: typeof data === 'string' ? data : undefined,
         meta,
       };
 
@@ -102,14 +102,28 @@ export const updateCache = async ({ changes, commit }) => {
  * @param {FileChange[]} args.changes Committed changes.
  * @param {Entry[]} args.savedEntries Entries that have been saved.
  * @param {Asset[]} args.savedAssets Assets that have been saved.
+ * @param {Entry[]} [args.arrayFileEntries] All the entries in the files storing all the entries of
+ * an entry collection that have been rewritten, which replace the entries previously in the files.
  */
-export const updateStores = ({ changes, savedEntries, savedAssets }) => {
-  const savedEntryIds = new Set(savedEntries.map((e) => e.id));
+export const updateStores = ({ changes, savedEntries, savedAssets, arrayFileEntries = [] }) => {
+  const savedEntryIds = new Set([...savedEntries, ...arrayFileEntries].map((e) => e.id));
 
-  allEntries.update((entries) => [
-    ...entries.filter((e) => !savedEntryIds.has(e.id)),
-    ...savedEntries,
-  ]);
+  const arrayFilePaths = new Set(
+    arrayFileEntries.flatMap((e) => Object.values(e.locales).map(({ path }) => path)),
+  );
+
+  allEntries.current = [
+    ...allEntries.current.filter(
+      (e) =>
+        !savedEntryIds.has(e.id) &&
+        !(
+          e.arrayIndex !== undefined &&
+          Object.values(e.locales).some(({ path }) => arrayFilePaths.has(path))
+        ),
+    ),
+    ...savedEntries.filter((e) => !arrayFileEntries.includes(e)),
+    ...arrayFileEntries,
+  ];
 
   const excludingPaths = new Set(savedAssets.map((a) => a.path));
 
@@ -121,14 +135,21 @@ export const updateStores = ({ changes, savedEntries, savedAssets }) => {
     }
   });
 
-  allAssets.update((assets) => [
-    ...assets.filter((a) => !excludingPaths.has(a.path)),
+  allAssets.current = [
+    ...allAssets.current.filter((a) => !excludingPaths.has(a.path)),
     ...savedAssets,
-  ]);
+  ];
 };
 
 /**
  * Save changes to the backend and update the file cache and stores with the results.
+ *
+ * The repository is checked for someone else’s commits first, so that the commit is made on top of
+ * the branch as it is rather than as it was when the site data was loaded — GitHub rejects a commit
+ * made against a head that has moved. The check is a nicety here: if it fails, the commit is
+ * attempted anyway, and the backend has the last word. It also brings the files storing all the
+ * entries of an entry collection up to date, so the changes to them are applied to the items as
+ * they are now, and combined into one change for each file.
  * @param {object} args Arguments.
  * @param {FileChange[]} args.changes Changes to be committed.
  * @param {Entry[]} [args.savingEntries] Entries to be saved.
@@ -138,36 +159,85 @@ export const updateStores = ({ changes, savedEntries, savedAssets }) => {
  * entries, and saved assets.
  */
 export const saveChanges = async ({ changes, savingEntries = [], savingAssets = [], options }) => {
-  const { commitChanges } = /** @type {BackendService} */ (get(backend));
+  const { commitChanges, fetchLastCommit } = /** @type {BackendService} */ (backend.current);
 
-  /** @type {CommitResults} */
-  const commit = {
-    ...(await commitChanges(changes, options)),
-    author: getCommitAuthor(),
-  };
-
-  if (prefs.devModeEnabled) {
+  try {
+    await checkForRemoteChanges();
+  } catch (ex) {
     // eslint-disable-next-line no-console
-    console.debug('Commit changes:', changes);
-    // eslint-disable-next-line no-console
-    console.debug('Commit results:', commit);
+    console.error('Failed to check the repository for changes.', ex);
   }
 
-  const { files, author: commitAuthor, date: commitDate } = commit;
+  return suspendChecksWhile(async () => {
+    // A check for remote changes made from here on would replace the items the changes are applied
+    // to, and the entries the saved ones are matched up with
+    const { changes: combinedChanges, arrayFileUpdates } = await combineArrayFileChanges(changes);
 
-  const savedEntries = savingEntries.map(
-    (entry) => /** @type {Entry} */ ({ ...entry, commitAuthor, commitDate }),
-  );
+    /** @type {CommitResults} */
+    const commit = {
+      ...(await commitChanges(combinedChanges, options)),
+      author: getCommitAuthor(),
+    };
 
-  const savedAssets = savingAssets.map((asset) => {
-    const { sha, file } = files[asset.path] ?? {};
-    const blobURL = file ? URL.createObjectURL(file) : undefined;
+    if (prefs.devModeEnabled) {
+      // eslint-disable-next-line no-console
+      console.debug('Commit changes:', combinedChanges);
+      // eslint-disable-next-line no-console
+      console.debug('Commit results:', commit);
+    }
 
-    return /** @type {Asset} */ ({ ...asset, sha, blobURL, commitAuthor, commitDate });
+    const { files, author: commitAuthor, date: commitDate } = commit;
+
+    const { entries: arrayFileEntries, savedEntries: savedArrayFileEntries } =
+      createArrayFileEntries({
+        arrayFileUpdates,
+        savingEntries,
+        meta: { commitAuthor, commitDate },
+      });
+
+    // An entry stored in a file with the other entries of the collection is replaced with the one
+    // made from the file as it has been saved, which knows its position in the array
+    const savedEntries = savingEntries.map(
+      (entry) =>
+        savedArrayFileEntries.get(entry) ??
+        /** @type {Entry} */ ({ ...entry, commitAuthor, commitDate }),
+    );
+
+    const savedAssets = await Promise.all(
+      savingAssets.map(async (asset) => {
+        const { sha, file } = files[asset.path] ?? {};
+
+        const savedAsset = /** @type {Asset} */ ({
+          ...asset,
+          sha,
+          blobURL: undefined,
+          commitAuthor,
+          commitDate,
+        });
+
+        // The URL has the CMS origin and can be opened in a new tab from a preview, so an SVG image
+        // gets the URL of a wrapper that can’t run any script, like an asset loaded from the
+        // repository does. The file is remembered with it, so reading the asset gives the file
+        if (file) {
+          await cacheAssetBlob(savedAsset, file);
+        }
+
+        return savedAsset;
+      }),
+    );
+
+    await updateCache({ changes: combinedChanges, commit });
+    updateStores({ changes: combinedChanges, savedEntries, savedAssets, arrayFileEntries });
+    // The site is rebuilt from this commit, so the deploy state the UI reports is now about the
+    // user’s own change. Editorial Workflow commits don’t come through here; they land on a
+    // workflow branch and are tracked by the pull request instead
+    productionSHA.current = commit.sha;
+
+    // The stores now reflect this commit, so it’s the head to compare the branch with from here on
+    if (fetchLastCommit) {
+      repositoryHead.current = commit.sha;
+    }
+
+    return { commit, savedEntries, savedAssets };
   });
-
-  await updateCache({ changes, commit });
-  updateStores({ changes, savedEntries, savedAssets });
-
-  return { commit, savedEntries, savedAssets };
 };

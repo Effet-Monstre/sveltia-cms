@@ -7,9 +7,13 @@
 <script>
   import { CodeEditor } from '@sveltia/ui';
   import { sleep } from '@sveltia/utils/misc';
-  import { getContext, untrack } from 'svelte';
+  import { isObject } from '@sveltia/utils/object';
+  import { getContext, tick } from 'svelte';
 
-  import { entryDraft } from '$lib/services/contents/draft';
+  import { getEntryDraftContext } from '$lib/services/contents/draft/state.svelte';
+  import { getValueMapSnapshot } from '$lib/services/contents/draft/value-map.svelte';
+  import { trackPendingFieldUpdate } from '$lib/services/contents/editor/pending';
+  import { watch } from '$lib/services/utils/state.svelte';
 
   /**
    * @import { FieldEditorContext, FieldEditorProps } from '$lib/types/private';
@@ -21,6 +25,8 @@
    * @property {CodeField} fieldConfig Field configuration.
    * @property {string | Record<string, string> | undefined} currentValue Field value.
    */
+
+  const entryDraft = getEntryDraftContext();
 
   /** @type {FieldEditorContext} */
   const { valueStoreKey = 'currentValues' } = getContext('field-editor') ?? {};
@@ -41,6 +47,7 @@
 
   let code = $state('');
   let lang = $state('');
+  let pending = $state(false);
 
   const {
     default_language: defaultLanguage = 'plain',
@@ -48,7 +55,7 @@
     output_code_only: outputCodeOnly = false,
     keys: outputKeys = { code: 'code', lang: 'lang' },
   } = $derived(fieldConfig);
-  const valueMap = $derived($state.snapshot($entryDraft?.[valueStoreKey][locale]) ?? {});
+  const valueMap = $derived(getValueMapSnapshot(entryDraft.current, locale, valueStoreKey));
   const codeKeyPath = $derived(`${keyPath}.${outputKeys.code}`);
   const langKeyPath = $derived(`${keyPath}.${outputKeys.lang}`);
 
@@ -90,33 +97,79 @@
       if (currentValue !== code) {
         currentValue = code;
       }
-    } else if ($entryDraft) {
-      currentValue = {};
 
-      if (valueMap[codeKeyPath] !== code) {
-        $entryDraft[valueStoreKey][locale][codeKeyPath] = code;
-      }
-
-      if (valueMap[langKeyPath] !== lang) {
-        $entryDraft[valueStoreKey][locale][langKeyPath] = lang;
-      }
+      return;
     }
+
+    const draft = entryDraft.current;
+
+    /* v8 ignore next 3 -- the editor is only rendered while the draft is there */
+    if (!draft) {
+      return;
+    }
+
+    /** @type {Record<string, any>} */
+    const updates = {};
+
+    if (!isObject(valueMap[keyPath]) || Object.keys(valueMap[keyPath]).length) {
+      updates[keyPath] = {};
+    }
+
+    if (valueMap[codeKeyPath] !== code) {
+      updates[codeKeyPath] = code;
+    }
+
+    if (valueMap[langKeyPath] !== lang) {
+      updates[langKeyPath] = lang;
+    }
+
+    if (!Object.keys(updates).length) {
+      return;
+    }
+
+    const valueStore = draft[valueStoreKey][locale];
+
+    // This runs from an effect, so defer the write to the draft like `<FieldEditor>` does: a write
+    // made while an effect is running makes Svelte walk the derived graph below the value map
+    // without memoizing, which takes exponentially longer with each level of nesting
+    queueMicrotask(() => {
+      Object.assign(valueStore, updates);
+    });
   };
 
-  $effect(() => {
-    void [valueMap];
-
-    untrack(() => {
+  watch(
+    () => valueMap,
+    () => {
       setInputValue();
-    });
-  });
+    },
+  );
 
-  $effect(() => {
-    void [code, lang];
-
-    untrack(() => {
+  watch(
+    () => [code, lang],
+    () => {
       setCurrentValue();
-    });
+    },
+  );
+
+  // While the editor holds a change made by the user, register it as a pending update: the editor
+  // passes the code on with a short delay, so a save right after a change would otherwise validate
+  // and write the previous value
+  $effect(() => {
+    if (!pending) {
+      return undefined;
+    }
+
+    /** @type {PromiseWithResolvers<void>} */
+    const { promise, resolve } = Promise.withResolvers();
+
+    trackPendingFieldUpdate(promise);
+
+    // Settle once the value has reached the draft, which `setCurrentValue()` writes in a microtask,
+    // or when the editor goes away
+    return async () => {
+      await tick();
+      resolve();
+    };
   });
 </script>
 
@@ -129,6 +182,7 @@
     <CodeEditor
       bind:code
       bind:lang
+      bind:pending
       {showLanguageSwitcher}
       flex
       {readonly}

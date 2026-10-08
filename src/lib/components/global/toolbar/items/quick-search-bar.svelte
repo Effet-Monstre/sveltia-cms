@@ -1,6 +1,7 @@
 <script>
   import { _ } from '@sveltia/i18n';
   import { SearchBar } from '@sveltia/ui';
+  import { untrack } from 'svelte';
 
   import { goBack, goto, parseLocation } from '$lib/services/app/navigation';
   import { searchMode, searchTerms } from '$lib/services/search';
@@ -22,37 +23,44 @@
    * @param {string} terms New search terms.
    */
   const navigate = (terms) => {
-    const hadTerms = !!$searchTerms;
+    const hadTerms = !!searchTerms.current;
     const { path } = parseLocation();
     const searching = path.startsWith('/search/');
 
-    $searchTerms = terms;
+    searchTerms.current = terms;
 
     if (terms) {
-      goto(`/search/${terms}`, { replaceState: searching });
+      // Encode the terms, or a `?` or `#` would cut them short in the URL, and a stray `%` would
+      // make the path impossible to decode
+      goto(`/search/${encodeURIComponent(terms)}`, { replaceState: searching });
     } else if (hadTerms && searching) {
       goBack('/collections');
     }
   };
 
-  /** @type {any | undefined} */
-  let searchBar = $state();
+  let inputValue = $state('');
 
   $effect(() => {
-    // Restore search terms when the page is reloaded
-    if (searchBar && $searchTerms !== searchBar?.value) {
-      searchBar.value = $searchTerms;
-    }
+    const terms = searchTerms.current;
+
+    // Restore the search terms when the page is reloaded, or another page changes them. The input
+    // is left alone while it only differs by surrounding spaces, which the terms don’t keep
+    untrack(() => {
+      if (terms !== inputValue.trim()) {
+        inputValue = terms;
+      }
+    });
   });
 </script>
 
 <div role="none" class="wrapper">
-  {#if $searchMode}
+  {#if searchMode.current}
     <SearchBar
-      bind:this={searchBar}
+      bind:value={inputValue}
       debounce
       keyShortcuts="Accel+F"
-      placeholder={_(`search_placeholder_${$searchMode}`)}
+      placeholder={_(`search_placeholder_${searchMode.current}`)}
+      aria-label={_(`search_placeholder_${searchMode.current}`)}
       --sui-textbox-placeholder-text-align="center"
       {onclick}
       oninput={({ target }) => {

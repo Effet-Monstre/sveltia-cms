@@ -35,38 +35,56 @@ export const apiConfig = { ...API_CONFIG_INFO_PLACEHOLDER };
 export const graphqlVars = {};
 
 /**
- * Refresh the OAuth access token using the refresh token.
+ * Send a request to an OAuth token endpoint.
+ * @param {string} tokenURL OAuth token request URL.
+ * @param {Record<string, string>} body Request parameters, including the `grant_type`.
+ * @param {object} [options] Options.
+ * @param {boolean} [options.includeCredentials] Whether to send cookies with the request.
+ * @returns {Promise<Response | undefined>} Response, or `undefined` if the URL isn’t secure or the
+ * request couldn’t be sent at all.
+ */
+export const requestAccessToken = async (tokenURL, body, { includeCredentials = false } = {}) => {
+  if (!isSecureURL(tokenURL)) {
+    return undefined;
+  }
+
+  try {
+    return await fetch(tokenURL, {
+      method: 'POST',
+      headers: {
+        Accept: 'application/json',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(body),
+      ...(includeCredentials && { credentials: 'include' }),
+    });
+  } catch {
+    return undefined;
+  }
+};
+
+/**
+ * Token refreshes in progress, keyed by the refresh token they use.
+ * @type {Map<string, Promise<AuthTokens>>}
+ */
+const pendingRefreshes = new Map();
+
+/**
+ * Send a request to refresh the OAuth access token.
  * @param {object} args Arguments.
  * @param {string} args.clientId OAuth application ID.
  * @param {string} args.tokenURL OAuth token request URL.
  * @param {string} args.refreshToken OAuth refresh token.
  * @returns {Promise<AuthTokens>} New access token and refresh token.
  */
-export const refreshAccessToken = async ({ clientId, tokenURL, refreshToken }) => {
-  let response;
+const requestTokenRefresh = async ({ clientId, tokenURL, refreshToken }) => {
   let token = '';
 
-  if (!isSecureURL(tokenURL)) {
-    throw new Error(_('sign_in_error.TOKEN_REFRESH_FAILED'));
-  }
-
-  try {
-    response = await fetch(tokenURL, {
-      method: 'POST',
-      headers: {
-        Accept: 'application/json',
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        grant_type: 'refresh_token',
-        client_id: clientId,
-        refresh_token: refreshToken,
-      }),
-      ...(apiConfig.includeCredentials && { credentials: 'include' }),
-    });
-  } catch {
-    //
-  }
+  const response = await requestAccessToken(
+    tokenURL,
+    { grant_type: 'refresh_token', client_id: clientId, refresh_token: refreshToken },
+    { includeCredentials: apiConfig.includeCredentials },
+  );
 
   if (!response?.ok) {
     throw new Error(_('sign_in_error.TOKEN_REFRESH_FAILED'));
@@ -78,6 +96,29 @@ export const refreshAccessToken = async ({ clientId, tokenURL, refreshToken }) =
   user.account = user.account ? { ...user.account, token, refreshToken } : user.account;
 
   return { token, refreshToken };
+};
+
+/**
+ * Refresh the OAuth access token using the refresh token. Requests failing at the same time share a
+ * single refresh, as a refresh token may only be used once, e.g. with a GitHub App or Gitea, and
+ * each of them refreshing on its own would make all but the first fail.
+ * @param {object} args Arguments.
+ * @param {string} args.clientId OAuth application ID.
+ * @param {string} args.tokenURL OAuth token request URL.
+ * @param {string} args.refreshToken OAuth refresh token.
+ * @returns {Promise<AuthTokens>} New access token and refresh token.
+ */
+export const refreshAccessToken = ({ clientId, tokenURL, refreshToken }) => {
+  let promise = pendingRefreshes.get(refreshToken);
+
+  if (!promise) {
+    promise = requestTokenRefresh({ clientId, tokenURL, refreshToken }).finally(() => {
+      pendingRefreshes.delete(refreshToken);
+    });
+    pendingRefreshes.set(refreshToken, promise);
+  }
+
+  return promise;
 };
 
 /**
@@ -134,7 +175,21 @@ export const fetchAPI = async (
     {
       responseType,
       refreshAccessToken: refreshToken
-        ? () => refreshAccessToken({ clientId, tokenURL, refreshToken })
+        ? async () => {
+            const { account } = user;
+
+            // Another request has refreshed the token since this one was sent, which used up the
+            // refresh token if it’s single-use, so take the new token instead of refreshing again
+            if (
+              account?.token &&
+              account.token !== token &&
+              account.refreshToken !== refreshToken
+            ) {
+              return { token: account.token, refreshToken: account.refreshToken };
+            }
+
+            return refreshAccessToken({ clientId, tokenURL, refreshToken });
+          }
         : undefined,
     },
   );

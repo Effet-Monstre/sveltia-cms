@@ -1,9 +1,25 @@
 import { locale as appLocale, isRTL } from '@sveltia/i18n';
 
+import { fillLocalePlaceholder } from '$lib/services/contents/i18n/placeholder';
+import { getOrCreate } from '$lib/services/utils/cache';
+
 /**
  * @import { InternalI18nOptions, InternalLocaleCode, } from '$lib/types/private';
  * @import { LocaleCode } from '$lib/types/public';
  */
+
+/**
+ * Default options for `Intl.DisplayNames()`. Use `English (US)` instead of `American English` for a
+ * better language listing.
+ * @type {Intl.DisplayNamesOptions}
+ * @see https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Intl/DisplayNames/DisplayNames
+ */
+const LANG_FORMATTER_OPTIONS = {
+  type: 'language',
+  languageDisplay: 'standard',
+  style: 'short',
+  fallback: 'none',
+};
 
 /**
  * Get the canonical locale of the given locale that can be used for various `Intl` methods.
@@ -46,12 +62,16 @@ const displayNamesCache = new Map();
  * @param {object} [options] Options.
  * @param {InternalLocaleCode} [options.displayLocale] Locale code to display the locale name. If
  * not given, use the current application locale. Default is `en`.
+ * @param {Intl.DisplayNamesOptions} [options.formatterOptions] Options for `Intl.DisplayNames()`.
  * @returns {string | undefined} Locale label like `English`. If the locale is not valid, returns
  * `undefined`.
  */
 export const getLocaleLabel = (
   locale,
-  { displayLocale = getCanonicalLocale(appLocale.current ?? 'en') } = {},
+  {
+    displayLocale = getCanonicalLocale(appLocale.current ?? 'en'),
+    formatterOptions = LANG_FORMATTER_OPTIONS,
+  } = {},
 ) => {
   const canonicalLocale = getCanonicalLocale(locale);
 
@@ -59,21 +79,25 @@ export const getLocaleLabel = (
     return undefined;
   }
 
-  let formatter;
-
-  if (displayLocale) {
-    formatter = displayNamesCache.get(displayLocale);
-
-    if (!formatter) {
-      formatter = new Intl.DisplayNames(displayLocale, { type: 'language' });
-      displayNamesCache.set(displayLocale, formatter);
-    }
-  } else {
-    formatter = new Intl.DisplayNames(undefined, { type: 'language' });
-  }
+  const formatter = displayLocale
+    ? getOrCreate(
+        displayNamesCache,
+        displayLocale,
+        () => new Intl.DisplayNames(displayLocale, formatterOptions),
+      )
+    : new Intl.DisplayNames(undefined, formatterOptions);
 
   try {
-    return formatter.of(canonicalLocale);
+    const label = formatter.of(canonicalLocale);
+
+    if (!label) {
+      return undefined;
+    }
+
+    const [firstLetter, ...rest] = label;
+
+    // Capitalize the label because the native `of()` method returns all lowercase in some languages
+    return [firstLetter.toLocaleUpperCase(displayLocale), ...rest].join('');
   } catch (/** @type {any} */ ex) {
     // eslint-disable-next-line no-console
     console.error(ex);
@@ -102,34 +126,29 @@ export const getListFormatter = (locale, options = {}) => {
   });
 
   const cacheKey = `${locale}|${effectiveOptions.style}|${effectiveOptions.type}`;
-  let formatter = listFormatterCache.get(cacheKey);
 
-  if (!formatter) {
-    formatter = new Intl.ListFormat(getCanonicalLocale(locale), effectiveOptions);
-    listFormatterCache.set(cacheKey, formatter);
-  }
-
-  return formatter;
+  return getOrCreate(
+    listFormatterCache,
+    cacheKey,
+    () => new Intl.ListFormat(getCanonicalLocale(locale), effectiveOptions),
+  );
 };
 
 /**
- * Get the complete path for the given entry folder, including the locale.
+ * Get the complete path for the given collection folder or file, including the locale.
  * @param {object} args Arguments.
  * @param {InternalI18nOptions} args._i18n I18n configuration.
  * @param {InternalLocaleCode} args.locale Locale code.
- * @param {string} args.path Collection file path with `{{locale}}` placeholder.
+ * @param {string} args.path Collection folder or file path with the `{{locale}}` placeholder.
  * @returns {string} Complete path, including the locale.
  */
 export const getLocalePath = ({ _i18n, locale, path }) => {
   const { defaultLocale, omitDefaultLocaleFromFilePath } = _i18n;
 
-  // Remove the default locale from the file name (for Zola compatibility)
-  // @see https://github.com/sveltia/sveltia-cms/discussions/394
-  if (omitDefaultLocaleFromFilePath && locale === defaultLocale) {
-    path = path.replace(/{{locale}}[./]/, '');
-  }
-
-  // Replace the placeholder with the actual locale. The placeholder may appear multiple times
-  // @see https://github.com/sveltia/sveltia-cms/issues/462
-  return path.replaceAll('{{locale}}', locale);
+  return fillLocalePlaceholder({
+    path,
+    locale,
+    // Remove the default locale from the path (for Zola compatibility)
+    omitLocale: omitDefaultLocaleFromFilePath && locale === defaultLocale,
+  });
 };

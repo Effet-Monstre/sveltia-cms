@@ -1,6 +1,25 @@
+import { getOrCreate } from '$lib/services/utils/cache';
+
 /**
  * @typedef {Map<string, string>} NormalizedValueCache
  */
+
+/**
+ * Normalized value caches that outlive a single search, keyed by the object the values belong to,
+ * typically an entry. Normalizing every field of every entry is what a search mostly spends its
+ * time on, and the values rarely change between two searches, so the work is kept for as long as
+ * the object is around; a saved or reloaded entry is a new object, so its cache starts over.
+ * @type {WeakMap<object, NormalizedValueCache>}
+ */
+const persistentCaches = new WeakMap();
+
+/**
+ * Get the normalized value cache for the given object, creating it on first use.
+ * @param {object} owner Object the values belong to.
+ * @returns {NormalizedValueCache} Cache.
+ */
+export const getNormalizedValueCache = (owner) =>
+  getOrCreate(persistentCaches, owner, () => new Map());
 
 /**
  * Normalize the given string for search value comparison. Since `transliterate` is slow, we only
@@ -56,3 +75,27 @@ const getNormalizedValue = (value, normalizedValueCache = undefined) => {
  */
 export const hasMatch = ({ value, terms, normalizedValueCache = undefined }) =>
   getNormalizedValue(value, normalizedValueCache).includes(terms);
+
+/**
+ * Split the search terms into normalized, unique, whitespace-separated tokens, so that a query like
+ * “annual report cover” can match a file named `annual-report-cover-photo.png`, where the words are
+ * present but not separated by spaces.
+ * @param {string} terms Search terms.
+ * @returns {string[]} Tokens. Empty if the terms are blank.
+ */
+export const tokenize = (terms) => [...new Set(normalize(terms).split(/\s+/).filter(Boolean))];
+
+/**
+ * Check if the value contains every one of the given tokens, in any order.
+ * @param {object} args Arguments.
+ * @param {string} args.value Value to check against.
+ * @param {string[]} args.tokens Search tokens from {@link tokenize}. An empty list matches any
+ * value, so callers should bail out early when the search terms are blank.
+ * @param {NormalizedValueCache} [args.normalizedValueCache] Normalized value cache.
+ * @returns {boolean} Result of the match check.
+ */
+export const hasAllMatches = ({ value, tokens, normalizedValueCache = undefined }) => {
+  const normalizedValue = getNormalizedValue(value, normalizedValueCache);
+
+  return tokens.every((token) => normalizedValue.includes(token));
+};

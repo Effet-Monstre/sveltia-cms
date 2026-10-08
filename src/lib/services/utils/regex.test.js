@@ -4,11 +4,20 @@ import { getRegex } from './regex';
 
 describe('Test getRegex()', () => {
   test('returns RegExp object as is when input is already a RegExp', () => {
-    const regex = /test/gi;
+    const regex = /test/i;
     const result = getRegex(regex);
 
     expect(result).toBe(regex);
     expect(result).toBeInstanceOf(RegExp);
+  });
+
+  test('drops the stateful flags from a RegExp input', () => {
+    const regex = /test/giy;
+    const result = getRegex(regex);
+
+    expect(result).not.toBe(regex);
+    expect(result?.source).toBe('test');
+    expect(result?.flags).toBe('i');
   });
 
   test('converts simple string pattern to RegExp', () => {
@@ -28,19 +37,44 @@ describe('Test getRegex()', () => {
   });
 
   test('converts regex string with multiple flags', () => {
-    const result = getRegex('/test/gim');
+    const result = getRegex('/test/im');
 
     expect(result).toBeInstanceOf(RegExp);
     expect(result?.source).toBe('test');
-    expect(result?.flags).toBe('gim');
+    expect(result?.flags).toBe('im');
   });
 
-  test('converts regex string with leading slash but no pattern delimiters', () => {
+  test('drops the stateful flags from a regex string', () => {
+    const result = getRegex('/test/gimy');
+
+    expect(result).toBeInstanceOf(RegExp);
+    expect(result?.source).toBe('test');
+    expect(result?.flags).toBe('im');
+  });
+
+  test('treats a leading slash without a closing delimiter as part of the pattern', () => {
     const result = getRegex('/pattern');
 
     expect(result).toBeInstanceOf(RegExp);
-    expect(result?.source).toBe('pattern');
+    expect(result?.source).toBe('\\/pattern');
     expect(result?.flags).toBe('');
+    expect(result?.test('/pattern')).toBe(true);
+    expect(result?.test('pattern')).toBe(false);
+  });
+
+  test('keeps a trailing slash of a pattern without delimiters', () => {
+    expect(getRegex('^https?://')?.test('https://example.com')).toBe(true);
+    expect(getRegex('^https?://')?.test('https:/example.com')).toBe(false);
+    expect(getRegex('^/blog/')?.test('/blog/post')).toBe(true);
+    expect(getRegex('^/blog/')?.test('/blogroll')).toBe(false);
+  });
+
+  test('does not treat a trailing `/flags` of a pattern without delimiters as flags', () => {
+    const result = getRegex('^[a-z]+/i');
+
+    expect(result?.flags).toBe('');
+    expect(result?.test('abc/i')).toBe(true);
+    expect(result?.test('ABC')).toBe(false);
   });
 
   test('handles regex string without leading slash', () => {
@@ -93,7 +127,26 @@ describe('Test getRegex()', () => {
 
     expect(result).toBeInstanceOf(RegExp);
     expect(result?.source).toBe('test');
-    expect(result?.flags).toBe('dgimsuy');
+    expect(result?.flags).toBe('dimsu');
+  });
+
+  test('handles the unicodeSets (`v`) flag', () => {
+    const result = getRegex('/^\\p{Lu}/v');
+
+    expect(result).toBeInstanceOf(RegExp);
+    expect(result?.source).toBe('^\\p{Lu}');
+    expect(result?.flags).toBe('v');
+    expect(result?.test('Émile')).toBe(true);
+    expect(result?.test('émile')).toBe(false);
+  });
+
+  // A global or sticky regex advances `lastIndex` on every `test()` call, so reusing it across a
+  // list of values would match only some of them
+  test('matches every value when the same regex is reused', () => {
+    const result = getRegex('/news/g');
+    const values = Array.from({ length: 10 }, (_item, index) => `news-${index}`);
+
+    expect(values.filter((value) => result?.test(value) ?? false)).toHaveLength(10);
   });
 
   test('validates that returned RegExp works correctly', () => {

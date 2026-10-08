@@ -1,8 +1,7 @@
-import { writable } from 'svelte/store';
 import { describe, expect, it, vi } from 'vitest';
 
+import { getListedCollections } from '$lib/services/contents/collection/entries';
 import { getCollectionFilesByEntry } from '$lib/services/contents/collection/files';
-import { getAssociatedCollections } from '$lib/services/contents/entry';
 
 import { scanEntry, searchEntries } from './entries';
 
@@ -18,8 +17,8 @@ vi.mock('$lib/services/contents/collection/files', () => ({
   ]),
 }));
 
-vi.mock('$lib/services/contents/entry', () => ({
-  getAssociatedCollections: vi.fn((entry) => {
+vi.mock('$lib/services/contents/collection/entries', () => ({
+  getListedCollections: vi.fn((entry) => {
     // Return empty array for entries without mock collections
     if (entry.id.startsWith('no-collection')) {
       return [];
@@ -45,6 +44,7 @@ vi.mock('$lib/services/contents/entry/summary', () => ({
 }));
 
 vi.mock('$lib/services/search/util', () => ({
+  getNormalizedValueCache: vi.fn(() => new Map()),
   hasMatch: vi.fn(({ value, terms }) => {
     // Simple case-insensitive substring match
     const normalizedValue = String(value).toLowerCase();
@@ -61,11 +61,11 @@ vi.mock('@sveltia/i18n', () => ({
 }));
 
 vi.mock('$lib/services/contents', () => ({
-  allEntries: writable([]),
+  allEntries: { current: [] },
 }));
 
 vi.mock('$lib/services/search', () => ({
-  searchTerms: writable(''),
+  searchTerms: { current: '' },
 }));
 
 describe('searchEntries basic functionality', () => {
@@ -122,16 +122,33 @@ describe('searchEntries basic functionality', () => {
     expect(result).toEqual([]);
   });
 
-  it('should test scanEntry function exists and returns number', () => {
+  it('should test scanEntry function exists and returns a result object', () => {
     const entry = createEntry('test-entry', {
       title: 'Test Entry',
       description: 'A test entry about testing',
     });
 
-    const points = scanEntry({ entry, terms: 'test' });
+    const result = scanEntry({ entry, terms: 'test' });
 
-    expect(typeof points).toBe('number');
-    expect(points).toBeGreaterThanOrEqual(0);
+    expect(result).toHaveProperty('points');
+    expect(typeof result.points).toBe('number');
+    expect(result.points).toBeGreaterThanOrEqual(0);
+  });
+
+  it('should normalize the entry’s own values through a cache tied to the entry', async () => {
+    const { getNormalizedValueCache, hasMatch } = await import('$lib/services/search/util');
+    const entryCache = new Map();
+    const entry = createEntry('cached-entry', { title: 'Cached Title' });
+
+    vi.mocked(getNormalizedValueCache).mockReturnValue(entryCache);
+
+    scanEntry({ entry, terms: 'cached', normalizedValueCache: new Map() });
+
+    expect(getNormalizedValueCache).toHaveBeenCalledWith(entry);
+    // The content values go through the entry’s cache, not the per-search one
+    expect(hasMatch).toHaveBeenCalledWith(
+      expect.objectContaining({ value: 'Cached Title', normalizedValueCache: entryCache }),
+    );
   });
 
   it('should handle entries with complex content', () => {
@@ -157,7 +174,7 @@ describe('searchEntries basic functionality', () => {
     expect(Array.isArray(result)).toBe(true);
 
     // If it finds matches, they should be valid entries
-    result.forEach((entry) => {
+    result.forEach(({ entry }) => {
       expect(entry).toHaveProperty('id');
       expect(entry).toHaveProperty('slug');
       expect(entry).toHaveProperty('subPath');
@@ -237,14 +254,14 @@ describe('searchEntries basic functionality', () => {
     });
 
     // Test with different search terms
-    const titlePoints = scanEntry({ entry, terms: 'mixed' });
-    const yearPoints = scanEntry({ entry, terms: '2023' });
-    const nonMatchPoints = scanEntry({ entry, terms: 'nonexistent' });
+    const titleResult = scanEntry({ entry, terms: 'mixed' });
+    const yearResult = scanEntry({ entry, terms: '2023' });
+    const nonMatchResult = scanEntry({ entry, terms: 'nonexistent' });
 
-    expect(typeof titlePoints).toBe('number');
-    expect(typeof yearPoints).toBe('number');
-    expect(typeof nonMatchPoints).toBe('number');
-    expect(nonMatchPoints).toBe(0);
+    expect(typeof titleResult.points).toBe('number');
+    expect(typeof yearResult.points).toBe('number');
+    expect(typeof nonMatchResult.points).toBe('number');
+    expect(nonMatchResult.points).toBe(0);
   });
 
   it('should handle multiple locale entries', () => {
@@ -281,10 +298,10 @@ describe('searchEntries basic functionality', () => {
       commitDate: undefined,
     });
 
-    const points = scanEntry({ entry, terms: 'english' });
+    const result = scanEntry({ entry, terms: 'english' });
 
-    expect(typeof points).toBe('number');
-    expect(points).toBeGreaterThanOrEqual(0);
+    expect(typeof result.points).toBe('number');
+    expect(result.points).toBeGreaterThanOrEqual(0);
   });
 
   it('should award points for collection label matches', () => {
@@ -294,9 +311,9 @@ describe('searchEntries basic functionality', () => {
     });
 
     // Search for the collection label "Blog"
-    const points = scanEntry({ entry, terms: 'blog' });
+    const result = scanEntry({ entry, terms: 'blog' });
 
-    expect(points).toBeGreaterThan(0);
+    expect(result.points).toBeGreaterThan(0);
   });
 
   it('should award points for collection name matches', () => {
@@ -306,9 +323,9 @@ describe('searchEntries basic functionality', () => {
     });
 
     // Search for collection name
-    const points = scanEntry({ entry, terms: 'posts' });
+    const result = scanEntry({ entry, terms: 'posts' });
 
-    expect(points).toBeGreaterThan(0);
+    expect(result.points).toBeGreaterThan(0);
   });
 
   it('should award points for file label matches', () => {
@@ -318,9 +335,9 @@ describe('searchEntries basic functionality', () => {
     });
 
     // Search for file label
-    const points = scanEntry({ entry, terms: 'test' });
+    const result = scanEntry({ entry, terms: 'test' });
 
-    expect(points).toBeGreaterThan(0);
+    expect(result.points).toBeGreaterThan(0);
   });
 
   it('should award points for entry summary matches', () => {
@@ -330,22 +347,59 @@ describe('searchEntries basic functionality', () => {
     });
 
     // Search for terms in summary
-    const points = scanEntry({ entry, terms: 'summary' });
+    const result = scanEntry({ entry, terms: 'summary' });
 
-    expect(points).toBeGreaterThan(0);
+    expect(result.points).toBeGreaterThan(0);
   });
 
-  it('should handle entries with no associated collections', () => {
+  it('should return the matching locale and key path for content matches', () => {
+    const entry = createEntry('highlight-entry', {
+      title: 'Highlight me',
+      description: 'This entry should expose highlight metadata',
+    });
+
+    const result = scanEntry({ entry, terms: 'highlight' });
+
+    expect(result.locale).toBe('en');
+    expect(result.keyPath).toBe('title');
+  });
+
+  it('should leave locale and key path undefined when only metadata matches', () => {
+    const entry = createEntry('metadata-only-entry', {
+      title: 'No content match here',
+      description: 'This should still be found by collection metadata',
+    });
+
+    const result = scanEntry({ entry, terms: 'blog' });
+
+    expect(result.points).toBeGreaterThan(0);
+    expect(result.locale).toBeUndefined();
+    expect(result.keyPath).toBeUndefined();
+  });
+
+  it('should score no points for entries not listed in any collection', () => {
     const entry = createEntry('no-collection-entry', {
       title: 'Orphaned Entry',
       description: 'Entry with no collection',
     });
 
-    // Should still score points for content matches
-    const points = scanEntry({ entry, terms: 'orphaned' });
+    // The entry can’t be opened, so a content match must not make it a result
+    const result = scanEntry({ entry, terms: 'orphaned' });
 
-    expect(typeof points).toBe('number');
-    expect(points).toBeGreaterThanOrEqual(0);
+    expect(result.points).toBe(0);
+    expect(result.locale).toBeUndefined();
+    expect(result.keyPath).toBeUndefined();
+  });
+
+  it('should exclude entries filtered out of every collection from the results', () => {
+    const entries = [
+      createEntry('listed-entry', { title: 'Filtered Test' }),
+      createEntry('no-collection-filtered-out', { title: 'Filtered Test' }),
+    ];
+
+    const results = searchEntries({ entries, terms: 'filtered' });
+
+    expect(results.map(({ entry }) => entry.id)).toEqual(['listed-entry']);
   });
 
   it('should handle entries with boolean values in content', () => {
@@ -355,9 +409,9 @@ describe('searchEntries basic functionality', () => {
       featured: false,
     });
 
-    const points = scanEntry({ entry, terms: 'boolean' });
+    const result = scanEntry({ entry, terms: 'boolean' });
 
-    expect(typeof points).toBe('number');
+    expect(typeof result.points).toBe('number');
   });
 
   it('should sort results by relevance (highest points first)', () => {
@@ -382,11 +436,11 @@ describe('searchEntries basic functionality', () => {
 
     // Verify results are sorted by scanning their points
     if (result.length > 1) {
-      const points = result.map((entry) => scanEntry({ entry, terms: 'javascript' }));
+      const points = result.map(({ entry }) => scanEntry({ entry, terms: 'javascript' }));
 
       // Each point should be >= the next one (sorted descending)
       for (let i = 0; i < points.length - 1; i += 1) {
-        expect(points[i]).toBeGreaterThanOrEqual(points[i + 1]);
+        expect(points[i].points).toBeGreaterThanOrEqual(points[i + 1].points);
       }
     }
   });
@@ -406,12 +460,14 @@ describe('searchEntries basic functionality', () => {
     const result = searchEntries({ entries, terms: 'javascript' });
 
     // Should only include entries with matches
-    expect(result.every((entry) => scanEntry({ entry, terms: 'javascript' }) > 0)).toBe(true);
+    expect(result.every(({ entry }) => scanEntry({ entry, terms: 'javascript' }).points > 0)).toBe(
+      true,
+    );
   });
 
   it('should test collection name fallback when label is undefined', () => {
     // Override mock to return collection without label
-    vi.mocked(getAssociatedCollections).mockReturnValueOnce([
+    vi.mocked(getListedCollections).mockReturnValueOnce([
       /** @type {any} */ ({
         name: 'articles',
         // No label property - should fallback to name
@@ -424,9 +480,9 @@ describe('searchEntries basic functionality', () => {
     });
 
     // Search for collection name (not label)
-    const points = scanEntry({ entry, terms: 'articles' });
+    const result = scanEntry({ entry, terms: 'articles' });
 
-    expect(points).toBeGreaterThan(0);
+    expect(result.points).toBeGreaterThan(0);
   });
 
   it('should test file name fallback when label is undefined', () => {
@@ -448,26 +504,20 @@ describe('searchEntries basic functionality', () => {
     });
 
     // Search for file name (not label)
-    const points = scanEntry({ entry, terms: 'config' });
+    const result = scanEntry({ entry, terms: 'config' });
 
-    expect(points).toBeGreaterThan(0);
+    expect(result.points).toBeGreaterThan(0);
   });
 });
 
-describe('entrySearchResults derived store', () => {
-  it('should execute the derived store callback', async () => {
+describe('entrySearchResults derived state', () => {
+  it('should compute the results from the entries and search terms', async () => {
     // Import after mocks are set up
     const { entrySearchResults } = await import('./entries');
     const { allEntries } = await import('$lib/services/contents');
     const { searchTerms } = await import('$lib/services/search');
-    let callbackExecuted = false;
 
-    const unsubscribe = entrySearchResults.subscribe(() => {
-      callbackExecuted = true;
-    });
-
-    // Trigger store updates to force the derived callback (line 91 execution)
-    allEntries.set([
+    allEntries.current = [
       /** @type {any} */ ({
         id: 'test',
         slug: 'test',
@@ -486,11 +536,11 @@ describe('entrySearchResults derived store', () => {
         defaultLocaleKey: 'en',
         currentLocaleKey: 'en',
       }),
-    ]);
-    searchTerms.set('test');
+    ];
+    searchTerms.current = 'test';
 
-    // The callback should have executed
-    expect(callbackExecuted).toBe(true);
-    unsubscribe();
+    expect(entrySearchResults.current).toEqual([
+      expect.objectContaining({ entry: expect.anything() }),
+    ]);
   });
 });

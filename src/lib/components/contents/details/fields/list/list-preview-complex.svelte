@@ -5,15 +5,14 @@
   @see https://sveltiacms.app/en/docs/fields/list
 -->
 <script>
-  import { isObject } from '@sveltia/utils/object';
-  import { escapeRegExp } from '@sveltia/utils/string';
-  import { unflatten } from 'flat';
+  import { VisibilityObserver } from '@sveltia/ui';
 
-  import VisibilityObserver from '$lib/components/common/visibility-observer.svelte';
   import Subsection from '$lib/components/contents/details/fields/object/subsection.svelte';
   import FieldPreview from '$lib/components/contents/details/preview/field-preview.svelte';
-  import { entryDraft } from '$lib/services/contents/draft';
-  import { getListFieldInfo } from '$lib/services/contents/fields/list/helper';
+  import { getEntryDraftContext } from '$lib/services/contents/draft/state.svelte';
+  import { getValueMapSnapshot } from '$lib/services/contents/draft/value-map.svelte';
+  import { getSubtree } from '$lib/services/contents/entry/subtree';
+  import { getListFieldInfo, getListItemKey } from '$lib/services/contents/fields/list/helpers';
 
   /**
    * @import { FieldPreviewProps } from '$lib/types/private';
@@ -22,6 +21,7 @@
    * ListFieldWithSubField,
    * ListFieldWithSubFields,
    * ListFieldWithTypes,
+   * VariableFieldType,
    * } from '$lib/types/public';
    */
 
@@ -30,6 +30,8 @@
    * @property {ComplexListField} fieldConfig Field configuration.
    * @property {string[] | undefined} currentValue Field value.
    */
+
+  const entryDraft = getEntryDraftContext();
 
   /** @type {FieldPreviewProps & Props} */
   let {
@@ -41,47 +43,52 @@
     /* eslint-enable prefer-const */
   } = $props();
 
-  const { name: fieldName } = $derived(fieldConfig);
   const { field } = $derived(/** @type {ListFieldWithSubField} */ (fieldConfig));
   const { fields } = $derived(/** @type {ListFieldWithSubFields} */ (fieldConfig));
   const { types, typeKey = 'type' } = $derived(/** @type {ListFieldWithTypes} */ (fieldConfig));
   const { hasSingleSubField, hasVariableTypes } = $derived(getListFieldInfo(fieldConfig));
-  const keyPathRegex = $derived(new RegExp(`^${escapeRegExp(keyPath)}\\.\\d+`));
+  /* v8 ignore start -- a list field has either subfields or a single subfield */
+  const singleSubFields = $derived(fields ?? (field ? [field] : []));
+  /* v8 ignore stop */
+  /** @type {Record<string, any>[]} */
   const items = $derived(
-    unflatten(
-      Object.fromEntries(
-        Object.entries($state.snapshot($entryDraft?.currentValues[locale]) ?? {})
-          .filter(([_keyPath]) => keyPathRegex.test(_keyPath))
-          .map(([_keyPath, value]) => [`${fieldName}${_keyPath.slice(keyPath.length)}`, value]),
-      ),
-    )[fieldName] ?? [],
+    getSubtree(getValueMapSnapshot(entryDraft.current, locale), keyPath) ?? [],
   );
+  /**
+   * The variable type of each item, or `undefined` for a list without variable types. The `each`
+   * block below iterates over these primitives rather than over the items: the items are rebuilt
+   * from the snapshot on every update, and a keyed `each` block over them would rewrite the source
+   * of every item on every keystroke, which Svelte then walks through every nested preview.
+   * @type {(string | undefined)[]}
+   */
+  const itemTypes = $derived(items.map((item) => (hasVariableTypes ? item[typeKey] : undefined)));
 </script>
 
-{#each items as item, index (isObject(item) ? (item.__sc_item_id ?? index) : index)}
+{#each itemTypes as type, index (getListItemKey(items, index))}
   <VisibilityObserver>
-    {@const itemKeyPath = `${keyPath}.${index}`}
-    {@const subFieldName = Array.isArray(types)
-      ? $entryDraft?.currentValues[locale][`${itemKeyPath}.${typeKey}`]
-      : undefined}
-    {@const typeConfig = types?.find(({ name }) => name === subFieldName)}
-    {@const label = typeConfig ? typeConfig.label || typeConfig.name : undefined}
-    {@const subFields = subFieldName
-      ? (typeConfig?.fields ?? [])
-      : (fields ?? (field ? [field] : []))}
-    <Subsection {label}>
-      {#each subFields as subField (subField.name)}
-        <VisibilityObserver>
-          <FieldPreview
-            keyPath={hasSingleSubField ? itemKeyPath : `${itemKeyPath}.${subField.name}`}
-            typedKeyPath={hasVariableTypes
-              ? `${typedKeyPath}.*<${subFieldName}>.${subField.name}`
-              : `${typedKeyPath}.*.${subField.name}`}
-            {locale}
-            fieldConfig={subField}
-          />
-        </VisibilityObserver>
-      {/each}
-    </Subsection>
+    {@const typeConfig = type ? types?.find(({ name }) => name === type) : undefined}
+    {#if hasVariableTypes && !typeConfig}
+      <!-- Unknown type: a warning is displayed in the editor -->
+    {:else}
+      {@const itemKeyPath = `${keyPath}.${index}`}
+      {@const label = typeConfig ? typeConfig.label || typeConfig.name : undefined}
+      {@const subFields = hasVariableTypes
+        ? /** @type {VariableFieldType} */ (typeConfig).fields
+        : singleSubFields}
+      <Subsection {label}>
+        {#each subFields as subField (subField.name)}
+          <VisibilityObserver>
+            <FieldPreview
+              keyPath={hasSingleSubField ? itemKeyPath : `${itemKeyPath}.${subField.name}`}
+              typedKeyPath={hasVariableTypes
+                ? `${typedKeyPath}.*<${type}>.${subField.name}`
+                : `${typedKeyPath}.*.${subField.name}`}
+              {locale}
+              fieldConfig={subField}
+            />
+          </VisibilityObserver>
+        {/each}
+      </Subsection>
+    {/if}
   </VisibilityObserver>
 {/each}

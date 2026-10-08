@@ -1,59 +1,45 @@
-import { escapeRegExp } from '@sveltia/utils/string';
+import { isObject } from '@sveltia/utils/object';
 
-import {
-  applyTransformations,
-  DATE_TRANSFORMATION_REGEX,
-} from '$lib/services/common/transformations';
+import { customFieldTypeRegistry } from '$lib/services/api/registries';
 import { getCollection } from '$lib/services/contents/collection';
-import {
-  getIndexFile,
-  isCollectionIndexFile,
-} from '$lib/services/contents/collection/entries/index-file';
+import { getIndexFile } from '$lib/services/contents/collection/entries/index-file';
 import { getCollectionFile } from '$lib/services/contents/collection/files';
-import { MEDIA_FIELD_TYPES, MULTI_VALUE_FIELD_TYPES } from '$lib/services/contents/fields';
-import { getDateTimeFieldDisplayValue } from '$lib/services/contents/fields/date-time/helper';
-import { getReferencedOptionLabel } from '$lib/services/contents/fields/relation/helper';
+import { getListItemKeys } from '$lib/services/contents/entry/key-paths';
+import { getSubtree } from '$lib/services/contents/entry/subtree';
+import {
+  BUILTIN_FIELD_TYPES,
+  MEDIA_FIELD_TYPES,
+  MULTI_VALUE_FIELD_TYPES,
+} from '$lib/services/contents/fields';
 import { getComponentDef } from '$lib/services/contents/fields/rich-text/components/definitions';
-import { getOptionLabel } from '$lib/services/contents/fields/select/helper';
-import { getCanonicalLocale, getListFormatter } from '$lib/services/contents/i18n';
-import { isMultiple } from '$lib/services/integrations/media-libraries/shared';
-import { getOrCreate } from '$lib/services/utils/cache';
+import { isMultiple } from '$lib/services/integrations/media-libraries/multiple';
 import { isNumeric } from '$lib/services/utils/number';
 
 /**
  * @import {
- * Entry,
  * FlattenedEntryContent,
  * GetFieldArgs,
  * InternalEntryCollection,
  * InternalLocaleCode,
+ * TypedFieldKeyPath,
  * } from '$lib/types/private';
  * @import {
- * DateTimeField,
  * Field,
  * FieldKeyPath,
  * FieldWithSubFields,
  * FieldWithTypes,
  * ListFieldWithSubField,
- * ListFieldWithSubFields,
- * ListFieldWithTypes,
- * LocaleCode,
  * MediaField,
  * MultiValueField,
- * NumberField,
  * ObjectFieldWithSubFields,
- * RelationField,
- * SelectField,
  * } from '$lib/types/public';
  */
 
 const TYPE_MATCH_REGEX = /^(.*?)<([^>]+)>(.*)$/;
-const NUMERIC_INDEX_REGEX = /(?:^|\.)(\d+)(?:\.|$)/;
 
 /**
  * Regular expression to match the list key path, e.g. `field.0`, `field.1`, etc.
  * @type {RegExp}
- * @internal
  */
 export const LIST_KEY_PATH_REGEX = /\.\d+$/;
 
@@ -233,15 +219,13 @@ export const getField = (args) => {
     isIndexFile = false,
   } = args;
 
-  // `valueMap` is only consulted during traversal when a keyPath segment is a numeric index (to
-  // resolve variable-type list/object fields). Wildcard paths (e.g. `sections.*.type`) never match
-  // a real flat-entry key, so the lookup always returns `undefined` and the result is identical
-  // regardless of entry content — no need to serialize `valueMap` into the cache key.
-  const hasNumericIndex = NUMERIC_INDEX_REGEX.test(keyPath);
-
-  const cacheKey = hasNumericIndex
-    ? JSON.stringify(args)
-    : `${collectionName}|${fileName ?? ''}|${componentName ?? ''}|${keyPath}|${isIndexFile ? '1' : '0'}`;
+  const cacheKey = [
+    collectionName,
+    fileName ?? '',
+    componentName ?? '',
+    keyPath,
+    isIndexFile ? '1' : '0',
+  ].join('|');
 
   if (fieldConfigCacheMap.has(cacheKey)) {
     return fieldConfigCacheMap.get(cacheKey);
@@ -274,6 +258,7 @@ export const getField = (args) => {
   let field;
   /** @type {string | undefined} - Track explicit type for current nesting level */
   let currentExplicitType;
+  let hasVariableTypeField = false;
 
   keyPathArray.forEach((key, index) => {
     if (index === 0) {
@@ -305,6 +290,10 @@ export const getField = (args) => {
       field = result.field;
       currentExplicitType = result.explicitType;
     }
+
+    if (field && 'types' in field) {
+      hasVariableTypeField = true;
+    }
   });
 
   // If we have an explicit type but haven’t applied it yet (e.g., for "field<button>" with no
@@ -316,9 +305,95 @@ export const getField = (args) => {
     field = types.find(({ name }) => name === currentExplicitType);
   }
 
-  fieldConfigCacheMap.set(cacheKey, field);
+  // Cache the field config if no variable type list/object field is found
+  if (!hasVariableTypeField) {
+    fieldConfigCacheMap.set(cacheKey, field);
+  }
 
   return field;
+};
+
+/**
+ * Convert a field key path to the typed key path a field-level asset folder is registered under: a
+ * list index becomes `*`, followed by the subfield name in a single-subfield List field, and a
+ * variable type is spelled out. The index of a multi-value field, like an Image field with the
+ * `multiple` option, is dropped, because the folder belongs to the field itself.
+ * @param {GetFieldArgs} args Arguments. A `valueMap` is required to resolve variable types.
+ * @returns {TypedFieldKeyPath} Typed key path.
+ * @example
+ * // A variable type List field, with `valueMap: { 'blocks.0.type': 'image' }`
+ * getTypedKeyPath({ collectionName, keyPath: 'blocks.0.src', valueMap })
+ * // => 'blocks.*<image>.src'
+ * @example
+ * // A variable type Object field, with `valueMap: { 'banner.type': 'hero' }`
+ * getTypedKeyPath({ collectionName, keyPath: 'banner.src', valueMap })
+ * // => 'banner<hero>.src'
+ * @example
+ * // A single-subfield List field, `field: { name: 'src', widget: 'image' }`
+ * getTypedKeyPath({ collectionName, keyPath: 'photos.0' })
+ * // => 'photos.*.src'
+ * @example
+ * // An Image field with the `multiple` option
+ * getTypedKeyPath({ collectionName, keyPath: 'images.1' })
+ * // => 'images'
+ */
+export const getTypedKeyPath = ({ keyPath, valueMap = {}, ...args }) => {
+  const keyPathArray = keyPath.split('.');
+
+  return keyPathArray
+    .map((key, index) => {
+      const parentKeyPath = keyPathArray.slice(0, index).join('.');
+      const currentKeyPath = index ? `${parentKeyPath}.${key}` : key;
+
+      if (isNumeric(key)) {
+        const parentField = getField({ ...args, valueMap, keyPath: parentKeyPath });
+        const { widget: parentFieldType = 'text' } = parentField ?? {};
+
+        if (MULTI_VALUE_FIELD_TYPES.includes(parentFieldType)) {
+          return undefined;
+        }
+
+        const { field: subField } = /** @type {ListFieldWithSubField} */ (parentField ?? {});
+        const { types, typeKey = 'type' } = /** @type {FieldWithTypes} */ (parentField ?? {});
+
+        if (subField) {
+          return `*.${subField.name}`;
+        }
+
+        const type = types ? valueMap[`${currentKeyPath}.${typeKey}`] : undefined;
+
+        return type ? `*<${type}>` : '*';
+      }
+
+      const field = getField({ ...args, valueMap, keyPath: currentKeyPath });
+      const { types, typeKey = 'type' } = /** @type {FieldWithTypes} */ (field ?? {});
+
+      const type =
+        field?.widget === 'object' && types ? valueMap[`${currentKeyPath}.${typeKey}`] : undefined;
+
+      return type ? `${key}<${type}>` : key;
+    })
+    .filter((segment) => segment !== undefined)
+    .join('.');
+};
+
+/**
+ * Determine the given field’s kind: one of the built-in field types, custom field type or unknown.
+ * @param {Field} fieldConfig Field configuration.
+ * @returns {'builtin' | 'custom' | 'unknown'} Result.
+ */
+export const getFieldKind = (fieldConfig) => {
+  const fieldType = fieldConfig.widget ?? 'string';
+
+  if (/** @type {string[]} */ (BUILTIN_FIELD_TYPES).includes(fieldType)) {
+    return 'builtin';
+  }
+
+  if (customFieldTypeRegistry.has(fieldType)) {
+    return 'custom';
+  }
+
+  return 'unknown';
 };
 
 /**
@@ -334,227 +409,45 @@ export const isFieldRequired = ({ fieldConfig: { required = true }, locale }) =>
   Array.isArray(required) ? required.includes(locale) : !!required;
 
 /**
- * Cache of pre-compiled list-item regexes for {@link getFieldDisplayValue}, keyed by field key
- * path.
- * @type {Map<FieldKeyPath, RegExp>}
- */
-const listItemDisplayRegexCache = new Map();
-/**
- * Cache of {@link Intl.NumberFormat} instances for {@link getFieldDisplayValue}, keyed by canonical
- * locale.
- * @type {Map<LocaleCode | undefined, Intl.NumberFormat>}
- */
-const numberFormatterCache = new Map();
-
-/**
- * Get a field’s display value that matches the given field name (key path).
+ * Get the current value of a field, taking into account whether it’s a single or multi-value field.
+ * Our internal representation of multi-value fields is a flattened object, so we need to gather all
+ * the values for a given key path into an array.
  * @param {object} args Arguments.
- * @param {string} args.collectionName Collection name.
- * @param {string} [args.fileName] Collection file name. File/singleton collection only.
- * @param {FlattenedEntryContent} [args.valueMap] Object holding current entry values.
- * @param {FieldKeyPath} args.keyPath Key path, e.g. `author.name`.
- * @param {InternalLocaleCode} args.locale Locale.
- * @param {string[]} [args.transformations] String transformations.
- * @param {boolean} [args.isIndexFile] Whether the corresponding entry is the collection’s special
- * index file used specifically in Hugo.
- * @returns {string} Resolved display value.
+ * @param {FlattenedEntryContent} args.valueMap Flattened entry content.
+ * @param {FieldKeyPath} args.keyPath Key path of the field.
+ * @param {boolean} args.isList Whether the field is a list field.
+ * @param {boolean} [args.isCustomFieldType] Whether the field is a custom field type. It may have
+ * arbitrary data structures, so we can’t assume they are multi-value fields.
+ * @returns {any} Current value of the field. For multi-value fields, returns an array of values;
+ * for single-value fields, returns the value directly.
  */
-export const getFieldDisplayValue = ({
-  collectionName,
-  fileName,
-  valueMap = {},
-  keyPath,
-  locale,
-  transformations,
-  isIndexFile = false,
-}) => {
-  const fieldConfig = getField({ collectionName, fileName, valueMap, keyPath, isIndexFile });
-  let value = valueMap[keyPath];
+export const getCurrentValue = ({ valueMap, keyPath, isList, isCustomFieldType = false }) => {
+  const value = valueMap[keyPath];
 
-  // If the field doesn’t exist in `valueMap` and transformations are applied, return empty string
-  if (value === undefined && transformations?.length) {
-    return '';
+  // Single value field: custom field requires the list check below as we don’t know the shape
+  if (!isList && !isCustomFieldType) {
+    // An object field stores an empty object placeholder at its own key path
+    return isObject(value) ? (getSubtree(valueMap, keyPath) ?? value) : value;
   }
 
-  if (fieldConfig?.widget === 'datetime') {
-    // If the `date` transformation is provided, do nothing; it should be used instead of the field
-    // `format` option, so the keep the original value for `applyTransformations()`
-    if (!transformations?.some((tf) => DATE_TRANSFORMATION_REGEX.test(tf))) {
-      value = getDateTimeFieldDisplayValue({
-        locale,
-        fieldConfig: /** @type {DateTimeField} */ (fieldConfig),
-        currentValue: value,
-      });
-    }
+  // Multiple values are flattened in the value map object
+  const itemKeys = getListItemKeys(valueMap, keyPath);
+
+  // Multi-value field
+  if (itemKeys.length) {
+    return itemKeys.map((key) => valueMap[key]).filter((val) => val !== undefined);
   }
 
-  if (fieldConfig?.widget === 'relation') {
-    value = getReferencedOptionLabel({
-      fieldConfig: /** @type {RelationField} */ (fieldConfig),
-      valueMap,
-      keyPath,
-      locale,
-    });
+  // Single value custom field: an object value is stored under its child key paths, and the
+  // placeholder at the field’s own key path can be missing, since `flatten()` doesn’t write one
+  // when an entry is loaded or a list item is manipulated. Assemble the value from the children
+  // either way rather than handing the control nothing
+  // @see https://github.com/sveltia/sveltia-cms/issues/969
+  if (isCustomFieldType) {
+    return value === undefined || isObject(value)
+      ? (getSubtree(valueMap, keyPath) ?? value)
+      : value;
   }
 
-  if (fieldConfig?.widget === 'select') {
-    value = getOptionLabel({
-      fieldConfig: /** @type {SelectField} */ (fieldConfig),
-      valueMap,
-      keyPath,
-    });
-  }
-
-  if (fieldConfig?.widget === 'list') {
-    const { fields } = /** @type {ListFieldWithSubFields} */ (fieldConfig);
-    const { types } = /** @type {ListFieldWithTypes} */ (fieldConfig);
-
-    if (fields || types) {
-      // Ignore
-    } else {
-      // Concat values of single field list or simple list
-      // Pre-compile and cache the regex — same key path is hit on every field render.
-      const listItemRegex = getOrCreate(
-        listItemDisplayRegexCache,
-        keyPath,
-        () => new RegExp(`^${escapeRegExp(keyPath)}${String.raw`\.\d+$`}`),
-      );
-
-      value = getListFormatter(locale).format(
-        Object.entries(valueMap)
-          .filter(([key, val]) => listItemRegex.test(key) && typeof val === 'string' && !!val)
-          .map(([, val]) => val),
-      );
-    }
-  }
-
-  if (fieldConfig?.widget === 'number') {
-    const { value_type: valueType = 'int' } = /** @type {NumberField} */ (fieldConfig);
-
-    if (valueType === 'int' || valueType === 'float') {
-      const canonicalLocale = getCanonicalLocale(locale);
-      let numberFormatter = numberFormatterCache.get(canonicalLocale);
-
-      if (!numberFormatter) {
-        numberFormatter = Intl.NumberFormat(canonicalLocale);
-        numberFormatterCache.set(canonicalLocale, numberFormatter);
-      }
-
-      value = numberFormatter.format(Number(value));
-    }
-  }
-
-  if (Array.isArray(value)) {
-    value = getListFormatter(locale).format(value);
-  }
-
-  if (transformations?.length) {
-    value = applyTransformations({ fieldConfig, value, transformations, locale });
-  }
-
-  // Return an empty string if the value is null or undefined
-  return String(value ?? '');
-};
-
-/**
- * Get the display value of the first visible field that has a non-empty value.
- * @param {object} args Arguments.
- * @param {FlattenedEntryContent} args.valueMap Entry content.
- * @param {InternalLocaleCode} args.locale Locale code.
- * @param {FieldKeyPath} args.keyPath Field key path.
- * @param {GetFieldArgs} args.getFieldArgs Arguments for `getField`.
- * @param {RegExp} args.keyPathRegex Regular expression to match the key path prefix.
- * @returns {string} Display value of the first visible field that has a non-empty value. If no such
- * field is found, returns an empty string.
- */
-export const getVisibleFieldDisplayValue = ({
-  valueMap,
-  locale,
-  keyPath,
-  keyPathRegex,
-  getFieldArgs,
-}) => {
-  // Find the first visible item key path that has a non-empty value
-  const visibleItemKeyPath = [`${keyPath}.title`, `${keyPath}.name`, ...Object.keys(valueMap)].find(
-    (_keyPath) => {
-      const value = valueMap[_keyPath];
-
-      if (
-        !keyPathRegex.test(_keyPath) ||
-        !(
-          (typeof value === 'string' && value.trim()) ||
-          (typeof value === 'number' && !Number.isNaN(value))
-        )
-      ) {
-        return false;
-      }
-
-      const fieldConfig = getField({ ...getFieldArgs, keyPath: _keyPath });
-
-      return !!fieldConfig && fieldConfig.widget !== 'hidden';
-    },
-  );
-
-  if (visibleItemKeyPath) {
-    return getFieldDisplayValue({ ...getFieldArgs, keyPath: visibleItemKeyPath, locale });
-  }
-
-  return '';
-};
-
-/**
- * Get an entry’s field value by locale and key.
- * @param {object} args Arguments.
- * @param {Entry} args.entry Entry.
- * @param {InternalLocaleCode} args.locale Locale code.
- * @param {string} args.collectionName Name of a collection that the entry belongs to.
- * @param {FieldKeyPath | string} args.key Field key path or one of other entry metadata property
- * keys: `slug`, `commit_author` and `commit_date`.
- * @param {boolean} [args.resolveRef] Whether to resolve the referenced value if the target field is
- * a relation field.
- * @returns {any} Value.
- */
-export const getPropertyValue = ({ entry, locale, collectionName, key, resolveRef = true }) => {
-  const { slug, locales, commitAuthor: { name, login, email } = {}, commitDate } = entry;
-
-  if (key === 'slug') {
-    return slug;
-  }
-
-  if (key === 'commit_author') {
-    return name || login || email;
-  }
-
-  if (key === 'commit_date') {
-    return commitDate;
-  }
-
-  const { content } = locales[locale] ?? {};
-
-  if (content === undefined) {
-    return undefined;
-  }
-
-  const collection = getCollection(collectionName);
-
-  if (!collection) {
-    return undefined;
-  }
-
-  if (resolveRef) {
-    const isIndexFile = isCollectionIndexFile(collection, entry);
-    const fieldConfig = getField({ collectionName, keyPath: key, isIndexFile });
-
-    // Resolve the displayed value for a relation field
-    if (fieldConfig?.widget === 'relation') {
-      return getReferencedOptionLabel({
-        fieldConfig: /** @type {RelationField} */ (fieldConfig),
-        valueMap: content,
-        keyPath: key,
-        locale,
-      });
-    }
-  }
-
-  return content[key];
+  return [];
 };

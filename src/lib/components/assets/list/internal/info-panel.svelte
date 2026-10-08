@@ -1,0 +1,147 @@
+<script>
+  import { _, locale as appLocale } from '@sveltia/i18n';
+
+  import FileInfoSections from '$lib/components/assets/list/file-info-sections.svelte';
+  import InfoPanelLayout from '$lib/components/assets/list/info-panel-layout.svelte';
+  import UsedEntries from '$lib/components/assets/list/used-entries.svelte';
+  import AssetPreview from '$lib/components/assets/shared/asset-preview.svelte';
+  import LeafletMap from '$lib/components/common/leaflet-map.svelte';
+  import {
+    defaultAssetDetails,
+    getAssetDetails,
+    getAssetUsedEntries,
+  } from '$lib/services/assets/details';
+  import { isMediaKind } from '$lib/services/assets/kinds';
+  import { formatDate } from '$lib/services/utils/date';
+
+  /**
+   * @import { Asset, AssetDetails } from '$lib/types/private';
+   */
+
+  /**
+   * @typedef {object} Props
+   * @property {Asset} asset Asset.
+   * @property {boolean} [showPreview] Whether to show the media preview.
+   */
+
+  /** @type {Props} */
+  let {
+    /* eslint-disable prefer-const */
+    asset,
+    showPreview = false,
+    /* eslint-enable prefer-const */
+  } = $props();
+
+  /** @type {AssetDetails} */
+  let details = $state({ ...defaultAssetDetails });
+
+  // @todo Fetch file size and commit info on demand for GitLab
+  const { path, size, kind, commitAuthor, commitDate } = $derived(asset);
+  const { publicURL, repoBlobURL, dimensions, duration, createdDate, coordinates, usedEntries } =
+    $derived(details);
+  const canPreview = $derived(isMediaKind(kind) || path.endsWith('.pdf'));
+
+  /**
+   * Asset the details were last requested for. The panel stays mounted while the focus moves from
+   * one asset to another, so a slow lookup for an asset focused earlier must not overwrite the
+   * details of the one focused now.
+   * @type {Asset | undefined}
+   */
+  let requestedAsset;
+
+  /**
+   * Update the properties above.
+   */
+  const updateProps = async () => {
+    const _asset = asset;
+
+    requestedAsset = _asset;
+
+    try {
+      const _details = _asset ? await getAssetDetails(_asset) : { ...defaultAssetDetails };
+
+      if (requestedAsset !== _asset) {
+        return;
+      }
+
+      details = _details;
+      // A late result lands on the object replaced since, so it needs no check
+      details.usedEntries = _asset ? await getAssetUsedEntries(_asset) : [];
+    } catch (/** @type {any} */ ex) {
+      // The file couldn’t be downloaded, so only the basic info is shown
+      // eslint-disable-next-line no-console
+      console.error(ex);
+    }
+  };
+
+  $effect(() => {
+    void [asset];
+    updateProps();
+  });
+</script>
+
+{#snippet preview()}
+  <AssetPreview
+    {kind}
+    {asset}
+    variant="tile"
+    checkerboard={kind === 'image'}
+    controls={['audio', 'video'].includes(kind)}
+  />
+{/snippet}
+
+<InfoPanelLayout preview={showPreview && canPreview ? preview : undefined}>
+  <FileInfoSections
+    fileName={path}
+    {kind}
+    {size}
+    hasDimensions={canPreview}
+    {dimensions}
+    {duration}
+  />
+  <section>
+    <h4>{_('public_urls', { values: { count: 1 } })}</h4>
+    <p>
+      {#if publicURL}
+        <a href={publicURL} dir="ltr" target="_blank" rel="noopener noreferrer">{publicURL}</a>
+      {:else}
+        –
+      {/if}
+    </p>
+  </section>
+  <section>
+    <h4>{_('file_paths', { values: { count: 1 } })}</h4>
+    <p>
+      {#if repoBlobURL}
+        <a href={repoBlobURL} dir="ltr">/{path}</a>
+      {:else}
+        <bdi dir="ltr">/{path}</bdi>
+      {/if}
+    </p>
+  </section>
+  <UsedEntries entries={usedEntries} />
+  {#if commitAuthor}
+    <section>
+      <h4>{_('sort_keys.commit_author')}</h4>
+      <p>{commitAuthor.name || commitAuthor.login || commitAuthor.email}</p>
+    </section>
+  {/if}
+  {#if commitDate}
+    <section>
+      <h4>{_('sort_keys.commit_date')}</h4>
+      <p>{formatDate(commitDate, appLocale.current)}</p>
+    </section>
+  {/if}
+  {#if createdDate}
+    <section>
+      <h4>{_('created_date')}</h4>
+      <p>{formatDate(createdDate, appLocale.current)}</p>
+    </section>
+  {/if}
+  {#if coordinates}
+    <section>
+      <h4>{_('location')}</h4>
+      <LeafletMap {coordinates} />
+    </section>
+  {/if}
+</InfoPanelLayout>

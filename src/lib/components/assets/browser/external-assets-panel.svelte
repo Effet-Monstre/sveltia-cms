@@ -5,30 +5,35 @@
 -->
 <script>
   import { _ } from '@sveltia/i18n';
-  import {
-    Alert,
-    Button,
-    EmptyState,
-    InfiniteScroll,
-    SecretInput,
-    TextInput,
-    Toast,
-  } from '@sveltia/ui';
+  import { Alert, EmptyState, InfiniteScroll, Toast } from '@sveltia/ui';
   import { sleep } from '@sveltia/utils/misc';
-  import { sanitize } from 'isomorphic-dompurify';
-  import { onMount, untrack } from 'svelte';
+  import { onMount } from 'svelte';
 
   import AssetPath from '$lib/components/assets/browser/asset-path.svelte';
+  import PickerBreadcrumb from '$lib/components/assets/browser/picker-breadcrumb.svelte';
   import SimpleImageGridItem from '$lib/components/assets/browser/simple-image-grid-item.svelte';
   import SimpleImageGrid from '$lib/components/assets/browser/simple-image-grid.svelte';
+  import SubfolderStrip from '$lib/components/assets/browser/subfolder-strip.svelte';
+  import SubfolderNameDialog from '$lib/components/assets/list/subfolder-name-dialog.svelte';
   import AssetPreview from '$lib/components/assets/shared/asset-preview.svelte';
+  import CloudServiceAuth from '$lib/components/assets/shared/cloud-service-auth.svelte';
   import DropZone from '$lib/components/assets/shared/drop-zone.svelte';
-  import OversizeAlertDialog from '$lib/components/assets/shared/oversize-alert-dialog.svelte';
-  import { processFile } from '$lib/services/assets/process';
-  import { cmsConfig } from '$lib/services/config';
+  import RejectedFilesAlertDialog from '$lib/components/assets/shared/rejected-files-alert-dialog.svelte';
+  import { getFetchOptions, mergeUploadedExternalAssets } from '$lib/services/assets/external';
+  import {
+    fetchExternalAssetBlob,
+    getSharedMediaLibraryOptions,
+    prepareExternalUploads,
+  } from '$lib/services/assets/external/data';
+  import {
+    getExternalAssetsInDir,
+    getExternalFolderLabel,
+    getExternalSubfolders,
+  } from '$lib/services/assets/external/view';
+  import { getRelativePath, getTakenNames } from '$lib/services/assets/subfolders';
   import { selectAssetsView } from '$lib/services/contents/editor';
   import { env } from '$lib/services/user/env.svelte';
-  import { prefs } from '$lib/services/user/prefs.svelte';
+  import { watch } from '$lib/services/utils/state.svelte';
 
   /**
    * @import {
@@ -71,60 +76,136 @@
     serviceLabel = '',
     hotlinking = false,
     authType = 'api_key',
-    developerURL = '',
-    apiKeyURL = '',
-    apiKeyPattern,
     init,
-    signIn,
     list,
+    browse,
     search,
     upload,
+    createFolder,
   } = $derived(serviceProps);
 
   // Use the grid view for Picsum as it doesn’t provide description for the assets, and the list
   // view relies on the description to show asset information.
-  const viewType = $derived(serviceId === 'picsum' ? 'grid' : $selectAssetsView?.type);
+  const viewType = $derived(serviceId === 'picsum' ? 'grid' : selectAssetsView.current?.type);
   const isStockAssets = $derived(serviceType === 'stock_assets');
-  const allMediaLibraryOptions = $derived(
-    fieldConfig?.media_libraries?.all ?? $cmsConfig?.media_libraries?.all ?? {},
-  );
+  const allMediaLibraryOptions = $derived(getSharedMediaLibraryOptions(fieldConfig));
+  /* v8 ignore start -- only read to report a file exceeding the configured size */
   const maxSize = $derived(
     /** @type {number} */ (allMediaLibraryOptions.max_file_size ?? Infinity),
   );
+  /* v8 ignore stop */
 
-  const input = $state({ userName: '', password: '' });
   let hasConfig = $state(true);
   let hasAuthInfo = $state(false);
   let apiKey = $state('');
   let userName = $state('');
   let password = $state('');
-  /** @type {'initial' | 'requested' | 'success' | 'error'} */
-  let authState = $state('initial');
-  /** @type {ExternalAsset[] | null} */
-  let listedAssets = $state(null);
+  /**
+   * Assets listed by the service. Only ever replaced as a whole, so the list, which can run to
+   * thousands of files on a cloud storage service, isn’t wrapped in a deep proxy.
+   * @type {ExternalAsset[] | null}
+   */
+  let listedAssets = $state.raw(null);
+  /**
+   * Paths of the empty folders on a service with folder support, each kept by a placeholder.
+   * @type {string[]}
+   */
+  let folders = $state([]);
+  /**
+   * Path of the folder being browsed on a service with folder support, relative to the configured
+   * prefix. Empty at the root.
+   */
+  let dirPath = $state('');
+  let newFolderDialogOpen = $state(false);
+  let folderCreationFailed = $state(false);
   /** @type {string | undefined} */
   let error = $state();
   /** @type {{ show: boolean, status: 'info' | 'error', length: number }} */
   let uploadingToast = $state({ show: false, status: 'info', length: 0 });
   /** @type {string[]} */
   let oversizedFileNames = $state([]);
-  let showOversizeAlert = $state(false);
+  /** @type {string[]} */
+  let invalidFileNames = $state([]);
+  let showRejectedFilesAlert = $state(false);
 
   /** @type {MediaLibraryFetchOptions} */
   const listFetchOptions = $derived({ kind, fieldConfig, apiKey, userName, password });
+  /**
+   * Search query. The search terms are shared by all the services in the dialog, so a service that
+   * can’t search, like Lorem Picsum, ignores the terms entered for another service.
+   */
+  const searchQuery = $derived(search ? searchTerms.trim() : '');
+  /**
+   * Whether the service is browsed folder by folder, like a repository folder in the picker. A
+   * search looks through the whole service instead, listing the matches with their paths.
+   */
+  const browsing = $derived(!!browse && !searchQuery);
+  /**
+   * Assets shown in the panel: those right in the folder being browsed, or every asset listed.
+   * @type {ExternalAsset[]}
+   */
+  const panelAssets = $derived.by(() => {
+    const assets = listedAssets ?? [];
+
+    return browsing ? getExternalAssetsInDir({ dirPath, assets }) : assets;
+  });
+  const subfolders = $derived(
+    browsing ? getExternalSubfolders({ dirPath, assets: listedAssets ?? [], folders }) : [],
+  );
+  /** Names already taken in the folder being browsed, which a new folder can’t be given. */
+  const takenNames = $derived(
+    getTakenNames({ subfolders, fileNames: panelAssets.map(({ fileName }) => fileName) }),
+  );
+  /** The folder being browsed, named after the service at the root. */
+  const folderLabel = $derived(getExternalFolderLabel({ dirPath, serviceLabel }));
+
+  /**
+   * ID of the latest {@link getAssets} request. A request made earlier, e.g. a search for the terms
+   * typed before, can come back after a later one, and its result must not replace the latest one.
+   */
+  let latestRequestId = 0;
 
   /**
    * Search or list assets from the external media library.
-   * @param {string} [query] Search query.
+   * @param {string} query Search query, which is only given to a service that can search.
    */
-  const getAssets = async (query = '') => {
+  const getAssets = async (query) => {
+    latestRequestId += 1;
+
+    const requestId = latestRequestId;
+
     listedAssets = null;
-    query = query.trim();
+    error = undefined;
 
     try {
-      listedAssets =
-        (await (query ? search?.(query, listFetchOptions) : list?.(listFetchOptions))) ?? [];
+      /** @type {ExternalAsset[]} */
+      let assets;
+      /** @type {string[] | undefined} */
+      let emptyFolders;
+
+      if (query) {
+        assets = await /** @type {NonNullable<typeof search>} */ (search)(query, listFetchOptions);
+      } else if (browse) {
+        // A service with folder support lists its empty folders along with the files
+        ({ assets, folders: emptyFolders } = await browse(listFetchOptions));
+      } else {
+        assets = (await list?.(listFetchOptions)) ?? [];
+      }
+
+      if (requestId !== latestRequestId) {
+        return;
+      }
+
+      listedAssets = assets;
+
+      if (emptyFolders) {
+        folders = emptyFolders;
+      }
     } catch (ex) {
+      if (requestId !== latestRequestId) {
+        return;
+      }
+
       error = 'search_fetch_failed';
       // eslint-disable-next-line no-console
       console.error(ex);
@@ -146,17 +227,9 @@
     }
 
     try {
-      const response = await fetch(url);
-      const { ok, status } = response;
+      const blob = await fetchExternalAssetBlob(asset);
 
-      if (!ok) {
-        throw new Error(`The response returned with HTTP status ${status}.`);
-      }
-
-      const blob = await response.blob();
-      const file = new File([blob], fileName, { type: blob.type });
-
-      return { url, credit, file };
+      return { url, credit, file: new File([blob], fileName, { type: blob.type }) };
     } catch (ex) {
       error = 'image_fetch_failed';
       // eslint-disable-next-line no-console
@@ -175,16 +248,14 @@
       return;
     }
 
-    const processed = await Promise.all(files.map((f) => processFile(f, allMediaLibraryOptions)));
+    const prepared = await prepareExternalUploads(files, allMediaLibraryOptions);
 
-    files = processed.filter(({ oversized }) => !oversized).map(({ file }) => file);
+    files = prepared.validFiles;
+    oversizedFileNames = prepared.oversizedFileNames;
+    invalidFileNames = prepared.invalidFileNames;
 
-    oversizedFileNames = processed
-      .filter(({ oversized }) => oversized)
-      .map(({ file }) => file.name);
-
-    if (oversizedFileNames.length) {
-      showOversizeAlert = true;
+    if (oversizedFileNames.length || invalidFileNames.length) {
+      showRejectedFilesAlert = true;
     }
 
     if (!files.length) {
@@ -194,22 +265,70 @@
     uploadingToast = { show: true, status: 'info', length: files.length };
 
     try {
-      const uploaded = await upload(files, listFetchOptions);
+      // The files go to the folder being browsed, or the one the search started from
+      const uploaded = await upload(files, { ...listFetchOptions, dirPath });
       const resources = await Promise.all(uploaded.map((asset) => getResource(asset)));
 
       selectedResources = resources.filter((r) => !!r).slice(0, multiple ? undefined : 1);
-      listedAssets = [...uploaded, ...(listedAssets ?? [])];
+      listedAssets = mergeUploadedExternalAssets(uploaded, listedAssets ?? []);
     } catch {
       uploadingToast = { show: true, status: 'error', length: files.length };
     }
   };
 
   /**
+   * Whether a folder can be created in the folder being browsed, which takes a service with folder
+   * support that can create one, while it’s browsed rather than searched.
+   * @returns {boolean} Result.
+   */
+  export const canCreateFolder = () => browsing && !!createFolder;
+
+  /**
+   * Open the New Folder dialog.
+   */
+  export const showNewFolderDialog = () => {
+    newFolderDialogOpen = true;
+  };
+
+  /**
+   * Create a folder in the folder being browsed, which is then listed along with the others.
+   * @param {string} name Folder name.
+   */
+  const createNewFolder = async (name) => {
+    const path = dirPath ? `${dirPath}/${name}` : name;
+
+    try {
+      await /** @type {NonNullable<typeof createFolder>} */ (createFolder)(path, listFetchOptions);
+      folders = [...folders, path];
+    } catch (ex) {
+      folderCreationFailed = true;
+      // eslint-disable-next-line no-console
+      console.error(ex);
+    }
+  };
+
+  /**
+   * URLs of the selected resources, built once per selection change so that each listed item can
+   * check its own selection without going through the whole selection.
+   */
+  const selectedURLs = $derived(new Set(selectedResources.map(({ url }) => url)));
+
+  /**
    * Check if the given asset is already selected.
    * @param {ExternalAsset} asset The asset to check.
    * @returns {boolean} `true` if the asset is selected, `false` otherwise.
    */
-  const isSelected = (asset) => selectedResources.some((r) => r.url === asset.downloadURL);
+  const isSelected = (asset) => selectedURLs.has(asset.downloadURL);
+
+  /**
+   * The latest selection state the list box reported for each asset, keyed by download URL. The
+   * resource of a selected asset is only ready after an `await`, by which time the asset may have
+   * been deselected: the list box reports the asset that loses a single selection after the one
+   * that gets it, if it comes later in the list, and the user can move on while a file downloads.
+   * @type {Map<string, boolean>}
+   */
+  // eslint-disable-next-line svelte/prefer-svelte-reactivity
+  const requestedSelection = new Map();
 
   /**
    * Handle selection change of an asset.
@@ -217,17 +336,33 @@
    * @param {boolean} selected `true` if the asset is now selected, `false` otherwise.
    */
   const onSelectionChange = async (asset, selected) => {
-    const otherResources = selectedResources.filter((r) => r.url !== asset.downloadURL);
+    const { downloadURL } = asset;
+
+    requestedSelection.set(downloadURL, selected);
 
     if (selected) {
       const resource = await getResource(asset);
 
-      if (resource) {
-        selectedResources = [...otherResources, resource];
+      // Read the selection again, as it may have changed during the `await`
+      if (resource && requestedSelection.get(downloadURL)) {
+        selectedResources = [...selectedResources.filter((r) => r.url !== downloadURL), resource];
       }
     } else {
-      selectedResources = otherResources;
+      selectedResources = selectedResources.filter((r) => r.url !== downloadURL);
     }
+  };
+
+  /**
+   * Load the stored credentials. Fetching the assets is left to the effect below, which reacts to
+   * `hasAuthInfo` being set.
+   */
+  const loadAuthInfo = () => {
+    const options = getFetchOptions(serviceProps);
+
+    apiKey = options.apiKey;
+    userName = options.userName;
+    password = options.password;
+    hasAuthInfo = authType === 'none' || !!apiKey || !!password;
   };
 
   onMount(() => {
@@ -241,42 +376,63 @@
         return;
       }
 
-      apiKey = prefs.apiKeys?.[serviceId] ?? '';
-      [userName, password] = (prefs.logins?.[serviceId] ?? '').split(' ');
-      hasAuthInfo = authType === 'none' || !!apiKey || !!password;
+      loadAuthInfo();
       listedAssets = null;
     })();
   });
 
-  $effect(() => {
-    void [searchTerms, hasAuthInfo];
-
-    untrack(() => {
+  watch(
+    () => [searchQuery, hasAuthInfo],
+    () => {
       if (hasAuthInfo) {
-        getAssets(searchTerms);
+        getAssets(searchQuery);
       }
-    });
-  });
+    },
+  );
 </script>
+
+{#snippet breadcrumb()}
+  {#if browsing}
+    <PickerBreadcrumb
+      rootLabel={serviceLabel}
+      path={dirPath}
+      onNavigate={(path) => {
+        dirPath = path;
+      }}
+    />
+  {/if}
+{/snippet}
 
 {#snippet content()}
   {#if !listedAssets}
     <EmptyState>
-      <span role="alert">{_(searchTerms ? 'searching' : 'loading')}</span>
+      <span role="alert">{_(searchQuery ? 'searching' : 'loading')}</span>
     </EmptyState>
-  {:else if !listedAssets.length}
+  {:else if !panelAssets.length && !subfolders.length}
+    {@render breadcrumb()}
     <EmptyState>
       <span role="alert">{_('no_files_found')}</span>
     </EmptyState>
   {:else}
+    {@render breadcrumb()}
     <div role="none" class="grid-wrapper">
+      {#if subfolders.length}
+        <SubfolderStrip
+          {subfolders}
+          {viewType}
+          onOpen={({ path }) => {
+            dirPath = path;
+          }}
+        />
+      {/if}
       <SimpleImageGrid {viewType} {gridId} {multiple}>
-        <InfiniteScroll items={listedAssets ?? []} itemKey="id">
+        <InfiniteScroll items={panelAssets} itemKey="id">
           {#snippet renderItem(/** @type {ExternalAsset} */ asset)}
             {#await sleep() then}
               {@const { id, previewURL, description, kind: _kind } = asset}
               <SimpleImageGridItem
                 value={id}
+                ariaLabel={description}
                 {viewType}
                 {multiple}
                 selected={isSelected(asset)}
@@ -292,9 +448,11 @@
                   crossorigin="anonymous"
                 />
                 {#if viewType === 'list' || (!env.isSmallScreen && !isStockAssets)}
+                  <!-- The path is relative to the folder being browsed -->
                   <AssetPath
-                    path={isStockAssets ? undefined : description}
-                    caption={isStockAssets ? description : undefined}
+                    {...isStockAssets
+                      ? { caption: description }
+                      : { path: browsing ? getRelativePath(description, dirPath) : description }}
                   />
                 {/if}
               </SimpleImageGridItem>
@@ -319,106 +477,7 @@
     {@render content()}
   {/if}
 {:else if hasConfig}
-  <EmptyState>
-    <p role="alert">
-      {#if isStockAssets}
-        {@html sanitize(
-          _('prefs.media.stock_photos.description', {
-            values: {
-              service: serviceLabel,
-              homeHref: `href="${developerURL}"`,
-              apiKeyHref: `href="${apiKeyURL}"`,
-            },
-          })
-            // Remove invisible characters used for link detection in the locale string
-            .replace(/[\u2068\u2069]/g, ''),
-          { ALLOWED_TAGS: ['a'], ALLOWED_ATTR: ['href', 'target', 'rel'] },
-        )}
-      {/if}
-      {#if serviceType === 'cloud_storage'}
-        {@html sanitize(
-          _(`cloud_storage.${serviceId}.auth.${authState}`, {
-            default: _(`cloud_storage.auth.${authType}.${authState}`, {
-              values: {
-                service: serviceLabel,
-                key: _(`cloud_storage.${serviceId}.auth_key_label`, {
-                  default: _(`cloud_storage.auth.${authType}.key_label`),
-                }),
-              },
-            }),
-          }),
-          { ALLOWED_TAGS: ['a'], ALLOWED_ATTR: ['href', 'target', 'rel'] },
-        )}
-      {/if}
-    </p>
-    {#if authType === 'api_key'}
-      <div role="none" class="input-outer">
-        <TextInput
-          dir="ltr"
-          flex
-          monospace
-          spellcheck="false"
-          aria-label={_('prefs.media.stock_photos.field_label', {
-            values: { service: serviceLabel },
-          })}
-          oninput={(event) => {
-            const _value = /** @type {HTMLInputElement} */ (event.target).value.trim();
-
-            if (apiKeyPattern?.test(_value)) {
-              apiKey = _value;
-              hasAuthInfo = true;
-              prefs.apiKeys ??= {};
-              prefs.apiKeys[serviceId] = apiKey;
-              getAssets();
-            }
-          }}
-        />
-      </div>
-    {/if}
-    {#if authType === 'password'}
-      <div role="none" class="input-outer">
-        <TextInput
-          dir="ltr"
-          flex
-          spellcheck="false"
-          aria-label={_('user_name')}
-          disabled={authState === 'requested'}
-          bind:value={input.userName}
-        />
-      </div>
-      <div role="none" class="input-outer">
-        <SecretInput
-          aria-label={_('password')}
-          disabled={authState === 'requested'}
-          bind:value={input.password}
-        />
-      </div>
-      <div role="none" class="input-outer">
-        <Button
-          variant="secondary"
-          label={_('sign_in')}
-          disabled={!input.userName || !input.password || authState === 'requested'}
-          onclick={async () => {
-            authState = 'requested';
-            input.userName = input.userName.trim();
-            input.password = input.password.trim();
-
-            if (await signIn?.(input.userName, input.password)) {
-              authState = 'success';
-              userName = input.userName;
-              password = input.password;
-              hasAuthInfo = true;
-              prefs.logins ??= {};
-              prefs.logins[serviceId] = [userName, password].join(' ');
-              getAssets();
-            } else {
-              authState = 'error';
-            }
-          }}
-        />
-      </div>
-    {/if}
-  </EmptyState>
+  <CloudServiceAuth {serviceProps} onAuth={loadAuthInfo} />
 {:else}
   <EmptyState>
     <span role="alert">{_('cloud_storage.invalid')}</span>
@@ -428,29 +487,41 @@
 <Toast bind:show={uploadingToast.show}>
   <Alert status={uploadingToast.status}>
     {#if uploadingToast.status === 'info'}
-      {_('uploading_files_progress', { values: { count: uploadingToast.length } })}
+      {_('uploading_files_progress')}
     {/if}
     {#if uploadingToast.status === 'error'}
-      {_('uploading_files_failed', { values: { count: uploadingToast.length } })}
+      {_('uploading_files_failed')}
     {/if}
   </Alert>
 </Toast>
 
-<OversizeAlertDialog bind:open={showOversizeAlert} {oversizedFileNames} {maxSize} />
+<RejectedFilesAlertDialog
+  bind:open={showRejectedFilesAlert}
+  {oversizedFileNames}
+  {invalidFileNames}
+  {maxSize}
+/>
+
+<Toast bind:show={folderCreationFailed}>
+  <Alert status="error">{_('creating_folder_failed')}</Alert>
+</Toast>
+
+{#if createFolder}
+  <SubfolderNameDialog
+    bind:open={newFolderDialogOpen}
+    title={_('new_folder')}
+    okLabel={_('new_folder_create')}
+    description={_('new_folder_description', { values: { folder: folderLabel } })}
+    {takenNames}
+    onSubmit={(name) => {
+      createNewFolder(name);
+    }}
+  />
+{/if}
 
 <style>
   .grid-wrapper {
     overflow-y: auto;
     height: 100%;
-  }
-
-  p {
-    margin: 0 0 8px;
-  }
-
-  .input-outer {
-    width: 400px;
-    max-width: 100%;
-    text-align: center;
   }
 </style>

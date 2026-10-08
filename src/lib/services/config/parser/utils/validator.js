@@ -1,6 +1,8 @@
 import { _, locale as appLocale } from '@sveltia/i18n';
 
 import { getListFormatter } from '$lib/services/contents/i18n';
+import { getRegex } from '$lib/services/utils/regex';
+import { makeLink } from '$lib/services/utils/string';
 
 /**
  * @import {
@@ -9,6 +11,12 @@ import { getListFormatter } from '$lib/services/contents/i18n';
  * UnsupportedOption,
  * } from '$lib/types/private';
  */
+
+const INVALID_FIELD_NAME_DOC_URL =
+  'https://sveltiacms.app/en/docs/troubleshooting#using-proper-naming-conventions';
+
+const COMPATIBILITY_DOC_URL =
+  'https://sveltiacms.app/en/docs/migration/netlify-decap-cms#features-not-to-be-implemented';
 
 /**
  * Add an error or warning message to the error collector with context information.
@@ -28,14 +36,15 @@ export const addMessage = ({
   context = {},
   collectors,
 }) => {
-  const { collection, collectionFile, typedKeyPath } = context;
+  const { collection, collectionFile, componentName, typedKeyPath } = context;
   const { errors, warnings } = collectors;
   const locators = [];
 
   if (collection) {
     locators.push(
       _('config.error_locator.collection', {
-        values: { collection: collection.label_singular ?? collection.label ?? collection.name },
+        // An empty label is as good as none, so fall back the same way the UI does
+        values: { collection: collection.label_singular || collection.label || collection.name },
       }),
     );
   }
@@ -43,7 +52,15 @@ export const addMessage = ({
   if (collectionFile) {
     locators.push(
       _('config.error_locator.file', {
-        values: { file: collectionFile.label ?? collectionFile.name },
+        values: { file: collectionFile.label || collectionFile.name },
+      }),
+    );
+  }
+
+  if (componentName) {
+    locators.push(
+      _('config.error_locator.component', {
+        values: { component: componentName },
       }),
     );
   }
@@ -59,9 +76,19 @@ export const addMessage = ({
   const collector = type === 'error' ? errors : warnings;
   const locale = appLocale.current;
   const locatorStr = locators.length ? `${getListFormatter(locale).format(locators)}: ` : '';
-  const message = _(`config.${type}.${strKey}`, { values });
+  let message = _(`config.${type}.${strKey}`, { values });
 
-  collector.add(`${locatorStr}${message}${extraStrKey ? ` ${_(`config.${extraStrKey}`)}` : ''}`);
+  if (strKey === 'invalid_field_name') {
+    message = makeLink(message, INVALID_FIELD_NAME_DOC_URL);
+  }
+
+  const extraMessage = extraStrKey
+    ? _(`config.${extraStrKey}`, {
+        values: { link: extraStrKey === 'compatibility_link' ? COMPATIBILITY_DOC_URL : undefined },
+      })
+    : '';
+
+  collector.add(`${locatorStr}${message}${extraMessage ? ` ${extraMessage}` : ''}`);
 };
 
 /**
@@ -95,7 +122,7 @@ export const checkUnsupportedOptions = ({ UNSUPPORTED_OPTIONS, config, context, 
  * asterisks are used for wildcard matching for relation fields, colons are used for editor
  * component identification, and angle brackets are used for variable type placeholders.
  */
-export const VALID_NAME_REGEX = /^[^\s.*:<>]+$/;
+const VALID_NAME_REGEX = /^[^\s.*:<>]+$/;
 
 /**
  * Checks if the given name is valid.
@@ -116,14 +143,30 @@ export const isValidName = (name) => VALID_NAME_REGEX.test(name);
  * "invalid_".
  * @param {ConfigParserContext} args.context Context.
  * @param {ConfigParserCollectors} args.collectors Collectors.
+ * @param {boolean} [args.required] Whether a missing name must be reported even when the JSON
+ * schema has been applied. The schema requires a `name` almost everywhere, so this is only needed
+ * where it can’t, such as a view group or filter in the object format.
  * @returns {boolean} `true` if the name is valid, `false` otherwise.
  */
-export const checkName = ({ name, index, nameCounts, strKeyBase, context, collectors }) => {
-  if (!name || typeof name !== 'string') {
-    // Use count (1-based index) for user-facing messages
-    const count = String(index + 1);
+export const checkName = ({
+  name,
+  index,
+  nameCounts,
+  strKeyBase,
+  context,
+  collectors,
+  required = false,
+}) => {
+  // A name that is absent or of the wrong type is reported against the JSON schema, so repeating it
+  // here would show two messages for one mistake. An empty string satisfies the schema but is just
+  // as unusable, and a name the schema can’t require has to be reported here or nowhere.
+  if (typeof name !== 'string' || !name) {
+    if (name === '' || (required && name === undefined)) {
+      // Use count (1-based index) for user-facing messages
+      const count = String(index + 1);
 
-    addMessage({ strKey: `missing_${strKeyBase}`, context, values: { count }, collectors });
+      addMessage({ strKey: `missing_${strKeyBase}`, context, values: { count }, collectors });
+    }
 
     return false;
   }
@@ -144,4 +187,22 @@ export const checkName = ({ name, index, nameCounts, strKeyBase, context, collec
   nameCounts[name] = (nameCounts[name] ?? 0) + 1;
 
   return true;
+};
+
+/**
+ * Check that a pattern option holds a regular expression that can be compiled. The runtime uses
+ * `getRegex()`, which returns `undefined` for a pattern it can’t compile, so a mistyped expression
+ * doesn’t fail loudly: a validation `pattern` stops validating, and a collection `filter` stops
+ * matching. A `RegExp` object, which the JS API accepts, is valid by construction, and a value of
+ * another type is reported against the JSON schema.
+ * @param {object} args Arguments.
+ * @param {string} args.option Name of the option holding the pattern, for the message.
+ * @param {any} args.pattern Pattern to check.
+ * @param {ConfigParserContext} args.context Context.
+ * @param {ConfigParserCollectors} args.collectors Collectors.
+ */
+export const checkRegex = ({ option, pattern, context, collectors }) => {
+  if (typeof pattern === 'string' && getRegex(pattern) === undefined) {
+    addMessage({ strKey: 'invalid_regex', values: { option, pattern }, context, collectors });
+  }
 };

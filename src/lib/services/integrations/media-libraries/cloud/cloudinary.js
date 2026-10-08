@@ -1,10 +1,17 @@
 /* eslint-disable no-await-in-loop */
 
+import { getHash } from '@sveltia/utils/crypto';
 import { sleep } from '@sveltia/utils/misc';
 import { isObject } from '@sveltia/utils/object';
-import { get } from 'svelte/store';
 
-import { cmsConfig } from '$lib/services/config';
+import { cmsConfig } from '$lib/services/config/state';
+import { assertResponseOK } from '$lib/services/integrations/media-libraries/cloud/shared/object-storage';
+import {
+  findLibraryOptions,
+  resolveLibraryOptions,
+} from '$lib/services/integrations/media-libraries/options';
+import { fetchPages } from '$lib/services/integrations/media-libraries/paging';
+import { createRawState } from '$lib/services/utils/state.svelte';
 
 /**
  * @import {
@@ -28,6 +35,21 @@ import { cmsConfig } from '$lib/services/config';
  * @property {number} [width] Image width in pixels.
  * @property {number} [height] Image height in pixels.
  */
+
+/**
+ * Whether the Cloudinary Media Library integration is activated.
+ */
+export const activated = createRawState(false);
+
+/**
+ * Whether the Cloudinary Media Library console is loaded.
+ */
+export const consoleLoaded = createRawState(false);
+
+/**
+ * Whether the Cloudinary Media Library dialog is open.
+ */
+export const dialogOpen = createRawState(false);
 
 /**
  * @typedef {object} CloudinaryListResponse
@@ -82,37 +104,12 @@ export const CONFIG_PROPS = [
 
 /**
  * Get Cloudinary library options from site config.
- * @internal
  * @param {CmsConfig | MediaField} [config] CMS configuration or field configuration.
  * @returns {CloudinaryMediaLibrary | false | undefined} Configuration object, or `false` if
  * explicitly disabled.
  */
-export const getLibraryOptions = (config) => {
-  const _cmsConfig = get(cmsConfig);
-
-  config ??= _cmsConfig;
-
-  // Check for explicit media_libraries.cloudinary config (preferred)
-  if (config?.media_libraries && 'cloudinary' in config.media_libraries) {
-    return config.media_libraries.cloudinary;
-  }
-
-  // Fall back to legacy media_library config
-  if (!config?.media_library) {
-    return undefined;
-  }
-
-  const isExplicitlyCloudinary = config.media_library.name === 'cloudinary';
-
-  const isImplicitlyCloudinary =
-    !config.media_library.name && _cmsConfig?.media_library?.name === 'cloudinary';
-
-  if (isExplicitlyCloudinary || isImplicitlyCloudinary) {
-    return /** @type {CloudinaryMediaLibrary} */ (config.media_library);
-  }
-
-  return undefined;
-};
+export const getLibraryOptions = (config = cmsConfig.current) =>
+  findLibraryOptions('cloudinary', config);
 
 /**
  * @type {Map<string, CloudinaryMediaLibrary>}
@@ -133,17 +130,11 @@ export const getMergedLibraryOptions = (fieldConfig) => {
     return cache;
   }
 
-  const siteOptions = getLibraryOptions() || { config: {} };
-  const fieldOptions = getLibraryOptions(fieldConfig) || { config: {} };
+  const resolved = /** @type {CloudinaryMediaLibrary} */ (
+    resolveLibraryOptions('cloudinary', fieldConfig) || {}
+  );
 
-  const options = {
-    ...siteOptions,
-    ...fieldOptions,
-    config: {
-      ...siteOptions.config,
-      ...fieldOptions.config,
-    },
-  };
+  const options = { ...resolved, config: { ...resolved.config } };
 
   optionCacheMap.set(cacheKey, options);
 
@@ -151,12 +142,12 @@ export const getMergedLibraryOptions = (fieldConfig) => {
 };
 
 /**
- * Get Cloudinary configuration from site config.
- * @internal
+ * Get Cloudinary configuration from the site config, with the given field config merged.
+ * @param {MediaField} [fieldConfig] Field configuration.
  * @returns {{ cloudName?: string; apiKey?: string }} Cloudinary configuration.
  */
-export const getCloudConfig = () => {
-  const options = getLibraryOptions();
+export const getCloudConfig = (fieldConfig) => {
+  const options = resolveLibraryOptions('cloudinary', fieldConfig);
   const { cloud_name: cloudName, api_key: apiKey } = (options ? options.config : undefined) ?? {};
 
   return { cloudName, apiKey };
@@ -168,15 +159,13 @@ export const getCloudConfig = () => {
  * @returns {boolean} True if enabled, false otherwise.
  */
 export const isEnabled = (fieldConfig) => {
-  const options = getLibraryOptions(fieldConfig) ?? getLibraryOptions();
-  const { cloud_name: cloudName, api_key: apiKey } = (options ? options.config : undefined) ?? {};
+  const { cloudName, apiKey } = getCloudConfig(fieldConfig);
 
   return !!(cloudName && apiKey);
 };
 
 /**
  * Convert transformation object to Cloudinary transformation string.
- * @internal
  * @param {Record<string, any>} transformation Transformation object. E.g. `{ width: 400, crop:
  * 'scale' }`.
  * @returns {string} Transformation string. E.g. `w_400,c_scale`.
@@ -259,7 +248,6 @@ export const transformationToString = (transformation) => {
 
 /**
  * Parse API results into ExternalAsset format.
- * @internal
  * @param {CloudinaryResource[]} results API results.
  * @param {object} [options] Additional options.
  * @param {MediaField} [options.fieldConfig] Field configuration for custom handling.
@@ -272,7 +260,7 @@ export const parseResults = (results, { fieldConfig } = {}) => {
     output_filename_only: fileNameOnly = false,
     use_transformations: useTransformations = true,
     config: { default_transformations: defaultTransformations = [] } = {},
-  } = (getLibraryOptions(fieldConfig) ?? getLibraryOptions()) || {};
+  } = resolveLibraryOptions('cloudinary', fieldConfig) || {};
 
   const transformation = /** @type {Record<string, any>[][]} */ (defaultTransformations)?.[0]?.[0];
   const hasTransformation = useTransformations && isObject(transformation);
@@ -307,7 +295,6 @@ export const parseResults = (results, { fieldConfig } = {}) => {
 
 /**
  * Generate Basic Auth header for Cloudinary API.
- * @internal
  * @param {string} apiKey API key.
  * @param {string} apiSecret API secret.
  * @returns {string} Basic Auth header value.
@@ -321,7 +308,6 @@ export const generateAuthHeader = (apiKey, apiSecret) => {
 
 /**
  * Fetch resources from Cloudinary API with pagination.
- * @internal
  * @param {MediaLibraryFetchOptions} options Options containing the API secret (apiKey).
  * @param {object} [config] Additional configuration.
  * @param {number} [config.maxPages] Maximum number of pages to fetch. Default: 10.
@@ -330,7 +316,8 @@ export const generateAuthHeader = (apiKey, apiSecret) => {
  * @see https://cloudinary.com/documentation/admin_api#search_for_resources
  */
 export const fetchResources = async (options, { maxPages = 10, expression } = {}) => {
-  const { cloudName, apiKey } = getCloudConfig();
+  const { kind, fieldConfig, apiKey: apiSecret } = options;
+  const { cloudName, apiKey } = getCloudConfig(fieldConfig);
 
   if (!cloudName) {
     return Promise.reject(new Error('Cloudinary cloud name is not configured'));
@@ -339,8 +326,6 @@ export const fetchResources = async (options, { maxPages = 10, expression } = {}
   if (!apiKey) {
     return Promise.reject(new Error('Cloudinary API key is not configured'));
   }
-
-  const { kind, fieldConfig, apiKey: apiSecret } = options;
 
   if (!apiSecret) {
     return Promise.reject(new Error('Cloudinary API secret is not provided'));
@@ -354,49 +339,34 @@ export const fetchResources = async (options, { maxPages = 10, expression } = {}
     Authorization: authHeader,
   };
 
-  /** @type {CloudinaryResource[]} */
-  const allResources = [];
-  /** @type {string | undefined} */
-  let nextCursor;
+  // Build expression with kind filter if specified
+  let filterExpression = expression;
 
-  // Fetch up to maxPages pages
-  for (let page = 0; page < maxPages; page += 1) {
-    // Build expression with kind filter if specified
-    let filterExpression = expression;
-
-    if (kind === 'image' && !expression) {
-      filterExpression = 'resource_type:image';
-    } else if (kind === 'image' && expression) {
-      filterExpression = `(${expression}) AND resource_type:image`;
-    }
-
-    const params = new URLSearchParams({
-      max_results: '100',
-      ...(filterExpression && { expression: filterExpression }),
-      ...(nextCursor && { next_cursor: nextCursor }),
-    });
-
-    const response = await fetch(`${endpoint}?${params}`, { headers });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-
-      return Promise.reject(new Error(`Failed to fetch resources: ${errorText}`));
-    }
-
-    /** @type {CloudinaryListResponse} */
-    const data = await response.json();
-
-    allResources.push(...data.resources);
-    nextCursor = data.next_cursor;
-
-    if (!nextCursor) {
-      break;
-    }
-
-    // Wait for a bit before requesting the next page
-    await sleep(50);
+  if (kind === 'image' && !expression) {
+    filterExpression = 'resource_type:image';
+  } else if (kind === 'image' && expression) {
+    filterExpression = `(${expression}) AND resource_type:image`;
   }
+
+  const allResources = await fetchPages(
+    async (/** @type {string | undefined} */ nextCursor) => {
+      const params = new URLSearchParams({
+        max_results: '100',
+        ...(filterExpression && { expression: filterExpression }),
+        ...(nextCursor && { next_cursor: nextCursor }),
+      });
+
+      const response = await fetch(`${endpoint}?${params}`, { headers });
+
+      await assertResponseOK(response, 'Failed to fetch resources');
+
+      /** @type {CloudinaryListResponse} */
+      const data = await response.json();
+
+      return { results: data.resources, next: data.next_cursor };
+    },
+    { maxPages },
+  );
 
   return parseResults(allResources, { fieldConfig });
 };
@@ -423,7 +393,6 @@ export const search = async (query, options) => {
 
 /**
  * Generate signature for Cloudinary upload.
- * @internal
  * @param {Record<string, string | number>} params Parameters to sign.
  * @param {string} apiSecret API secret.
  * @returns {Promise<string>} Signature.
@@ -436,13 +405,7 @@ export const generateSignature = async (params, apiSecret) => {
     .map((key) => `${key}=${params[key]}`)
     .join('&');
 
-  const stringToSign = `${sortedParams}${apiSecret}`;
-  const encoder = new TextEncoder();
-  const data = encoder.encode(stringToSign);
-  const hashBuffer = await crypto.subtle.digest('SHA-256', data);
-  const hashArray = Array.from(new Uint8Array(hashBuffer));
-
-  return hashArray.map((b) => b.toString(16).padStart(2, '0')).join('');
+  return getHash(`${sortedParams}${apiSecret}`, { algorithm: 'SHA-256' });
 };
 
 /**
@@ -457,7 +420,8 @@ export const upload = async (files, options) => {
     return [];
   }
 
-  const { cloudName, apiKey } = getCloudConfig();
+  const { fieldConfig, apiKey: apiSecret } = options;
+  const { cloudName, apiKey } = getCloudConfig(fieldConfig);
 
   if (!cloudName) {
     return Promise.reject(new Error('Cloudinary cloud name is not configured'));
@@ -466,8 +430,6 @@ export const upload = async (files, options) => {
   if (!apiKey) {
     return Promise.reject(new Error('Cloudinary API key is not configured'));
   }
-
-  const { fieldConfig, apiKey: apiSecret } = options;
 
   if (!apiSecret) {
     return Promise.reject(new Error('Cloudinary API secret is not provided'));
@@ -498,11 +460,7 @@ export const upload = async (files, options) => {
       body: formData,
     });
 
-    if (!response.ok) {
-      const errorText = await response.text();
-
-      throw new Error(`Failed to upload file ${file.name}: ${errorText}`);
-    }
+    await assertResponseOK(response, `Failed to upload file ${file.name}`);
 
     /** @type {CloudinaryResource} */
     const data = await response.json();
@@ -516,6 +474,17 @@ export const upload = async (files, options) => {
   }
 
   return parseResults(uploadedResources, { fieldConfig });
+};
+
+/**
+ * Whether the given URL points to a file in the configured Cloudinary product environment.
+ * @param {string} url URL.
+ * @returns {boolean} Result.
+ */
+export const isAssetURL = (url) => {
+  const { cloudName } = getCloudConfig();
+
+  return !!cloudName && url.startsWith(`https://res.cloudinary.com/${cloudName}/`);
 };
 
 /**
@@ -537,4 +506,5 @@ export default {
   apiKeyURL: 'https://console.cloudinary.com/settings/api-keys',
   apiKeyPattern: /^[A-Za-z0-9_-]{15,}$/,
   isEnabled,
+  isAssetURL,
 };

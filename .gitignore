@@ -1,7 +1,12 @@
 /coverage
+/playwright-report
+/test-results
 #/package
 /.vite
+/.vitest
 node_modules
 *.log
 *.local
 .DS_Store
+.sonda
+.claude

@@ -189,7 +189,7 @@ describe('OpenAI Translator Service', () => {
       );
 
       await expect(openaiTranslator.translate(['Hello'], mockOptions)).rejects.toThrow(
-        'OpenAI API error: 401 Unauthorized - Invalid API key',
+        'Responses API error: 401 Unauthorized - Invalid API key',
       );
     });
 
@@ -204,7 +204,7 @@ describe('OpenAI Translator Service', () => {
       );
 
       await expect(openaiTranslator.translate(['Hello'], mockOptions)).rejects.toThrow(
-        'OpenAI API error: 429 Too Many Requests',
+        'Responses API error: 429 Too Many Requests',
       );
     });
 
@@ -220,7 +220,7 @@ describe('OpenAI Translator Service', () => {
       mockFetch.mockResolvedValueOnce(mockResponse);
 
       await expect(openaiTranslator.translate(['Hello'], mockOptions)).rejects.toThrow(
-        'OpenAI API error: 500 Internal Server Error',
+        'Responses API error: 500 Internal Server Error',
       );
     });
 
@@ -239,7 +239,7 @@ describe('OpenAI Translator Service', () => {
       );
 
       await expect(openaiTranslator.translate(['Hello'], mockOptions)).rejects.toThrow(
-        'Invalid response format from OpenAI API.',
+        'Invalid response format from Responses API.',
       );
     });
 
@@ -250,16 +250,6 @@ describe('OpenAI Translator Service', () => {
 
       await expect(openaiTranslator.translate(['Hello'], mockOptions)).rejects.toThrow(
         'Network error',
-      );
-    });
-
-    it('should handle unknown errors', async () => {
-      const mockFetch = vi.mocked(fetch);
-
-      mockFetch.mockRejectedValueOnce('Unknown error');
-
-      await expect(openaiTranslator.translate(['Hello'], mockOptions)).rejects.toThrow(
-        'Failed to translate text with OpenAI API.',
       );
     });
 
@@ -436,8 +426,8 @@ describe('OpenAI Translator Service', () => {
       expect(requestBody.instructions).toContain('markdown formatting');
       expect(requestBody.instructions).toContain('HTML tags');
       expect(requestBody.instructions).toContain('JSON array');
-      expect(requestBody.model).toBe('gpt-5.4-nano');
-      expect(requestBody.temperature).toBe(0.3);
+      expect(requestBody.model).toBe('gpt-6-luna');
+      expect(requestBody).not.toHaveProperty('temperature');
       expect(requestBody.store).toBe(false);
     });
 

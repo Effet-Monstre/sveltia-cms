@@ -14,6 +14,7 @@
   /**
    * @typedef {object} Props
    * @property {ViewType} viewType View type.
+   * @property {string} [aria-label] Accessible name of the grid.
    * @property {Snippet} [children] Slot content.
    */
 
@@ -21,6 +22,8 @@
   let {
     /* eslint-disable prefer-const */
     viewType,
+    // The `Grid` component takes its accessible name as a prop; a spread `aria-label` is dropped
+    'aria-label': ariaLabel = undefined,
     children = undefined,
     ...rest
     /* eslint-enable prefer-const */
@@ -29,7 +32,7 @@
 
 <div role="none" class="{viewType}-view">
   {#await sleep() then}
-    <Grid multiple clickToSelect={false} {...rest}>
+    <Grid multiple clickToSelect={false} {ariaLabel} {...rest}>
       {@render children?.()}
     </Grid>
   {/await}
@@ -100,9 +103,14 @@
           .label {
             overflow: hidden;
             margin: 12px;
-            height: 40px;
-            line-height: 1.5;
+            height: calc(var(--sui-line-height-compact) * 2);
+            line-height: var(--sui-line-height-compact);
           }
+        }
+
+        /* Editorial Workflow status, shown below the title on a tile */
+        .status {
+          margin: -4px 12px 12px;
         }
 
         &[tabindex] {
@@ -186,6 +194,15 @@
           &.title {
             width: 100%; /* flex: auto */
             color: var(--sui-primary-foreground-color);
+          }
+
+          /*
+           * The column is as wide as the widest Editorial Workflow status badge, so align the
+           * badges to the end of the row rather than letting the narrower ones float mid-column
+           */
+
+          &.status {
+            text-align: end;
           }
 
           &:first-child {

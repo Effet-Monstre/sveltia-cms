@@ -3,12 +3,13 @@ import { isObject } from '@sveltia/utils/object';
 import { escapeRegExp } from '@sveltia/utils/string';
 import { flatten } from 'flat';
 
-import { getCollection } from '$lib/services/contents/collection';
 import { getIndexFile } from '$lib/services/contents/collection/entries/index-file';
-import { getCollectionFile } from '$lib/services/contents/collection/files';
+import { resolveCollectionAndFile } from '$lib/services/contents/collection/files';
+import { getNestedIndexFileName } from '$lib/services/contents/collection/nested';
 import { hasRootField } from '$lib/services/contents/entry/fields';
 import { parseEntryFile } from '$lib/services/contents/file/parse';
 import { getOrCreate } from '$lib/services/utils/cache';
+import { runInChunks } from '$lib/services/utils/scheduling';
 
 /**
  * @import {
@@ -17,6 +18,7 @@ import { getOrCreate } from '$lib/services/utils/cache';
  * InternalCollection,
  * InternalEntryCollection,
  * InternalLocaleCode,
+ * RepositoryFileMetadata,
  * } from '$lib/types/private';
  * @import { Field, RawEntryContent } from '$lib/types/public';
  */
@@ -28,6 +30,11 @@ import { getOrCreate } from '$lib/services/utils/cache';
  */
 export const isIndexFile = (path) => /\/_index(?:\.[\w-]+)?\.md$/.test(path);
 
+/**
+ * Regex to split a `subPath` template into literal text and template tags. Unlike
+ * `TEMPLATE_TAG_REGEX`, it also matches an empty `{{}}` tag and a tag spanning a line break.
+ */
+const SLUG_TEMPLATE_TAG_REGEX = /{{([^]*?)}}/;
 /** @type {Map<string, RegExp>} */
 const slugRegexCache = new Map();
 
@@ -46,39 +53,17 @@ const slugRegexCache = new Map();
 export const getSlug = ({ subPath, subPathTemplate }) => {
   if (subPathTemplate?.includes('{{slug}}')) {
     const regex = getOrCreate(slugRegexCache, subPathTemplate, () => {
-      // Build regex by replacing placeholders with patterns
-      let regexPattern = '';
-      let remaining = subPathTemplate;
+      const regexPattern = subPathTemplate
+        .split(SLUG_TEMPLATE_TAG_REGEX)
+        .map((part, index) => {
+          // The odd parts are the tags captured by the split; an unclosed `{{` stays literal
+          if (index % 2 === 0) {
+            return escapeRegExp(part);
+          }
 
-      // Process template character by character, handling placeholders specially
-      while (remaining.length > 0) {
-        const nextPlaceholder = remaining.indexOf('{{');
-
-        if (nextPlaceholder === -1) {
-          // No more placeholders, escape remaining literal text
-          regexPattern += escapeRegExp(remaining);
-          break;
-        }
-
-        // Add escaped literal text before placeholder
-        if (nextPlaceholder > 0) {
-          regexPattern += escapeRegExp(remaining.substring(0, nextPlaceholder));
-        }
-
-        // Find end of placeholder
-        const placeholderEnd = remaining.indexOf('}}', nextPlaceholder);
-
-        if (placeholderEnd === -1) {
-          // Malformed template, treat as literal
-          regexPattern += escapeRegExp(remaining);
-          break;
-        }
-
-        const placeholder = remaining.substring(nextPlaceholder, placeholderEnd + 2);
-
-        regexPattern += placeholder === '{{slug}}' ? '([^/]+)' : '[^/]+?';
-        remaining = remaining.substring(placeholderEnd + 2);
-      }
+          return part === 'slug' ? '([^/]+)' : '[^/]+?';
+        })
+        .join('');
 
       return new RegExp(`^${regexPattern}$`);
     });
@@ -101,6 +86,12 @@ export const getSlug = ({ subPath, subPathTemplate }) => {
  */
 export const parseFileContent = async (file, errors) => {
   try {
+    // A file whose content couldn’t be read, e.g. because it’s too large, has no text. Parsing it
+    // as an empty file would load an empty entry, and saving that would wipe the file
+    if (file.text === undefined) {
+      throw new Error(`${file.path} could not be read.`);
+    }
+
     return await parseEntryFile(file);
   } catch (/** @type {any} */ ex) {
     // eslint-disable-next-line no-console
@@ -231,29 +222,32 @@ export const shouldSkipIndexFile = (path, fileName, collection, subPathTemplate,
   // 2. The collection is an entry collection and index file inclusion is enabled
   // 3. The collection is an entry collection and the `path` option value ends with `_index` and
   // the extension is `md`
+  // 4. The collection is a nested collection where every entry is stored as `_index.md`
   return !(
     !!fileName ||
     getIndexFile(collection)?.name === '_index' ||
-    (subPathTemplate?.split('/').pop() === '_index' && extension === 'md')
+    (subPathTemplate?.split('/').pop() === '_index' && extension === 'md') ||
+    getNestedIndexFileName(collection) === '_index'
   );
 };
 
 /**
  * Extract subPath and locale information from the file path.
- * @param {BaseEntryListItem} file Entry file list item.
- * @param {string | undefined} fileName Collection file name.
- * @param {RegExp | undefined} fullPathRegEx Full path regex for parsing.
- * @param {InternalLocaleCode} defaultLocale Default locale.
- * @param {boolean} isMultiFileStructure Whether using multi-file i18n structure.
+ * @param {object} args Arguments.
+ * @param {BaseEntryListItem} args.file Entry file list item.
+ * @param {string} [args.fileName] Collection file name.
+ * @param {RegExp} [args.fullPathRegEx] Full path regex for parsing.
+ * @param {InternalLocaleCode} args.defaultLocale Default locale.
+ * @param {boolean} args.isMultiFileStructure Whether using multi-file i18n structure.
  * @returns {{ subPath: string | undefined, locale: InternalLocaleCode | undefined }} Path info.
  */
-export const extractPathInfo = (
+export const extractPathInfo = ({
   file,
   fileName,
   fullPathRegEx,
   defaultLocale,
   isMultiFileStructure,
-) => {
+}) => {
   const {
     path,
     folder: { filePathMap },
@@ -289,21 +283,22 @@ export const extractPathInfo = (
 
 /**
  * Process entry for non-i18n collections.
- * @param {Entry} entry Entry object to populate.
- * @param {RawEntryContent} rawContent Raw content.
- * @param {string} path File path.
- * @param {string | undefined} fileName Collection file name.
- * @param {string} subPath Sub path.
- * @param {string | undefined} subPathTemplate Sub path template.
+ * @param {object} args Arguments.
+ * @param {Entry} args.entry Entry object to populate.
+ * @param {RawEntryContent} args.rawContent Raw content.
+ * @param {string} args.path File path.
+ * @param {string} [args.fileName] Collection file name.
+ * @param {string} args.subPath Sub path.
+ * @param {string} [args.subPathTemplate] Sub path template.
  */
-export const processNonI18nEntry = (
+export const processNonI18nEntry = ({
   entry,
   rawContent,
   path,
   fileName,
   subPath,
   subPathTemplate,
-) => {
+}) => {
   const slug = fileName || getSlug({ subPath, subPathTemplate });
 
   entry.slug = slug;
@@ -312,15 +307,16 @@ export const processNonI18nEntry = (
 
 /**
  * Process entry for single-file i18n structure.
- * @param {Entry} entry Entry object to populate.
- * @param {RawEntryContent} rawContent Raw content.
- * @param {string} path File path.
- * @param {string | undefined} fileName Collection file name.
- * @param {string} subPath Sub path.
- * @param {string | undefined} subPathTemplate Sub path template.
- * @param {InternalLocaleCode[]} allLocales All available locales.
+ * @param {object} args Arguments.
+ * @param {Entry} args.entry Entry object to populate.
+ * @param {RawEntryContent} args.rawContent Raw content.
+ * @param {string} args.path File path.
+ * @param {string} [args.fileName] Collection file name.
+ * @param {string} args.subPath Sub path.
+ * @param {string} [args.subPathTemplate] Sub path template.
+ * @param {InternalLocaleCode[]} args.allLocales All available locales.
  */
-export const processI18nSingleFileEntry = (
+export const processI18nSingleFileEntry = ({
   entry,
   rawContent,
   path,
@@ -328,33 +324,36 @@ export const processI18nSingleFileEntry = (
   subPath,
   subPathTemplate,
   allLocales,
-) => {
+}) => {
   const slug = fileName || getSlug({ subPath, subPathTemplate });
 
   entry.slug = slug;
   entry.locales = Object.fromEntries(
     allLocales
-      .filter((_locale) => _locale in rawContent)
+      // A locale key without an object, e.g. an empty `fr:` stub, has no content to read
+      .filter((_locale) => isObject(rawContent[_locale]))
       .map((_locale) => [_locale, { slug, path, content: flatten(rawContent[_locale]) }]),
   );
 };
 
 /**
  * Process entry for multi-file i18n structure.
- * @param {Entry} entry Entry object to populate.
- * @param {RawEntryContent} rawContent Raw content.
- * @param {string} path File path.
- * @param {string | undefined} fileName Collection file name.
- * @param {string} subPath Sub path.
- * @param {string | undefined} subPathTemplate Sub path template.
- * @param {InternalLocaleCode} locale Current locale.
- * @param {InternalLocaleCode} defaultLocale Default locale.
- * @param {string} collectionName Collection name.
- * @param {string | undefined} canonicalSlugKey Canonical slug key.
- * @param {Entry[]} entries Existing entries array.
+ * @param {object} args Arguments.
+ * @param {Entry} args.entry Entry object to populate.
+ * @param {RawEntryContent} args.rawContent Raw content.
+ * @param {string} args.path File path.
+ * @param {string} [args.fileName] Collection file name.
+ * @param {string} args.subPath Sub path.
+ * @param {string} [args.subPathTemplate] Sub path template.
+ * @param {InternalLocaleCode} args.locale Current locale.
+ * @param {InternalLocaleCode} args.defaultLocale Default locale.
+ * @param {string} args.collectionName Collection name.
+ * @param {string} [args.canonicalSlugKey] Canonical slug key.
+ * @param {Map<string, Entry>} args.entryMap Entries prepared so far, keyed by their temporary ID. A
+ * new entry is registered here so that its other locales can find it.
  * @returns {boolean} True if entry was added to existing entry, false if new entry should be added.
  */
-export const processI18nMultiFileEntry = (
+export const processI18nMultiFileEntry = ({
   entry,
   rawContent,
   path,
@@ -365,8 +364,8 @@ export const processI18nMultiFileEntry = (
   defaultLocale,
   collectionName,
   canonicalSlugKey,
-  entries,
-) => {
+  entryMap,
+}) => {
   // Support a canonical slug to link localized files
   const canonicalSlug =
     canonicalSlugKey && typeof rawContent[canonicalSlugKey] === 'string'
@@ -375,16 +374,23 @@ export const processI18nMultiFileEntry = (
 
   const slug = fileName || getSlug({ subPath, subPathTemplate });
   const localizedEntry = { slug, path, content: flatten(rawContent) };
-  // Use a temporary ID to locate all the localized files for the entry
-  const tempId = `${collectionName}/${canonicalSlug ?? slug}`;
-  // Check if the entry has already been added for another locale
-  const existingEntry = entries.find((e) => e.id === tempId);
+  // Use a temporary ID to locate all the localized files for the entry. The sub path is the same
+  // across locales, while the slug may not be unique, e.g. with the `{{year}}/{{slug}}` path. A
+  // collection file is identified by its name, so a canonical slug in one of its locales can’t
+  // split it into two entries
+  const tempId = `${collectionName}/${fileName || (canonicalSlug ?? subPath)}`;
+  // Check if the entry has already been added for another locale. A lookup in the map rather than
+  // a scan of the entry list keeps this linear over a repository with thousands of localized files
+  const existingEntry = entryMap.get(tempId);
 
   // If found, add a new locale to the existing entry; don’t add another entry
   if (existingEntry) {
     existingEntry.locales[locale] = localizedEntry;
 
-    if (locale === defaultLocale) {
+    // The default locale defines the entry’s identity, but any other locale stands in when its file
+    // is absent. Otherwise the entry would have no slug and `prepareEntries()` would drop it, which
+    // happens with Editorial Workflow whenever a pull request touches only a non-default locale
+    if (locale === defaultLocale || !existingEntry.slug) {
       existingEntry.slug = slug;
       existingEntry.subPath = subPath;
     }
@@ -394,12 +400,98 @@ export const processI18nMultiFileEntry = (
 
   entry.id = tempId;
   entry.locales[locale] = localizedEntry;
-
-  if (locale === defaultLocale) {
-    entry.slug = slug;
-  }
+  // The default locale file overrides this when it’s processed, in the branch above
+  entry.slug = slug;
+  entryMap.set(tempId, entry);
 
   return false; // New entry should be added
+};
+
+/**
+ * Raw items of the files storing all the entries of an entry collection, keyed by file path, as
+ * they were last parsed. A save rewrites the file from these rather than from the entries, so the
+ * items that don’t make an entry, and the properties that aren’t defined as fields, are kept as
+ * they are. `null` for a file that doesn’t contain a valid array, which can’t be updated.
+ * @type {Map<string, any[] | null>}
+ */
+export const arrayFileItems = new Map();
+
+/**
+ * Create an entry from an item in a file storing all the entries of an entry collection. With i18n
+ * enabled, the item holds all the translations, like a file with the `single_file` or
+ * `single_file_default_root` structure does.
+ * @param {object} args Arguments.
+ * @param {InternalEntryCollection} args.collection Collection.
+ * @param {any} args.item Raw item.
+ * @param {number} args.index Position of the item in the array.
+ * @param {string} args.path File path.
+ * @param {RepositoryFileMetadata} [args.meta] File metadata.
+ * @returns {Entry | undefined} Entry, or `undefined` if the item doesn’t make one.
+ */
+export const createArrayItemEntry = ({ collection, item, index, path, meta = {} }) => {
+  const {
+    fields,
+    _i18n: {
+      i18nEnabled,
+      allLocales,
+      defaultLocale,
+      structureMap: { i18nSingleFileDefaultRoot },
+    },
+  } = collection;
+
+  const rawContent = i18nSingleFileDefaultRoot
+    ? normalizeDefaultRootContent(item, allLocales, defaultLocale)
+    : item;
+
+  const content = rawContent ? transformRawContent(rawContent, fields, i18nEnabled) : undefined;
+
+  if (!content) {
+    return undefined;
+  }
+
+  // The position is the slug, as an item has no file name to take one from
+  const subPath = String(index);
+  /** @type {Entry} */
+  const entry = { id: '', slug: '', subPath, locales: {}, arrayIndex: index, ...meta };
+
+  if (i18nEnabled) {
+    processI18nSingleFileEntry({ entry, rawContent: content, path, subPath, allLocales });
+  } else {
+    processNonI18nEntry({ entry, rawContent: content, path, subPath });
+  }
+
+  return Object.keys(entry.locales).length ? entry : undefined;
+};
+
+/**
+ * Prepare the entries stored in a file of an entry collection that stores all the entries in one
+ * file, one for each object in the array.
+ * @param {object} args Arguments.
+ * @param {InternalEntryCollection} args.collection Collection.
+ * @param {BaseEntryListItem} args.file Entry file list item.
+ * @param {any} args.rawContent Parsed file content.
+ * @param {Entry[]} args.entries List of prepared entries.
+ * @param {Error[]} args.errors List of parse errors.
+ */
+export const prepareArrayFileEntries = ({ collection, file, rawContent, entries, errors }) => {
+  const { path, meta = {} } = file;
+
+  if (!Array.isArray(rawContent)) {
+    arrayFileItems.set(path, null);
+    errors.push(new Error(`${path} could not be parsed, as it doesn’t contain an array.`));
+
+    return;
+  }
+
+  arrayFileItems.set(path, rawContent);
+
+  rawContent.forEach((item, index) => {
+    const entry = createArrayItemEntry({ collection, item, index, path, meta });
+
+    if (entry) {
+      entries.push(entry);
+    }
+  });
 };
 
 /**
@@ -407,14 +499,12 @@ export const processI18nMultiFileEntry = (
  * @param {object} args Arguments.
  * @param {BaseEntryListItem} args.file Entry file list item.
  * @param {Entry[]} args.entries List of prepared entries.
+ * @param {Map<string, Entry>} args.entryMap Prepared entries keyed by their temporary ID, used to
+ * merge the localized files of a multi-file i18n entry.
  * @param {Error[]} args.errors List of parse errors.
  */
-export const prepareEntry = async ({ file, entries, errors }) => {
+export const prepareEntry = async ({ file, entries, entryMap, errors }) => {
   const rawContent = await parseFileContent(file, errors);
-
-  if (!rawContent) {
-    return;
-  }
 
   const {
     path,
@@ -422,12 +512,28 @@ export const prepareEntry = async ({ file, entries, errors }) => {
     folder: { collectionName, fileName },
   } = file;
 
-  const collection = getCollection(collectionName);
+  const { collection, collectionFile } = resolveCollectionAndFile(collectionName, fileName) ?? {};
 
-  const collectionFile =
-    collection && fileName ? getCollectionFile(collection, fileName) : undefined;
+  // A file storing all the entries of an entry collection
+  const isArrayFile =
+    !collectionFile && collection?._type === 'entry' && collection._file.arrayFile;
 
-  if (!collection || (fileName && !collectionFile)) {
+  if (!rawContent) {
+    // Make sure the array file is not overwritten
+    if (isArrayFile) {
+      arrayFileItems.set(path, null);
+    }
+
+    return;
+  }
+
+  if (!collection) {
+    return;
+  }
+
+  if (isArrayFile) {
+    prepareArrayFileEntries({ collection, file, rawContent, entries, errors });
+
     return;
   }
 
@@ -472,13 +578,13 @@ export const prepareEntry = async ({ file, entries, errors }) => {
 
   const isMultiFileStructure = i18nMultiFile || i18nMultiFolder || i18nMultiRootFolder;
 
-  const { subPath, locale } = extractPathInfo(
+  const { subPath, locale } = extractPathInfo({
     file,
     fileName,
     fullPathRegEx,
     defaultLocale,
     isMultiFileStructure,
-  );
+  });
 
   if (!subPath) {
     return;
@@ -497,34 +603,30 @@ export const prepareEntry = async ({ file, entries, errors }) => {
     ...meta,
   };
 
+  const entryArgs = {
+    entry,
+    rawContent: transformedContent,
+    path,
+    fileName,
+    subPath,
+    subPathTemplate,
+  };
+
   if (!i18nEnabled) {
-    processNonI18nEntry(entry, transformedContent, path, fileName, subPath, subPathTemplate);
-  } else if (i18nSingleFile || i18nSingleFileDefaultRoot) {
-    processI18nSingleFileEntry(
-      entry,
-      transformedContent,
-      path,
-      fileName,
-      subPath,
-      subPathTemplate,
-      allLocales,
-    );
+    processNonI18nEntry(entryArgs);
+  } else if (isI18nSingleFile) {
+    processI18nSingleFileEntry({ ...entryArgs, allLocales });
   } else {
     // `isMultiFileStructure` is always true here (the only non-`i18nSingleFile` path), and `locale`
     // is always set (the guard above returned early if it wasn’t).
-    const wasMerged = processI18nMultiFileEntry(
-      entry,
-      transformedContent,
-      path,
-      fileName,
-      subPath,
-      subPathTemplate,
-      /** @type {InternalLocaleCode} */ (locale),
+    const wasMerged = processI18nMultiFileEntry({
+      ...entryArgs,
+      locale: /** @type {InternalLocaleCode} */ (locale),
       defaultLocale,
       collectionName,
       canonicalSlugKey,
-      entries,
-    );
+      entryMap,
+    });
 
     if (wasMerged) {
       return; // Entry was merged with existing, don’t add to entries array
@@ -542,10 +644,14 @@ export const prepareEntry = async ({ file, entries, errors }) => {
 export const prepareEntries = async (entryFiles) => {
   /** @type {Entry[]} */
   const entries = [];
+  /** @type {Map<string, Entry>} */
+  const entryMap = new Map();
   /** @type {Error[]} */
   const errors = [];
 
-  await Promise.all(entryFiles.map((file) => prepareEntry({ file, entries, errors })));
+  // Parsing is synchronous, so a large repository would freeze the tab for the whole batch while
+  // the progress indicator stalls. Yield between chunks instead
+  await runInChunks(entryFiles, (file) => prepareEntry({ file, entries, entryMap, errors }));
 
   return {
     entries: entries.filter((entry) => {

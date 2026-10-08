@@ -5,16 +5,31 @@
   import EntrancePage from '$lib/components/entrance/entrance-page.svelte';
   import BackendStatusIndicator from '$lib/components/global/infobars/backend-status-indicator.svelte';
   import UpdateNotification from '$lib/components/global/infobars/update-notification.svelte';
+  import LocaleLoadErrorToast from '$lib/components/global/locale-load-error-toast.svelte';
   import MainRouter from '$lib/components/global/main-router.svelte';
-  import { appLogoType, appLogoURL, appTitle } from '$lib/services/app/branding';
+  import ForkPermissionDialog from '$lib/components/workflow/fork-permission-dialog.svelte';
+  import OpenAuthoringIndicator from '$lib/components/workflow/open-authoring-indicator.svelte';
+  import {
+    appIconURLs,
+    appLogoType,
+    appLogoURL,
+    appManifestURL,
+    appTitle,
+  } from '$lib/services/app/branding';
   import { initAppLocale } from '$lib/services/app/i18n';
-  import { announcedPageStatus, startViewTransition } from '$lib/services/app/navigation';
+  import {
+    announcedPageStatus,
+    mainAreaTitle,
+    overlayTitle,
+    startViewTransition,
+  } from '$lib/services/app/navigation';
   import { backend } from '$lib/services/backends';
-  import { cmsConfigLoaded, DEV_SITE_URL, initCmsConfig } from '$lib/services/config';
+  import { cmsConfigLoaded, DEV_SITE_URL } from '$lib/services/config';
+  import { initCmsConfig } from '$lib/services/config/init';
   import { dataLoaded } from '$lib/services/contents';
   import { user } from '$lib/services/user/account.svelte';
-  import { initUserEnvDetection } from '$lib/services/user/env.svelte';
   import { signInManually } from '$lib/services/user/auth.svelte';
+  import { initUserEnvDetection } from '$lib/services/user/env.svelte';
 
   /**
    * @import { CmsConfig } from '$lib/types/public';
@@ -32,32 +47,26 @@
     /* eslint-enable prefer-const */
   } = $props();
 
-  /**
-   * State to track whether the app locale has been initialized and loaded. We can’t use `isLoading`
-   * from the i18n service here because it becomes `false` as soon as Sveltia UI strings are loaded.
-   */
-  let localeLoaded = $state(false);
-
-  $effect.pre(() => {
-    initAppLocale();
-    localeLoaded = true;
-  });
+  // The strings for the default locale are always bundled with the app, so the UI can be rendered
+  // right away, even while the strings for another locale are being fetched from the CDN
+  initAppLocale();
 
   $effect.pre(() => {
     initUserEnvDetection();
   });
 
-  const configuredBackendName = $derived(/** @type {string} */ (config?.backend?.name));
-
-  $effect(() => {
-    if (!configuredBackendName) {
-      return;
-    }
-    signInManually(configuredBackendName);
+  onMount(() => {
+    initCmsConfig(config);
   });
 
+  // The fork signs the user in with the configured backend as soon as the configuration is known,
+  // so no sign-in screen is shown; see `docs/fork.md`
+  const configuredBackendName = $derived(config?.backend?.name);
+
   $effect(() => {
-    initCmsConfig(config);
+    if (configuredBackendName) {
+      signInManually(configuredBackendName);
+    }
   });
 
   // Fix the position of the custom mount element if needed
@@ -84,8 +93,14 @@
 
   let transitioned = $state(false);
 
+  // “Posts › Hello – Acme CMS” while editing, “Posts Collection – Acme CMS” on the list, and just
+  // the app name on the sign-in page, so each view has its own title (WCAG 2.4.2)
+  const documentTitle = $derived(
+    [overlayTitle.current || mainAreaTitle.current, appTitle.current].filter(Boolean).join(' – '),
+  );
+
   $effect(() => {
-    if ($dataLoaded && user.account) {
+    if (dataLoaded.current && user.account) {
       startViewTransition('forwards', () => {
         transitioned = true;
       });
@@ -100,9 +115,15 @@
 <svelte:head>
   <meta name="referrer" content="same-origin" />
   <meta name="robots" content="noindex" />
-  {#if $cmsConfigLoaded}
-    <title>{$appTitle}</title>
-    <link rel="icon" href={$appLogoURL} type={$appLogoType} />
+  {#if cmsConfigLoaded.current}
+    <title>{documentTitle}</title>
+    <link rel="icon" href={appLogoURL.current} type={appLogoType.current} />
+    {#if appIconURLs.current}
+      <link rel="apple-touch-icon" href={appIconURLs.current.large} />
+    {/if}
+    {#if appManifestURL.current}
+      <link rel="manifest" href={appManifestURL.current} />
+    {/if}
   {/if}
   {#if DEV_SITE_URL}
     <link href="{DEV_SITE_URL}/admin/config.yml" type="application/yaml" rel="cms-config-url" />
@@ -111,8 +132,10 @@
 
 <svelte:body
   onmousedown={(event) => {
-    if (/** @type {HTMLElement | null} */ (event.target)?.matches('a')) {
-      const link = /** @type {HTMLAnchorElement} */ (event.target);
+    // The press can land on an element within the link, e.g. `<strong>` in a Markdown field hint
+    const link = /** @type {HTMLElement | null} */ (event.target)?.closest('a');
+
+    if (link) {
       const { origin, pathname } = link;
 
       // Open external links and links to different paths in a new tab
@@ -125,22 +148,25 @@
 />
 
 <AppShell>
-  {#if localeLoaded}
-    <div role="none" class="outer">
-      <UpdateNotification />
-      {#if $backend}
-        <BackendStatusIndicator />
+  <div role="none" class="outer">
+    <LocaleLoadErrorToast />
+    <UpdateNotification />
+    <ForkPermissionDialog />
+    {#if backend.current}
+      <BackendStatusIndicator />
+    {/if}
+    {#if user.account && dataLoaded.current}
+      <OpenAuthoringIndicator />
+    {/if}
+    <div role="none" class="main">
+      {#if user.account && dataLoaded.current && transitioned}
+        <MainRouter />
+      {:else}
+        <EntrancePage />
       {/if}
-      <div role="none" class="main">
-        {#if user.account && $dataLoaded && transitioned}
-          <MainRouter />
-        {:else}
-          <EntrancePage />
-        {/if}
-      </div>
     </div>
-    <div role="status">{$announcedPageStatus}</div>
-  {/if}
+  </div>
+  <div role="status">{announcedPageStatus.current}</div>
 </AppShell>
 
 <style>
@@ -356,6 +382,19 @@
 
     #nc-root > .sui.app-shell {
       position: absolute;
+    }
+
+    .sui.app-shell {
+      /* A placeholder is often the only visible label of a search box, so it has to meet the 4.5:1
+        text contrast. Sveltia UI only renders it at full strength in the high-contrast themes; the
+        default themes leave it at 50% opacity, which is 2.6:1 on white. */
+      --sui-textbox-placeholder-foreground-color: var(--sui-tertiary-foreground-color);
+      --sui-textbox-placeholder-opacity: 1;
+      /* Border drawn where a primary area (page content, editor panes, asset preview) meets a
+        secondary one (sidebars, toolbars, the gutter between panes). The default themes tell them
+        apart by background alone, so the width is zero; the high-contrast themes, which set
+        `--sui-modal-border-width` to outline dialogs for the same reason, get a visible line. */
+      --area-border: var(--sui-modal-border-width) solid var(--sui-primary-border-color);
     }
   }
 

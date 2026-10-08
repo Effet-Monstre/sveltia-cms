@@ -1,12 +1,13 @@
-import { stripSlashes } from '@sveltia/utils/string';
-import { get } from 'svelte/store';
-
 import {
   normalizeGraphQLBaseURL,
   normalizeRestBaseURL,
 } from '$lib/services/backends/git/github/api';
 import { getTokenPageURL, signIn, signOut } from '$lib/services/backends/git/github/auth';
-import { commitChanges, fetchFileCommits } from '$lib/services/backends/git/github/commits';
+import {
+  commitChanges,
+  fetchFileCommits,
+  fetchLastCommit,
+} from '$lib/services/backends/git/github/commits';
 import {
   BACKEND_LABEL,
   BACKEND_NAME,
@@ -16,17 +17,21 @@ import {
   DEFAULT_PKCE_AUTH_PATH,
   DEFAULT_PKCE_AUTH_ROOT,
 } from '$lib/services/backends/git/github/constants';
-import { triggerDeployment } from '$lib/services/backends/git/github/deployment';
+import {
+  fetchBranchHeadSHA,
+  fetchDeployments,
+  triggerDeployment,
+} from '$lib/services/backends/git/github/deployment';
 import { fetchBlob, fetchFiles } from '$lib/services/backends/git/github/files';
 import { getBaseURLs, repository } from '$lib/services/backends/git/github/repository';
 import { checkStatus, STATUS_DASHBOARD_URL } from '$lib/services/backends/git/github/status';
-import { apiConfig, graphqlVars } from '$lib/services/backends/git/shared/api';
-import { getRepoURL } from '$lib/services/backends/git/shared/repository';
+import workflow from '$lib/services/backends/git/github/workflow';
+import { graphqlVars } from '$lib/services/backends/git/shared/api';
+import { initGitBackend } from '$lib/services/backends/git/shared/init';
 import { cmsConfig } from '$lib/services/config';
-import { prefs } from '$lib/services/user/prefs.svelte';
 
 /**
- * @import { ApiEndpointConfig, BackendService, RepositoryInfo } from '$lib/types/private';
+ * @import { BackendService, RepositoryInfo } from '$lib/types/private';
  */
 
 /**
@@ -35,7 +40,7 @@ import { prefs } from '$lib/services/user/prefs.svelte';
  * not GitHub.
  */
 export const init = () => {
-  const { backend } = get(cmsConfig) ?? {};
+  const { backend } = cmsConfig.current ?? {};
 
   if (backend?.name !== BACKEND_NAME) {
     return undefined;
@@ -55,48 +60,36 @@ export const init = () => {
     // GitHub Enterprise Server: https://HOSTNAME/api/graphql
     graphql_api_root: graphqlApiRoot = restApiRoot,
     include_credentials: includeCredentials = false,
+    // Open Authoring on a public repository only needs `public_repo`, which is a narrower grant to
+    // ask a contributor for than full `repo` access
+    auth_scope: authScope = 'repo',
   } = backend;
 
   const [owner, repo] = /** @type {string} */ (projectPath).split('/');
-  const repoPath = `${owner}/${repo}`;
-  const authURL = `${stripSlashes(authRoot)}/${stripSlashes(authPath)}`;
-  const repoURL = getRepoURL(restApiRoot, repoPath);
 
-  Object.assign(
-    repository,
-    /** @type {RepositoryInfo} */ ({
-      service: BACKEND_NAME,
-      label: BACKEND_LABEL,
-      owner,
-      repo,
-      branch,
-      repoURL,
-      tokenPageURL: getTokenPageURL(repoURL),
-      databaseName: `${BACKEND_NAME}:${repoPath}`,
-      isSelfHosted: restApiRoot !== DEFAULT_API_ROOT,
-    }),
-    getBaseURLs(repoURL, branch),
-  );
-
-  Object.assign(
-    apiConfig,
-    /** @type {ApiEndpointConfig} */ ({
+  initGitBackend(repository, {
+    service: BACKEND_NAME,
+    label: BACKEND_LABEL,
+    owner,
+    repo,
+    branch,
+    restApiRoot,
+    defaultApiRoot: DEFAULT_API_ROOT,
+    getTokenPageURL,
+    getBaseURLs,
+    authRoot,
+    authPath,
+    tokenPath: '/access_token',
+    api: {
       clientId,
-      authScope: 'repo,user',
-      authURL,
-      tokenURL: authURL.replace('/authorize', '/access_token'),
+      authScope: `${authScope},user`,
       restBaseURL: normalizeRestBaseURL(restApiRoot),
       graphqlBaseURL: normalizeGraphQLBaseURL(graphqlApiRoot),
       includeCredentials,
-    }),
-  );
+    },
+  });
 
   Object.assign(graphqlVars, { owner, repo, branch });
-
-  if (prefs.devModeEnabled) {
-    // eslint-disable-next-line no-console
-    console.info('repositoryInfo', repository);
-  }
 
   return repository;
 };
@@ -115,8 +108,12 @@ export default {
   signIn,
   signOut,
   fetchFiles,
+  fetchLastCommit,
   fetchBlob,
   commitChanges,
   fetchFileCommits,
   triggerDeployment,
+  fetchBranchHeadSHA,
+  fetchDeployments,
+  workflow,
 };

@@ -1,15 +1,17 @@
-import { derived } from 'svelte/store';
-
-import { matchesFilter } from '$lib/services/common/view';
+import { getConditionKey, getViewConditions } from '$lib/services/common/view';
 import { selectedCollection } from '$lib/services/contents/collection';
-import { currentView } from '$lib/services/contents/collection/view';
-import { parseViewOptions } from '$lib/services/contents/collection/view/utils';
-import { getPropertyValue } from '$lib/services/contents/entry/fields';
-import { getRegex } from '$lib/services/utils/regex';
+import {
+  matchesConditions,
+  prepareConditions,
+} from '$lib/services/contents/collection/view/conditions';
+import { parseViewOptions } from '$lib/services/contents/collection/view/options';
+import { getField } from '$lib/services/contents/entry/fields';
+import { getPropertyValue } from '$lib/services/contents/entry/values';
+import { createDerivedState } from '$lib/services/utils/state.svelte';
 
 /**
  * @import { Entry, FilteringConditions, InternalEntryCollection } from '$lib/types/private';
- * @import { ViewFilter, ViewFilters } from '$lib/types/public';
+ * @import { DateTimeField, ViewFilter, ViewFilters } from '$lib/types/public';
  */
 
 /**
@@ -19,7 +21,7 @@ import { getRegex } from '$lib/services/utils/regex';
  * @returns {{ options: ViewFilter[], default?: FilteringConditions }} Parsed view filters.
  * @see https://decapcms.org/docs/configuration-options/#view_filters
  * @see https://staticjscms.netlify.app/docs/collection-overview#view-filters
- * @see https://sveltiacms.app/en/docs/collections/entries#filtering
+ * @see https://sveltiacms.app/en/docs/collections/entries/views#filtering
  */
 export const parseFilterConfig = (filters) =>
   /** @type {{ options: ViewFilter[], default?: FilteringConditions }} */
@@ -30,11 +32,12 @@ export const parseFilterConfig = (filters) =>
  * @param {Entry[]} entries Entry list.
  * @param {InternalEntryCollection} collection Collection that the entries belong to.
  * @param {FilteringConditions[]} filters One or more filtering conditions.
+ * @param {Date} [now] Current date and time, which the template tags in the conditions resolve to.
  * @returns {Entry[]} Filtered entry list.
  * @see https://decapcms.org/docs/configuration-options/#view_filters
- * @see https://sveltiacms.app/en/docs/collections/entries#filtering
+ * @see https://sveltiacms.app/en/docs/collections/entries/views#filtering
  */
-export const filterEntries = (entries, collection, filters) => {
+export const filterEntries = (entries, collection, filters, now = new Date()) => {
   const {
     name: collectionName,
     view_filters: configuredFilters = [],
@@ -42,66 +45,51 @@ export const filterEntries = (entries, collection, filters) => {
   } = collection;
 
   const { options } = parseFilterConfig(configuredFilters);
+  const optionKeys = options.map((option) => getConditionKey(getViewConditions(option)));
 
-  // Ignore invalid filters
+  // Ignore invalid filters, such as one saved in the view settings and removed from the
+  // configuration since
   const validFilters = filters.filter(
-    ({ field, pattern }) =>
-      field !== undefined &&
-      pattern !== undefined &&
-      options.some((f) => f.field === field && String(f.pattern) === String(pattern)),
+    (conditions) =>
+      conditions.field !== undefined && optionKeys.includes(getConditionKey(conditions)),
   );
 
-  // Pre-compute regexes once per filter instead of recreating them for every entry.
-  const preparedFilters = validFilters.map(({ field, pattern }) => ({
-    field,
-    pattern,
-    regex: getRegex(pattern),
-  }));
+  // Resolve the template tags and compile the regexes once per filter instead of for every entry
+  const preparedFilters = validFilters.map((conditions) => {
+    const fieldConfig = getField({ collectionName, keyPath: conditions.field });
+
+    const dateFieldConfig =
+      fieldConfig?.widget === 'datetime' ? /** @type {DateTimeField} */ (fieldConfig) : undefined;
+
+    return {
+      field: conditions.field,
+      conditions: prepareConditions(conditions, { dateFieldConfig, now }),
+    };
+  });
 
   return entries.filter((entry) =>
-    preparedFilters.every(({ field, pattern, regex }) => {
+    preparedFilters.every(({ field, conditions }) => {
       // Check both the raw value and referenced value
       const args = { entry, locale, collectionName, key: field };
       const rawValue = getPropertyValue({ ...args, resolveRef: false });
       const refValue = getPropertyValue({ ...args });
 
-      if (rawValue === undefined || refValue === undefined) {
-        return false;
-      }
-
-      return matchesFilter(rawValue, pattern, regex) || matchesFilter(refValue, pattern, regex);
+      return matchesConditions({ rawValue, refValue, conditions });
     }),
   );
 };
 
 /**
- * Initialize view filters for a collection.
- * @internal
- * @param {any} collection Collection (entry or file).
- * @param {(options: ViewFilter[]) => void} set Callback to set the filter options.
+ * View filters for the selected entry collection.
+ * @type {{ readonly current: ViewFilter[] }}
  */
-export const initializeViewFilters = (collection, set) => {
-  // Disable filters for file/singleton collection
-  if (!collection || !('folder' in collection)) {
-    set([]);
+export const viewFilters = createDerivedState(() => {
+  const collection = selectedCollection.current;
 
-    return;
+  // Disable filters for file/singleton collection
+  if (collection?._type !== 'entry') {
+    return [];
   }
 
-  const { options, default: defaultFilter } = parseFilterConfig(collection.view_filters);
-
-  set(options);
-
-  currentView.update((_view) => ({
-    ..._view,
-    filters: _view.filters ?? (defaultFilter ? [defaultFilter] : undefined),
-  }));
-};
-
-/**
- * View filters for the selected entry collection.
- * @type {import('svelte/store').Readable<ViewFilter[]>}
- */
-export const viewFilters = derived([selectedCollection], ([collection], set) => {
-  initializeViewFilters(collection, set);
+  return parseFilterConfig(collection.view_filters).options;
 });

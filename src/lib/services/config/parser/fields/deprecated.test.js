@@ -9,7 +9,6 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const mockI18nStrings = {
   'config.error.unsupported_deprecated_option': '{prop} is deprecated, use {newProp} instead',
   'config.error.invalid_object_field': 'Object field must have either fields or types, not both',
-  'config.error.object_field_missing_fields': 'Object field must have either fields or types',
   'config.error.duplicate_names': 'Duplicate name: {name}',
   'config.error.relation_field_invalid_collection': 'Collection not found: {collection}',
   'config.error.relation_field_missing_file_name': 'File name required for file collection',
@@ -41,11 +40,6 @@ vi.mock('@sveltia/i18n', () => ({
 }));
 
 const mockGetStore = vi.fn();
-
-vi.mock('svelte/store', () => ({
-  get: mockGetStore,
-}));
-
 const mockCheckUnsupportedOptions = vi.fn();
 
 vi.mock('$lib/services/config/parser/utils/validator', () => ({

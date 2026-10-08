@@ -1,20 +1,19 @@
-import { writable } from 'svelte/store';
 import { describe, expect, it, vi } from 'vitest';
 
 import { searchAssets } from './assets';
-import { hasMatch, normalize } from './util';
+import { hasAllMatches, hasMatch, normalize, tokenize } from './util';
 
 /**
  * @import { Asset } from '$lib/types/private';
  */
 
 // Mock only the stores, not the util functions
-vi.mock('$lib/services/assets', () => ({
-  allAssets: writable([]),
+vi.mock('$lib/services/assets/state', () => ({
+  publishedAssets: { current: [] },
 }));
 
 vi.mock('$lib/services/search', () => ({
-  searchTerms: writable(''),
+  searchTerms: { current: '' },
 }));
 
 describe('searchAssets integration', () => {
@@ -102,32 +101,70 @@ describe('searchAssets integration', () => {
     expect(result[0]).toEqual(asset);
   });
 
-  it('should integrate properly with hasMatch and normalize utilities', () => {
+  it('should integrate properly with the search utilities', () => {
     // Test that the actual utility functions work correctly
     expect(hasMatch({ value: 'test-file.jpg', terms: normalize('TEST') })).toBe(true);
     expect(hasMatch({ value: 'café.png', terms: normalize('cafe') })).toBe(true);
+    expect(hasAllMatches({ value: 'café.png', tokens: tokenize('Cafe PNG') })).toBe(true);
 
     const assets = [createAsset('café-image.jpg')];
     const result = searchAssets({ assets, terms: 'cafe' });
 
     expect(result).toHaveLength(1);
   });
+
+  it('should match every word of a multi-word query in a hyphenated file name', () => {
+    const assets = [createAsset('annual-report-cover-photo.png'), createAsset('logo.svg')];
+
+    expect(searchAssets({ assets, terms: 'annual report cover' }).map((a) => a.name)).toEqual([
+      'annual-report-cover-photo.png',
+    ]);
+    // The words can appear in any order
+    expect(searchAssets({ assets, terms: 'cover annual' }).map((a) => a.name)).toEqual([
+      'annual-report-cover-photo.png',
+    ]);
+  });
+
+  it('should require every word to match', () => {
+    const assets = [
+      createAsset('photo.png'),
+      createAsset('cover-photo.png'),
+      createAsset('annual-report-cover-photo.png'),
+      createAsset('logo.svg'),
+    ];
+
+    const result = searchAssets({ assets, terms: 'annual report cover' });
+
+    expect(result.map((a) => a.name)).toEqual(['annual-report-cover-photo.png']);
+  });
+
+  it('should keep the original order of the assets', () => {
+    const assets = [
+      createAsset('report-2024-annual.pdf'),
+      createAsset('annual-summary.pdf'),
+      createAsset('annual-report.pdf'),
+      createAsset('report-2025.pdf'),
+    ];
+
+    const result = searchAssets({ assets, terms: 'annual report' });
+
+    expect(result.map((a) => a.name)).toEqual(['report-2024-annual.pdf', 'annual-report.pdf']);
+  });
 });
 
 describe('assetSearchResults derived store', () => {
-  it('should execute the derived store callback', async () => {
+  it('should compute the results from the assets and search terms', async () => {
     // Import after mocks are set up
     const { assetSearchResults } = await import('./assets');
-    const { allAssets } = await import('$lib/services/assets');
+
+    // The mock replaces the real read-only state with a writable one
+    const allAssets = /** @type {any} */ (
+      (await import('$lib/services/assets/state')).publishedAssets
+    );
+
     const { searchTerms } = await import('$lib/services/search');
-    let callbackExecuted = false;
 
-    const unsubscribe = assetSearchResults.subscribe(() => {
-      callbackExecuted = true;
-    });
-
-    // Trigger store updates to force the derived callback (line 34 execution)
-    allAssets.set([
+    allAssets.current = [
       /** @type {any} */ ({
         name: 'profile.jpg',
         path: '/assets/profile.jpg',
@@ -142,11 +179,9 @@ describe('assetSearchResults derived store', () => {
           hasTemplateTags: false,
         },
       }),
-    ]);
-    searchTerms.set('profile');
+    ];
+    searchTerms.current = 'profile';
 
-    // The callback should have executed
-    expect(callbackExecuted).toBe(true);
-    unsubscribe();
+    expect(assetSearchResults.current).toEqual([expect.objectContaining({ name: 'profile.jpg' })]);
   });
 });

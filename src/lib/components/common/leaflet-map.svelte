@@ -5,9 +5,9 @@
 -->
 <script>
   import { _ } from '@sveltia/i18n';
-  import { onMount } from 'svelte';
+  import { onMount, untrack } from 'svelte';
 
-  import { getUnpkgURL, loadModule } from '$lib/services/app/dependencies';
+  import { getLeafletMarkerIconURL, loadModule } from '$lib/services/app/dependencies';
 
   /**
    * @import Leaflet from 'leaflet';
@@ -36,6 +36,44 @@
 
   /** @type {ResizeObserver | undefined} */
   let resizeObserver;
+  /** Whether the component has been destroyed, possibly before the map is initialized. */
+  let destroyed = false;
+  /**
+   * Leaflet library, map instance and marker icon, once the map is initialized.
+   * @type {{ leaflet: Leaflet, map: Leaflet.Map, iconUrl: string } | undefined}
+   */
+  let instance = $state.raw();
+  /** @type {Leaflet.Marker | undefined} */
+  let marker;
+  /** @type {GeoCoordinates | undefined} */
+  let shownCoordinates;
+
+  /**
+   * Show a marker at the current coordinates, and centre the map on them. The component can stay
+   * mounted while the coordinates change, e.g. in the info panel of the Asset Library as the focus
+   * moves from one photo to another, so the previous marker is removed first.
+   */
+  const showLocation = () => {
+    const { latitude, longitude } = coordinates ?? {};
+
+    if (latitude === shownCoordinates?.latitude && longitude === shownCoordinates?.longitude) {
+      return;
+    }
+
+    // Only called once the map is initialized
+    const { leaflet, map, iconUrl } = /** @type {NonNullable<typeof instance>} */ (instance);
+
+    shownCoordinates = coordinates;
+    marker?.remove();
+    marker = undefined;
+
+    if (coordinates) {
+      const icon = leaflet.icon({ iconUrl, iconSize: [25, 41] });
+
+      marker = leaflet.marker([coordinates.latitude, coordinates.longitude], { icon }).addTo(map);
+      map.setView([coordinates.latitude, coordinates.longitude], 12);
+    }
+  };
 
   /**
    * Load the Leaflet library and initialize the map. We don’t bundle the library because of the
@@ -43,13 +81,20 @@
    * Maps and Here Maps, may be supported in the future.
    */
   const init = async () => {
+    /* v8 ignore next 3 -- called once mounted, when the element is bound */
     if (!mapElement) {
       return;
     }
 
     /** @type {Leaflet} */
     const leaflet = await loadModule('leaflet', 'dist/leaflet-src.esm.js');
-    const iconUrl = `${getUnpkgURL('leaflet')}/dist/images/marker-icon-2x.png`;
+    const iconUrl = await getLeafletMarkerIconURL();
+
+    // The component may have been destroyed while the library was being loaded
+    if (destroyed) {
+      return;
+    }
+
     const map = leaflet.map(mapElement, { center: [0, 0], zoom: 2 });
 
     leaflet
@@ -63,13 +108,8 @@
       })
       .addTo(map);
 
-    if (coordinates) {
-      const { latitude, longitude } = coordinates;
-      const icon = leaflet.icon({ iconUrl, iconSize: [25, 41] });
-
-      leaflet.marker([latitude, longitude], { icon }).addTo(map);
-      map.setView([latitude, longitude], 12);
-    }
+    instance = { leaflet, map, iconUrl };
+    showLocation();
 
     mapElement.querySelectorAll('a[href^="https:"]').forEach((a) => {
       a.setAttribute('target', '_blank');
@@ -85,11 +125,31 @@
     onReady?.({ leaflet, map });
   };
 
+  // Move the marker when the coordinates change
+  $effect(() => {
+    void [instance, coordinates?.latitude, coordinates?.longitude];
+
+    untrack(() => {
+      if (instance) {
+        showLocation();
+      }
+    });
+  });
+
   onMount(() => {
     init();
 
     return () => {
+      destroyed = true;
       resizeObserver?.disconnect();
+
+      // Remove the map, along with the window resize listener Leaflet keeps until then
+      if (instance) {
+        // Leaflet ends a zoom animation with a timer that `remove()` doesn’t clear, and that then
+        // throws on the removed map, so mark the animation as over first
+        /** @type {any} */ (instance.map)._animatingZoom = false;
+        instance.map.remove();
+      }
     };
   });
 </script>
@@ -105,17 +165,16 @@
 <style>
   /* Leaflet default styles copied from `node_modules/leaflet/dist/leaflet.css`. Somehow we can’t */
   /* import it directly here; Vite emits it as a separate CSS file, which we want to avoid. */
-  /* @todo Remove unused rules. */
+  /* Rules for the features we don’t use — popups, tooltips, the Layers and Scale controls, */
+  /* image/video overlays, div icons, marker shadows, the Canvas renderer and the legacy IE/VML */
+  /* hacks — have been dropped. */
   :global {
     .leaflet-pane,
     .leaflet-tile,
     .leaflet-marker-icon,
-    .leaflet-marker-shadow,
     .leaflet-tile-container,
     .leaflet-pane > svg,
-    .leaflet-pane > canvas,
     .leaflet-zoom-box,
-    .leaflet-image-layer,
     .leaflet-layer {
       position: absolute;
       left: 0;
@@ -134,8 +193,7 @@
     }
 
     .leaflet-tile,
-    .leaflet-marker-icon,
-    .leaflet-marker-shadow {
+    .leaflet-marker-icon {
       -webkit-user-select: none;
       -moz-user-select: none;
       user-select: none;
@@ -157,8 +215,7 @@
       transform-origin: 0 0;
     }
 
-    .leaflet-marker-icon,
-    .leaflet-marker-shadow {
+    .leaflet-marker-icon {
       display: block;
     }
 
@@ -168,9 +225,7 @@
     }
 
     .leaflet-container .leaflet-marker-pane img,
-    .leaflet-container .leaflet-shadow-pane img,
     .leaflet-container .leaflet-tile-pane img,
-    .leaflet-container img.leaflet-image-layer,
     .leaflet-container .leaflet-tile {
       max-width: none !important;
       max-height: none !important;
@@ -239,39 +294,12 @@
       z-index: 400;
     }
 
-    .leaflet-shadow-pane {
-      z-index: 500;
-    }
-
     .leaflet-marker-pane {
       z-index: 600;
     }
 
-    .leaflet-tooltip-pane {
-      z-index: 650;
-    }
-
-    .leaflet-popup-pane {
-      z-index: 700;
-    }
-
-    .leaflet-map-pane canvas {
-      z-index: 100;
-    }
-
     .leaflet-map-pane svg {
       z-index: 200;
-    }
-
-    .leaflet-vml-shape {
-      width: 1px;
-      height: 1px;
-    }
-
-    .lvml {
-      behavior: url(#default#VML);
-      display: inline-block;
-      position: absolute;
     }
 
     .leaflet-control {
@@ -281,6 +309,7 @@
       pointer-events: auto;
       float: left;
       clear: both;
+      cursor: auto;
     }
 
     .leaflet-top,
@@ -321,17 +350,6 @@
 
     .leaflet-left .leaflet-control {
       margin-left: 10px;
-    }
-
-    .leaflet-fade-anim .leaflet-popup {
-      opacity: 0;
-      -webkit-transition: opacity 0.2s linear;
-      -moz-transition: opacity 0.2s linear;
-      transition: opacity 0.2s linear;
-    }
-
-    .leaflet-fade-anim .leaflet-map-pane .leaflet-popup {
-      opacity: 1;
     }
 
     .leaflet-zoom-animated {
@@ -378,14 +396,8 @@
       cursor: crosshair;
     }
 
-    .leaflet-popup-pane,
-    .leaflet-control {
-      cursor: auto;
-    }
-
     .leaflet-dragging .leaflet-grab,
-    .leaflet-dragging .leaflet-grab .leaflet-interactive,
-    .leaflet-dragging .leaflet-marker-draggable {
+    .leaflet-dragging .leaflet-grab .leaflet-interactive {
       cursor: move;
       /* stylelint-disable-next-line declaration-property-value-no-unknown */
       cursor: -webkit-grabbing;
@@ -395,17 +407,13 @@
     }
 
     .leaflet-marker-icon,
-    .leaflet-marker-shadow,
-    .leaflet-image-layer,
     .leaflet-pane > svg path,
     .leaflet-tile-container {
       pointer-events: none;
     }
 
     .leaflet-marker-icon.leaflet-interactive,
-    .leaflet-image-layer.leaflet-interactive,
-    .leaflet-pane > svg path.leaflet-interactive,
-    svg.leaflet-image-layer.leaflet-interactive path {
+    .leaflet-pane > svg path.leaflet-interactive {
       pointer-events: visiblePainted;
       pointer-events: auto;
     }
@@ -417,6 +425,8 @@
 
     .leaflet-bar a {
       background-color: #fff;
+      background-position: 50% 50%;
+      background-repeat: no-repeat;
       border-bottom: 1px solid #ccc;
       width: 26px;
       height: 26px;
@@ -425,13 +435,6 @@
       text-align: center;
       text-decoration: none;
       color: black;
-    }
-
-    .leaflet-bar a,
-    .leaflet-control-layers-toggle {
-      background-position: 50% 50%;
-      background-repeat: no-repeat;
-      display: block;
     }
 
     .leaflet-bar a:hover,
@@ -486,80 +489,13 @@
       font-size: 22px;
     }
 
-    .leaflet-control-layers {
-      box-shadow: 0 1px 5px rgba(0, 0, 0, 0.4);
-      background: #fff;
-      border-radius: 5px;
-    }
-
-    .leaflet-control-layers-toggle {
-      background-image: url(images/layers.png);
-      width: 36px;
-      height: 36px;
-    }
-
-    .leaflet-retina .leaflet-control-layers-toggle {
-      background-image: url(images/layers-2x.png);
-      background-size: 26px 26px;
-    }
-
-    .leaflet-touch .leaflet-control-layers-toggle {
-      width: 44px;
-      height: 44px;
-    }
-
-    .leaflet-control-layers .leaflet-control-layers-list,
-    .leaflet-control-layers-expanded .leaflet-control-layers-toggle {
-      display: none;
-    }
-
-    .leaflet-control-layers-expanded .leaflet-control-layers-list {
-      display: block;
-      position: relative;
-    }
-
-    .leaflet-control-layers-expanded {
-      padding: 6px 10px 6px 6px;
-      color: #333;
-      background: #fff;
-    }
-
-    .leaflet-control-layers-scrollbar {
-      overflow-y: scroll;
-      overflow-x: hidden;
-      padding-right: 5px;
-    }
-
-    .leaflet-control-layers-selector {
-      margin-top: 2px;
-      position: relative;
-      top: 1px;
-    }
-
-    .leaflet-control-layers label {
-      display: block;
-      font-size: 13px;
-      font-size: 1.08333em;
-    }
-
-    .leaflet-control-layers-separator {
-      height: 0;
-      border-top: 1px solid #ddd;
-      margin: 5px -10px 5px -6px;
-    }
-
-    .leaflet-default-icon-path {
-      background-image: url(images/marker-icon.png);
-    }
-
     .leaflet-container .leaflet-control-attribution {
       background: #fff;
       background: rgba(255, 255, 255, 0.8);
       margin: 0;
     }
 
-    .leaflet-control-attribution,
-    .leaflet-control-scale-line {
+    .leaflet-control-attribution {
       padding: 0 5px;
       color: #333;
       line-height: 1.4;
@@ -581,236 +517,14 @@
       height: 0.6669em;
     }
 
-    .leaflet-left .leaflet-control-scale {
-      margin-left: 5px;
-    }
-
-    .leaflet-bottom .leaflet-control-scale {
-      margin-bottom: 5px;
-    }
-
-    .leaflet-control-scale-line {
-      border: 2px solid #777;
-      border-top: none;
-      line-height: 1.1;
-      padding: 2px 5px 1px;
-      white-space: nowrap;
-      -moz-box-sizing: border-box;
-      box-sizing: border-box;
-      background: rgba(255, 255, 255, 0.8);
-      text-shadow: 1px 1px #fff;
-    }
-
-    .leaflet-control-scale-line:not(:first-child) {
-      border-top: 2px solid #777;
-      border-bottom: none;
-      margin-top: -2px;
-    }
-
-    .leaflet-control-scale-line:not(:first-child):not(:last-child) {
-      border-bottom: 2px solid #777;
-    }
-
     .leaflet-touch .leaflet-control-attribution,
-    .leaflet-touch .leaflet-control-layers,
     .leaflet-touch .leaflet-bar {
       box-shadow: none;
     }
 
-    .leaflet-touch .leaflet-control-layers,
     .leaflet-touch .leaflet-bar {
       border: 2px solid rgba(0, 0, 0, 0.2);
       background-clip: padding-box;
-    }
-
-    .leaflet-popup {
-      position: absolute;
-      text-align: center;
-      margin-bottom: 20px;
-    }
-
-    .leaflet-popup-content-wrapper {
-      padding: 1px;
-      text-align: left;
-      border-radius: 12px;
-    }
-
-    .leaflet-popup-content {
-      margin: 13px 24px 13px 20px;
-      line-height: 1.3;
-      font-size: 13px;
-      font-size: 1.08333em;
-      min-height: 1px;
-    }
-
-    .leaflet-popup-content p {
-      margin: 17px 0;
-      margin: 1.3em 0;
-    }
-
-    .leaflet-popup-tip-container {
-      width: 40px;
-      height: 20px;
-      position: absolute;
-      left: 50%;
-      margin-top: -1px;
-      margin-left: -20px;
-      overflow: hidden;
-      pointer-events: none;
-    }
-
-    .leaflet-popup-tip {
-      width: 17px;
-      height: 17px;
-      padding: 1px;
-
-      margin: -10px auto 0;
-      pointer-events: auto;
-
-      -webkit-transform: rotate(45deg);
-      -moz-transform: rotate(45deg);
-      -ms-transform: rotate(45deg);
-      transform: rotate(45deg);
-    }
-
-    .leaflet-popup-content-wrapper,
-    .leaflet-popup-tip {
-      background: white;
-      color: #333;
-      box-shadow: 0 3px 14px rgba(0, 0, 0, 0.4);
-    }
-
-    .leaflet-container a.leaflet-popup-close-button {
-      position: absolute;
-      top: 0;
-      right: 0;
-      border: none;
-      text-align: center;
-      width: 24px;
-      height: 24px;
-      font:
-        16px/24px Tahoma,
-        Verdana,
-        sans-serif;
-      color: #757575;
-      text-decoration: none;
-      background: transparent;
-    }
-
-    .leaflet-container a.leaflet-popup-close-button:hover,
-    .leaflet-container a.leaflet-popup-close-button:focus {
-      color: #585858;
-    }
-
-    .leaflet-popup-scrolled {
-      overflow: auto;
-    }
-
-    .leaflet-oldie .leaflet-popup-content-wrapper {
-      -ms-zoom: 1;
-      zoom: 1;
-    }
-
-    .leaflet-oldie .leaflet-popup-tip {
-      width: 24px;
-      margin: 0 auto;
-    }
-
-    .leaflet-oldie .leaflet-control-zoom,
-    .leaflet-oldie .leaflet-control-layers,
-    .leaflet-oldie .leaflet-popup-content-wrapper,
-    .leaflet-oldie .leaflet-popup-tip {
-      border: 1px solid #999;
-    }
-
-    .leaflet-div-icon {
-      background: #fff;
-      border: 1px solid #666;
-    }
-
-    .leaflet-tooltip {
-      position: absolute;
-      padding: 6px;
-      background-color: #fff;
-      border: 1px solid #fff;
-      border-radius: 3px;
-      color: #222;
-      white-space: nowrap;
-      -webkit-user-select: none;
-      -moz-user-select: none;
-      -ms-user-select: none;
-      user-select: none;
-      pointer-events: none;
-      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
-    }
-
-    .leaflet-tooltip.leaflet-interactive {
-      cursor: pointer;
-      pointer-events: auto;
-    }
-
-    .leaflet-tooltip-top:before,
-    .leaflet-tooltip-bottom:before,
-    .leaflet-tooltip-left:before,
-    .leaflet-tooltip-right:before {
-      position: absolute;
-      pointer-events: none;
-      border: 6px solid transparent;
-      background: transparent;
-      content: '';
-    }
-
-    .leaflet-tooltip-bottom {
-      margin-top: 6px;
-    }
-
-    .leaflet-tooltip-top {
-      margin-top: -6px;
-    }
-
-    .leaflet-tooltip-bottom:before,
-    .leaflet-tooltip-top:before {
-      left: 50%;
-      margin-left: -6px;
-    }
-
-    .leaflet-tooltip-top:before {
-      bottom: 0;
-      margin-bottom: -12px;
-      border-top-color: #fff;
-    }
-
-    .leaflet-tooltip-bottom:before {
-      top: 0;
-      margin-top: -12px;
-      margin-left: -6px;
-      border-bottom-color: #fff;
-    }
-
-    .leaflet-tooltip-left {
-      margin-left: -6px;
-    }
-
-    .leaflet-tooltip-right {
-      margin-left: 6px;
-    }
-
-    .leaflet-tooltip-left:before,
-    .leaflet-tooltip-right:before {
-      top: 50%;
-      margin-top: -6px;
-    }
-
-    .leaflet-tooltip-left:before {
-      right: 0;
-      margin-right: -12px;
-      border-left-color: #fff;
-    }
-
-    .leaflet-tooltip-right:before {
-      left: 0;
-      margin-left: -12px;
-      border-right-color: #fff;
     }
   }
 

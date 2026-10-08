@@ -1,10 +1,19 @@
-import { _ } from '@sveltia/i18n';
 import { encodeBase64 } from '@sveltia/utils/file';
 
-import { repository } from '$lib/services/backends/git/gitlab/repository';
+import { projectIds } from '$lib/services/backends/git/gitlab/fork';
+import { getProjectId, repository } from '$lib/services/backends/git/gitlab/repository';
 import { fetchAPI, fetchGraphQL } from '$lib/services/backends/git/shared/api';
-import { createCommitMessage } from '$lib/services/backends/git/shared/commits';
+import {
+  assertBranchNotMoved,
+  createCommitMessage,
+  fetchPerPathCommits,
+} from '$lib/services/backends/git/shared/commits';
+import { runConcurrently } from '$lib/services/backends/git/shared/concurrency';
+import { createLocalizedError } from '$lib/services/backends/git/shared/errors';
+import { repositoryHead } from '$lib/services/backends/git/shared/fetch';
+import { getOrCreateAsync } from '$lib/services/utils/cache';
 import { getGitHash } from '$lib/services/utils/file';
+import { forkedRepository, openAuthoring } from '$lib/services/workflow/open-authoring';
 
 /**
  * @import { CommitOptions, CommitResults, FileChange, FileCommit } from '$lib/types/private';
@@ -55,16 +64,17 @@ export const fetchLastCommit = async () => {
   );
 
   if (!result.project) {
-    throw new Error('Failed to retrieve the last commit hash.', {
-      cause: new Error(_('repository_not_found', { values: { repo } })),
+    throw createLocalizedError('Failed to retrieve the last commit hash.', 'repository_not_found', {
+      repo,
     });
   }
 
   const { lastCommit } = result.project.repository.tree ?? {};
 
   if (!lastCommit) {
-    throw new Error('Failed to retrieve the last commit hash.', {
-      cause: new Error(_('branch_not_found', { values: { repo, branch } })),
+    throw createLocalizedError('Failed to retrieve the last commit hash.', 'branch_not_found', {
+      repo,
+      branch,
     });
   }
 
@@ -85,7 +95,29 @@ export const fetchLastCommit = async () => {
  * @see https://forum.gitlab.com/t/how-to-commit-a-image-via-gitlab-commit-api/26632/4
  */
 export const commitChanges = async (changes, options) => {
-  const { owner, repo, branch } = repository;
+  // An Open Authoring contributor can’t write to the configured project at all, so a change that
+  // doesn’t go through Editorial Workflow has nowhere to land. Fail here with an explanation rather
+  // than letting the API reject the commit with a bare permission error
+  if (openAuthoring.current && !options.branch) {
+    throw createLocalizedError(
+      'Cannot commit directly to the configured repository',
+      'open_authoring.direct_commit_unsupported',
+    );
+  }
+
+  // A workflow branch lives in the contributor’s fork with Open Authoring, while the configured
+  // branch is only ever committed to by someone who can write to the configured project
+  const fork = options.branch ? forkedRepository.current : undefined;
+  const branch = options.branch ?? repository.branch;
+  // On the configured branch, the commit the loaded site data reflects, which the caller has just
+  // brought up to date. GitLab has no branch-level guard like GitHub’s `expectedHeadOid`: a
+  // `start_sha` is refused on an existing branch unless `force` is set, which would discard someone
+  // else’s push instead. But an action can take a `last_commit_id`, and GitLab 15.10+ refuses an
+  // update, move or deletion when the file’s last commit on the branch differs from its last commit
+  // as of that ID, i.e. when someone else has changed the file since. So the head goes with every
+  // such action, which takes no lookup per file. A workflow branch is only ever written by its own
+  // author, and its files differ from those on the configured branch, so it’s left alone
+  const expectedHead = options.branch ? undefined : repositoryHead.current || undefined;
 
   const actions = await Promise.all(
     changes.map(async ({ action, path, previousPath, data = '' }) => ({
@@ -94,19 +126,43 @@ export const commitChanges = async (changes, options) => {
       encoding: typeof data === 'string' ? 'text' : 'base64',
       file_path: path,
       previous_path: previousPath,
+      ...(expectedHead && action !== 'create' ? { last_commit_id: expectedHead } : {}),
     })),
   );
 
-  const { id: sha, committed_date: committedDate } = /** @type {CommitResponse} */ (
-    await fetchAPI(`/projects/${encodeURIComponent(`${owner}/${repo}`)}/repository/commits`, {
-      method: 'POST',
-      body: {
-        branch,
-        commit_message: createCommitMessage(changes, options),
-        actions,
-      },
-    })
-  );
+  const endpoint = `/projects/${getProjectId(fork)}/repository/commits`;
+  const body = { branch, commit_message: createCommitMessage(changes, options), actions };
+  const { startBranch } = options;
+  // With Open Authoring the branch is created in the contributor’s fork, but starts from the head
+  // of the configured project rather than the fork’s own copy of it, so a fork that has fallen
+  // behind or gained commits of its own doesn’t pass them on to the merge request. GitLab offers no
+  // way to sync a fork, which makes this the only way to keep the merge request to the entry
+  // edited. The project goes by its numeric ID: a path in the request body is taken as is, so the
+  // encoded one {@link getProjectId} gives for a request path would name no project at all
+  const startProject = fork ? { start_project: projectIds.base } : {};
+  /** @type {CommitResponse} */
+  let response;
+
+  try {
+    // GitLab rejects `start_branch` outright once the branch exists. That’s left to the caller to
+    // sort out, because only the Editorial Workflow service can tell whether the branch is a
+    // leftover to start over from or someone’s work in progress to commit onto
+    response = /** @type {CommitResponse} */ (
+      await fetchAPI(endpoint, {
+        method: 'POST',
+        body: startBranch ? { ...body, start_branch: startBranch, ...startProject } : body,
+      })
+    );
+  } catch (/** @type {any} */ ex) {
+    // GitLab refuses a changed file with a 400 Bad Request, like any other invalid request
+    if (expectedHead && ex.cause?.status === 400) {
+      await assertBranchNotMoved(expectedHead, fetchLastCommit);
+    }
+
+    throw ex;
+  }
+
+  const { id: sha, committed_date: committedDate } = response;
 
   // Calculate the SHA-1 hash for each file because the GitLab REST API does not return file SHAs
   const entries = await Promise.all(
@@ -123,6 +179,21 @@ export const commitChanges = async (changes, options) => {
 };
 
 /**
+ * Avatar URLs looked up so far, keyed by email address. The commit history is fetched every time
+ * the history of an entry is shown, and mostly lists the same few authors, so each of them is only
+ * looked up once.
+ * @type {Map<string, Promise<string | undefined>>}
+ */
+const avatarURLCache = new Map();
+
+/**
+ * Reset {@link avatarURLCache}. Used in tests.
+ */
+export const _resetAvatarURLCache = () => {
+  avatarURLCache.clear();
+};
+
+/**
  * Fetch the avatar URL for a given email address.
  * @param {string} email Email address.
  * @returns {Promise<string | undefined>} Avatar URL, or `undefined` if not available.
@@ -130,11 +201,14 @@ export const commitChanges = async (changes, options) => {
  */
 const fetchAvatarURL = async (email) => {
   try {
-    const { avatar_url: avatarURL } = /** @type {{ avatar_url: string }} */ (
-      await fetchAPI(`/avatar?email=${encodeURIComponent(email)}&size=48`)
-    );
+    // A failure isn’t remembered, so the avatar can show up next time
+    return await getOrCreateAsync(avatarURLCache, email, async () => {
+      const { avatar_url: avatarURL } = /** @type {{ avatar_url: string }} */ (
+        await fetchAPI(`/avatar?email=${encodeURIComponent(email)}&size=48`)
+      );
 
-    return avatarURL || undefined;
+      return avatarURL || undefined;
+    });
   } catch {
     return undefined;
   }
@@ -147,53 +221,41 @@ const fetchAvatarURL = async (email) => {
  * @see https://docs.gitlab.com/api/commits/#list-repository-commits
  */
 export const fetchFileCommits = async (paths) => {
-  const { owner, repo, branch } = repository;
-  const projectId = encodeURIComponent(`${owner}/${repo}`);
+  const { branch } = repository;
+  const projectId = getProjectId();
 
-  const results = await Promise.all(
-    paths.map(
-      (path) =>
-        /** @type {Promise<any[]>} */ (
-          fetchAPI(
-            `/projects/${projectId}/repository/commits` +
-              `?ref_name=${encodeURIComponent(branch ?? '')}` +
-              `&path=${encodeURIComponent(path)}&per_page=100`,
-          )
-        ),
-    ),
+  /** @type {FileCommit[]} */
+  const commitList = await fetchPerPathCommits(
+    paths,
+    (path) =>
+      /** @type {Promise<any[]>} */ (
+        fetchAPI(
+          `/projects/${projectId}/repository/commits` +
+            `?ref_name=${encodeURIComponent(branch ?? '')}` +
+            `&path=${encodeURIComponent(path)}&per_page=100`,
+        )
+      ),
+    (commit) => ({
+      sha: commit.id,
+      authorName: commit.author_name,
+      authorEmail: commit.author_email,
+      authorAvatarURL: undefined,
+      date: new Date(commit.committed_date),
+    }),
   );
-
-  /** @type {Map<string, FileCommit>} */
-  const commitMap = new Map();
-
-  results.flat().forEach((commit) => {
-    if (!commitMap.has(commit.id)) {
-      commitMap.set(commit.id, {
-        sha: commit.id,
-        authorName: commit.author_name,
-        authorEmail: commit.author_email,
-        authorAvatarURL: undefined,
-        date: new Date(commit.committed_date),
-      });
-    }
-  });
 
   // Resolve avatar URLs for unique author emails via the GitLab Avatar API
   /** @type {string[]} */
   const uniqueEmails = /** @type {string[]} */ (
-    [...new Set([...commitMap.values()].map((c) => c.authorEmail))].filter((e) => !!e)
+    [...new Set(commitList.map((c) => c.authorEmail))].filter((e) => !!e)
   );
 
   /** @type {Map<string, string | undefined>} */
-  const avatarMap = new Map(
-    await Promise.all(
-      uniqueEmails.map(
-        async (email) => /** @type {const} */ ([email, await fetchAvatarURL(email)]),
-      ),
-    ),
-  );
+  const avatarMap = new Map();
 
-  const commitList = [...commitMap.values()].sort((a, b) => b.date.getTime() - a.date.getTime());
+  await runConcurrently(uniqueEmails, async (email) => {
+    avatarMap.set(email, await fetchAvatarURL(email));
+  });
 
   commitList.forEach((commit) => {
     commit.authorAvatarURL = avatarMap.get(/** @type {string} */ (commit.authorEmail));

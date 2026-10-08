@@ -141,15 +141,153 @@ describe('Test getEntrySummary()', () => {
     expect(result).toEqual('net [de, en]');
   });
 
+  test('handles quoted placeholders in summary templates', () => {
+    const result = getEntrySummary(
+      {
+        ...collection,
+        summary: "'{{title}}', '{{locales}}', content/main/{{filename}}.{{extension}}",
+      },
+      entry,
+      {
+        locale: 'de',
+        useTemplate: true,
+      },
+    );
+
+    expect(result).toEqual("'.Net', 'de', content/main/index.md");
+  });
+
   test('fields', () => {
     expect(format('{{title}}')).toEqual('.Net');
     expect(format('{{fields.title}}')).toEqual('.Net');
     expect(format('{{fields.slug}}')).toEqual('dotnet');
   });
 
+  test('falls back to the entry slug when the title is empty in a template', () => {
+    const entryWithEmptyTitle = {
+      ...entry,
+      locales: {
+        de: {
+          ...entry.locales.de,
+          content: {
+            ...entry.locales.de.content,
+            title: '',
+          },
+        },
+      },
+    };
+
+    const result = getEntrySummary({ ...collection, summary: '{{title}}' }, entryWithEmptyTitle, {
+      locale: 'de',
+      useTemplate: true,
+    });
+
+    expect(result).toBe('net');
+  });
+
   test('transformations', () => {
     expect(format("{{date | date('MMM D, YYYY')}}")).toEqual('Jan 23, 2024');
     expect(format("{{draft | ternary('Draft', 'Public')}}")).toEqual('Public');
+  });
+
+  test('nested templates in default transformation', () => {
+    // Test the issue from GitHub #813: default transformation with nested template
+    const entryWithSubtitle = {
+      ...entry,
+      locales: {
+        de: {
+          ...entry.locales.de,
+          content: {
+            title: 'Main Title',
+            subtitle: 'Subtitle Here',
+          },
+        },
+      },
+    };
+
+    const entryWithoutSubtitle = {
+      ...entry,
+      locales: {
+        de: {
+          ...entry.locales.de,
+          content: {
+            title: 'Main Title',
+            subtitle: '',
+          },
+        },
+      },
+    };
+
+    // When subtitle exists, should show subtitle
+    expect(
+      getEntrySummary(
+        { ...collection, summary: "{{fields.subtitle | default('{{fields.title}}')}}" },
+        entryWithSubtitle,
+        { locale: 'de', useTemplate: true },
+      ),
+    ).toEqual('Subtitle Here');
+
+    // When subtitle is missing, should fall back to title
+    expect(
+      getEntrySummary(
+        { ...collection, summary: "{{fields.subtitle | default('{{fields.title}}')}}" },
+        entryWithoutSubtitle,
+        { locale: 'de', useTemplate: true },
+      ),
+    ).toEqual('Main Title');
+  });
+
+  test('nested templates in ternary transformation', () => {
+    // Test the issue from GitHub #813: ternary transformation with nested templates
+    const entryWithSubtitle = {
+      ...entry,
+      locales: {
+        de: {
+          ...entry.locales.de,
+          content: {
+            title: 'Main Title',
+            subtitle: 'Subtitle Here',
+          },
+        },
+      },
+    };
+
+    const entryWithoutSubtitle = {
+      ...entry,
+      locales: {
+        de: {
+          ...entry.locales.de,
+          content: {
+            title: 'Main Title',
+            subtitle: '',
+          },
+        },
+      },
+    };
+
+    // When subtitle exists, should show subtitle (with fields. prefix)
+    expect(
+      getEntrySummary(
+        {
+          ...collection,
+          summary: "{{fields.subtitle | ternary('{{fields.subtitle}}', '{{fields.title}}')}}",
+        },
+        entryWithSubtitle,
+        { locale: 'de', useTemplate: true },
+      ),
+    ).toEqual('Subtitle Here');
+
+    // When subtitle is empty/falsy, should show title (with fields. prefix)
+    expect(
+      getEntrySummary(
+        {
+          ...collection,
+          summary: "{{fields.subtitle | ternary('{{fields.subtitle}}', '{{fields.title}}')}}",
+        },
+        entryWithoutSubtitle,
+        { locale: 'de', useTemplate: true },
+      ),
+    ).toEqual('Main Title');
   });
 
   test('Markdown', () => {
@@ -218,15 +356,22 @@ describe('Test getEntrySummary()', () => {
     const indexFileCollection = {
       ...collection,
       index_file: {
-        name: 'net',
         label: 'Category Index',
+      },
+      _file: {
+        ...collection._file,
+        fullPathRegEx: /^content\/tags\/(?<subPath>[^/]+?\/index|_index)\.(?<locale>en|de)\.md$/,
       },
     };
 
     // Create entry that would be identified as an index file
     const indexFileEntry = {
       ...entry,
-      slug: 'net',
+      slug: '_index',
+      subPath: '_index',
+      locales: {
+        de: { ...entry.locales.de, path: 'content/tags/_index.de.md' },
+      },
     };
 
     const result = getEntrySummary(indexFileCollection, indexFileEntry, {
@@ -360,6 +505,16 @@ describe('Test sanitizeEntrySummary()', () => {
     const result = sanitizeEntrySummary(input, { allowMarkdown: true });
 
     expect(result).toBe('<strong>Safe</strong>');
+  });
+
+  test('should strip attributes from allowed Markdown tags', () => {
+    const input =
+      '<strong style="position: fixed; inset: 0" class="x" id="y">A</strong> ' +
+      '&lt;em style=&quot;display: block&quot;&gt;B&lt;/em&gt;';
+
+    const result = sanitizeEntrySummary(input, { allowMarkdown: true });
+
+    expect(result).toBe('<strong>A</strong> <em>B</em>');
   });
 
   test('should trim whitespace', () => {
@@ -598,6 +753,20 @@ describe('Test replaceSub()', () => {
     expect(result).toBe('md');
   });
 
+  test('should strip only the last extension from the filename tag', () => {
+    const dottedContext = { ...context, entryPath: 'content/posts/2024/my.post.md' };
+
+    expect(replaceSub('filename', dottedContext)).toBe('my.post');
+    expect(replaceSub('extension', dottedContext)).toBe('md');
+  });
+
+  test('should give an empty extension for a file name without a dot', () => {
+    const plainContext = { ...context, entryPath: 'content/posts/2024/README' };
+
+    expect(replaceSub('filename', plainContext)).toBe('README');
+    expect(replaceSub('extension', plainContext)).toBe('');
+  });
+
   test('should replace commit_date tag', () => {
     const result = replaceSub('commit_date', context);
 
@@ -736,6 +905,27 @@ describe('Test replaceSub()', () => {
     // After removing basePath, we have ''
     // After stripSlashes, we have ''
     expect(result).toBe('');
+  });
+
+  test('should handle dirname with the locale placeholder in basePath', () => {
+    const localeContext = {
+      slug: 'test-entry',
+      entryPath: 'content/fr/posts/blog/article.md',
+      basePath: 'content/{{locale}}/posts',
+      locales: ['en', 'fr'],
+      commitDate: new Date('2024-01-15T10:30:00Z'),
+      commitAuthor: { name: 'John Doe', login: 'john', email: 'john@test.com' },
+    };
+
+    // The locale folder is part of the base path
+    expect(replaceSub('dirname', localeContext)).toBe('blog');
+    // The default locale may be omitted from the path
+    expect(
+      replaceSub('dirname', { ...localeContext, entryPath: 'content/posts/blog/article.md' }),
+    ).toBe('blog');
+    expect(
+      replaceSub('dirname', { ...localeContext, entryPath: 'content/fr/posts/article.md' }),
+    ).toBe('');
   });
 
   test('should handle dirname when basePath is undefined (line 105)', () => {
@@ -881,6 +1071,19 @@ describe('Test replace()', () => {
     const result = replace('title', context);
 
     expect(result).toBe('Test Entry');
+  });
+
+  test('should use the fallback summary when title is empty', () => {
+    const result = replace('title', {
+      ...context,
+      content: {
+        ...context.content,
+        title: '',
+      },
+      fallbackSummary: 'Fallback summary',
+    });
+
+    expect(result).toBe('Fallback summary');
   });
 
   test('should handle fields.* syntax', () => {
@@ -1564,5 +1767,63 @@ describe('Additional comprehensive tests for edge cases', () => {
 
     // Should format the date correctly
     expect(result).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+  });
+});
+
+describe('Test getEntrySummary() caching', () => {
+  /** @type {InternalCollection} */
+  const collection = {
+    name: 'posts',
+    folder: 'content/posts',
+    fields: [],
+    _type: 'entry',
+    _file: /** @type {any} */ ({}),
+    _i18n: /** @type {any} */ ({ defaultLocale: 'en', allLocales: ['en'] }),
+    _thumbnailFieldNames: [],
+  };
+
+  /** @type {Entry} */
+  const entry = {
+    id: 'posts/hello',
+    slug: 'hello',
+    subPath: 'hello',
+    locales: {
+      en: { slug: 'hello', path: 'content/posts/hello.md', content: { title: 'Hello' } },
+    },
+  };
+
+  test('returns the memoized result for the same entry, collection and options', () => {
+    const first = getEntrySummary(collection, entry, { locale: 'en' });
+    const second = getEntrySummary(collection, entry, { locale: 'en' });
+
+    expect(second).toBe(first);
+    expect(second).toBe('Hello');
+  });
+
+  test('keys the cache on the options', () => {
+    const plain = getEntrySummary(collection, entry, { locale: 'en' });
+
+    const templated = getEntrySummary({ ...collection, summary: '{{title}} — post' }, entry, {
+      locale: 'en',
+      useTemplate: true,
+    });
+
+    expect(plain).toBe('Hello');
+    expect(templated).toBe('Hello — post');
+  });
+
+  test('does not share cache entries between different entries', () => {
+    /** @type {Entry} */
+    const otherEntry = {
+      ...entry,
+      id: 'posts/world',
+      slug: 'world',
+      locales: {
+        en: { slug: 'world', path: 'content/posts/world.md', content: { title: 'World' } },
+      },
+    };
+
+    expect(getEntrySummary(collection, entry, { locale: 'en' })).toBe('Hello');
+    expect(getEntrySummary(collection, otherEntry, { locale: 'en' })).toBe('World');
   });
 });

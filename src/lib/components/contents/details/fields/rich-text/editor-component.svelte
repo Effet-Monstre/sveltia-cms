@@ -1,40 +1,94 @@
 <script>
   import { _ } from '@sveltia/i18n';
-  import { Button, Dialog, Icon, Spacer } from '@sveltia/ui';
+  import { Button, Dialog, Icon, Spacer, VisibilityObserver } from '@sveltia/ui';
   import equal from 'fast-deep-equal';
-  import { flatten, unflatten } from 'flat';
   import { onMount, untrack } from 'svelte';
 
-  import VisibilityObserver from '$lib/components/common/visibility-observer.svelte';
+  import Image from '$lib/components/assets/shared/image.svelte';
   import FieldEditor from '$lib/components/contents/details/editor/field-editor.svelte';
   import ObjectHeader from '$lib/components/contents/details/fields/object/object-header.svelte';
-  import { TEMPLATE_TAG_REPLACE_REGEX } from '$lib/services/common/template/constants';
   import {
-    applyTransformations,
-    TRANSFORMATION_SPLIT_REGEX,
-  } from '$lib/services/common/transformations';
-  import { entryDraft } from '$lib/services/contents/draft';
-  import { getDefaultValues } from '$lib/services/contents/draft/defaults';
-  import { validateFields } from '$lib/services/contents/draft/validate/fields';
+    getEntryDraftByElement,
+    setEntryDraftContext,
+  } from '$lib/services/contents/draft/state.svelte';
+  import { getValueMapSnapshot } from '$lib/services/contents/draft/value-map.svelte';
+  import {
+    getComponentDisplayText,
+    getComponentDisplayValues,
+  } from '$lib/services/contents/fields/rich-text/components/summary';
+  import { getComponentThumbnail } from '$lib/services/contents/fields/rich-text/components/thumbnail';
+  import { validateComponentValues } from '$lib/services/contents/fields/rich-text/components/validate';
+  import {
+    deleteKeysByPrefix,
+    flattenWithPrefix,
+    getValuesByPrefix,
+    reconcileComponentValues,
+  } from '$lib/services/contents/fields/rich-text/components/values';
+  import { watch } from '$lib/services/utils/state.svelte';
 
   /**
+   * @import { EntryDraftState } from '$lib/services/contents/draft/state.svelte';
    * @import {
    * DraftValueStoreKey,
+   * EntryDraft,
    * InternalLocaleCode,
+   * MediaFieldSource,
    * TypedFieldKeyPath,
    * } from '$lib/types/private';
    * @import { EditorComponentMode, Field, FieldKeyPath, RawEntryContent } from '$lib/types/public';
    */
 
   /**
+   * Entry draft state of the editor this component is rendered in. Lexical mounts the component
+   * outside the Svelte component tree, so the state can’t come from the context; it’s looked up
+   * through the DOM once the component is in place, along with the locale and key path below.
+   * @type {EntryDraftState | undefined}
+   */
+  let entryDraft = $state();
+
+  // The field editors rendered below expect the state in the context, which has to be set now,
+  // before the state is resolved, so hand them a stand-in that follows it
+  setEntryDraftContext({
+    /**
+     * Get the current draft.
+     * @returns {EntryDraft | null | undefined} Draft.
+     */
+    get current() {
+      return entryDraft?.current;
+    },
+    /* v8 ignore start -- only the entry editor toolbar and overlay, which are never rendered within
+    a component, replace the draft or check whether it’s been modified */
+    /**
+     * Replace the current draft.
+     * @param {EntryDraft | null | undefined} draft Draft.
+     */
+    set current(draft) {
+      if (entryDraft) {
+        entryDraft.current = draft;
+      }
+    },
+    /**
+     * Get whether the current draft has been modified.
+     * @returns {boolean} Result.
+     */
+    get modified() {
+      return entryDraft?.modified ?? false;
+    },
+    /* v8 ignore stop */
+  });
+
+  /**
    * @typedef {object} Props
    * @property {string} componentName Rich text editor component name.
    * @property {string} label Field label.
    * @property {EditorComponentMode} [mode] Editing mode for the component. Default: `'block'`.
+   * @property {boolean} [inline] Whether the component is inline. Default: `false`.
    * @property {boolean} [collapsed] Whether to collapse the object by default (`block` mode only).
    * Default: `false`.
    * @property {string} [summary] Summary template for the placeholder text (`dialog` mode only),
    * e.g. `{{title}}`.
+   * @property {string} [thumbnail] Name of an Image or File field whose image is displayed as a
+   * thumbnail in the placeholder (`dialog` mode only), e.g. `icon`.
    * @property {Field[]} fields Subfield definitions.
    * @property {Record<string, any> | undefined} values Value map.
    * @property {(event: CustomEvent) => void} [onChange] Custom `change` event handler.
@@ -46,8 +100,10 @@
     componentName,
     label,
     mode = 'block',
+    inline = false,
     collapsed = false,
     summary,
+    thumbnail,
     fields,
     values,
     onChange = () => undefined,
@@ -82,16 +138,10 @@
    */
   let isNewComponent = $state(false);
 
+  /* v8 ignore start -- the key paths are resolved together once the component is in place */
   const keyPathPrefix = $derived(!keyPath ? '' : `${keyPath}:${fieldId}:`);
   const typedKeyPathPrefix = $derived(!typedKeyPath ? '' : `${typedKeyPath}:${fieldId}:`);
-  /**
-   * Find the first string/text field from the fields definition.
-   * @type {Field | undefined}
-   */
-  const displayField = $derived(
-    fields.find((f) => f.widget === 'string' || f.widget === 'text' || !f.widget),
-  );
-
+  /* v8 ignore stop */
   /**
    * Get the wrapper element.
    * @returns {HTMLElement | undefined} Wrapper.
@@ -117,16 +167,13 @@
    * @type {RawEntryContent | undefined}
    */
   const currentValues = $derived.by(() => {
-    if (!($entryDraft && locale && keyPath)) {
+    if (!(entryDraft?.current && locale && keyPath)) {
       return undefined;
     }
 
-    return unflatten(
-      Object.fromEntries(
-        Object.entries($state.snapshot($entryDraft[valueStoreKey][locale] ?? {}))
-          .filter(([key]) => key.startsWith(keyPathPrefix))
-          .map(([key, value]) => [key.replace(keyPathPrefix, ''), value]),
-      ),
+    return getValuesByPrefix(
+      getValueMapSnapshot(entryDraft.current, locale, valueStoreKey),
+      keyPathPrefix,
     );
   });
 
@@ -134,6 +181,7 @@
    * Open the dialog and take a snapshot of current values (dialog mode only).
    */
   const openDialog = () => {
+    /* v8 ignore next -- the values are set up before the dialog can be opened */
     valuesSnapshot = currentValues ? { ...currentValues } : undefined;
     dialogOpen = true;
   };
@@ -142,23 +190,14 @@
    * Restore values from snapshot, used on cancel (dialog mode only).
    */
   const restoreValues = () => {
-    if ($entryDraft && locale && keyPath && valuesSnapshot) {
+    const draft = entryDraft?.current;
+
+    /* v8 ignore next -- the dialog is only open while the draft is there, with a snapshot */
+    if (draft && locale && keyPath && valuesSnapshot) {
       // Clear current values
-      Object.keys($entryDraft[valueStoreKey][locale] ?? {}).forEach((key) => {
-        if (key.startsWith(keyPathPrefix)) {
-          delete $entryDraft[valueStoreKey][locale][key];
-        }
-      });
+      deleteKeysByPrefix(draft[valueStoreKey][locale], keyPathPrefix);
       // Restore snapshot
-      Object.assign(
-        $entryDraft[valueStoreKey][locale],
-        Object.fromEntries(
-          Object.entries(flatten(valuesSnapshot)).map(([key, value]) => [
-            `${keyPathPrefix}${key}`,
-            value,
-          ]),
-        ),
-      );
+      Object.assign(draft[valueStoreKey][locale], flattenWithPrefix(valuesSnapshot, keyPathPrefix));
     }
   };
 
@@ -174,34 +213,14 @@
    * Handle OK button click. Validates fields and only closes if valid (dialog mode only).
    */
   const handleOk = () => {
-    const { validities: extraValidities } = validateFields('extraValues');
+    const draft = entryDraft?.current;
 
-    entryDraft.update((_draft) => {
-      if (!_draft) {
-        return _draft;
-      }
+    /* v8 ignore next 3 -- the dialog can only be confirmed while the draft is being edited */
+    if (!draft) {
+      return;
+    }
 
-      return {
-        ..._draft,
-        validities: Object.fromEntries(
-          Object.keys(_draft.validities).map((loc) => [
-            loc,
-            {
-              ..._draft.validities[loc],
-              ...extraValidities[loc],
-            },
-          ]),
-        ),
-      };
-    });
-
-    const localeValidities = extraValidities[locale] ?? {};
-
-    const thisComponentValid = !Object.entries(localeValidities).some(
-      ([key, validity]) => key.startsWith(keyPathPrefix) && !validity.valid,
-    );
-
-    if (thisComponentValid) {
+    if (validateComponentValues({ draft, locale, keyPathPrefix })) {
       isNewComponent = false;
       dialogOpen = false;
       onChange(new CustomEvent('update', { detail: currentValues }));
@@ -225,85 +244,64 @@
   };
 
   /**
-   * Format a summary template by replacing `{{fieldName}}` placeholders with values (dialog mode
-   * only). Supports nested properties and transformations like the CMS object field summary.
-   * @param {string} template Summary template, e.g. `{{title}} - {{linkType.url | upper}}`.
-   * @param {RawEntryContent} _values Current values (unflattened).
-   * @returns {string | null} Formatted summary, or null if template is empty or result is empty.
+   * The asset or URL of a thumbnail that couldn’t be shown, which is then replaced with the text.
+   * Raw, as a deep state would wrap the asset in a proxy that never equals the asset itself.
+   * @type {MediaFieldSource['asset'] | string | undefined}
    */
-  const formatSimpleSummary = (template, _values) => {
-    if (!template || !_values) {
-      return null;
+  let brokenThumbnail = $state.raw();
+
+  /**
+   * The image to display as a thumbnail in the placeholder (dialog mode only), taken from the field
+   * named with the `thumbnail` option. The draft is required to look up the field’s collection.
+   * Only the dialog mode placeholder reads this, so it’s never worked out in block mode.
+   * @type {MediaFieldSource | undefined}
+   */
+  const thumbnailSource = $derived.by(() => {
+    const draft = entryDraft?.current;
+
+    if (!draft) {
+      return undefined;
     }
 
-    const flatValues = flatten(_values);
-
-    const result = template.replaceAll(TEMPLATE_TAG_REPLACE_REGEX, (__, placeholder) => {
-      const [tag, ...transformations] = placeholder.trim().split(TRANSFORMATION_SPLIT_REGEX);
-      const fieldName = tag.replace(/^fields\./, '');
-      let value = flatValues[fieldName];
-
-      if (value === undefined || value === null) {
-        return '';
-      }
-
-      if (transformations.length) {
-        value = applyTransformations({
-          fieldConfig: fields.find((f) => f.name === fieldName),
-          value,
-          transformations,
-          locale,
-        });
-      }
-
-      return String(value);
+    const source = getComponentThumbnail({
+      thumbnailFieldName: thumbnail,
+      values: getComponentDisplayValues({ currentValues, values, fields }),
+      componentName,
+      collectionName: draft.collectionName,
+      fileName: draft.fileName,
+      isIndexFile: draft.isIndexFile,
+      entry: draft.originalEntry,
+      files: draft.files,
     });
 
-    // Return `null` if the result (after stripping all placeholder-based content) is empty. This
-    // handles the case where all field values are empty but literal text (e.g. ' — ') remains.
-    const strippedTemplate = template.replaceAll(TEMPLATE_TAG_REPLACE_REGEX, '');
-
-    if (result !== strippedTemplate && result.trim()) {
-      return result.trim();
-    }
-
-    return null;
-  };
+    return source && (source.asset ?? source.url) !== brokenThumbnail ? source : undefined;
+  });
 
   /**
    * The text to display in the placeholder (dialog mode only). Priority:
    * 1. Formatted summary template (if provided and produces non-empty result)
    * 2. First string field’s value
-   * 3. Component label.
+   * 3. Component label, which is omitted when a thumbnail is shown.
    */
-  const displayText = $derived.by(() => {
+  const displayText = $derived(
     // Fall back to the `values` prop when `currentValues` has no field data yet, e.g. on initial
-    // render or before the store has been notified with the values.
-    const hasFieldValues = fields.some((f) => currentValues?.[f.name] !== undefined);
-    const vals = hasFieldValues ? currentValues : values;
-
-    if (summary && vals) {
-      const formatted = formatSimpleSummary(summary, vals);
-
-      if (formatted) {
-        return formatted;
-      }
-    }
-
-    if (displayField && vals) {
-      const value = vals[displayField.name];
-
-      if (typeof value === 'string' && value.trim()) {
-        return value.trim();
-      }
-    }
-
-    return label;
-  });
+    // render or before the store has been notified with the values
+    getComponentDisplayText({
+      template: summary,
+      currentValues,
+      values,
+      fields,
+      locale,
+      label,
+      hasThumbnail: !!thumbnailSource,
+    }),
+  );
 
   onMount(() => {
     window.requestAnimationFrame(() => {
-      // Get the locale and key path from the closest containers
+      // Get the draft state, locale and key path from the closest containers
+      entryDraft = getEntryDraftByElement(wrapper);
+
       const localeContainer = /** @type {HTMLElement} */ (wrapper?.closest('[data-locale]'));
       const keyPathContainer = /** @type {HTMLElement} */ (wrapper?.closest('[data-key-path]'));
 
@@ -324,56 +322,42 @@
     });
 
     return () => {
-      // Remove the values and validities from the draft when the component is unmounted
-      if ($entryDraft) {
-        Object.keys($entryDraft[valueStoreKey][locale] ?? {}).forEach((key) => {
-          if (key.startsWith(keyPathPrefix)) {
-            delete $entryDraft[valueStoreKey][locale][key];
-          }
-        });
+      const draft = entryDraft?.current;
 
-        Object.keys($entryDraft.validities[locale] ?? {}).forEach((key) => {
-          if (key.startsWith(keyPathPrefix)) {
-            delete $entryDraft.validities[locale][key];
-          }
-        });
+      // Remove the values and validities from the draft when the component is unmounted
+      if (draft) {
+        deleteKeysByPrefix(draft[valueStoreKey][locale], keyPathPrefix);
+        deleteKeysByPrefix(draft.validities[locale], keyPathPrefix);
       }
     };
   });
 
-  $effect(() => {
-    void [values, locale, keyPath];
+  watch(
+    () => [values, locale, keyPath],
+    () => {
+      if (entryDraft?.current && locale && keyPath) {
+        const reconciledValues = reconcileComponentValues({
+          values,
+          fields,
+          componentName,
+          locale,
+          defaultLocale: entryDraft.current.defaultLocale,
+        });
 
-    untrack(() => {
-      if ($entryDraft && locale && keyPath) {
-        const { defaultLocale } = $entryDraft;
-
-        values ??= unflatten(getDefaultValues({ fields, locale, defaultLocale })) ?? {};
-        values.__sc_component_name = componentName;
+        // Only reassign when something actually changed, or this would run forever
+        if (reconciledValues !== values) {
+          values = reconciledValues;
+        }
 
         if (!equal(values, currentValues)) {
-          const newEntries = Object.fromEntries(
-            Object.entries(flatten(values)).map(([key, value]) => [
-              `${keyPathPrefix}${key}`,
-              value,
-            ]),
+          Object.assign(
+            entryDraft.current[valueStoreKey][locale],
+            flattenWithPrefix(/** @type {Record<string, any>} */ (values), keyPathPrefix),
           );
-
-          // Use `entryDraft.update()` instead of `Object.assign()` directly so that the store
-          // notifies subscribers and `currentValues` re-derives immediately.
-          entryDraft.update((_draft) => {
-            if (!_draft) {
-              return _draft;
-            }
-
-            Object.assign(_draft[valueStoreKey][locale], newEntries);
-
-            return _draft;
-          });
         }
       }
-    });
-  });
+    },
+  );
 
   // Block mode: forward onChange whenever currentValues change
   $effect(() => {
@@ -394,7 +378,8 @@
   <!-- Dialog mode: compact placeholder that opens a dialog on click -->
   <span
     role="button"
-    class="placeholder"
+    class="component {inline ? 'inline' : 'block'} placeholder"
+    class:thumbnail-only={!!thumbnailSource && !displayText}
     bind:this={wrapper}
     contenteditable="false"
     tabindex="0"
@@ -417,10 +402,36 @@
       }
     }}
   >
-    {displayText}
+    {#if thumbnailSource}
+      <Image
+        asset={thumbnailSource.asset}
+        src={thumbnailSource.url}
+        variant="icon"
+        cover
+        onError={() => {
+          // Show the text instead of a generic file icon
+          const { asset, url } = /** @type {MediaFieldSource} */ (thumbnailSource);
+
+          brokenThumbnail = asset ?? url;
+        }}
+      />
+    {/if}
+    {#if displayText}
+      <span role="none">{displayText}</span>
+    {/if}
   </span>
 
-  <Dialog title={label} bind:open={dialogOpen} size="large" showOk={false} showCancel={false}>
+  <Dialog
+    title={label}
+    bind:open={dialogOpen}
+    size="large"
+    showOk={false}
+    showCancel={false}
+    onCancel={() => {
+      // The Escape key dismisses the dialog just like the Cancel button
+      handleCancel();
+    }}
+  >
     <div role="none" class="fields">
       {#if locale && keyPath}
         {#each fields as fieldConfig (fieldConfig.name)}
@@ -430,6 +441,7 @@
             typedKeyPath="{keyPathPrefix}{fieldConfig.name}"
             {fieldConfig}
             context="rich-text-editor-component"
+            {componentName}
             {valueStoreKey}
           />
         {/each}
@@ -465,7 +477,8 @@
   <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
   <div
     role="group"
-    class="wrapper"
+    class="component {inline ? 'inline' : 'block'} wrapper"
+    class:expanded
     bind:this={wrapper}
     contenteditable="false"
     tabindex="0"
@@ -473,12 +486,23 @@
     data-key-path-prefix={keyPathPrefix}
     data-component-name={componentName}
     onkeydowncapture={(event) => {
-      // Allow to select all in any `TextInput` within the component below using Ctrl+A
+      const { target } = event;
+
+      // A nested rich text editor handles its own keys, so leave the event alone when it comes
+      // from one: stopping it here would keep it from ever reaching the nested editor, which is
+      // below in the capture phase, and cancelling it would block typing there. The outer editor
+      // ignores the event once it bubbles up, as Lexical marks it as handled by the nested one
+      if (/** @type {HTMLElement} */ (target).closest('[contenteditable]') !== wrapper) {
+        return;
+      }
+
+      // Allow to select all in any `TextInput` within the component below using Ctrl+A. Svelte
+      // delegates `keydown` to the root, which the event never reaches once it’s stopped, so the
+      // block’s own handling has to happen here as well
       event.stopPropagation();
-    }}
-    onkeydown={(event) => {
+
       if (
-        !(/** @type {HTMLElement} */ (event.target).matches('button, input, textarea')) &&
+        !(/** @type {HTMLElement} */ (target).matches('button, input, textarea')) &&
         event.key !== 'Tab'
       ) {
         event.preventDefault();
@@ -515,6 +539,7 @@
               typedKeyPath="{typedKeyPathPrefix}{fieldConfig.name}"
               {fieldConfig}
               context="rich-text-editor-component"
+              {componentName}
               {valueStoreKey}
             />
           </VisibilityObserver>
@@ -525,16 +550,38 @@
 {/if}
 
 <style>
+  .component {
+    &.block {
+      display: block;
+
+      &:not(:first-child) {
+        margin-top: var(--sui-paragraph-margin);
+      }
+
+      &:not(:last-child) {
+        margin-bottom: var(--sui-paragraph-margin);
+      }
+    }
+
+    &.inline {
+      display: inline-block;
+    }
+  }
+
   .wrapper {
-    display: inline-block; /* Cancel underline if the component is within a link */
-    border: 1px solid var(--sui-secondary-border-color);
-    border-radius: 4px;
+    border-inline-width: 2px;
+    border-color: var(--sui-secondary-border-color);
+    border-radius: var(--sui-control-medium-border-radius);
     width: 100%;
     color: var(--sui-secondary-foreground-color); /* Reset color within a link */
     background-color: var(--sui-primary-background-color);
     white-space: normal;
     -webkit-user-select: none;
     user-select: none;
+
+    &.expanded {
+      border-bottom-width: 2px;
+    }
 
     &:focus {
       outline-color: var(--sui-primary-accent-color-translucent);
@@ -544,8 +591,9 @@
     &:is([data-component-name='image'], [data-component-name='linked-image']) {
       :global {
         @media (768px <= width) {
-          [data-field-type] {
-            border-width: 0;
+          /* Hide the bottom border */
+          [data-field-type]::after {
+            display: none;
           }
 
           [data-field-type='string'] {
@@ -569,14 +617,12 @@
         }
       }
     }
-
-    & + :global(.wrapper) {
-      margin-top: 16px;
-    }
   }
 
   .placeholder {
-    display: inline;
+    --icon-size: 20px; /* Thumbnail size */
+    align-items: center;
+    gap: 0.4em;
     border: dashed 1px currentColor;
     border-color: hsl(from currentColor h s l / 0.5);
     border-radius: 2px;
@@ -592,6 +638,24 @@
     &:focus {
       outline: 2px solid var(--sui-primary-accent-color-translucent);
       outline-offset: 1px;
+    }
+
+    &.inline {
+      display: inline-flex;
+    }
+
+    &.block {
+      display: flex;
+      width: fit-content;
+    }
+
+    /* Center the thumbnail on the line rather than sitting it on the baseline */
+    &:has(:global(.preview)) {
+      vertical-align: middle;
+    }
+
+    &.thumbnail-only {
+      padding: 2px;
     }
   }
 

@@ -2,18 +2,9 @@
   import { _ } from '@sveltia/i18n';
   import { Alert, Button, Toast } from '@sveltia/ui';
 
-  import { backend, isLastCommitPublished } from '$lib/services/backends';
   import { skipCIConfigured } from '$lib/services/backends/git/shared/integration';
+  import { canTriggerDeployment, triggerDeployment } from '$lib/services/deployments/publish';
   import { env } from '$lib/services/user/env.svelte';
-  import { prefs } from '$lib/services/user/prefs.svelte';
-  import { isSecureURL } from '$lib/services/utils/networking';
-
-  const deployHookURL = $derived(prefs.deployHookURL);
-  const deployHookAuthHeader = $derived(prefs.deployHookAuthHeader);
-  const triggerDeployment = $derived($backend?.triggerDeployment);
-  const canPublish = $derived(
-    (!!deployHookURL || typeof triggerDeployment === 'function') && !$isLastCommitPublished,
-  );
 
   /** @type {'info' | 'error'} */
   let toastStatus = $state('info');
@@ -28,24 +19,7 @@
     showToast = true;
 
     try {
-      if (deployHookURL && !isSecureURL(deployHookURL)) {
-        throw new Error('Deploy hook URL must use HTTPS or localhost');
-      }
-
-      const { ok, status } = deployHookURL
-        ? await fetch(deployHookURL, {
-            method: 'POST',
-            mode: deployHookAuthHeader ? 'cors' : 'no-cors',
-            headers: deployHookAuthHeader ? { Authorization: deployHookAuthHeader } : {},
-          })
-        : ((await triggerDeployment?.()) ?? {});
-
-      // If the `mode` is `no-cors`, the regular response status will be `0`
-      if (!ok && (deployHookAuthHeader || status !== 0)) {
-        throw new Error(`Webhook returned ${status} error`);
-      }
-
-      $isLastCommitPublished = true;
+      await triggerDeployment();
     } catch (ex) {
       toastStatus = 'error';
       showToast = true;
@@ -55,12 +29,12 @@
   };
 </script>
 
-{#if $skipCIConfigured}
+{#if skipCIConfigured.current}
   <Button
     variant="secondary"
     size={env.isSmallScreen ? 'small' : 'medium'}
     label={_('publish_changes')}
-    disabled={!canPublish}
+    disabled={!canTriggerDeployment.current}
     onclick={() => publish()}
   />
   <Toast bind:show={showToast}>

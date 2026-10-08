@@ -1,31 +1,47 @@
 // @ts-nocheck
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { isLastCommitPublished } from '$lib/services/backends';
+import { callEventHooks } from '$lib/services/api/events';
+import { lockedBranch } from '$lib/services/backends/branch-access';
 import { skipCIConfigured, skipCIEnabled } from '$lib/services/backends/git/shared/integration';
 import { saveChanges } from '$lib/services/backends/save';
+import { getCollection } from '$lib/services/contents/collection';
 import {
   contentUpdatesToast,
   UPDATE_TOAST_DEFAULT_STATE,
 } from '$lib/services/contents/collection/data';
 import { getEntriesByCollection } from '$lib/services/contents/collection/entries';
-import { getOrderFieldKey } from '$lib/services/contents/collection/entries/reorder';
-import { entryDraft } from '$lib/services/contents/draft';
-import { deleteBackup } from '$lib/services/contents/draft/backup';
-import { callEventHooks } from '$lib/services/contents/draft/events';
+import { getOrderFieldKey } from '$lib/services/contents/collection/entries/reorder/config';
+import { deleteBackup, getBackupSlug } from '$lib/services/contents/draft/backup';
 import { createSavingEntryData } from '$lib/services/contents/draft/save/changes';
+import { detectEntryConflict } from '$lib/services/contents/draft/save/conflict';
 import { getSlugs } from '$lib/services/contents/draft/slugs';
 import { validateEntry } from '$lib/services/contents/draft/validate';
-import { expandInvalidFields } from '$lib/services/contents/editor/expanders';
+import { expandInvalidFields } from '$lib/services/contents/editor/fields';
+import { awaitPendingFieldUpdates } from '$lib/services/contents/editor/pending';
 import { clearEntryHistoryCache } from '$lib/services/contents/entry/history';
+import { assignAutoNowValues } from '$lib/services/contents/fields/date-time/auto-now';
+import { setLastCommitPublishHint } from '$lib/services/deployments';
+import { isWorkflowDraft, unpublishedEntries } from '$lib/services/workflow';
+import { saveWorkflowChanges } from '$lib/services/workflow/save';
 
-import { saveEntry } from '.';
+import { saveEntry as _saveEntry } from '.';
 
 vi.mock('$lib/services/backends');
-vi.mock('$lib/services/backends/git/shared/integration');
+vi.mock('$lib/services/backends/git/shared/integration', () => ({
+  skipCIConfigured: { current: false },
+  skipCIEnabled: { current: false },
+}));
 vi.mock('$lib/services/backends/save');
-vi.mock('$lib/services/contents/collection/data');
-vi.mock('$lib/services/contents/collection/entries/reorder', () => ({
+vi.mock('$lib/services/contents/collection', async (importOriginal) => ({
+  .../** @type {object} */ (await importOriginal()),
+  getCollection: vi.fn(),
+}));
+vi.mock('$lib/services/contents/collection/data', async (importOriginal) => ({
+  .../** @type {object} */ (await importOriginal()),
+  contentUpdatesToast: { current: undefined },
+}));
+vi.mock('$lib/services/contents/collection/entries/reorder/config', () => ({
   getOrderFieldKey: vi.fn(() => undefined),
 }));
 vi.mock('$lib/services/contents/collection/entries', () => ({
@@ -33,37 +49,45 @@ vi.mock('$lib/services/contents/collection/entries', () => ({
 }));
 vi.mock('$lib/services/contents/draft');
 vi.mock('$lib/services/contents/draft/backup');
-vi.mock('$lib/services/contents/draft/events', () => ({
+vi.mock('$lib/services/api/events', () => ({
   callEventHooks: vi.fn(),
 }));
+vi.mock('$lib/services/contents/draft/save/asset-move', () => ({
+  buildEntryAssetMoveChanges: vi.fn(async () => ({ changes: [], savingAssets: [] })),
+}));
 vi.mock('$lib/services/contents/draft/save/changes');
+vi.mock('$lib/services/contents/draft/save/conflict');
 vi.mock('$lib/services/contents/draft/slugs');
 vi.mock('$lib/services/contents/draft/validate');
-vi.mock('$lib/services/contents/editor/expanders');
+vi.mock('$lib/services/contents/editor/fields');
+vi.mock('$lib/services/contents/editor/pending');
 vi.mock('$lib/services/contents/entry/history');
-vi.mock('$lib/services/user/prefs.svelte', () => ({
-  prefs: { subscribe: vi.fn(() => vi.fn()) },
+vi.mock('$lib/services/contents/fields/date-time/auto-now');
+vi.mock('$lib/services/deployments');
+vi.mock('$lib/services/workflow', async (importOriginal) => ({
+  .../** @type {object} */ (await importOriginal()),
+  isWorkflowDraft: vi.fn(),
+  unpublishedEntries: { current: undefined },
 }));
-vi.mock('svelte/store', async () => {
-  const actual = await vi.importActual('svelte/store');
-
-  return {
-    ...actual,
-    get: vi.fn(() => ({ devModeEnabled: false })),
-  };
-});
-
+vi.mock('$lib/services/workflow/branch', () => ({
+  getBranchName: vi.fn(({ collectionName, slug }) => `cms/${collectionName}/${slug}`),
+}));
+vi.mock('$lib/services/workflow/save');
+vi.mock('$lib/services/user/prefs.svelte', () => ({
+  prefs: {},
+}));
 describe('draft/save/index', () => {
   let mockDraft;
-  let mockGet;
+  /**
+   * Save the mock draft.
+   * @param {object} [options] Options other than the draft.
+   * @returns {Promise<any>} Saved entry.
+   */
+  const saveEntry = (options = {}) => _saveEntry({ draft: mockDraft, ...options });
 
   beforeEach(async () => {
     vi.clearAllMocks();
     vi.spyOn(console, 'error').mockImplementation(() => {});
-
-    const { get } = await import('svelte/store');
-
-    mockGet = vi.mocked(get);
 
     mockDraft = {
       collection: {
@@ -74,23 +98,14 @@ describe('draft/save/index', () => {
       collectionName: 'posts',
       fileName: undefined,
       currentValues: { en: { title: 'Test Post' } },
+      extraValues: { en: {} },
+      pendingEntries: [],
     };
 
-    mockGet.mockImplementation((store) => {
-      if (store === entryDraft) {
-        return mockDraft;
-      }
-
-      if (store === skipCIConfigured) {
-        return true;
-      }
-
-      if (store === skipCIEnabled) {
-        return false;
-      }
-
-      return undefined;
-    });
+    /** @type {any} */ (skipCIConfigured).current = true;
+    /** @type {any} */ (skipCIEnabled).current = false;
+    vi.mocked(isWorkflowDraft).mockReturnValue(false);
+    unpublishedEntries.current = [];
 
     vi.mocked(validateEntry).mockReturnValue(true);
     vi.mocked(getSlugs).mockReturnValue({
@@ -121,9 +136,12 @@ describe('draft/save/index', () => {
     });
 
     vi.mocked(callEventHooks).mockResolvedValue(undefined);
-    vi.mocked(contentUpdatesToast).set = vi.fn();
-    vi.mocked(isLastCommitPublished).set = vi.fn();
+    contentUpdatesToast.current = /** @type {any} */ (undefined);
     vi.mocked(deleteBackup).mockResolvedValue(undefined);
+    // Same as the actual implementation: the file name, or the slug the entry had when opened
+    vi.mocked(getBackupSlug).mockImplementation(
+      ({ fileName, originalEntry }) => fileName ?? originalEntry?.slug ?? '',
+    );
   });
 
   describe('saveEntry', () => {
@@ -137,11 +155,242 @@ describe('draft/save/index', () => {
       expect(result.slug).toBe('test-post');
     });
 
+    it('should save through Editorial Workflow when enabled', async () => {
+      vi.mocked(isWorkflowDraft).mockReturnValue(true);
+
+      vi.mocked(saveWorkflowChanges).mockResolvedValue({
+        commit: { sha: 'abc', files: {} },
+        savedEntries: [
+          {
+            id: 'test-id',
+            slug: 'test-post',
+            locales: { en: { slug: 'test-post', path: 'posts/test-post.md' } },
+          },
+        ],
+        savedAssets: [],
+      });
+
+      const result = await saveEntry();
+
+      expect(saveChanges).not.toHaveBeenCalled();
+      expect(saveWorkflowChanges).toHaveBeenCalledWith(
+        expect.objectContaining({ collectionName: 'posts', slug: 'test-post' }),
+      );
+
+      expect(result.slug).toBe('test-post');
+
+      // Nothing is published yet, because the changes only exist in a pull request
+      expect(vi.mocked(setLastCommitPublishHint)).toHaveBeenCalledWith(false);
+    });
+
+    it('should refuse to save a read-only entry', async () => {
+      mockDraft.collection.readonly = true;
+
+      await expect(saveEntry()).rejects.toThrow('saving_failed');
+      expect(validateEntry).not.toHaveBeenCalled();
+      expect(saveChanges).not.toHaveBeenCalled();
+      expect(saveWorkflowChanges).not.toHaveBeenCalled();
+    });
+
+    it('should refuse to save an entry to a branch the user can’t push to', async () => {
+      lockedBranch.current = 'main';
+
+      try {
+        const error = await saveEntry().catch((/** @type {Error} */ ex) => ex);
+
+        expect(error).toBeInstanceOf(Error);
+        expect(/** @type {Error} */ (error).cause).toEqual(new Error('readonly_branch'));
+        expect(saveChanges).not.toHaveBeenCalled();
+      } finally {
+        lockedBranch.current = undefined;
+      }
+    });
+
+    it('should decide on the workflow per draft', async () => {
+      // A collection can opt in or out of Editorial Workflow with its own `publish_mode` option,
+      // and an entry that already has a pull request stays in it
+      await saveEntry();
+
+      expect(isWorkflowDraft).toHaveBeenCalledWith(mockDraft);
+    });
+
+    describe('required field enforcement', () => {
+      /**
+       * Make the mocked stores report that Editorial Workflow is enabled.
+       */
+      const enableWorkflow = () => {
+        vi.mocked(isWorkflowDraft).mockReturnValue(true);
+        unpublishedEntries.current = [];
+
+        vi.mocked(saveWorkflowChanges).mockResolvedValue({
+          commit: { sha: 'abc', files: {} },
+          savedEntries: [
+            {
+              id: 'test-id',
+              slug: 'test-post',
+              locales: { en: { slug: 'test-post', path: 'posts/test-post.md' } },
+            },
+          ],
+          savedAssets: [],
+        });
+      };
+
+      it('should enforce required fields without Editorial Workflow', async () => {
+        await saveEntry();
+
+        expect(validateEntry).toHaveBeenCalledWith({ draft: mockDraft, enforceRequired: true });
+      });
+
+      it('should not enforce required fields for a new Editorial Workflow entry', async () => {
+        enableWorkflow();
+        await saveEntry();
+
+        expect(validateEntry).toHaveBeenCalledWith({ draft: mockDraft, enforceRequired: false });
+      });
+
+      it('should not enforce required fields for an entry still in the drafting stage', async () => {
+        enableWorkflow();
+        mockDraft.isNew = false;
+        mockDraft.originalEntry = {
+          id: 'test-id',
+          slug: 'test-post',
+          locales: { _default: { path: 'content/posts/test-post.md' } },
+          workflow: { status: 'draft', pullRequest: { branch: 'cms/posts/test-post' } },
+        };
+        await saveEntry();
+
+        expect(validateEntry).toHaveBeenCalledWith({ draft: mockDraft, enforceRequired: false });
+      });
+
+      it('should enforce required fields for an entry that has left the drafting stage', async () => {
+        enableWorkflow();
+        mockDraft.isNew = false;
+        mockDraft.originalEntry = {
+          id: 'test-id',
+          slug: 'test-post',
+          locales: { _default: { path: 'content/posts/test-post.md' } },
+          workflow: { status: 'pending_review', pullRequest: { branch: 'cms/posts/test-post' } },
+        };
+        await saveEntry();
+
+        expect(validateEntry).toHaveBeenCalledWith({ draft: mockDraft, enforceRequired: true });
+      });
+    });
+
+    it('should wait for pending field updates before validating', async () => {
+      /** @type {string[]} */
+      const order = [];
+
+      vi.mocked(awaitPendingFieldUpdates).mockImplementation(async () => {
+        order.push('await');
+      });
+      vi.mocked(validateEntry).mockImplementation(() => {
+        order.push('validate');
+
+        return true;
+      });
+
+      await saveEntry();
+
+      expect(order).toEqual(['await', 'validate']);
+    });
+
     it('should throw validation error when entry is invalid', async () => {
       vi.mocked(validateEntry).mockReturnValue(false);
 
       await expect(saveEntry()).rejects.toThrow('validation_failed');
-      expect(expandInvalidFields).toHaveBeenCalled();
+      expect(expandInvalidFields).toHaveBeenCalledWith({ draft: mockDraft });
+      // Nothing is fetched for a draft that can’t be saved anyway
+      expect(detectEntryConflict).not.toHaveBeenCalled();
+      // The draft isn’t touched either
+      expect(assignAutoNowValues).not.toHaveBeenCalled();
+    });
+
+    it('should set the auto-now DateTime fields before working out the changes', async () => {
+      const order = [];
+
+      vi.mocked(assignAutoNowValues).mockImplementation(() => {
+        order.push('autoNow');
+      });
+      vi.mocked(getSlugs).mockImplementation(() => {
+        order.push('slugs');
+
+        return { defaultLocaleSlug: 'test-post' };
+      });
+
+      await saveEntry();
+
+      expect(assignAutoNowValues).toHaveBeenCalledWith(mockDraft);
+      expect(order).toEqual(['autoNow', 'slugs']);
+    });
+
+    it('should not set the auto-now DateTime fields when refusing to save over a change', async () => {
+      vi.mocked(detectEntryConflict).mockResolvedValue({ type: 'modified', entry: { id: 'x' } });
+
+      await expect(saveEntry()).rejects.toThrow('save_conflict');
+      expect(assignAutoNowValues).not.toHaveBeenCalled();
+    });
+
+    it('should refuse to save over someone else’s change unless told to', async () => {
+      const conflict = { type: 'modified', entry: { id: 'test-id' } };
+
+      vi.mocked(detectEntryConflict).mockResolvedValue(conflict);
+
+      const error = await saveEntry().catch((ex) => ex);
+
+      expect(error.message).toBe('save_conflict');
+      expect(error.cause).toBe(conflict);
+      expect(detectEntryConflict).toHaveBeenCalledWith(mockDraft);
+      expect(createSavingEntryData).not.toHaveBeenCalled();
+      expect(saveChanges).not.toHaveBeenCalled();
+
+      await saveEntry({ overwrite: true });
+
+      expect(saveChanges).toHaveBeenCalledTimes(1);
+    });
+
+    it('should keep checking the item of an entry in an array file when overwriting', async () => {
+      const locales = { en: { path: 'data/members.json', content: { title: 'A' } } };
+
+      // The item at the position may be another entry that has moved there, so it’s still checked
+      mockDraft.isNew = false;
+      mockDraft.originalEntry = { id: 'test-id', slug: '1', arrayIndex: 1, locales };
+      vi.mocked(detectEntryConflict).mockResolvedValue({ type: 'modified', entry: { id: 'x' } });
+      vi.mocked(createSavingEntryData).mockResolvedValue({
+        savingEntry: { id: 'test-id', slug: '1', arrayIndex: 1, locales },
+        changes: [
+          { action: 'update', path: 'data/members.json', arrayItem: { index: 1, locales } },
+        ],
+        savingAssets: [],
+      });
+
+      await saveEntry({ overwrite: true });
+
+      const { changes } = vi.mocked(saveChanges).mock.calls[0][0];
+
+      expect(changes[0].arrayItem).toEqual({ index: 1, locales });
+    });
+
+    it('should save when there is no conflict', async () => {
+      vi.mocked(detectEntryConflict).mockResolvedValue(undefined);
+
+      await saveEntry();
+
+      expect(detectEntryConflict).toHaveBeenCalledWith(mockDraft);
+      expect(saveChanges).toHaveBeenCalled();
+    });
+
+    it('should not look for a conflict for an Editorial Workflow draft', async () => {
+      vi.mocked(isWorkflowDraft).mockReturnValue(true);
+      vi.mocked(saveWorkflowChanges).mockResolvedValue({
+        commit: { sha: 'abc', files: {} },
+        savedEntries: [{ id: 'test-id', slug: 'test-post', locales: {} }],
+        savedAssets: [],
+      });
+
+      await saveEntry();
+
+      expect(detectEntryConflict).not.toHaveBeenCalled();
     });
 
     it('should handle save failure', async () => {
@@ -150,48 +399,60 @@ describe('draft/save/index', () => {
       await expect(saveEntry()).rejects.toThrow('saving_failed');
     });
 
+    it('should fail without saving when an entry file cannot be formatted', async () => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      const formatError = new Error(
+        'Entries in the custom “csv” format can’t be saved, as no `toFile` method was registered ' +
+          'for it with `CMS.registerCustomFormat()`',
+      );
+
+      vi.mocked(createSavingEntryData).mockRejectedValue(formatError);
+
+      // The original error is the cause, so its message can be shown to the user
+      await expect(saveEntry()).rejects.toThrow(
+        expect.objectContaining({ message: 'saving_failed', cause: formatError }),
+      );
+      expect(errorSpy).toHaveBeenCalledWith(formatError);
+      expect(saveChanges).not.toHaveBeenCalled();
+      expect(callEventHooks).not.toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'postSave' }),
+      );
+      errorSpy.mockRestore();
+    });
+
     it('should update toast with published status for git backend', async () => {
       await saveEntry();
 
-      expect(vi.mocked(contentUpdatesToast).set).toHaveBeenCalledWith({
+      expect(contentUpdatesToast.current).toEqual({
         ...UPDATE_TOAST_DEFAULT_STATE,
         saved: true,
         published: true,
         count: 1,
       });
 
-      expect(vi.mocked(isLastCommitPublished).set).toHaveBeenCalledWith(true);
+      expect(vi.mocked(setLastCommitPublishHint)).toHaveBeenCalledWith(true);
     });
 
     it('should handle skipCI option', async () => {
       await saveEntry({ skipCI: true });
 
-      expect(vi.mocked(contentUpdatesToast).set).toHaveBeenCalledWith({
+      expect(contentUpdatesToast.current).toEqual({
         ...UPDATE_TOAST_DEFAULT_STATE,
         saved: true,
         published: false,
         count: 1,
       });
 
-      expect(vi.mocked(isLastCommitPublished).set).toHaveBeenCalledWith(false);
+      expect(vi.mocked(setLastCommitPublishHint)).toHaveBeenCalledWith(false);
     });
 
     it('should handle non-git backend', async () => {
-      mockGet.mockImplementation((store) => {
-        if (store === entryDraft) {
-          return mockDraft;
-        }
-
-        if (store === skipCIConfigured) {
-          return false;
-        }
-
-        return undefined;
-      });
+      /** @type {any} */ (skipCIConfigured).current = false;
 
       await saveEntry();
 
-      expect(vi.mocked(contentUpdatesToast).set).toHaveBeenCalledWith({
+      expect(contentUpdatesToast.current).toEqual({
         ...UPDATE_TOAST_DEFAULT_STATE,
         saved: true,
         published: false,
@@ -201,10 +462,71 @@ describe('draft/save/index', () => {
 
     it('should delete backup after successful save', async () => {
       mockDraft.isNew = false;
+      mockDraft.originalEntry = { id: 'test-id', slug: 'test-post', locales: {} };
 
       await saveEntry();
 
       expect(deleteBackup).toHaveBeenCalledWith('posts', 'test-post');
+    });
+
+    it('should delete the backup stored under the original slug after a rename', async () => {
+      mockDraft.isNew = false;
+      mockDraft.originalEntry = { id: 'test-id', slug: 'old-post', locales: {} };
+
+      await saveEntry();
+
+      // The backup was made under the slug the entry had when it was opened, not the new one
+      expect(deleteBackup).toHaveBeenCalledWith('posts', 'old-post');
+      expect(deleteBackup).not.toHaveBeenCalledWith('posts', 'test-post');
+    });
+
+    it('should delete the backup of a new file collection entry stored under the file name', async () => {
+      mockDraft.fileName = 'about';
+
+      await saveEntry();
+
+      expect(deleteBackup).toHaveBeenCalledWith('posts', 'about');
+    });
+
+    it('should delete backup before running the post-save hooks', async () => {
+      /** @type {string[]} */
+      const calls = [];
+
+      vi.mocked(deleteBackup).mockImplementation(async () => {
+        calls.push('deleteBackup');
+      });
+      vi.mocked(callEventHooks).mockImplementation(async () => {
+        calls.push('callEventHooks');
+      });
+
+      await saveEntry();
+
+      expect(calls[0]).toBe('deleteBackup');
+      expect(calls).toContain('callEventHooks');
+    });
+
+    it('should complete the save even if the backup cannot be deleted', async () => {
+      const error = new DOMException('Store missing', 'NotFoundError');
+      const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      vi.mocked(deleteBackup).mockRejectedValue(error);
+
+      try {
+        await expect(saveEntry()).resolves.toBeDefined();
+        expect(callEventHooks).toHaveBeenCalled();
+        expect(contentUpdatesToast.current.saved).toBe(true);
+        expect(consoleError).toHaveBeenCalledWith(error);
+      } finally {
+        consoleError.mockRestore();
+      }
+    });
+
+    it('should keep backup if save fails', async () => {
+      vi.mocked(saveChanges).mockRejectedValue(new Error('Save failed'));
+
+      await expect(saveEntry()).rejects.toThrow('saving_failed');
+
+      expect(deleteBackup).not.toHaveBeenCalled();
     });
 
     it('should delete backup for new entry with empty slug', async () => {
@@ -250,7 +572,7 @@ describe('draft/save/index', () => {
       expect(callEventHooks).toHaveBeenCalledWith(
         expect.objectContaining({
           type: 'postSave',
-          draft: mockDraft,
+          collection: mockDraft.collection,
         }),
       );
     });
@@ -261,7 +583,7 @@ describe('draft/save/index', () => {
       expect(callEventHooks).toHaveBeenCalledWith(
         expect.objectContaining({
           type: 'postSave',
-          savingEntry: expect.objectContaining({
+          entry: expect.objectContaining({
             id: 'test-id',
             slug: 'test-post',
             locales: expect.objectContaining({
@@ -397,6 +719,40 @@ describe('draft/save/index', () => {
       expect(mockDraft.currentValues.ja.order).toBe(7);
     });
 
+    it('should put a new entry after the entries added from its Relation field', async () => {
+      mockDraft.isNew = true;
+      vi.mocked(getOrderFieldKey).mockReturnValue('order');
+      vi.mocked(getEntriesByCollection).mockReturnValue([
+        { locales: { en: { content: { order: 5 } } } },
+      ]);
+
+      /**
+       * Create a pending entry, as added from a Relation field of the entry being edited.
+       * @param {string} collectionName Collection name.
+       * @param {number} [order] Order the entry was given when it was added.
+       * @returns {any} Pending entry.
+       */
+      const createPendingEntry = (collectionName, order) => ({
+        collectionName,
+        entry: { locales: { en: { content: { order } } } },
+        values: [],
+        changes: [],
+        savingAssets: [],
+      });
+
+      // Entries added to the same collection took the orders after the highest one, 6 and 7
+      mockDraft.pendingEntries = [
+        createPendingEntry('posts', 6),
+        createPendingEntry('tags'),
+        createPendingEntry('posts', 7),
+      ];
+
+      await saveEntry();
+
+      expect(mockDraft.currentValues.en.order).toBe(8);
+      expect(mockDraft.currentValues.ja.order).toBe(8);
+    });
+
     it('should use the configured custom order key', async () => {
       mockDraft.isNew = true;
       vi.mocked(getOrderFieldKey).mockReturnValue('priority');
@@ -454,6 +810,94 @@ describe('draft/save/index', () => {
 
       // Reads from `ja` (collectionFile defaultLocale), so max = 9 → next = 10.
       expect(mockDraft.currentValues.en.order).toBe(10);
+    });
+  });
+
+  describe('pending entries', () => {
+    const tagCollection = { name: 'tags', _type: 'entry' };
+
+    /**
+     * Build a pending entry.
+     * @param {string} slug Slug.
+     * @returns {any} Pending entry.
+     */
+    const createPendingEntry = (slug) => ({
+      collectionName: 'tags',
+      entry: { id: `id-${slug}`, slug, subPath: slug, locales: {} },
+      changes: [{ action: 'create', path: `tags/${slug}.md`, data: `title: ${slug}` }],
+      savingAssets: [{ path: `uploads/${slug}.png` }],
+      values: [slug],
+    });
+
+    beforeEach(() => {
+      vi.mocked(getOrderFieldKey).mockReturnValue(undefined);
+      vi.mocked(getCollection).mockReturnValue(/** @type {any} */ (tagCollection));
+      vi.mocked(createSavingEntryData).mockResolvedValue({
+        savingEntry: {
+          id: 'test-id',
+          slug: 'test-post',
+          locales: { en: { slug: 'test-post', path: 'posts/test-post.md' } },
+        },
+        changes: [{ action: 'create', path: 'posts/test-post.md', data: 'title: Test Post' }],
+        savingAssets: [{ path: 'uploads/hero.png' }],
+      });
+    });
+
+    it('should commit the referenced pending entries along with the entry', async () => {
+      const svelte = createPendingEntry('svelte');
+      const react = createPendingEntry('react');
+
+      mockDraft.currentValues = { en: { title: 'Test Post', 'tags.0': 'svelte' } };
+      mockDraft.pendingEntries = [svelte, react];
+
+      await saveEntry();
+
+      expect(saveChanges).toHaveBeenCalledWith({
+        changes: [
+          { action: 'create', path: 'posts/test-post.md', data: 'title: Test Post' },
+          ...svelte.changes,
+        ],
+        savingEntries: [expect.objectContaining({ id: 'test-id' }), svelte.entry],
+        savingAssets: [{ path: 'uploads/hero.png' }, ...svelte.savingAssets],
+        options: expect.objectContaining({ commitType: 'create' }),
+      });
+
+      expect(callEventHooks).toHaveBeenCalledWith({
+        type: 'postSave',
+        entry: svelte.entry,
+        collection: tagCollection,
+        isNew: true,
+      });
+      expect(callEventHooks).not.toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'postSave', entry: react.entry }),
+      );
+      expect(getCollection).toHaveBeenCalledWith('tags');
+      expect(contentUpdatesToast.current).toEqual(expect.objectContaining({ count: 2 }));
+    });
+
+    it('should leave the pending entries out of the Editorial Workflow entry', async () => {
+      const svelte = createPendingEntry('svelte');
+
+      mockDraft.currentValues = { en: { title: 'Test Post', 'tags.0': 'svelte' } };
+      mockDraft.pendingEntries = [svelte];
+      vi.mocked(isWorkflowDraft).mockReturnValue(true);
+
+      vi.mocked(saveWorkflowChanges).mockResolvedValue({
+        commit: { sha: 'abc', files: {} },
+        savedEntries: [{ id: 'test-id', slug: 'test-post', locales: {} }],
+        savedAssets: [],
+      });
+
+      await saveEntry();
+
+      // The changes go into the pull request, while the tracked entry is the one being edited
+      expect(saveWorkflowChanges).toHaveBeenCalledWith(
+        expect.objectContaining({
+          changes: expect.arrayContaining(svelte.changes),
+          savingEntry: expect.objectContaining({ id: 'test-id' }),
+          savingAssets: expect.arrayContaining(svelte.savingAssets),
+        }),
+      );
     });
   });
 });

@@ -1,12 +1,14 @@
-import { IndexedDB } from '@sveltia/utils/storage';
-import { get } from 'svelte/store';
-
-import { allBackendServices } from '$lib/services/backends';
-import { loadFiles, saveChanges } from '$lib/services/backends/fs/shared/files';
+import { readFile } from '$lib/services/backends/fs/shared/handles';
+import { loadFiles } from '$lib/services/backends/fs/shared/load';
+import { saveChanges } from '$lib/services/backends/fs/shared/save';
+import { gitBackendServices } from '$lib/services/backends/git/services';
 import { cmsConfig } from '$lib/services/config';
+import { getRepositoryDatabase } from '$lib/services/utils/database';
 
 /**
+ * @import { IndexedDB } from '@sveltia/utils/storage';
  * @import {
+ * Asset,
  * BackendService,
  * CommitResults,
  * FileChange,
@@ -48,6 +50,13 @@ const ROOT_DIR_HANDLE_KEY = 'root_dir_handle';
  */
 let rootDirHandleDB = undefined;
 /**
+ * Store holding the Git object IDs of the asset files hashed by previous loads, so unchanged files
+ * don’t have to be read again. Like the other caches, it only exists when a remote repository is
+ * configured, as the database is named after it.
+ * @type {IndexedDB | null | undefined}
+ */
+let assetHashDB = undefined;
+/**
  * @type {FileSystemDirectoryHandle | undefined}
  */
 let rootDirHandle = undefined;
@@ -55,7 +64,6 @@ let rootDirHandle = undefined;
 /**
  * Get the project’s root directory handle so the app can read all the files under the directory.
  * The handle will be cached in IndexedDB for later use.
- * @internal
  * @param {object} [options] Options.
  * @param {boolean} [options.forceReload] Whether to force getting the handle.
  * @param {boolean} [options.showPicker] Whether to show the directory picker.
@@ -120,13 +128,12 @@ export const getRootDirHandle = async ({ forceReload = false, showPicker = true 
  * @returns {RepositoryInfo | undefined} Repository info.
  */
 const init = () => {
-  const { name: service } = /** @type {InternalCmsConfig} */ (get(cmsConfig)).backend;
+  const { name: service } = /** @type {InternalCmsConfig} */ (cmsConfig.current).backend;
 
-  remoteRepository = allBackendServices[service]?.init?.();
+  remoteRepository = gitBackendServices[service]?.init?.();
 
-  const { databaseName } = remoteRepository ?? {};
-
-  rootDirHandleDB = databaseName ? new IndexedDB(databaseName, 'file-system-handles') : null;
+  rootDirHandleDB = getRepositoryDatabase(remoteRepository, 'file-system-handles') ?? null;
+  assetHashDB = getRepositoryDatabase(remoteRepository, 'asset-hashes') ?? null;
 
   return repository;
 };
@@ -164,7 +171,9 @@ const signOut = async () => {
  * {@link allEntries} and {@link allAssets} stores.
  */
 const fetchFiles = async () => {
-  await loadFiles(/** @type {FileSystemDirectoryHandle} */ (rootDirHandle));
+  await loadFiles(/** @type {FileSystemDirectoryHandle} */ (rootDirHandle), {
+    hashCacheDB: assetHashDB,
+  });
 };
 
 /**
@@ -174,6 +183,22 @@ const fetchFiles = async () => {
  * their blob SHAs.
  */
 const commitChanges = async (changes) => saveChanges(rootDirHandle, changes);
+
+/**
+ * Read an asset file from the file system. An asset uploaded or moved during the session has no
+ * file handle of its own, so once the object URL it was given is revoked, the file is read from the
+ * disk again.
+ * @param {Asset} asset Asset to be fetched.
+ * @returns {Promise<Blob>} Blob.
+ * @throws {Error} If the root directory handle is not available or the file doesn’t exist.
+ */
+const fetchBlob = async ({ path }) => {
+  if (!rootDirHandle) {
+    throw new Error('Root directory handle is not available');
+  }
+
+  return readFile(rootDirHandle, path);
+};
 
 /**
  * @type {BackendService}
@@ -187,5 +212,6 @@ export default {
   signIn,
   signOut,
   fetchFiles,
+  fetchBlob,
   commitChanges,
 };

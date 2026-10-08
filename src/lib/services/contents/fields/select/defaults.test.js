@@ -290,4 +290,46 @@ describe('Test getDefaultValueMap()', () => {
       });
     });
   });
+
+  test('should use the value of a default given as an option object', () => {
+    // eslint-disable-next-line jsdoc/require-jsdoc
+    const getValueMap = (/** @type {any} */ options) =>
+      getDefaultValueMap({
+        fieldConfig: /** @type {SelectField} */ ({
+          ...baseFieldConfig,
+          options: [
+            { label: 'One', value: 1 },
+            { label: 'Two', value: 2 },
+          ],
+          ...options,
+        }),
+        keyPath: 'category',
+        locale: '_default',
+        defaultLocale: '_default',
+      });
+
+    expect(getValueMap({ default: { label: 'Two', value: 2 } })).toEqual({ category: 2 });
+    expect(getValueMap({ default: [{ label: 'One', value: 1 }, 2], multiple: true })).toEqual({
+      'category.0': 1,
+      'category.1': 2,
+    });
+  });
+
+  test('should start a single select field without default with the matching empty value', () => {
+    // eslint-disable-next-line jsdoc/require-jsdoc
+    const getValue = (/** @type {any[] | undefined} */ options) =>
+      getDefaultValueMap({
+        fieldConfig: /** @type {SelectField} */ ({ ...baseFieldConfig, options }),
+        keyPath: 'category',
+        locale: '_default',
+        defaultLocale: '_default',
+      }).category;
+
+    expect(getValue(['option1', 'option2'])).toBe('');
+    expect(getValue([{ label: 'One', value: 1 }])).toBeNull();
+    expect(getValue([true, false])).toBeNull();
+    expect(getValue([])).toBe('');
+    // A Relation field has no `options`
+    expect(getValue(undefined)).toBe('');
+  });
 });

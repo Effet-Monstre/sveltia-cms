@@ -9,7 +9,14 @@ describe('Cloud storage services', () => {
   });
 
   test('should be an empty object', () => {
-    expect(Object.keys(allCloudStorageServices)).toHaveLength(7);
+    expect(Object.keys(allCloudStorageServices)).toHaveLength(10);
+  });
+
+  test('should include azure blob storage service', () => {
+    expect(Object.keys(allCloudStorageServices)).toContain('azure_blob_storage');
+    expect(allCloudStorageServices.azure_blob_storage).toBeDefined();
+    expect(allCloudStorageServices.azure_blob_storage.serviceType).toBe('cloud_storage');
+    expect(allCloudStorageServices.azure_blob_storage.serviceId).toBe('azure_blob_storage');
   });
 
   test('should include cloudinary service', () => {

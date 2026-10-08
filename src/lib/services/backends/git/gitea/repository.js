@@ -1,7 +1,15 @@
-import { _ } from '@sveltia/i18n';
-
+import { recordBranchAccess } from '$lib/services/backends/branch-access';
 import { fetchAPI } from '$lib/services/backends/git/shared/api';
-import { REPOSITORY_INFO_PLACEHOLDER } from '$lib/services/backends/git/shared/repository';
+import {
+  createLocalizedError,
+  NOT_COLLABORATOR_ERROR_MESSAGE,
+} from '$lib/services/backends/git/shared/errors';
+import {
+  applyDefaultBranch,
+  REPOSITORY_INFO_PLACEHOLDER,
+} from '$lib/services/backends/git/shared/repository';
+import { encodePath } from '$lib/services/backends/git/shared/url';
+import { user } from '$lib/services/user/account.svelte';
 
 /**
  * @import { RepositoryBaseURLs, RepositoryInfo } from '$lib/types/private';
@@ -14,16 +22,28 @@ import { REPOSITORY_INFO_PLACEHOLDER } from '$lib/services/backends/git/shared/r
 export const repository = { ...REPOSITORY_INFO_PLACEHOLDER };
 
 /**
- * Cache for repository information to avoid multiple API calls.
- * @type {Record<string, any> | null}
+ * Cache for repository information to avoid multiple API calls. The information includes the
+ * signed-in user’s permissions, so it’s kept along with the ID of the user it was fetched for. The
+ * request is cached rather than its result, so callers asking at the same time, like the access
+ * check and the default branch lookup, share one request.
+ * @type {{ userId: number | undefined, promise: Promise<Record<string, any>> } | null}
  */
 let repositoryInfoCache = null;
+/**
+ * Last response of the branch endpoint, along with the branch and user it was fetched for. The
+ * last commit and the user’s branch permissions come from the same endpoint, and the permissions
+ * are checked right after the last commit is fetched on the initial load, so they’re read from
+ * here rather than requested again.
+ * @type {{ branch: string, userId: number | undefined, result: Record<string, any> } | undefined}
+ */
+let lastBranchResponse;
 
 /**
  * Reset the repository info cache. Used for testing.
  */
 export const resetRepositoryInfoCache = () => {
   repositoryInfoCache = null;
+  lastBranchResponse = undefined;
 };
 
 /**
@@ -45,19 +65,55 @@ export const getBaseURLs = (repoURL, branch) => ({
  * @returns {Promise<Record<string, any>>} Repository information.
  * @see https://docs.gitea.com/api/next/#tag/repository/operation/repoGet
  */
-export const getRepositoryInfo = async () => {
+export const getRepositoryInfo = () => {
   const { owner, repo } = repository;
+  const userId = user.account?.id;
 
-  repositoryInfoCache ??= await /** @type {Promise<Record<string, any>>} */ (
+  // Another user may have signed in on the same page, e.g. after a read-only account was refused,
+  // and their permissions are not the previous user’s
+  if (repositoryInfoCache && repositoryInfoCache.userId === userId) {
+    return repositoryInfoCache.promise;
+  }
+
+  const promise = /** @type {Promise<Record<string, any>>} */ (
     fetchAPI(`/repos/${owner}/${repo}`)
-  );
+  ).catch((ex) => {
+    // A failure isn’t remembered, so a later call can try again
+    if (repositoryInfoCache?.promise === promise) {
+      repositoryInfoCache = null;
+    }
 
-  return repositoryInfoCache;
+    throw ex;
+  });
+
+  repositoryInfoCache = { userId, promise };
+
+  return promise;
 };
 
 /**
- * Check if the user has access to the current repository.
- * @throws {Error} If the user is not a collaborator of the repository.
+ * Fetch the configured branch, which includes its last commit and the signed-in user’s permissions
+ * on it. The response is kept for {@link checkBranchAccess}.
+ * @returns {Promise<Record<string, any>>} Branch information.
+ * @see https://docs.gitea.com/api/next/#tag/repository/operation/repoGetBranch
+ */
+export const fetchBranch = async () => {
+  const { owner, repo } = repository;
+  const branch = String(repository.branch);
+  const userId = user.account?.id;
+
+  const result = /** @type {Record<string, any>} */ (
+    await fetchAPI(`/repos/${owner}/${repo}/branches/${encodePath(branch)}`)
+  );
+
+  lastBranchResponse = { branch, userId, result };
+
+  return result;
+};
+
+/**
+ * Check if the user has write access to the current repository, like Netlify/Decap CMS requires.
+ * @throws {Error} If the user can’t push to the repository.
  * @see https://docs.gitea.com/api/next/#tag/repository/operation/repoGet
  */
 export const checkRepositoryAccess = async () => {
@@ -66,20 +122,45 @@ export const checkRepositoryAccess = async () => {
   try {
     const { permissions } = await getRepositoryInfo();
 
-    if (!permissions?.pull) {
-      throw new Error('Not a collaborator of the repository', {
-        cause: new Error(_('repository_no_access', { values: { repo } })),
-      });
+    if (!permissions?.push) {
+      throw createLocalizedError(NOT_COLLABORATOR_ERROR_MESSAGE, 'repository_no_access', { repo });
     }
   } catch (error) {
-    if (error instanceof Error && error.message.includes('Not a collaborator')) {
+    if (error instanceof Error && error.message === NOT_COLLABORATOR_ERROR_MESSAGE) {
       throw error;
     }
 
-    throw new Error('Failed to check repository access', {
-      cause: new Error(_('repository_not_found', { values: { repo } })),
+    throw createLocalizedError('Failed to check repository access', 'repository_not_found', {
+      repo,
     });
   }
+};
+
+/**
+ * Check if the user can push to and merge into the configured branch, and record it in
+ * {@link lockedBranch} and {@link mergeLockedBranch}. Write access is enough to sign in, but a
+ * protected branch may only allow some users to push or merge, in which case everything that would
+ * fail is made read-only or hidden up front. A failed request leaves the branch writable, as
+ * Gitea/Forgejo still refuses a push or merge the user isn’t allowed to make.
+ * @see https://docs.gitea.com/api/next/#tag/repository/operation/repoGetBranch
+ */
+export const checkBranchAccess = async () => {
+  const { owner, repo, branch } = repository;
+  // Read the response the last commit was just fetched with, if it’s for this branch and user. It’s
+  // only used once, so a later check doesn’t go by permissions fetched long ago
+  const cached = lastBranchResponse;
+
+  lastBranchResponse = undefined;
+
+  await recordBranchAccess(branch, async (_branch) => {
+    const result = /** @type {{ user_can_push?: boolean, user_can_merge?: boolean }} */ (
+      cached?.branch === _branch && cached.userId === user.account?.id
+        ? cached.result
+        : await fetchAPI(`/repos/${owner}/${repo}/branches/${encodePath(_branch)}`)
+    );
+
+    return { canPush: result.user_can_push, canMerge: result.user_can_merge };
+  });
 };
 
 /**
@@ -89,23 +170,13 @@ export const checkRepositoryAccess = async () => {
  * @see https://docs.gitea.com/api/next/#tag/repository/operation/repoGet
  */
 export const fetchDefaultBranchName = async () => {
-  const { repo, repoURL = '' } = repository;
+  // A request that fails means the repository could not be read at all, which `applyDefaultBranch`
+  // reports as a missing repository; a repository that was read but has no default branch is empty
+  const info = await getRepositoryInfo().catch(() => undefined);
 
-  try {
-    const { default_branch: branch } = await getRepositoryInfo();
-
-    if (!branch) {
-      throw new Error('Failed to retrieve the default branch name.', {
-        cause: new Error(_('repository_empty', { values: { repo } })),
-      });
-    }
-
-    Object.assign(repository, { branch }, getBaseURLs(repoURL, branch));
-
-    return branch;
-  } catch {
-    throw new Error('Failed to retrieve the default branch name.', {
-      cause: new Error(_('repository_not_found', { values: { repo } })),
-    });
-  }
+  return applyDefaultBranch(repository, {
+    found: !!info,
+    branch: info?.default_branch,
+    getBaseURLs,
+  });
 };

@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'vitest';
 
-import { validateListField } from './validate';
+import { getListItems, validateListField } from './validate';
 
 /**
  * @import { EntryValidityState } from '$lib/types/private';
@@ -27,7 +27,7 @@ describe('validateListField()', () => {
     const result = validateListField({
       keyPath: 'tags',
       value: undefined,
-      valueEntries: [],
+      valueMap: {},
       validity,
       validities: { _default: { tags: validity } },
       locale: '_default',
@@ -46,7 +46,7 @@ describe('validateListField()', () => {
     const result = validateListField({
       keyPath: 'tags',
       value: [],
-      valueEntries: [],
+      valueMap: {},
       validity,
       validities: { _default: {} },
       locale: '_default',
@@ -55,7 +55,7 @@ describe('validateListField()', () => {
       max: Infinity,
     });
 
-    expect(result).toEqual({ skip: false });
+    expect(result).toEqual({ skip: false, empty: true });
     expect(validity.valueMissing).toBe(true);
   });
 
@@ -65,7 +65,7 @@ describe('validateListField()', () => {
     validateListField({
       keyPath: 'tags',
       value: [],
-      valueEntries: [],
+      valueMap: {},
       validity,
       validities: { _default: {} },
       locale: '_default',
@@ -83,7 +83,7 @@ describe('validateListField()', () => {
     validateListField({
       keyPath: 'tags',
       value: ['a', 'b', 'c'],
-      valueEntries: [],
+      valueMap: {},
       validity,
       validities: { _default: {} },
       locale: '_default',
@@ -96,19 +96,14 @@ describe('validateListField()', () => {
     expect(validity.rangeUnderflow).toBe(false);
   });
 
-  test('counts items from flattened valueEntries when value is not an array', () => {
+  test('counts items from flattened key paths when value is not an array', () => {
     const validity = freshValidity();
-
-    const valueEntries = /** @type {[string, any][]} */ ([
-      ['tags.0', 'a'],
-      ['tags.1', 'b'],
-      ['title', 'Hello'],
-    ]);
+    const valueMap = { 'tags.0': 'a', 'tags.1': 'b', title: 'Hello' };
 
     validateListField({
       keyPath: 'tags',
       value: undefined,
-      valueEntries,
+      valueMap,
       validity,
       validities: { _default: {} },
       locale: '_default',
@@ -126,7 +121,7 @@ describe('validateListField()', () => {
     validateListField({
       keyPath: 'items',
       value: ['a'],
-      valueEntries: [],
+      valueMap: {},
       validity,
       validities: { _default: {} },
       locale: '_default',
@@ -144,7 +139,7 @@ describe('validateListField()', () => {
     validateListField({
       keyPath: 'items',
       value: ['a', 'b', 'c'],
-      valueEntries: [],
+      valueMap: {},
       validity,
       validities: { _default: {} },
       locale: '_default',
@@ -162,7 +157,7 @@ describe('validateListField()', () => {
     validateListField({
       keyPath: 'items',
       value: ['a', 'b'],
-      valueEntries: [],
+      valueMap: {},
       validity,
       validities: { _default: {} },
       locale: '_default',
@@ -180,7 +175,7 @@ describe('validateListField()', () => {
     validateListField({
       keyPath: 'items',
       value: ['a', 'b'],
-      valueEntries: [],
+      valueMap: {},
       validity,
       validities: { _default: {} },
       locale: '_default',
@@ -198,7 +193,7 @@ describe('validateListField()', () => {
     validateListField({
       keyPath: 'items',
       value: ['a'],
-      valueEntries: [],
+      valueMap: {},
       validity,
       validities: { _default: {} },
       locale: '_default',
@@ -214,18 +209,13 @@ describe('validateListField()', () => {
 
   test('deduplicates flattened keys when counting', () => {
     const validity = freshValidity();
-
-    // Each unique `tags.N` prefix should count as one item
-    const valueEntries = /** @type {[string, any][]} */ ([
-      ['tags.0', 'a'],
-      ['tags.0', 'a'], // duplicate — should be deduped by Set
-      ['tags.1', 'b'],
-    ]);
+    // Each unique `tags.N` prefix should count as one item, however many sub-keys it has
+    const valueMap = { 'tags.0.name': 'a', 'tags.0.url': 'a', 'tags.1.name': 'b' };
 
     validateListField({
       keyPath: 'tags',
       value: undefined,
-      valueEntries,
+      valueMap,
       validity,
       validities: { _default: {} },
       locale: '_default',
@@ -235,5 +225,76 @@ describe('validateListField()', () => {
     });
 
     expect(validity.rangeUnderflow).toBe(true);
+  });
+
+  test('counts only the items, not other keys under the list or keys of a sibling field', () => {
+    const validity = freshValidity();
+
+    const valueMap = {
+      'tags.0': 'a',
+      'tags.__sc_item_original_key_path': 'x',
+      'tagline.0': 'b',
+      'tags.1': 'c',
+    };
+
+    validateListField({
+      keyPath: 'tags',
+      value: undefined,
+      valueMap,
+      validity,
+      validities: { _default: {} },
+      locale: '_default',
+      required: false,
+      min: 0,
+      max: 1,
+    });
+
+    expect(validity.rangeOverflow).toBe(true);
+
+    const validity2 = freshValidity();
+
+    validateListField({
+      keyPath: 'tags',
+      value: undefined,
+      valueMap,
+      validity: validity2,
+      validities: { _default: {} },
+      locale: '_default',
+      required: false,
+      min: 0,
+      max: 2,
+    });
+
+    expect(validity2.rangeOverflow).toBe(false);
+  });
+});
+
+describe('getListItems()', () => {
+  test('returns the items stored under the list, in list order', () => {
+    expect(
+      getListItems({
+        keyPath: 'tags',
+        value: '',
+        valueMap: {
+          title: 'Title',
+          'tags.1': 'b',
+          'tags.0': 'a',
+          'tags.10': 'k',
+          'tags.2': 'c',
+          'tags_other.0': 'x',
+          'tags.3.name': 'y',
+        },
+      }),
+    ).toEqual(['a', 'b', 'c', 'k']);
+  });
+
+  test('returns the value itself when the list holds its items in an array', () => {
+    expect(
+      getListItems({ keyPath: 'tags', value: ['a', 'b'], valueMap: { tags: ['a', 'b'] } }),
+    ).toEqual(['a', 'b']);
+  });
+
+  test('returns an empty array when the list has no items', () => {
+    expect(getListItems({ keyPath: 'tags', value: [], valueMap: { tags: [] } })).toEqual([]);
   });
 });

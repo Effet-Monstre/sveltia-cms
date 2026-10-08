@@ -1,4 +1,4 @@
-version: "0.2"
+version: '0.2'
 language: en
 dictionaries:
   - css
@@ -10,23 +10,43 @@ enableFiletypes:
   - svelte
   - xml
 files:
-  - "**/.*"
-  - "**/*.{css,js,json,jsonc,html,md,scss,svelte,svg,yaml,yml,xml}"
+  - '**/.*'
+  - '**/*.{css,js,json,jsonc,html,md,scss,svelte,svg,yaml,yml,xml}'
 useGitignore: true
+# Stop the .gitignore search at the repo root. Git worktrees live under `.claude/worktrees/`, which
+# the parent repo’s `.gitignore` excludes, so without this every file in a worktree looks ignored
+gitignoreRoot: .
 ignorePaths:
+  # A worktree’s `.git` is a file rather than a directory, so the `**/.*` glob above picks it up
+  - .git
   - pnpm-lock.yaml
   - data/**/*.json
   - package/**
   - src/**/*.test.js
+  - e2e/**/*.e2e.js
+  - e2e/fixtures/configs/**
+  - src/lib/locales/*.yaml
+  - .claude/**
+  # Non-English locales; negative globs are not supported, so match everything but `en-*.yaml`
+  - src/lib/locales/{[^e]*,e[^n]*}.yaml
 words:
   - analyzing
+  - appinstalled
   - astrolicious
   - astros
+  - Backblaze
   - backlink
   - backlinks
+  - basehead
+  - beforeinstallprompt
+  - bindable
+  - BMFF
   - brotlied
+  - bunnycdn
   - BYOK
   - camelcase
+  - cfworker
+  - CLDR
   - Cloudinary
   - cmaps
   - Codeberg
@@ -39,43 +59,63 @@ words:
   - DeepSeek
   - dialogs
   - dompurify
+  - Effet
   - embeddable
   - esbuild
+  - esrap
   - exif
   - exifr
   - FedRAMP
+  - filechooser
   - Flavored
   - Forgejo
   - frontmatter
+  - ftyp
   - GHSA
   - Ghsas
   - gitdir
   - Gitea
   - goldmark
   - groupable
+  - heim
+  - heis
+  - heix
+  - hevm
+  - hevs
+  - hevx
+  - hotlinked
   - hotlinking
   - hugolify
   - husenunicorn
   - iarna
   - iccs
   - IIFE
+  - iids
   - indexeddb
   - infobar
   - infobars
+  - jfif
   - jsdoc
   - jSquash
   - keymap
   - keyvalue
   - Kohei
   - kyoshino
+  - libheif
+  - llms
   - Lume
   - lvml
+  - maxresults
   - mdwn
   - messageformat
   - mkdn
+  - Monstre
   - Mtei
   - Mullvad
   - notranslate
+  - onclickcapture
+  - ondragovercapture
+  - ondropcapture
   - onkeydowncapture
   - onpastecapture
   - onwheelcapture
@@ -86,6 +126,7 @@ words:
   - pexels
   - Photoshop
   - Picsum
+  - pingable
   - Pixabay
   - PKCE
   - plusplus
@@ -102,22 +143,28 @@ words:
   - Ragdoll
   - rearchitect
   - rebranded
+  - recentupdate
   - reimagined
   - rescanning
+  - restype
   - Roadmap
   - safesearch
+  - sandboxing
   - Scaleway
   - sebousan
   - Shiki
+  - shikijs
   - sindresorhus
   - singleline
   - slugification
   - slugified
   - slugifying
   - smol
+  - Sonda
   - strikethrough
   - stylelint
   - subfolders
+  - subschema
   - Supabase
   - sveltejs
   - Sveltia
@@ -128,9 +175,11 @@ words:
   - unflattened
   - unflattening
   - unlinkable
+  - unlocalised
   - unlocalized
   - unpatched
   - unproxify
+  - unreviewed
   - unrs
   - unsubscribers
   - Uploadcare
@@ -142,6 +191,8 @@ words:
   - webformat
   - whitespaces
   - worktree
+  - worktrees
+  - xhigh
   - xslx
   - yacosta
   - Yoshino
@@ -149,4 +200,6 @@ words:
   - Zola
 overrides:
   - language: en-gb
-    filename: "**/*.md"
+    filename: '**/*.md'
+  - language: en-gb
+    filename: src/lib/locales/en-{CA,GB}.yaml

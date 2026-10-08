@@ -8,44 +8,41 @@
     Toolbar,
     TruncatedText,
   } from '@sveltia/ui';
-  import { sanitize } from 'isomorphic-dompurify';
-  import { marked } from 'marked';
 
   import BackButton from '$lib/components/common/page-toolbar/back-button.svelte';
   import ReorderControls from '$lib/components/contents/list/reorder-controls.svelte';
   import DeleteEntriesDialog from '$lib/components/contents/shared/delete-entries-dialog.svelte';
   import CreateEntryButton from '$lib/components/contents/toolbar/create-entry-button.svelte';
   import { goBack } from '$lib/services/app/navigation';
+  import { getReadonlyMessage } from '$lib/services/config/readonly';
   import { getCollectionLabel, selectedCollection } from '$lib/services/contents/collection';
   import { selectedEntries } from '$lib/services/contents/collection/entries';
   import {
     collectionState,
     listedEntries,
+    listedUnpublishedEntries,
     reordering,
+    setReorderMode,
   } from '$lib/services/contents/collection/view';
   import { env } from '$lib/services/user/env.svelte';
+  import { sanitizeInlineMarkdown } from '$lib/services/utils/string';
+  import { openAuthoring } from '$lib/services/workflow/open-authoring';
 
   let showDeleteDialog = $state(false);
 
-  /**
-   * Parse the given string as Markdown and sanitize the result to only allow certain tags.
-   * @param {string} str Original string.
-   * @returns {string} Sanitized string.
-   */
-  const _sanitize = (str) =>
-    sanitize(/** @type {string} */ (marked.parseInline(str)), {
-      ALLOWED_TAGS: ['strong', 'em', 'del', 'code', 'a'],
-      ALLOWED_ATTR: ['href'],
-    });
-
-  const name = $derived($selectedCollection?.name ?? '');
-  const description = $derived($selectedCollection?.description);
+  /* v8 ignore start -- only read while a collection is selected, once the app locale is loaded */
+  const name = $derived(selectedCollection.current?.name ?? '');
   const collectionLabel = $derived(
     // `appLocale.current` is a key, because `getCollectionLabel` can return a localized label
-    appLocale.current && $selectedCollection ? getCollectionLabel($selectedCollection) : name,
+    appLocale.current && selectedCollection.current
+      ? getCollectionLabel(selectedCollection.current)
+      : name,
   );
+  /* v8 ignore stop */
+  const description = $derived(selectedCollection.current?.description);
   const {
     isEntryCollection,
+    readonly,
     canCreate,
     canDelete,
     canReorder,
@@ -53,11 +50,41 @@
     remaining,
     nearingQuota,
     creationDisabled,
-  } = $derived($collectionState);
+  } = $derived(collectionState.current);
+  const deleteDisabled = $derived(!selectedEntries.current.length || !canDelete);
+  // The empty entry list offers a Create button of its own, so the floating one is only needed once
+  // the list has entries, including unpublished ones, which can be the only ones in the collection
+  const hasEntries = $derived(
+    !!(listedEntries.current.length || listedUnpublishedEntries.current.length),
+  );
 </script>
 
-{#if $selectedCollection}
-  <Toolbar variant="primary" aria-label={_('collection')}>
+{#if selectedCollection.current}
+  {#if readonly}
+    <Infobar
+      dismissible={false}
+      --sui-infobar-border-width="0 0 1px"
+      --sui-infobar-message-justify-content="center"
+    >
+      {getReadonlyMessage('collection', { collection: selectedCollection.current })}
+    </Infobar>
+  {:else if isEntryCollection && (creationDisabled || nearingQuota)}
+    <!-- Only when not read-only, as the read-only message already says nothing can be created -->
+    <Infobar
+      dismissible={false}
+      --sui-infobar-border-width="0 0 1px"
+      --sui-infobar-message-justify-content="center"
+    >
+      {#if !canCreate}
+        {_('creating_entries_disabled_by_admin')}
+      {:else if creationDisabled}
+        {_('creating_entries_disabled_by_quota', { values: { quota } })}
+      {:else}
+        {_('creating_entries_nearing_quota', { values: { quota, remaining } })}
+      {/if}
+    </Infobar>
+  {/if}
+  <Toolbar variant="primary" ariaLabel={_('collection')}>
     {#if env.isSmallScreen}
       <BackButton
         aria-label={_('back_to_collection_list')}
@@ -66,25 +93,29 @@
         }}
       />
     {/if}
-    <h2 role="none">{collectionLabel}</h2>
+    <h2 role="none"><bdi>{collectionLabel}</bdi></h2>
     {#if env.isSmallScreen}
       <Spacer flex />
     {:else}
       <div role="none" class="description">
         <TruncatedText>
-          {@html _sanitize(description || '')}
+          <bdi>{@html sanitizeInlineMarkdown(description || '')}</bdi>
         </TruncatedText>
       </div>
     {/if}
-    {#if isEntryCollection && $reordering}
+    {#if isEntryCollection && reordering.current}
       <ReorderControls />
     {:else if isEntryCollection}
-      {#if !env.isSmallScreen}
+      <!-- Taking a published entry off the site is a maintainer’s call, and the entry list has no
+      other bulk action, so a contributor has nothing to select entries for -->
+      {#if !env.isSmallScreen && !openAuthoring.current}
         <Button
           variant="ghost"
           label={_('delete')}
-          aria-label={_('delete_selected_entries', { values: { count: $selectedEntries.length } })}
-          disabled={!$selectedEntries.length || !canDelete}
+          aria-label={_('delete_selected_entries', {
+            values: { count: selectedEntries.current.length },
+          })}
+          disabled={deleteDisabled}
           onclick={() => {
             showDeleteDialog = true;
           }}
@@ -95,14 +126,14 @@
           variant="ghost"
           label={_('reorder')}
           aria-label={_('reorder_entries')}
-          disabled={!$listedEntries.length}
+          disabled={!listedEntries.current.length}
           onclick={() => {
-            $reordering = true;
+            setReorderMode(true);
           }}
         />
       {/if}
       <FloatingActionButtonWrapper>
-        {#if !env.isSmallScreen || ($listedEntries.length && !creationDisabled)}
+        {#if !env.isSmallScreen || (hasEntries && !creationDisabled)}
           <CreateEntryButton
             collectionName={name}
             label={env.isSmallScreen ? undefined : _('create')}
@@ -112,21 +143,6 @@
       </FloatingActionButtonWrapper>
     {/if}
   </Toolbar>
-  {#if isEntryCollection && (creationDisabled || nearingQuota)}
-    <Infobar
-      dismissible={false}
-      --sui-infobar-border-width="1px 0"
-      --sui-infobar-message-justify-content="center"
-    >
-      {#if !canCreate}
-        {_('creating_entries_disabled_by_admin')}
-      {:else if creationDisabled}
-        {_('creating_entries_disabled_by_quota', { values: { quota } })}
-      {:else if nearingQuota}
-        {_('creating_entries_nearing_quota', { values: { quota, remaining } })}
-      {/if}
-    </Infobar>
-  {/if}
 {/if}
 
 <DeleteEntriesDialog bind:open={showDeleteDialog} />

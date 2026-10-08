@@ -1,7 +1,4 @@
-import {
-  getCurrentDateTime,
-  getCurrentValue,
-} from '$lib/services/contents/fields/date-time/helper';
+import { getCurrentStorableValue } from '$lib/services/contents/fields/date-time/value';
 
 /**
  * @import { GetDefaultValueMapFuncArgs } from '$lib/types/private';
@@ -27,7 +24,7 @@ const getDefaultValue = ({ fieldConfig, dynamicValue }) => {
   // @see https://github.com/decaporg/decap-cms/releases/tag/decap-cms%403.3.0
   // @see https://github.com/decaporg/decap-website/commit/01e54d8392e368e5d7b9fec307f50af584b12c91
   if (value === '{{now}}') {
-    return /** @type {string} */ (getCurrentValue(getCurrentDateTime(config), '', config));
+    return getCurrentStorableValue(config);
   }
 
   return value;

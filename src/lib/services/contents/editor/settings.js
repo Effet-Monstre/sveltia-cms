@@ -1,76 +1,87 @@
-import { IndexedDB } from '@sveltia/utils/storage';
 import equal from 'fast-deep-equal';
-import { get, writable } from 'svelte/store';
+import { untrack } from 'svelte';
 
 import { backend } from '$lib/services/backends';
+import { initViewSettingsStorage } from '$lib/services/common/view';
 import { selectAssetsView } from '$lib/services/contents/editor';
+import { createRawState, createRootEffect } from '$lib/services/utils/state.svelte';
 
 /**
- * @import { Writable } from 'svelte/store';
  * @import { BackendService, EntryEditorView } from '$lib/types/private';
  */
 
 /**
- * @type {Writable<EntryEditorView | undefined>}
+ * View settings for the entry editor.
+ * @type {{ current: EntryEditorView | undefined }}
  */
-export const entryEditorSettings = writable();
+export const entryEditorSettings = createRawState();
 
 /**
- * Store unsubscribe functions to prevent memory leaks.
- * @type {{ entryEditorSettingsUnsubscribe?: () => void, selectAssetsViewUnsubscribe?: () => void }}
+ * Turn the given entry editor setting on or off.
+ * @param {'showSecondPane' | 'showPreview' | 'syncScrolling'} key Setting name.
+ * @param {boolean} [defaultValue] Value the setting has when it hasn’t been stored yet.
  */
-const unsubscribers = {};
+export const toggleEntryEditorSetting = (key, defaultValue = false) => {
+  entryEditorSettings.current = {
+    ...entryEditorSettings.current,
+    [key]: !(entryEditorSettings.current?.[key] ?? defaultValue),
+  };
+};
 
 /**
- * Initialize {@link entryEditorSettings}, {@link selectAssetsView} and relevant subscribers.
+ * Functions to stop the effects created by {@link initSettings}, so that they don’t pile up when
+ * the settings are initialized again.
+ * @type {{ entryEditorSettings?: () => void, selectAssetsView?: () => void }}
+ */
+const effectStoppers = {};
+
+/**
+ * Initialize {@link entryEditorSettings}, {@link selectAssetsView} and relevant effects.
  * @param {BackendService} _backend Backend service.
  */
 export const initSettings = async ({ repository }) => {
-  const { databaseName } = repository ?? {};
-  const settingsDB = databaseName ? new IndexedDB(databaseName, 'ui-settings') : null;
-  const storageKey = 'entry-view';
+  // Stop the previous effects to prevent memory leaks
+  effectStoppers.entryEditorSettings?.();
+  effectStoppers.selectAssetsView?.();
 
-  const settings = {
-    showPreview: true,
-    syncScrolling: true,
-    selectAssetsView: { type: 'grid' },
-    ...(await settingsDB?.get(storageKey)),
-  };
+  effectStoppers.entryEditorSettings = await initViewSettingsStorage(
+    repository,
+    'entry-view',
+    entryEditorSettings,
+    {
+      defaults: {
+        showSecondPane: true,
+        showPreview: true,
+        syncScrolling: true,
+        selectAssetsView: { type: 'grid' },
+      },
+    },
+  );
 
-  entryEditorSettings.set(settings);
-  selectAssetsView.set(settings.selectAssetsView);
+  selectAssetsView.current = entryEditorSettings.current?.selectAssetsView;
 
-  // Unsubscribe from previous subscribers to prevent memory leaks
-  unsubscribers.entryEditorSettingsUnsubscribe?.();
-  unsubscribers.selectAssetsViewUnsubscribe?.();
+  effectStoppers.selectAssetsView = createRootEffect(() => {
+    const view = selectAssetsView.current;
 
-  unsubscribers.entryEditorSettingsUnsubscribe = entryEditorSettings.subscribe((_settings) => {
-    (async () => {
-      try {
-        if (!equal(_settings, await settingsDB?.get(storageKey))) {
-          await settingsDB?.set(storageKey, _settings);
-        }
-      } catch {
-        //
-      }
-    })();
-  });
-
-  unsubscribers.selectAssetsViewUnsubscribe = selectAssetsView.subscribe((view) => {
     if (!view || !Object.keys(view).length) {
       return;
     }
 
-    const savedView = get(entryEditorSettings)?.selectAssetsView ?? {};
+    untrack(() => {
+      const _settings = entryEditorSettings.current;
+      const savedView = _settings?.selectAssetsView ?? {};
 
-    if (!equal(view, savedView)) {
-      entryEditorSettings.update((_settings) => ({ ..._settings, selectAssetsView: view }));
-    }
+      if (!equal(view, savedView)) {
+        entryEditorSettings.current = { ..._settings, selectAssetsView: view };
+      }
+    });
   });
 };
 
-backend.subscribe((_backend) => {
-  if (_backend && !get(entryEditorSettings)) {
+createRootEffect(() => {
+  const { current: _backend } = backend;
+
+  if (_backend && !untrack(() => entryEditorSettings.current)) {
     initSettings(_backend);
   }
 });

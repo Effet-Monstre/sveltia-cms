@@ -1,14 +1,15 @@
 <script>
-  import { escapeRegExp } from '@sveltia/utils/string';
-
-  import { previews } from '$lib/components/contents/details/fields';
-  import { entryDraft } from '$lib/services/contents/draft';
-  import { isFieldMultiple } from '$lib/services/contents/entry/fields';
-  import { DEFAULT_I18N_CONFIG } from '$lib/services/contents/i18n/config';
+  import { CustomPreview, previews } from '$lib/components/contents/details/fields';
+  import { customFieldTypeRegistry } from '$lib/services/api/registries';
+  import { getEntryDraftContext } from '$lib/services/contents/draft/state.svelte';
+  import { getValueMapSnapshot } from '$lib/services/contents/draft/value-map.svelte';
+  import { highlightEditorField } from '$lib/services/contents/editor/fields';
+  import { getFieldLocaleAccess } from '$lib/services/contents/editor/locale';
+  import { getCurrentValue, isFieldMultiple } from '$lib/services/contents/entry/fields';
 
   /**
    * @import { InternalLocaleCode, TypedFieldKeyPath } from '$lib/types/private';
-   * @import { Field, FieldKeyPath, VisibleField } from '$lib/types/public';
+   * @import { CustomField, Field, FieldKeyPath, VisibleField } from '$lib/types/public';
    */
 
   /**
@@ -19,6 +20,8 @@
    * @property {Field} fieldConfig Field configuration.
    * @property {boolean} [showLabel] Whether to show the field label/header. Defaults to `true`.
    */
+
+  const entryDraft = getEntryDraftContext();
 
   /** @type {Props} */
   let {
@@ -31,42 +34,23 @@
     /* eslint-enable prefer-const */
   } = $props();
 
-  const { name: fieldName, widget: fieldType = 'string', i18n = false } = $derived(fieldConfig);
+  const { name: fieldName, widget: fieldType = 'string' } = $derived(fieldConfig);
   const { label = '', preview = true } = $derived(/** @type {VisibleField} */ (fieldConfig));
   const multiple = $derived(isFieldMultiple(fieldConfig));
   const isList = $derived(fieldType === 'list' || multiple);
-  const collection = $derived($entryDraft?.collection);
-  const collectionFile = $derived($entryDraft?.collectionFile);
-  const valueMap = $derived($state.snapshot($entryDraft?.currentValues[locale] ?? {}));
-  const { i18nEnabled, defaultLocale } = $derived(
-    (collectionFile ?? collection)?._i18n ?? DEFAULT_I18N_CONFIG,
+  const valueMap = $derived(getValueMapSnapshot(entryDraft.current, locale));
+  // A field duplicated along with an ancestor is shown in the other locales like in `FieldEditor`
+  const { isShown } = $derived(
+    getFieldLocaleAccess({ draft: entryDraft.current, fieldConfig, keyPath, locale, valueMap }),
   );
-  const canTranslate = $derived(i18nEnabled && (i18n === true || i18n === 'translate'));
-  const canDuplicate = $derived(i18nEnabled && i18n === 'duplicate');
-  const keyPathRegex = $derived(new RegExp(`^${escapeRegExp(keyPath)}\\.\\d+$`));
-  // Multiple values are flattened in the value map object
+  const customFieldType = $derived(customFieldTypeRegistry.get(fieldType));
   const currentValue = $derived(
-    isList
-      ? Object.entries(valueMap)
-          .filter(([_keyPath]) => keyPathRegex.test(_keyPath))
-          .map(([, val]) => val)
-          .filter((val) => val !== undefined)
-      : valueMap[keyPath],
+    getCurrentValue({ valueMap, keyPath, isList, isCustomFieldType: !!customFieldType }),
   );
-
-  /**
-   * Called whenever the preview field is clicked. Posts a message to the window to highlight the
-   * corresponding field in the editor.
-   */
-  const highlightEditorField = () => {
-    window.postMessage(
-      { type: 'highlight-editor-field', payload: { locale, keyPath } },
-      window.location.origin,
-    );
-  };
+  const previewProps = $derived({ locale, keyPath, typedKeyPath, fieldConfig, currentValue });
 </script>
 
-{#if fieldType !== 'hidden' && preview && (locale === defaultLocale || canTranslate || canDuplicate)}
+{#if fieldType !== 'hidden' && preview && isShown}
   <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
   <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
   <section
@@ -78,20 +62,25 @@
     onkeydown={(event) => {
       if (event.key === 'Enter') {
         event.stopPropagation();
-        highlightEditorField();
+        highlightEditorField({ locale, keyPath });
       }
     }}
     onclick={(event) => {
       event.stopPropagation();
-      highlightEditorField();
+      highlightEditorField({ locale, keyPath });
     }}
   >
     {#if showLabel}
       <h4>{label || fieldName}</h4>
     {/if}
-    {#if fieldType in previews}
+    {#if customFieldType?.preview}
+      <CustomPreview
+        {...{ ...previewProps, fieldConfig: /** @type {CustomField} */ (fieldConfig) }}
+        preview={customFieldType.preview}
+      />
+    {:else if fieldType in previews}
       {@const Preview = previews[fieldType]}
-      <Preview {keyPath} {typedKeyPath} {locale} {fieldConfig} {currentValue} />
+      <Preview {...previewProps} />
     {/if}
   </section>
 {/if}
@@ -99,8 +88,8 @@
 <style>
   :global([role='document']) section {
     overflow: hidden;
-    margin: 8px 0;
-    padding: 8px 0;
+    /* Don’t set margin here because it makes scroll sync bumpy */
+    padding: 12px 0;
 
     h4 {
       color: var(--sui-secondary-foreground-color);
@@ -125,6 +114,10 @@
 
       img {
         max-height: 800px !important;
+      }
+
+      .sui.alert {
+        margin-block: 16px;
       }
     }
   }

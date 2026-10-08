@@ -1,0 +1,125 @@
+<!--
+  @component
+  Render a custom field preview registered via `CMS.registerFieldType()`.
+  @see https://decapcms.org/docs/custom-widgets/
+  @see https://sveltiacms.app/en/docs/api/field-types
+-->
+<script>
+  import { createElement } from 'react';
+  import { onMount } from 'svelte';
+
+  import { assetURLUpdates } from '$lib/services/api/asset-proxy';
+  import { fieldStateContext } from '$lib/services/api/field-state';
+  import { immutableLoaded, loadImmutable } from '$lib/services/api/immutable';
+  import { getReactDom, loadReactDom, reactDomLoaded } from '$lib/services/api/react-dom';
+  import { getEntryDraftContext } from '$lib/services/contents/draft/state.svelte';
+  import { getValueMapSnapshot } from '$lib/services/contents/draft/value-map.svelte';
+  import { buildPreviewProps } from '$lib/services/contents/fields/custom/preview';
+
+  /**
+   * @import { Root } from 'react-dom/client';
+   * @import { FieldPreviewProps } from '$lib/types/private';
+   * @import { CustomField, CustomFieldPreview } from '$lib/types/public';
+   */
+
+  /**
+   * @typedef {object} Props
+   * @property {CustomField} fieldConfig Field configuration.
+   * @property {any} currentValue Current field value.
+   * @property {CustomFieldPreview} preview React component for preview.
+   */
+
+  const entryDraft = getEntryDraftContext();
+
+  /** @type {FieldPreviewProps & Props} */
+  let {
+    /* eslint-disable prefer-const */
+    locale,
+    keyPath,
+    fieldConfig,
+    currentValue,
+    preview,
+    /* eslint-enable prefer-const */
+  } = $props();
+
+  /** @type {HTMLDivElement | undefined} */
+  let container = $state();
+  /**
+   * React root, created on the first render. Not reactive, as the effect rendering the component
+   * assigns it, and would otherwise run again right away.
+   * @type {Root | undefined}
+   */
+  let reactRoot;
+
+  /**
+   * Render the React component with the current props.
+   */
+  const renderComponent = () => {
+    /* v8 ignore next 3 -- the effect below only calls this once everything is ready */
+    if (!container || !immutableLoaded.current || !reactDomLoaded.current) {
+      return;
+    }
+
+    const props = buildPreviewProps({
+      locale,
+      keyPath,
+      fieldConfig,
+      currentValue,
+      draft: entryDraft.current,
+      preview,
+    });
+
+    if (props) {
+      reactRoot ??= getReactDom().createRoot(container);
+
+      // Provide the state of this field to any built-in field preview reused within the custom
+      // preview, which is typically given an ad hoc field configuration that doesn’t describe it
+      reactRoot.render(
+        createElement(
+          fieldStateContext.Provider,
+          { value: { locale, keyPath } },
+          createElement(preview, props),
+        ),
+      );
+    }
+  };
+
+  onMount(() => {
+    // The preview is a React component receiving Immutable Maps. Both libraries are normally loaded
+    // by the time the editor opens, as `CMS.registerFieldType()` starts loading them, but wait for
+    // them in any case; the effect below renders the preview once they’re there
+    /* v8 ignore next 4 -- the libraries are bundled with the tests, so loading can’t fail */
+    Promise.all([loadImmutable(), loadReactDom()]).catch((/** @type {Error} */ error) => {
+      // eslint-disable-next-line no-console
+      console.error(error);
+    });
+
+    return () => {
+      reactRoot?.unmount();
+    };
+  });
+
+  $effect(() => {
+    // A custom preview receives `entry` and `fieldsMetaData` and may render values from any field,
+    // so this depends on the whole content of the locale. The expensive part is shared between
+    // previews via a cache, which is why the values are not read through it and have to be tracked
+    // here. The re-render stays cheap.
+    void getValueMapSnapshot(entryDraft.current, locale);
+    // Render again once an asset the preview got with `getAsset()` has a blob URL
+    void assetURLUpdates.current;
+
+    // Render the preview once the container and the library are ready, then keep it up to date
+    if (immutableLoaded.current && reactDomLoaded.current && container) {
+      renderComponent();
+    }
+  });
+</script>
+
+<div bind:this={container}></div>
+
+<style>
+  div {
+    /* Allow the React component to use the full width */
+    width: 100%;
+  }
+</style>

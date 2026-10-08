@@ -1,18 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { cmsConfig } from '$lib/services/config';
+
 import { getMediaLibraryOptions } from '.';
 
 // Mock all dependencies
-vi.mock('svelte/store', () => ({
-  get: vi.fn(),
-  writable: vi.fn(() => ({ subscribe: vi.fn(), set: vi.fn(), update: vi.fn() })),
-  derived: vi.fn(() => ({ subscribe: vi.fn() })),
-}));
 vi.mock('$lib/services/config', () => ({
-  cmsConfig: {
-    subscribe: vi.fn(),
-    _mockValue: 'cmsConfig',
-  },
+  cmsConfig: { current: undefined },
 }));
 
 describe('integrations/media-libraries', () => {
@@ -47,17 +41,7 @@ describe('integrations/media-libraries', () => {
       },
     };
 
-    // Setup get mock
-    const { get } = await import('svelte/store');
-    const getMock = vi.mocked(get);
-
-    getMock.mockImplementation((store) => {
-      if (store && typeof store === 'object' && '_mockValue' in store) {
-        if (store._mockValue === 'cmsConfig') return mockCmsConfig;
-      }
-
-      return undefined;
-    });
+    cmsConfig.current = mockCmsConfig;
   });
 
   describe('getMediaLibraryOptions', () => {
@@ -72,7 +56,7 @@ describe('integrations/media-libraries', () => {
 
       const result = getMediaLibraryOptions({ libraryName: 'default', fieldConfig });
 
-      expect(result).toEqual({ config: { max_file_size: 500000 } });
+      expect(result).toEqual({ config: { max_file_size: 500000, slugify_filename: false } });
     });
 
     it('should return field-level media_library config when media_libraries not available', () => {
@@ -87,18 +71,15 @@ describe('integrations/media-libraries', () => {
 
       expect(result).toEqual({
         name: 'default',
-        config: { slugify_filename: true },
+        config: { max_file_size: 2048000, slugify_filename: true },
       });
     });
 
     it('should match field media_library when names match explicitly and site config also matches', async () => {
-      const { get } = await import('svelte/store');
-      const getMock = vi.mocked(get);
-
       // Site config must also have the matching library name for Priority 2 to apply
-      getMock.mockImplementation(() => ({
+      cmsConfig.current = /** @type {any} */ ({
         media_library: { name: 'custom' },
-      }));
+      });
 
       const fieldConfig = /** @type {any} */ ({
         media_library: {
@@ -119,13 +100,10 @@ describe('integrations/media-libraries', () => {
     });
 
     it('should not match field media_library when field name matches but site config does not match', async () => {
-      const { get } = await import('svelte/store');
-      const getMock = vi.mocked(get);
-
       // Site config has different library name
-      getMock.mockImplementation(() => ({
+      cmsConfig.current = /** @type {any} */ ({
         media_library: { name: 'default' },
-      }));
+      });
 
       const fieldConfig = /** @type {any} */ ({
         media_library: {
@@ -144,11 +122,8 @@ describe('integrations/media-libraries', () => {
     });
 
     it('should match field media_library when site config is undefined (defaults to "default") and requesting default', async () => {
-      const { get } = await import('svelte/store');
-      const getMock = vi.mocked(get);
-
       // Site config has no media_library name (will default to 'default')
-      getMock.mockImplementation(() => ({}));
+      cmsConfig.current = /** @type {any} */ ({});
 
       const fieldConfig = /** @type {any} */ ({
         media_library: {
@@ -166,12 +141,9 @@ describe('integrations/media-libraries', () => {
     });
 
     it('should match field media_library when field name is undefined and site/library names match', async () => {
-      const { get } = await import('svelte/store');
-      const getMock = vi.mocked(get);
-
-      getMock.mockImplementation(() => ({
+      cmsConfig.current = /** @type {any} */ ({
         media_library: { name: 'default' },
-      }));
+      });
 
       const fieldConfig = /** @type {any} */ ({
         media_library: {
@@ -182,15 +154,13 @@ describe('integrations/media-libraries', () => {
       const result = getMediaLibraryOptions({ libraryName: 'default', fieldConfig });
 
       expect(result).toEqual({
+        name: 'default',
         config: { slugify_filename: true },
       });
     });
 
     it('should match field media_library when site name defaults to "default" and requesting default', async () => {
-      const { get } = await import('svelte/store');
-      const getMock = vi.mocked(get);
-
-      getMock.mockImplementation(() => ({}));
+      cmsConfig.current = /** @type {any} */ ({});
 
       const fieldConfig = /** @type {any} */ ({
         media_library: {
@@ -206,10 +176,7 @@ describe('integrations/media-libraries', () => {
     });
 
     it('should not match field media_library when site defaults to "default" but field name is different', async () => {
-      const { get } = await import('svelte/store');
-      const getMock = vi.mocked(get);
-
-      getMock.mockImplementation(() => ({})); // Empty site config
+      cmsConfig.current = /** @type {any} */ ({}); // Empty site config
 
       const fieldConfig = /** @type {any} */ ({
         media_library: {
@@ -224,12 +191,9 @@ describe('integrations/media-libraries', () => {
     });
 
     it('should match field media_library when field name is undefined and site has explicit non-default name', async () => {
-      const { get } = await import('svelte/store');
-      const getMock = vi.mocked(get);
-
-      getMock.mockImplementation(() => ({
+      cmsConfig.current = /** @type {any} */ ({
         media_library: { name: 'custom' },
-      }));
+      });
 
       const fieldConfig = /** @type {any} */ ({
         media_library: {
@@ -243,20 +207,18 @@ describe('integrations/media-libraries', () => {
       });
 
       expect(result).toEqual({
+        name: 'custom',
         config: { max_file_size: 400000 },
       });
     });
 
     it('should fallback to site-level media_libraries config', async () => {
-      const { get } = await import('svelte/store');
-      const getMock = vi.mocked(get);
-
-      getMock.mockImplementation(() => ({
+      cmsConfig.current = /** @type {any} */ ({
         media_libraries: {
           default: { config: { max_file_size: 1024000 } },
           custom: { config: { slugify_filename: true } },
         },
-      }));
+      });
 
       const result = getMediaLibraryOptions({ libraryName: /** @type {any} */ ('custom') });
 
@@ -264,15 +226,12 @@ describe('integrations/media-libraries', () => {
     });
 
     it('should fallback to site-level media_library config when names match', async () => {
-      const { get } = await import('svelte/store');
-      const getMock = vi.mocked(get);
-
-      getMock.mockImplementation(() => ({
+      cmsConfig.current = /** @type {any} */ ({
         media_library: {
           name: 'default',
           config: { transformations: { jpeg: { format: 'webp' } } },
         },
-      }));
+      });
 
       const result = getMediaLibraryOptions({ libraryName: 'default' });
 
@@ -282,16 +241,32 @@ describe('integrations/media-libraries', () => {
       });
     });
 
-    it('should not match site media_library when names do not match', async () => {
-      const { get } = await import('svelte/store');
-      const getMock = vi.mocked(get);
+    it('should use a site-level media_library config without a name for the default library', () => {
+      cmsConfig.current = /** @type {any} */ ({
+        media_library: { config: { max_file_size: 1000, slugify_filename: true } },
+      });
 
-      getMock.mockImplementation(() => ({
+      expect(getMediaLibraryOptions()).toEqual({
+        config: { max_file_size: 1000, slugify_filename: true },
+      });
+      expect(getMediaLibraryOptions({ libraryName: 'stock_assets' })).toEqual({});
+
+      const fieldConfig = /** @type {any} */ ({
+        media_libraries: { default: { config: { max_file_size: 500 } } },
+      });
+
+      expect(getMediaLibraryOptions({ fieldConfig })).toEqual({
+        config: { max_file_size: 500, slugify_filename: true },
+      });
+    });
+
+    it('should not match site media_library when names do not match', async () => {
+      cmsConfig.current = /** @type {any} */ ({
         media_library: {
           name: 'custom',
           config: { slugify_filename: true },
         },
-      }));
+      });
 
       const result = getMediaLibraryOptions({ libraryName: 'default' });
 
@@ -299,10 +274,7 @@ describe('integrations/media-libraries', () => {
     });
 
     it('should return empty object when no config is found', async () => {
-      const { get } = await import('svelte/store');
-      const getMock = vi.mocked(get);
-
-      getMock.mockImplementation(() => ({}));
+      cmsConfig.current = /** @type {any} */ ({});
 
       const result = getMediaLibraryOptions({ libraryName: /** @type {any} */ ('nonexistent') });
 
@@ -318,18 +290,15 @@ describe('integrations/media-libraries', () => {
 
       const result = getMediaLibraryOptions({ fieldConfig });
 
-      expect(result).toEqual({ config: { max_file_size: 500000 } });
+      expect(result).toEqual({ config: { max_file_size: 500000, slugify_filename: false } });
     });
 
     it('should work with no parameters provided', async () => {
-      const { get } = await import('svelte/store');
-      const getMock = vi.mocked(get);
-
-      getMock.mockImplementation(() => ({
+      cmsConfig.current = /** @type {any} */ ({
         media_libraries: {
           default: { config: { slugify_filename: false } },
         },
-      }));
+      });
 
       const result = getMediaLibraryOptions();
 
@@ -363,11 +332,8 @@ describe('integrations/media-libraries', () => {
     });
 
     it('should not match field media_library when site defaults to "default" but requesting different library', async () => {
-      const { get } = await import('svelte/store');
-      const getMock = vi.mocked(get);
-
       // Site config has no media_library name (will default to 'default')
-      getMock.mockImplementation(() => ({}));
+      cmsConfig.current = /** @type {any} */ ({});
 
       // Field config has no media_library name
       const fieldConfig = /** @type {any} */ ({
@@ -386,13 +352,10 @@ describe('integrations/media-libraries', () => {
     });
 
     it('should match field media_library when field name is undefined and site name matches requested library', async () => {
-      const { get } = await import('svelte/store');
-      const getMock = vi.mocked(get);
-
       // Site config has a library name that matches our request
-      getMock.mockImplementation(() => ({
+      cmsConfig.current = /** @type {any} */ ({
         media_library: { name: 'custom' },
-      }));
+      });
 
       const fieldConfig = /** @type {any} */ ({
         media_library: {
@@ -407,18 +370,16 @@ describe('integrations/media-libraries', () => {
       });
 
       expect(result).toEqual({
+        name: 'custom',
         config: { max_file_size: 400000 },
       });
     });
 
     it('should not match when site name is undefined (defaults to "default") but requesting different library', async () => {
-      const { get } = await import('svelte/store');
-      const getMock = vi.mocked(get);
-
       // Site config has no media_library name (will default to 'default')
-      getMock.mockImplementation(() => ({
+      cmsConfig.current = /** @type {any} */ ({
         media_library: { some_other_config: true }, // No 'name' property
-      }));
+      });
 
       const fieldConfig = /** @type {any} */ ({
         media_library: {
@@ -437,13 +398,10 @@ describe('integrations/media-libraries', () => {
     });
 
     it('should match field media_library when site explicitly sets name to "default" and field name is undefined', async () => {
-      const { get } = await import('svelte/store');
-      const getMock = vi.mocked(get);
-
       // Site config explicitly sets name to 'default'
-      getMock.mockImplementation(() => ({
+      cmsConfig.current = /** @type {any} */ ({
         media_library: { name: 'default' },
-      }));
+      });
 
       const fieldConfig = /** @type {any} */ ({
         media_library: {
@@ -456,11 +414,12 @@ describe('integrations/media-libraries', () => {
       const result = getMediaLibraryOptions({ libraryName: 'default', fieldConfig });
 
       expect(result).toEqual({
+        name: 'default',
         config: { max_file_size: 600000 },
       });
     });
 
-    it('should return empty object when field-level media_libraries entry is null', () => {
+    it('should fall back to the site config when the field-level media_libraries entry is null', () => {
       const fieldConfig = /** @type {any} */ ({
         media_libraries: {
           default: null,
@@ -469,18 +428,15 @@ describe('integrations/media-libraries', () => {
 
       const result = getMediaLibraryOptions({ libraryName: 'default', fieldConfig });
 
-      expect(result).toEqual({});
+      expect(result).toEqual({ config: { max_file_size: 2048000, slugify_filename: false } });
     });
 
     it('should return empty object when site-level media_libraries entry is null', async () => {
-      const { get } = await import('svelte/store');
-      const getMock = vi.mocked(get);
-
-      getMock.mockImplementation(() => ({
+      cmsConfig.current = /** @type {any} */ ({
         media_libraries: {
           stock_assets: null,
         },
-      }));
+      });
 
       const result = getMediaLibraryOptions({ libraryName: /** @type {any} */ ('stock_assets') });
 
@@ -500,14 +456,11 @@ describe('integrations/media-libraries', () => {
     });
 
     it('should return false when site-level media_libraries explicitly disables a library', async () => {
-      const { get } = await import('svelte/store');
-      const getMock = vi.mocked(get);
-
-      getMock.mockImplementation(() => ({
+      cmsConfig.current = /** @type {any} */ ({
         media_libraries: {
           stock_assets: false,
         },
-      }));
+      });
 
       const result = getMediaLibraryOptions({ libraryName: /** @type {any} */ ('stock_assets') });
 
@@ -515,14 +468,11 @@ describe('integrations/media-libraries', () => {
     });
 
     it('should respect field-level false even when site-level has config', async () => {
-      const { get } = await import('svelte/store');
-      const getMock = vi.mocked(get);
-
-      getMock.mockImplementation(() => ({
+      cmsConfig.current = /** @type {any} */ ({
         media_libraries: {
           default: { config: { max_file_size: 2048000 } },
         },
-      }));
+      });
 
       const fieldConfig = /** @type {any} */ ({
         media_libraries: {
@@ -536,14 +486,11 @@ describe('integrations/media-libraries', () => {
     });
 
     it('should fall through to site config when field media_libraries does not include the library', async () => {
-      const { get } = await import('svelte/store');
-      const getMock = vi.mocked(get);
-
-      getMock.mockImplementation(() => ({
+      cmsConfig.current = /** @type {any} */ ({
         media_libraries: {
           cloudflare_r2: { access_key_id: 'key', bucket: 'bucket', account_id: 'id' },
         },
-      }));
+      });
 
       const fieldConfig = /** @type {any} */ ({
         media_libraries: {
@@ -559,16 +506,69 @@ describe('integrations/media-libraries', () => {
       expect(result).toEqual({ access_key_id: 'key', bucket: 'bucket', account_id: 'id' });
     });
 
+    it('should merge the field-level default library options over the site-level ones', () => {
+      cmsConfig.current = /** @type {any} */ ({
+        media_libraries: {
+          default: {
+            config: {
+              max_file_size: 2048000,
+              slugify_filename: true,
+              transformations: { raster_image: { format: 'webp' } },
+            },
+          },
+        },
+      });
+
+      const fieldConfig = /** @type {any} */ ({
+        media_libraries: {
+          default: {
+            config: {
+              max_file_size: 1000,
+              transformations: { svg: { optimize: true } },
+            },
+          },
+        },
+      });
+
+      expect(getMediaLibraryOptions({ fieldConfig })).toEqual({
+        config: {
+          max_file_size: 1000,
+          slugify_filename: true,
+          transformations: { svg: { optimize: true } },
+        },
+      });
+    });
+
+    it('should merge the field-level stock_assets options over the site-level ones', () => {
+      const fieldConfig = /** @type {any} */ ({ media_libraries: { stock_assets: {} } });
+
+      expect(getMediaLibraryOptions({ libraryName: 'stock_assets', fieldConfig })).toEqual({
+        providers: ['unsplash', 'pixabay'],
+      });
+    });
+
+    it('should use the field-level options when the site-level library is disabled', () => {
+      cmsConfig.current = /** @type {any} */ ({
+        media_libraries: { stock_assets: false },
+      });
+
+      const fieldConfig = /** @type {any} */ ({
+        media_libraries: { stock_assets: { providers: ['pexels'] } },
+      });
+
+      expect(getMediaLibraryOptions({ libraryName: 'stock_assets', fieldConfig })).toEqual({
+        providers: ['pexels'],
+      });
+    });
+
     describe('all (shared) option merging', () => {
       it('should merge site-level all options into the default library config', async () => {
-        const { get } = await import('svelte/store');
-
-        vi.mocked(get).mockImplementation(() => ({
+        cmsConfig.current = /** @type {any} */ ({
           media_libraries: {
             all: { slugify_filename: true, max_file_size: 1024000 },
             default: { config: { multiple: false } },
           },
-        }));
+        });
 
         const result = getMediaLibraryOptions({ libraryName: 'default' });
 
@@ -578,14 +578,12 @@ describe('integrations/media-libraries', () => {
       });
 
       it('should let library-specific config override all options', async () => {
-        const { get } = await import('svelte/store');
-
-        vi.mocked(get).mockImplementation(() => ({
+        cmsConfig.current = /** @type {any} */ ({
           media_libraries: {
             all: { slugify_filename: true, max_file_size: 500000 },
             default: { config: { slugify_filename: false } },
           },
-        }));
+        });
 
         const result = getMediaLibraryOptions({ libraryName: 'default' });
 
@@ -595,13 +593,11 @@ describe('integrations/media-libraries', () => {
       });
 
       it('should merge field-level all options on top of site-level all options', async () => {
-        const { get } = await import('svelte/store');
-
-        vi.mocked(get).mockImplementation(() => ({
+        cmsConfig.current = /** @type {any} */ ({
           media_libraries: {
             all: { slugify_filename: true, max_file_size: 500000 },
           },
-        }));
+        });
 
         const fieldConfig = /** @type {any} */ ({
           media_libraries: {
@@ -616,14 +612,42 @@ describe('integrations/media-libraries', () => {
         });
       });
 
-      it('should apply all options when no library-specific config exists', async () => {
-        const { get } = await import('svelte/store');
+      it('should let field-level all options override the site-level library config', () => {
+        cmsConfig.current = /** @type {any} */ ({
+          media_libraries: {
+            all: { slugify_filename: true, max_file_size: 500000, multiple: true },
+            default: { config: { slugify_filename: false, max_file_size: 400000 } },
+          },
+        });
 
-        vi.mocked(get).mockImplementation(() => ({
+        const fieldConfig = /** @type {any} */ ({
+          media_libraries: {
+            all: { max_file_size: 300000, slugify_filename: true },
+            default: { config: { max_file_size: 200000 } },
+          },
+        });
+
+        expect(getMediaLibraryOptions({ libraryName: 'default', fieldConfig })).toEqual({
+          config: { slugify_filename: true, max_file_size: 200000, multiple: true },
+        });
+      });
+
+      it('should not enable a disabled default library with field-level all options', () => {
+        cmsConfig.current = /** @type {any} */ ({ media_libraries: { default: false } });
+
+        const fieldConfig = /** @type {any} */ ({
+          media_libraries: { all: { max_file_size: 300000 } },
+        });
+
+        expect(getMediaLibraryOptions({ libraryName: 'default', fieldConfig })).toBe(false);
+      });
+
+      it('should apply all options when no library-specific config exists', async () => {
+        cmsConfig.current = /** @type {any} */ ({
           media_libraries: {
             all: { slugify_filename: true },
           },
-        }));
+        });
 
         const result = getMediaLibraryOptions({ libraryName: 'default' });
 
@@ -631,14 +655,12 @@ describe('integrations/media-libraries', () => {
       });
 
       it('should not apply all options to non-default libraries', async () => {
-        const { get } = await import('svelte/store');
-
-        vi.mocked(get).mockImplementation(() => ({
+        cmsConfig.current = /** @type {any} */ ({
           media_libraries: {
             all: { slugify_filename: true },
             stock_assets: { providers: ['unsplash'] },
           },
-        }));
+        });
 
         const result = getMediaLibraryOptions({ libraryName: 'stock_assets' });
 
@@ -646,6 +668,8 @@ describe('integrations/media-libraries', () => {
       });
 
       it('should apply field-level all options even without site-level all options', () => {
+        cmsConfig.current = /** @type {any} */ ({});
+
         const fieldConfig = /** @type {any} */ ({
           media_libraries: {
             all: { slugify_filename: true },

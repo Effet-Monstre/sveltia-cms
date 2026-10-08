@@ -3,10 +3,11 @@
   import { Button, Icon, Menu, MenuButton } from '@sveltia/ui';
 
   import CopyMenuItems from '$lib/components/contents/details/editor/copy-menu-items.svelte';
-  import { entryDraft } from '$lib/services/contents/draft';
+  import { getEntryDraftContext } from '$lib/services/contents/draft/state.svelte';
   import { copyFromLocale } from '$lib/services/contents/draft/update/copy';
   import { getLocaleLabel } from '$lib/services/contents/i18n';
   import { translator } from '$lib/services/integrations/translators';
+  import { isPendingDeletion } from '$lib/services/workflow';
 
   /**
    * @import { InternalLocaleCode, LanguagePair } from '$lib/types/private';
@@ -21,6 +22,8 @@
    * @property {FieldKeyPath} [keyPath] Field key path.
    */
 
+  const entryDraft = getEntryDraftContext();
+
   /** @type {Props} */
   let {
     /* eslint-disable prefer-const */
@@ -31,7 +34,11 @@
     /* eslint-enable prefer-const */
   } = $props();
 
-  const sourceDisabled = $derived(!$entryDraft?.currentLocales[locale]);
+  const sourceDisabled = $derived(
+    !entryDraft.current?.currentLocales[locale] ||
+      // An entry awaiting deletion is read-only, so there’s nothing to translate into
+      isPendingDeletion(entryDraft.current?.originalEntry),
+  );
 
   /**
    * Check if the translate button should be disabled.
@@ -40,8 +47,22 @@
    */
   const isButtonDisabled = async ({ sourceLanguage, targetLanguage }) =>
     sourceDisabled ||
-    !$entryDraft?.currentLocales[sourceLanguage] ||
-    !(await $translator?.availability({ sourceLanguage, targetLanguage }));
+    !entryDraft.current?.currentLocales[sourceLanguage] ||
+    !(await translator.current?.availability({ sourceLanguage, targetLanguage }));
+
+  /**
+   * Translate the field from another locale.
+   * @param {LanguagePair} languagePair Language pair.
+   */
+  const translate = (languagePair) => {
+    /* v8 ignore next 6 -- the button is only offered while the draft is there */
+    if (entryDraft.current) {
+      copyFromLocale({
+        draft: entryDraft.current,
+        options: { ...languagePair, keyPath, translate: true },
+      });
+    }
+  };
 </script>
 
 {#if otherLocales.length === 1}
@@ -61,7 +82,7 @@
       title={label}
       {disabled}
       onclick={() => {
-        copyFromLocale({ ...languagePair, keyPath, translate: true });
+        translate(languagePair);
       }}
     >
       {#snippet startIcon()}
@@ -82,7 +103,7 @@
       <Icon name="translate" />
     {/snippet}
     {#snippet popup()}
-      <Menu aria-label={_('translation_options')}>
+      <Menu ariaLabel={_('translation_options')}>
         <CopyMenuItems {locale} {otherLocales} {keyPath} translate={true} />
       </Menu>
     {/snippet}

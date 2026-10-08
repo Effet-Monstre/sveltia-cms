@@ -1,25 +1,53 @@
 <script>
   import { _, locale as appLocale, locales as appLocales } from '@sveltia/i18n';
-  import { Option, Select } from '@sveltia/ui';
+  import { Alert, Divider, Option, Select, Toast } from '@sveltia/ui';
 
+  import { appLocaleLoading } from '$lib/services/app/i18n';
+  import { setState } from '$lib/services/app/onboarding';
   import { getLocaleLabel } from '$lib/services/contents/i18n';
-  import { prefs } from '$lib/services/user/prefs.svelte';
+  import { AUTO_PREF_VALUE, prefs } from '$lib/services/user/prefs.svelte';
 
   /**
-   * @import { SettingsPanelOnChangeArgs } from '$lib/types/private';
+   * Locale list sorted by label.
    */
+  const locales = $derived(
+    appLocales
+      .map((code) => {
+        /* v8 ignore start -- every supported locale has a label */
+        const localizedLabel = getLocaleLabel(code, { displayLocale: appLocale.current }) ?? code;
+        const nativeLabel = getLocaleLabel(code, { displayLocale: code }) ?? code;
+        /* v8 ignore stop */
+
+        const label =
+          localizedLabel === nativeLabel ? localizedLabel : `${localizedLabel} — ${nativeLabel}`;
+
+        return {
+          value: code,
+          searchValue: `${label} (${code})`,
+          label,
+        };
+      })
+      .sort((a, b) => a.label.localeCompare(b.label)),
+  );
 
   /**
-   * @typedef {object} Props
-   * @property {(detail: SettingsPanelOnChangeArgs) => void} [onChange] `change` event handler.
+   * Selected language preference, which is {@link AUTO_PREF_VALUE} rather than a locale code while
+   * the UI follows the browser’s language settings.
    */
+  const selectedLocale = $derived(prefs.locale ?? AUTO_PREF_VALUE);
 
-  /** @type {Props} */
-  let {
-    /* eslint-disable prefer-const, no-unused-vars */
-    onChange = undefined,
-    /* eslint-enable prefer-const, no-unused-vars */
-  } = $props();
+  /**
+   * Locale being switched to. Unlike `appLocaleLoading.current`, this keeps the last value, so the
+   * message doesn’t disappear while the toast is fading out.
+   */
+  let switchingLocale = $state('');
+  const switchingLocaleLabel = $derived(getLocaleLabel(switchingLocale) ?? switchingLocale);
+
+  $effect(() => {
+    if (appLocaleLoading.current) {
+      switchingLocale = appLocaleLoading.current;
+    }
+  });
 </script>
 
 <section>
@@ -27,21 +55,34 @@
   <div role="none">
     {#key appLocale.current}
       <Select
-        aria-label={_('prefs.language.ui_language.select_language')}
-        value={appLocale.current}
+        ariaLabel={_('prefs.language.ui_language.select_language')}
+        value={selectedLocale}
         onChange={(event) => {
           prefs.locale = event.detail.value;
+          // Suppress the new language infobar, which is pointless once the user has explicitly
+          // picked a language here
+          setState('newLanguageCta', true);
         }}
       >
-        {#each appLocales as locale (locale)}
-          <Option
-            label={getLocaleLabel(locale, { displayLocale: locale }) ?? locale}
-            value={locale}
-            selected={locale === appLocale.current}
-            dir="auto"
-          />
+        <Option
+          value={AUTO_PREF_VALUE}
+          label={_('automatic')}
+          selected={selectedLocale === AUTO_PREF_VALUE}
+        />
+        <Divider />
+        {#each locales as { value, searchValue, label } (value)}
+          <Option {value} {searchValue} {label} selected={value === selectedLocale} />
         {/each}
       </Select>
     {/key}
   </div>
 </section>
+
+<!-- Hidden automatically once the strings are loaded, hence `duration={0}` -->
+<Toast show={!!appLocaleLoading.current} duration={0}>
+  <Alert status="info">
+    {#if switchingLocaleLabel}
+      {_('switching_language', { values: { locale: switchingLocaleLabel } })}
+    {/if}
+  </Alert>
+</Toast>

@@ -1,32 +1,74 @@
+<!--
+  @component
+  Secondary toolbar of the Asset Library, shared by repository folders and external locations: item
+  selector, optional search box, sort/filter/group menus, view switcher and Info pane toggle. The
+  view settings live in the shared `currentView`.
+-->
 <script>
   import { _ } from '@sveltia/i18n';
-  import { Button, Divider, Icon, Spacer, Toolbar } from '@sveltia/ui';
+  import { Button, Divider, Icon, SearchBar, Spacer, Toolbar } from '@sveltia/ui';
 
   import FilterMenu from '$lib/components/common/page-toolbar/filter-menu.svelte';
+  import GroupMenu from '$lib/components/common/page-toolbar/group-menu.svelte';
   import ItemSelector from '$lib/components/common/page-toolbar/item-selector.svelte';
   import SortMenu from '$lib/components/common/page-toolbar/sort-menu.svelte';
   import ViewSwitcher from '$lib/components/common/page-toolbar/view-switcher.svelte';
-  import { selectedAssets } from '$lib/services/assets';
   import { ASSET_KINDS } from '$lib/services/assets/kinds';
-  import { assetGroups, currentView, listedAssets } from '$lib/services/assets/view';
-  import { sortKeys } from '$lib/services/assets/view/sort-keys';
+  import { currentView } from '$lib/services/assets/view/settings';
   import { env } from '$lib/services/user/env.svelte';
 
-  const hasListedAssets = $derived(!!$listedAssets.length);
-  const hasMultipleAssets = $derived($listedAssets.length > 1);
+  /**
+   * @import { Asset, ExternalAsset, SortKey } from '$lib/types/private';
+   * @import { ViewGroup } from '$lib/types/public';
+   */
+
+  /**
+   * @typedef {object} Props
+   * @property {(Asset | ExternalAsset)[]} allItems Listed items the item selector can select.
+   * @property {{ current: (Asset | ExternalAsset)[] }} selectedItems Selected items.
+   * @property {number} totalCount Number of assets in the location before any filter or search
+   * narrows them down, so that the menus stay enabled and the filter can be reset.
+   * @property {SortKey[]} sortKeys Sort keys shown in the Sort menu.
+   * @property {ViewGroup[]} [groups] Grouping options shown in the Group menu. The menu is omitted
+   * when there are none, as repository assets have nothing to group by.
+   * @property {string[]} [groupNames] Names of the groups currently in the list, which the Group
+   * menu’s Expand All and Collapse All items act on.
+   * @property {{ current: string }} [searchTerms] Search terms to bind a search box to. The box is
+   * omitted when this is not given, as repository assets are searched with the global search.
+   */
+
+  /** @type {Props} */
+  let {
+    /* eslint-disable prefer-const */
+    allItems,
+    selectedItems,
+    totalCount,
+    sortKeys,
+    groups = [],
+    groupNames = [],
+    searchTerms = undefined,
+    /* eslint-enable prefer-const */
+  } = $props();
+
+  const hasListedAssets = $derived(!!totalCount);
+  const hasMultipleAssets = $derived(totalCount > 1);
 </script>
 
-<Toolbar variant="secondary" aria-label={_('asset_list')}>
+<Toolbar variant="secondary" ariaLabel={_('asset_list')}>
   {#if !(env.isSmallScreen || env.isMediumScreen)}
-    <ItemSelector allItems={Object.values($assetGroups).flat(1)} selectedItems={selectedAssets} />
+    <ItemSelector {allItems} {selectedItems} />
   {/if}
   <Spacer flex />
-  <SortMenu
-    disabled={!hasMultipleAssets}
-    {currentView}
-    sortKeys={$sortKeys}
-    aria-controls="asset-list"
-  />
+  {#if searchTerms}
+    <SearchBar
+      dir="auto"
+      flex={env.isSmallScreen}
+      bind:value={searchTerms.current}
+      ariaLabel={_('assets_dialog.search_for_file')}
+      aria-controls="asset-list"
+    />
+  {/if}
+  <SortMenu disabled={!hasMultipleAssets} {currentView} {sortKeys} aria-controls="asset-list" />
   <FilterMenu
     label={_('type')}
     disabled={!hasMultipleAssets}
@@ -35,6 +77,15 @@
     filters={ASSET_KINDS.map((type) => ({ label: _(type), field: 'fileType', pattern: type }))}
     aria-controls="asset-list"
   />
+  {#if groups.length}
+    <GroupMenu
+      disabled={!hasMultipleAssets}
+      {currentView}
+      {groups}
+      {groupNames}
+      aria-controls="asset-list"
+    />
+  {/if}
   <ViewSwitcher disabled={!hasListedAssets} {currentView} aria-controls="asset-list" />
   {#if !(env.isSmallScreen || env.isMediumScreen)}
     <Divider orientation="vertical" />
@@ -42,15 +93,15 @@
       variant="ghost"
       iconic
       disabled={!hasListedAssets}
-      pressed={!!$currentView.showInfo}
+      pressed={!!currentView.current.showInfo}
       aria-controls="asset-info"
-      aria-expanded={!!$currentView.showInfo}
-      aria-label={_($currentView.showInfo ? 'hide_info' : 'show_info')}
+      aria-expanded={!!currentView.current.showInfo}
+      aria-label={_(currentView.current.showInfo ? 'hide_info' : 'show_info')}
       onclick={() => {
-        currentView.update((view) => ({
-          ...view,
-          showInfo: !$currentView.showInfo,
-        }));
+        currentView.current = {
+          ...currentView.current,
+          showInfo: !currentView.current.showInfo,
+        };
       }}
     >
       {#snippet startIcon()}

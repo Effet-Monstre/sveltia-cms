@@ -1,18 +1,18 @@
 # Sveltia CMS
 
-[Sveltia CMS](https://sveltiacms.app/en/) is a free, open-source, Git-based headless content management system for [Jamstack](https://jamstack.org/) sites. It’s a complete rewrite of Netlify CMS, now known as Decap CMS.
+[Sveltia CMS](https://sveltiacms.app/en/) is a leading Git-based headless CMS for [Jamstack](https://jamstack.org/) sites. It’s open source, free, and a complete modern rewrite of Netlify CMS, now known as Decap CMS, which has been neglected for years.
 
-Designed for content editors and developers alike, Sveltia CMS delivers a modern UX/DX, powerful features, and first-class internationalization (i18n) support — all in a small, maintenance-free, single-page web application served from a CDN. Its framework-agnostic, generic-purpose approach makes it suitable for a wide range of projects, from personal blogs and portfolios to marketing sites and knowledge bases.
+Designed for content editors and developers alike, Sveltia CMS delivers a great UX/DX, powerful features, and first-class internationalization (i18n) support — all in a small, maintenance-free, single-page web application served from a CDN. Its generic-purpose approach makes it suitable for a wide range of projects, from personal blogs and portfolios to marketing sites and knowledge bases.
 
-As the de facto [successor to Netlify CMS](https://sveltiacms.app/en/docs/successor-to-netlify-cms), Sveltia CMS addresses 300+ longstanding issues while maintaining high compatibility with existing installations. It far surpasses the neglected official successor, Decap CMS. More and more projects, including a U.S. government website, are [switching from Netlify/Decap CMS](https://sveltiacms.app/en/docs/migration/netlify-decap-cms) to Sveltia CMS to benefit from its significantly improved performance, security, reliability, and experience.
+As the de facto [successor to Netlify/Decap CMS](https://sveltiacms.app/en/docs/successor-to-netlify-cms), we continue to deal with issues reported in their repository, of which 360 have now been solved in Sveltia CMS (815 including duplicates). It incorporates numerous enhancements while maintaining high compatibility with existing installations. A growing number of projects, including U.S. government agencies, are [switching from Netlify/Decap CMS](https://sveltiacms.app/en/docs/migration/netlify-decap-cms) to Sveltia CMS to enjoy its significantly improved performance, security, reliability, and experience.
 
-It’s also a great choice for people migrating from a traditional CMS to a static site generator and looking for a lightweight headless CMS. A common use case is rebuilding a WordPress site with Astro and Sveltia CMS, which provides a secure, low-cost, high-performance hosting stack.
+Sveltia CMS is framework-agnostic and can also be used for vanilla JavaScript sites. It’s an excellent option for people moving away from a traditional CMS or website builder and looking for a lightweight headless CMS that works well with a static site generator (SSG) like Astro, Eleventy, or Hugo.
 
-Explore 250+ real-world examples in our [showcase](https://sveltiacms.app/en/showcase), or visit the [documentation](https://sveltiacms.app/en/docs) to get started.
+Explore 630 real-world examples in our [showcase](https://sveltiacms.app/en/showcase), including 175 sites migrated from Netlify/Decap CMS and 95 sites from WordPress, or visit the [documentation](https://sveltiacms.app/en/docs) to get started.
 
 [![Sveltia CMS: Fast, Git-based, Headless, Modern UX, Mobile Support, I18n Support, Open Source](https://sveltiacms.app/images/highlights/cover.webp)](https://sveltiacms.app/en/)
 
-[![300 Netlify/Decap CMS issues solved in Sveltia CMS](https://sveltiacms.app/images/highlights/decap-issues.webp?20260427)](https://sveltiacms.app/en/docs/successor-to-netlify-cms)
+[![815 Netlify/Decap CMS issues solved in Sveltia CMS (including duplicates)](https://sveltiacms.app/images/highlights/decap-issues.webp?20261008)](https://sveltiacms.app/en/docs/successor-to-netlify-cms)
 
 [![See it in action. Visit Sveltia CMS Showcase](https://sveltiacms.app/images/highlights/showcase.webp)](https://sveltiacms.app/en/showcase)
 
@@ -23,7 +23,19 @@ We provide comprehensive documentation to help you get started and make the most
 - [Introduction](https://sveltiacms.app/en/docs/intro): Product highlights, use cases, project goals
 - [Getting Started](https://sveltiacms.app/en/docs/start): Step-by-step setup instructions
 - [Migration Guides](https://sveltiacms.app/en/docs/migration): Instructions for migrating from other CMSs
+- [Working with AI](https://sveltiacms.app/en/docs/working-with-ai): Official Agent Skill and `llms.txt`
 - [Roadmap](https://sveltiacms.app/en/docs/roadmap): Upcoming features and improvements
+
+## Showcase
+
+Our [industry-leading showcase](https://sveltiacms.app/en/showcase) is updated daily with new real-world examples of Sveltia CMS users, including:
+
+- [Sites migrated from Decap CMS](https://sveltiacms.app/en/showcase?migrated-from=decap-cms): Most popular
+- [Sites migrated from WordPress](https://sveltiacms.app/en/showcase?migrated-from=wordpress)
+- [Sites built with Astro](https://sveltiacms.app/en/showcase?framework=astro)
+- [Sites built with Eleventy](https://sveltiacms.app/en/showcase?framework=eleventy)
+- [Sites built with vanilla JavaScript](https://sveltiacms.app/en/showcase?framework=vanilla): Trending
+- [Sites using i18n support](https://sveltiacms.app/en/showcase?feature=i18n): Multilingual sites made easy
 
 ## Community
 
@@ -33,3 +45,11 @@ Stay connected and get support through our community channels:
 - [Discord](https://discord.com/invite/5hwCGqup5b): Join the community and chat with us
 - [GitHub Discussions](https://github.com/sveltia/sveltia-cms/discussions): Ask questions and share ideas
 - [Contribute](https://github.com/sveltia/sveltia-cms/blob/main/CONTRIBUTING.md): Learn how to get involved
+
+## Announcements
+
+Highlights from our latest [announcements](https://github.com/sveltia/sveltia-cms/discussions/categories/announcements):
+
+- [Sveltia CMS is now feature complete — It’s time to switch from Decap CMS!](https://github.com/sveltia/sveltia-cms/discussions/957)
+- [Sveltia CMS Community Insights, June 2026](https://github.com/sveltia/sveltia-cms/discussions/809)
+- [Sveltia CMS Now Accepts Donations – Support Open Source Development!](https://github.com/sveltia/sveltia-cms/discussions/762)

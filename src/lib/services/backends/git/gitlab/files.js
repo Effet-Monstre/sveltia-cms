@@ -1,16 +1,25 @@
 /* eslint-disable no-await-in-loop */
 
-import { getPathInfo } from '@sveltia/utils/file';
-
 import { fetchLastCommit } from '$lib/services/backends/git/gitlab/commits';
 import {
+  getWorkflowRepository,
+  initOpenAuthoring,
+  isOpenAuthoringConfigured,
+} from '$lib/services/backends/git/gitlab/fork';
+import {
+  checkBranchAccess,
   checkRepositoryAccess,
   fetchDefaultBranchName,
+  getProjectId,
   repository,
 } from '$lib/services/backends/git/gitlab/repository';
 import { fetchAPI, fetchGraphQL } from '$lib/services/backends/git/shared/api';
+import { mapConcurrently } from '$lib/services/backends/git/shared/concurrency';
 import { fetchAndParseFiles } from '$lib/services/backends/git/shared/fetch';
-import { dataLoadedProgress } from '$lib/services/contents';
+import { startSimulatedProgress } from '$lib/services/backends/git/shared/progress';
+import { toFileListItems } from '$lib/services/backends/git/shared/tree';
+import { splitIntoChunks } from '$lib/services/utils/array';
+import { forkedRepository, openAuthoringInitialized } from '$lib/services/workflow/open-authoring';
 
 /**
  * @import {
@@ -19,20 +28,6 @@ import { dataLoadedProgress } from '$lib/services/contents';
  * BaseFileListItemProps,
  * RepositoryContentsMap,
  * } from '$lib/types/private';
- */
-
-/**
- * @typedef {object} GitLabUserInfo
- * @property {string} [id] GitLab user ID.
- * @property {string} [username] GitLab user username.
- */
-
-/**
- * @typedef {object} GitLabCommit
- * @property {GitLabUserInfo | null} author Commit author’s GitLab user info.
- * @property {string} authorName Commit author’s full name.
- * @property {string} authorEmail Commit author’s email.
- * @property {string} committedDate Committed date.
  */
 
 /**
@@ -50,7 +45,11 @@ import { dataLoadedProgress } from '$lib/services/contents';
  */
 
 /**
+ * A blob node as returned by the GraphQL API. Which of these fields is populated depends on the
+ * query, as the callers of {@link fetchBlobNodes} select different ones.
  * @typedef {object} BlobItem
+ * @property {string} [path] Path of the file.
+ * @property {string} [oid] Blob’s object ID, which is a SHA-1 hash.
  * @property {string} [size] Size of the blob in bytes.
  * @property {string} [rawTextBlob] Raw text content of the blob.
  */
@@ -62,13 +61,6 @@ import { dataLoadedProgress } from '$lib/services/contents';
  * @property {object} project.repository.blobs Blobs information.
  * @property {BlobItem[]} project.repository.blobs.nodes List of file blobs with their sizes and raw
  * text contents.
- */
-
-/**
- * @typedef {object} FetchCommitsResponse
- * @property {object} project Project information.
- * @property {Record<string, { lastCommit: GitLabCommit }>} project.repository Mapping of file paths
- * to their last commit information.
  */
 
 const FETCH_FILE_LIST_QUERY = `
@@ -123,11 +115,21 @@ export const fetchFileList = async () => {
     }
   }
 
-  // The `size` is not available here; it will be retrieved in `fetchFileContents` below
-  return blobs
-    .filter(({ type }) => type === 'blob')
-    .map(({ path, sha }) => ({ path, sha, size: 0, name: getPathInfo(path).basename }));
+  // The `size` is not available from the GitLab API in bulk, so it’s left as `0`
+  return toFileListItems(blobs);
 };
+
+/**
+ * Number of blob batches requested at the same time on GitLab.com. Each batch is a heavy query, so
+ * this is kept well below the general limit on requests in flight.
+ */
+export const BLOB_CONCURRENCY = 4;
+
+/**
+ * Number of blob batches requested at the same time on a self-hosted instance, which typically runs
+ * on less powerful hardware and is more likely to time out under load.
+ */
+export const SELF_HOSTED_BLOB_CONCURRENCY = 2;
 
 const FETCH_BLOBS_QUERY = `
   query($fullPath: ID!, $branch: String!, $paths: [String!]!) {
@@ -135,6 +137,7 @@ const FETCH_BLOBS_QUERY = `
       repository {
         blobs(ref: $branch, paths: $paths) {
           nodes {
+            path
             rawTextBlob
           }
         }
@@ -144,30 +147,74 @@ const FETCH_BLOBS_QUERY = `
 `;
 
 /**
+ * Fetch a single batch of blobs, halving the batch and trying again whenever the request fails.
+ * GitLab refuses a request whose blobs add up to more than 20 MB, and the sizes aren’t known in
+ * advance, so an oversized batch can only be discovered by attempting it. A single blob of any size
+ * is always accepted, which guarantees the split terminates; an error that survives all the way
+ * down to one path isn’t about the size, so it’s thrown as is. Because a failing half is awaited
+ * before the other one is requested, such an error surfaces after a handful of extra requests
+ * rather than a retry of every path.
+ * @param {string[]} paths List of file paths to fetch.
+ * @param {string} query GraphQL query string.
+ * @param {Record<string, any>} [variables] Any variable to be applied to the query, other than the
+ * paths.
+ * @returns {Promise<BlobItem[]>} Fetched blobs, in the same order as the given paths. A path that
+ * isn’t on the branch is left out, so select the `path` to match a blob to its file.
+ * @throws {Error} When a request for a single path fails.
+ * @see https://docs.gitlab.com/api/graphql/#data-limits
+ * @see https://gitlab.com/gitlab-org/gitlab/-/merge_requests/212456
+ */
+export const fetchBlobBatch = async (paths, query, variables = {}) => {
+  /** @type {FetchBlobsResponse} */
+  let result;
+
+  try {
+    result = /** @type {FetchBlobsResponse} */ (await fetchGraphQL(query, { ...variables, paths }));
+  } catch (ex) {
+    // A request for a single blob is always within the size limit, so this error is about something
+    // else, and there’s nothing left to split anyway
+    if (paths.length === 1) {
+      throw ex;
+    }
+
+    const midPoint = Math.ceil(paths.length / 2);
+    const firstHalf = await fetchBlobBatch(paths.slice(0, midPoint), query, variables);
+    const secondHalf = await fetchBlobBatch(paths.slice(midPoint), query, variables);
+
+    return [...firstHalf, ...secondHalf];
+  }
+
+  // Read the response outside the `try` block, so a malformed one is reported as is instead of
+  // being mistaken for an oversized batch and retried
+  return result.project.repository.blobs.nodes;
+};
+
+/**
  * Fetch the blobs for the given file paths. This function retrieves the raw text contents of files
  * in the repository using the GitLab GraphQL API. It handles pagination by fetching a fixed number
  * of paths at a time, ensuring that the complexity score of the query does not exceed the limit.
  * @param {string[]} paths List of file paths to fetch.
  * @param {string} query GraphQL query string.
- * @returns {Promise<Record<string, BlobItem>>} Fetched blobs mapped by file path.
+ * @param {Record<string, any>} [variables] Any variable to be applied to the query, other than the
+ * paths.
+ * @returns {Promise<BlobItem[]>} Fetched blobs, in the same order as the given paths. A path that
+ * isn’t on the branch is left out, so select the `path` to match a blob to its file.
  * @see https://docs.gitlab.com/api/graphql/reference/#repositoryblob
  * @see https://docs.gitlab.com/api/graphql/reference/#tree
  * @see https://forum.gitlab.com/t/graphql-api-read-raw-file/35389
  * @see https://docs.gitlab.com/api/graphql/#limits
  */
-export const fetchBlobs = async (paths, query) => {
+export const fetchBlobNodes = async (paths, query, variables = {}) => {
   if (!paths.length) {
-    return {};
+    return [];
   }
 
   const { isSelfHosted = false } = repository;
   const batchSize = isSelfHosted ? 20 : 100;
-  const fetchingPaths = [...paths];
-  /** @type {BlobItem[]} */
-  const blobs = [];
+  const concurrency = isSelfHosted ? SELF_HOSTED_BLOB_CONCURRENCY : BLOB_CONCURRENCY;
 
   // Fetch all the text contents with the GraphQL API. Pagination would fail if `paths` becomes too
-  // long, so we just use a fixed number of paths to iterate. The complexity score of this query is
+  // long, so we just use a fixed number of paths per request. The complexity score of this query is
   // 15 + (2 * node size) so 100 paths = 215 complexity, giving the following conditions:
   // 1. The max number of records is 100
   // 2. The max query complexity is 250 or 300
@@ -176,129 +223,53 @@ export const fetchBlobs = async (paths, query) => {
   // @see https://gitlab.com/gitlab-org/gitlab/-/issues/576497
   // The batch size is reduced to 20 for self-hosted instances because they typically run on less
   // powerful hardware, which may lead to timeout issues.
-  for (;;) {
-    const currentPaths = fetchingPaths.splice(0, batchSize);
+  // Only the first two conditions can be satisfied by a fixed count; the size of a blob is unknown
+  // until it’s fetched, so {@link fetchBlobBatch} handles the third one by splitting a batch that
+  // turns out to be too large.
+  //
+  // The batches are independent, so a few of them are requested at once rather than one after
+  // another; a large repository needs dozens of them, and each is a full round trip
+  const results = await mapConcurrently(
+    splitIntoChunks(paths, batchSize),
+    (batchPaths) => fetchBlobBatch(batchPaths, query, variables),
+    { concurrency },
+  );
 
-    const result = /** @type {FetchBlobsResponse} */ (
-      await fetchGraphQL(query, { paths: currentPaths })
-    );
-
-    blobs.push(...result.project.repository.blobs.nodes);
-
-    if (!fetchingPaths.length) {
-      break;
-    }
-  }
-
-  // Map the blobs back to their respective file paths
-  return Object.fromEntries(paths.map((path, index) => [path, blobs[index]]));
+  // Keep the order of the given paths, although callers match a blob to its file by path
+  return results.flat();
 };
 
 /**
- * Generate the inner GraphQL query for fetching the last commit information of a file at the
- * specified path.
- * @param {string} path File path.
- * @param {number} index Index of the path in the current batch.
- * @returns {string} GraphQL query string for fetching the last commit information of the file at
- * the specified path.
- */
-const getFetchCommitsInnerQuery = (path, index) => `
-  tree_${index}: tree(ref: $branch, path: ${JSON.stringify(path)}) {
-    lastCommit {
-      author {
-        id
-        username
-      }
-      authorName
-      authorEmail
-      committedDate
-    }
-  }
-`;
-
-/**
- * Fetch commit information for each file in the repository. This function retrieves the last commit
- * information for each file path using the GitLab GraphQL API. It handles pagination by fetching a
- * fixed number of paths at a time, ensuring that the complexity score of the query does not exceed
- * the limit. The commit information includes the author’s GitLab user info, name, email, and
- * committed date.
- * This function is unused at the moment due to performance concerns but may be used in the future.
+ * Fetch the blobs for the given file paths, and map them back to those paths.
  * @param {string[]} paths List of file paths to fetch.
- * @returns {Promise<Record<string, GitLabCommit>>} Fetched commit information for each file.
+ * @param {string} query GraphQL query string, which has to select the `path` of each blob.
+ * @returns {Promise<Record<string, BlobItem>>} Fetched blobs mapped by file path. A path missing
+ * from the branch has no blob.
  */
-export const fetchCommits = async (paths) => {
-  const fetchingPaths = [...paths];
-  /** @type {GitLabCommit[]} */
-  const commits = [];
+export const fetchBlobs = async (paths, query) => {
+  const blobs = await fetchBlobNodes(paths, query);
 
-  // The complexity score of this query is 5 + (18 * node size) so 13 paths = 239 complexity
-  for (;;) {
-    const currentPaths = fetchingPaths.splice(0, 13);
-
-    const query = `
-      query($fullPath: ID!, $branch: String!) {
-        project(fullPath: $fullPath) {
-          repository {
-            ${currentPaths.map(getFetchCommitsInnerQuery).join('')}
-          }
-        }
-      }
-    `;
-
-    const result = /** @type {FetchCommitsResponse} */ (await fetchGraphQL(query));
-
-    commits.push(...Object.values(result.project.repository).map(({ lastCommit }) => lastCommit));
-
-    if (!fetchingPaths.length) {
-      break;
-    }
-  }
-
-  // Map the commits back to their respective file paths
-  return Object.fromEntries(paths.map((path, index) => [path, commits[index]]));
+  // Map the blobs back by their own paths rather than by position: GitLab leaves a path that isn’t
+  // on the branch out of the response, e.g. a file deleted by a push made during the load, which
+  // would otherwise give every later file the content of the one after it
+  return Object.fromEntries(blobs.map((blob) => [/** @type {string} */ (blob.path), blob]));
 };
 
 /**
- * Parse the file contents from the API response.
+ * Parse the file contents from the API response. The GitLab API doesn’t give us file sizes or
+ * commit information in bulk, so only the text contents are filled in.
  * @param {object} args Arguments.
  * @param {BaseFileListItem[]} args.fetchingFiles Base file list.
  * @param {Record<string, BlobItem>} args.blobs Raw text blobs.
- * @param {Record<string, BlobItem>} [args.sizes] File sizes.
- * @param {Record<string, GitLabCommit>} [args.commits] Commit information for each file.
- * @returns {Promise<RepositoryContentsMap>} Parsed file contents map.
+ * @returns {RepositoryContentsMap} Parsed file contents map.
  */
-export const parseFileContents = async ({ fetchingFiles, blobs, sizes = {}, commits = {} }) => {
-  const entries = fetchingFiles.map(({ path, sha }) => {
-    const commit = commits[path];
-
-    const data = {
-      sha,
-      size: Number(sizes[path]?.size ?? 0),
-      text: blobs[path]?.rawTextBlob ?? undefined,
-      meta: {},
-    };
-
-    if (commit) {
-      const { author, authorName, authorEmail, committedDate } = commit;
-      const { id, username } = author ?? {};
-      const idMatcher = id?.match(/\d+/);
-
-      data.meta = {
-        commitAuthor: {
-          name: authorName,
-          email: authorEmail,
-          id: idMatcher ? Number(idMatcher[0]) : undefined,
-          login: username,
-        },
-        committedDate: new Date(committedDate),
-      };
-    }
-
-    return [path, data];
-  });
-
-  return Object.fromEntries(entries);
-};
+export const parseFileContents = ({ fetchingFiles, blobs }) =>
+  Object.fromEntries(
+    fetchingFiles.map(({ path, sha }) => [
+      path,
+      { sha, size: 0, text: blobs[path]?.rawTextBlob ?? undefined, meta: {} },
+    ]),
+  );
 
 /**
  * Fetch the metadata of entry/asset files as well as text file contents.
@@ -306,20 +277,19 @@ export const parseFileContents = async ({ fetchingFiles, blobs, sizes = {}, comm
  * @returns {Promise<RepositoryContentsMap>} Fetched contents map.
  */
 export const fetchFileContents = async (fetchingFiles) => {
-  dataLoadedProgress.set(0);
-
-  // Show a fake progressbar because the request waiting time is long
-  const dataLoadedProgressInterval = window.setInterval(() => {
-    /* v8 ignore next */
-    dataLoadedProgress.update((progress = 0) => progress + 1);
-  }, fetchingFiles.length / 10);
-
+  // Show a simulated progress bar because the request waiting time is long
+  const stopProgress = startSimulatedProgress(fetchingFiles.length);
   // Fetch blobs for entry/config files only
   const textPaths = fetchingFiles.filter(({ type }) => type !== 'asset').map(({ path }) => path);
-  const blobs = await fetchBlobs(textPaths, FETCH_BLOBS_QUERY);
+  /** @type {Awaited<ReturnType<typeof fetchBlobs>>} */
+  let blobs;
 
-  window.clearInterval(dataLoadedProgressInterval);
-  dataLoadedProgress.set(undefined);
+  try {
+    blobs = await fetchBlobs(textPaths, FETCH_BLOBS_QUERY);
+  } finally {
+    // Also on failure, so the interval doesn’t keep running behind the error message
+    stopProgress();
+  }
 
   return parseFileContents({ fetchingFiles, blobs });
 };
@@ -327,14 +297,30 @@ export const fetchFileContents = async (fetchingFiles) => {
 /**
  * Fetch file list from the backend service, download/parse all the entry files, then cache them in
  * the {@link allEntries} and {@link allAssets} stores.
+ * @param {object} [options] Options.
+ * @param {{ hash: string, message: string }} [options.lastCommit] Last commit on the branch, if the
+ * caller has just fetched it, so it isn’t fetched again.
  */
-export const fetchFiles = async () => {
-  await checkRepositoryAccess();
+export const fetchFiles = async ({ lastCommit } = {}) => {
+  // With Open Authoring, a user without write access is a contributor rather than a stranger, so
+  // they’re given a fork to work in instead of being turned away. Setting the fork up may involve
+  // the user, so it has to finish before the data is fetched, unlike a plain access check
+  const openAuthoring = isOpenAuthoringConfigured();
+
+  // Once only: a later call brings the stores up to date with the project, and setting the fork up
+  // again would reset the fork state while a workflow commit may be relying on it
+  if (openAuthoring && !openAuthoringInitialized.current) {
+    await initOpenAuthoring();
+  }
 
   await fetchAndParseFiles({
     repository,
+    checkAccess: openAuthoring ? undefined : checkRepositoryAccess,
+    // A contributor’s changes go to their fork, so the branch they can’t push to doesn’t matter
+    checkBranchAccess: forkedRepository.current ? undefined : checkBranchAccess,
     fetchDefaultBranchName,
     fetchLastCommit,
+    lastCommit,
     fetchFileList,
     fetchFileContents,
   });
@@ -348,13 +334,18 @@ export const fetchFiles = async () => {
  * @see https://docs.gitlab.com/api/repository_files/#get-raw-file-from-repository
  */
 export const fetchBlob = async (asset) => {
-  const { owner, repo, branch = '' } = repository;
-  const { path } = asset;
+  const { branch = '' } = repository;
+  const { path, workflow } = asset;
+  // An asset attached to an unpublished entry is committed to a workflow branch only, so it has to
+  // be read from there; on the configured branch the path is missing or holds the published
+  // version. That branch lives in the contributor’s fork with Open Authoring, so it’s read there
+  const ref = workflow?.branch ?? branch;
+  const projectId = getProjectId(workflow ? getWorkflowRepository() : undefined);
 
   return /** @type {Promise<Blob>} */ (
     fetchAPI(
-      `/projects/${encodeURIComponent(`${owner}/${repo}`)}/repository/files` +
-        `/${encodeURIComponent(path)}/raw?lfs=true&ref=${encodeURIComponent(branch)}`,
+      `/projects/${projectId}/repository/files` +
+        `/${encodeURIComponent(path)}/raw?lfs=true&ref=${encodeURIComponent(ref)}`,
       { responseType: 'blob' },
     )
   );

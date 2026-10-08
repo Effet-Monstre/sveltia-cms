@@ -1,6 +1,6 @@
-import { get } from 'svelte/store';
 import { describe, expect, test, vi } from 'vitest';
 
+import { cmsConfig } from '$lib/services/config';
 import {
   formatEntryFile,
   formatFrontMatter,
@@ -15,20 +15,7 @@ import {
 
 // Mock the cmsConfig store
 vi.mock('$lib/services/config', () => ({
-  cmsConfig: {
-    subscribe: vi.fn(),
-    set: vi.fn(),
-  },
-}));
-
-// Mock the get function from svelte/store to return our mock config
-vi.mock('svelte/store', () => ({
-  get: vi.fn(() => ({
-    output: {
-      yaml: { indent_size: 2, quote: 'none' },
-      json: { indent_style: 'space', indent_size: 2 },
-    },
-  })),
+  cmsConfig: { current: undefined },
 }));
 
 // Mock custom file formats
@@ -281,7 +268,7 @@ image:
 
   test('uses empty legacyOptions when not provided (line 53)', () => {
     // Mock get to return undefined for output.yaml to test the ?? {} fallback on line 52
-    vi.mocked(get).mockReturnValueOnce({ output: { yaml: undefined } });
+    cmsConfig.current = /** @type {any} */ ({ output: { yaml: undefined } });
 
     const result = formatYAML(object);
 
@@ -328,7 +315,7 @@ image:
 
   test('uses empty options when cmsConfig.output.json is undefined (line 20)', () => {
     // Mock get to return undefined for output.json to test the ?? {} fallback
-    vi.mocked(get).mockReturnValueOnce({ output: { json: undefined } });
+    cmsConfig.current = /** @type {any} */ ({ output: { json: undefined } });
 
     const result = formatJSON(object);
 
@@ -351,6 +338,57 @@ image:
 }
 `.trim(),
     );
+  });
+});
+
+describe('Test formatYAML() with comments', () => {
+  test('writes a comment before a top-level key, including the first one', () => {
+    expect(formatYAML({ title: 'Hello', draft: false }, {}, {}, { title: 'Title' })).toBe(
+      '# Title\ntitle: Hello\ndraft: false',
+    );
+  });
+
+  test('writes a comment before a key nested in a map', () => {
+    expect(
+      formatYAML(
+        { image: { src: 'a.jpg', alt: 'A' } },
+        {},
+        {},
+        {
+          image: 'Image',
+          'image.alt': 'Alt text',
+        },
+      ),
+    ).toBe('# Image\nimage:\n  src: a.jpg\n  # Alt text\n  alt: A');
+  });
+
+  test('splits a comment on an escaped or a real line break', () => {
+    // Netlify/Decap CMS documents `comment: 'line 1\nline 2'`, where YAML keeps the `\n` as is
+    expect(formatYAML({ a: 'a' }, {}, {}, { a: 'line 1\\nline 2\nline 3' })).toBe(
+      '# line 1\n# line 2\n# line 3\na: a',
+    );
+  });
+
+  test('leaves the items of a sequence alone', () => {
+    expect(
+      formatYAML(
+        { links: [{ url: 'https://example.com' }] },
+        {},
+        {},
+        {
+          links: 'Links',
+          'links.url': 'URL',
+        },
+      ),
+    ).toBe('# Links\nlinks:\n  - url: https://example.com');
+  });
+
+  test('ignores a comment for a key that is not there', () => {
+    expect(formatYAML({ title: 'Hello' }, {}, {}, { body: 'Body' })).toBe('title: Hello');
+  });
+
+  test('ignores the comments when the document is not a map', () => {
+    expect(formatYAML(/** @type {any} */ (['a', 'b']), {}, {}, { 0: 'First' })).toBe('- a\n- b');
   });
 });
 
@@ -507,16 +545,15 @@ This is the body content of the post.
     const _file = { format: 'json-frontmatter', extension: '.md', fmDelimiters: ['{', '}'] };
     const result = formatFrontMatter({ content, _file });
 
+    // The outer braces of the object double as the delimiters, like Netlify/Decap CMS
     expect(result).toBe(
       `{
-{
   "title": "My Post",
   "published": true,
   "tags": [
     "test",
     "vitest"
   ]
-}
 }
 
 This is the body content of the post.
@@ -562,13 +599,14 @@ title: My Post
     );
   });
 
-  test('invalid format returns empty string', () => {
+  test('invalid format throws rather than returning an empty string', () => {
     const content = { ...baseContent };
     /** @type {import('$lib/types/private').FileConfig} */
     const _file = { format: /** @type {any} */ ('invalid-format'), extension: '.md' };
-    const result = formatFrontMatter({ content, _file });
 
-    expect(result).toBe('');
+    expect(() => formatFrontMatter({ content, _file })).toThrow(
+      'Unsupported front matter format: invalid-format',
+    );
   });
 
   test('body property is removed from content object', () => {
@@ -586,24 +624,7 @@ title: My Post
     });
   });
 
-  test('error handling in formatFrontMatter', () => {
-    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-
-    const _file = {
-      format: /** @type {any} */ ('invalid-type'),
-      extension: '.md',
-    };
-
-    const content = { title: 'Test' };
-    const result = formatFrontMatter({ content, _file });
-
-    expect(result).toBe('');
-    errorSpy.mockRestore();
-  });
-
-  test('error handling in formatFrontMatter with json-frontmatter (lines 106-108)', () => {
-    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-
+  test('formatting error in formatFrontMatter with json-frontmatter is thrown', () => {
     // Create a mock _file object that would trigger an error during formatting
     const _file = /** @type {any} */ ({
       format: 'json-frontmatter',
@@ -616,13 +637,8 @@ title: My Post
 
     circularObj.self = circularObj; // Create circular reference
 
-    const result = formatFrontMatter({ content: circularObj, _file });
-
-    // When an error occurs, formatFrontMatter returns empty string
-    expect(result).toBe('');
-    // Verify that console.error was called
-    expect(errorSpy).toHaveBeenCalled();
-    errorSpy.mockRestore();
+    // An empty string would be written as the file, wiping its content
+    expect(() => formatFrontMatter({ content: circularObj, _file })).toThrow(TypeError);
   });
 });
 
@@ -801,15 +817,14 @@ describe('Test formatEntryFile()', () => {
 
     const result = await formatEntryFile({ content, _file });
 
-    expect(result).toContain('{');
-    expect(result).toContain('"title": "Test Post"');
+    expect(result).toBe('{\n  "title": "Test Post"\n}\n\nThis is the body content.\n');
     expect(result).toContain('This is the body content.');
   });
 
   test('uses custom formatter when available', async () => {
     const customFormatter = vi.fn().mockResolvedValue('custom formatted content');
     // Mock the custom file formats
-    const { customFileFormatRegistry } = await import('$lib/services/contents/file/config');
+    const { customFileFormatRegistry } = await import('$lib/services/api/registries');
 
     customFileFormatRegistry.set('customFormat', {
       formatter: customFormatter,
@@ -833,8 +848,7 @@ describe('Test formatEntryFile()', () => {
     customFileFormatRegistry.delete('customFormat');
   });
 
-  test('handles formatting errors gracefully', async () => {
-    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+  test('throws on a formatting error rather than returning an empty string', async () => {
     // Create content that will cause JSON.stringify to fail
     const circularRef = {};
 
@@ -846,15 +860,27 @@ describe('Test formatEntryFile()', () => {
       yamlQuote: false,
     });
 
-    const result = await formatEntryFile({ content: circularRef, _file });
+    const promise = formatEntryFile({ content: circularRef, _file });
 
-    expect(result).toBe('');
-    expect(consoleSpy).toHaveBeenCalled();
-
-    consoleSpy.mockRestore();
+    await expect(promise).rejects.toThrow(
+      /^The entry could not be formatted due to TypeError: Converting circular structure/,
+    );
+    await expect(promise).rejects.toHaveProperty('cause', expect.any(TypeError));
   });
 
-  test('returns empty string for unknown format', async () => {
+  test('throws on a front matter formatting error', async () => {
+    const circularRef = /** @type {any} */ ({ title: 'Test' });
+
+    circularRef.self = circularRef;
+
+    const _file = /** @type {FileConfig} */ ({ format: 'json-frontmatter', extension: 'md' });
+
+    await expect(formatEntryFile({ content: circularRef, _file })).rejects.toThrow(
+      /^The entry could not be formatted due to TypeError/,
+    );
+  });
+
+  test('throws for unknown format rather than returning an empty string', async () => {
     const content = { title: 'Test' };
 
     const _file = /** @type {FileConfig} */ ({
@@ -863,9 +889,62 @@ describe('Test formatEntryFile()', () => {
       yamlQuote: false,
     });
 
-    const result = await formatEntryFile({ content, _file });
+    await expect(formatEntryFile({ content, _file })).rejects.toThrow(
+      'Entries in the unknown “unknown-format” format can’t be saved',
+    );
+  });
 
-    expect(result).toBe('');
+  test('throws for a custom format registered without a formatter', async () => {
+    const { customFileFormatRegistry } = await import('$lib/services/api/registries');
+
+    customFileFormatRegistry.set('csv', { parser: vi.fn(), extension: 'csv' });
+
+    const _file = /** @type {FileConfig} */ ({ format: 'csv', extension: 'csv' });
+
+    try {
+      await expect(formatEntryFile({ content: { title: 'Test' }, _file })).rejects.toThrow(
+        'Entries in the custom “csv” format can’t be saved, as no `toFile` method was registered ' +
+          'for it with `CMS.registerCustomFormat()`',
+      );
+    } finally {
+      customFileFormatRegistry.delete('csv');
+    }
+  });
+
+  test('uses the built-in formatter for a custom format with a built-in name', async () => {
+    const { customFileFormatRegistry } = await import('$lib/services/api/registries');
+
+    customFileFormatRegistry.set('json', { parser: vi.fn(), extension: 'json' });
+
+    const _file = /** @type {FileConfig} */ ({ format: 'json', extension: 'json' });
+
+    try {
+      expect(await formatEntryFile({ content: { title: 'Test' }, _file })).toBe(
+        '{\n  "title": "Test"\n}\n',
+      );
+    } finally {
+      customFileFormatRegistry.delete('json');
+    }
+  });
+
+  test('throws when a custom formatter does not return a string', async () => {
+    const { customFileFormatRegistry } = await import('$lib/services/api/registries');
+
+    customFileFormatRegistry.set('custom', {
+      // A formatter written in plain JavaScript can return anything
+      formatter: /** @type {any} */ (vi.fn()),
+      extension: 'txt',
+    });
+
+    const _file = /** @type {FileConfig} */ ({ format: 'custom', extension: 'txt' });
+
+    try {
+      await expect(formatEntryFile({ content: { title: 'Test' }, _file })).rejects.toThrow(
+        'The `toFile` method registered for the custom “custom” format must return a string',
+      );
+    } finally {
+      customFileFormatRegistry.delete('custom');
+    }
   });
 
   test('handles content without body property in frontmatter', async () => {
@@ -1030,6 +1109,38 @@ title: Test Post
 description: This stays inline.
 ---
 `,
+    );
+  });
+});
+
+describe('Test formatEntryFile() with comments', () => {
+  const comments = { title: 'Page title' };
+
+  test('writes the comments to a YAML file', async () => {
+    const _file = /** @type {FileConfig} */ ({ format: 'yaml', extension: 'yml' });
+
+    expect(await formatEntryFile({ content: { title: 'Hello' }, _file, comments })).toBe(
+      '# Page title\ntitle: Hello\n',
+    );
+  });
+
+  test('writes the comments to YAML front matter', async () => {
+    const _file = /** @type {FileConfig} */ ({ format: 'yaml-frontmatter', extension: 'md' });
+
+    expect(
+      await formatEntryFile({ content: { title: 'Hello', body: 'Text' }, _file, comments }),
+    ).toBe('---\n# Page title\ntitle: Hello\n---\n\nText\n');
+  });
+
+  test('leaves the comments out of other formats, like Netlify/Decap CMS', async () => {
+    const toml = /** @type {FileConfig} */ ({ format: 'toml', extension: 'toml' });
+    const json = /** @type {FileConfig} */ ({ format: 'json', extension: 'json' });
+
+    expect(await formatEntryFile({ content: { title: 'Hello' }, _file: toml, comments })).toBe(
+      'title = "Hello"\n',
+    );
+    expect(await formatEntryFile({ content: { title: 'Hello' }, _file: json, comments })).toBe(
+      '{\n  "title": "Hello"\n}\n',
     );
   });
 });

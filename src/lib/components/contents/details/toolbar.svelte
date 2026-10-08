@@ -9,7 +9,7 @@
     Menu,
     MenuButton,
     MenuItem,
-    MenuItemCheckbox,
+    Spacer,
     SplitButton,
     Toast,
     Toolbar,
@@ -17,34 +17,79 @@
   } from '@sveltia/ui';
 
   import BackButton from '$lib/components/common/page-toolbar/back-button.svelte';
-  import EditSlugDialog from '$lib/components/contents/details/edit-slug-dialog.svelte';
-  import { goBack, goto } from '$lib/services/app/navigation';
-  import { getAssetFolder } from '$lib/services/assets/folders';
+  import DeleteEntryDialog from '$lib/components/contents/details/delete-entry-dialog.svelte';
+  import ResetDialog from '$lib/components/contents/details/editor/reset-dialog.svelte';
+  import ResetMenuItems from '$lib/components/contents/details/editor/reset-menu-items.svelte';
+  import ViewMenuItems from '$lib/components/contents/details/editor/view-menu-items.svelte';
+  import PreviewLinkButton from '$lib/components/contents/details/preview-link-button.svelte';
+  import SaveConflictDialog from '$lib/components/contents/details/save-conflict-dialog.svelte';
+  import EntryStatusMenu from '$lib/components/workflow/entry-status-menu.svelte';
+  import PublishEntryButton from '$lib/components/workflow/publish-entry-button.svelte';
+  import { encodeRoutePath, goBack, goto, overlayTitle } from '$lib/services/app/navigation';
+  import { getErrorMessage } from '$lib/services/backends/git/shared/errors';
   import { skipCIConfigured, skipCIEnabled } from '$lib/services/backends/git/shared/integration';
+  import { isDraftReadonly } from '$lib/services/config/readonly';
   import { getCollectionLabel } from '$lib/services/contents/collection';
-  import { deleteEntries } from '$lib/services/contents/collection/data/delete';
+  import {
+    contentUpdatesToast,
+    UPDATE_TOAST_DEFAULT_STATE,
+  } from '$lib/services/contents/collection/data';
   import { getCollectionFileLabel } from '$lib/services/contents/collection/files';
+  import { isNestedCollection, nestedFilterPath } from '$lib/services/contents/collection/nested';
   import { collectionState } from '$lib/services/contents/collection/view';
-  import { entryDraft, entryDraftModified } from '$lib/services/contents/draft';
   import { createDraft } from '$lib/services/contents/draft/create';
   import { duplicateDraft } from '$lib/services/contents/draft/create/duplicate';
   import { saveEntry } from '$lib/services/contents/draft/save';
-  import { revertChanges } from '$lib/services/contents/draft/update/revert';
-  import { copyFromLocaleToast } from '$lib/services/contents/editor';
-  import { entryEditorSettings } from '$lib/services/contents/editor/settings';
-  import { getEntryPreviewURL } from '$lib/services/contents/entry';
-  import { getAssociatedAssets } from '$lib/services/contents/entry/assets';
+  import { getEntryDraftContext } from '$lib/services/contents/draft/state.svelte';
+  import { canResetEntry } from '$lib/services/contents/draft/update/reset';
+  import { validateDraft } from '$lib/services/contents/draft/validate';
+  import { countInvalidFields } from '$lib/services/contents/draft/validate/reveal';
+  import { activeInlineEditors, copyFromLocaleToast } from '$lib/services/contents/editor';
+  import {
+    awaitPendingFieldUpdates,
+    fieldUpdatePending,
+  } from '$lib/services/contents/editor/pending';
+  import { getSidebarPanels, showSidebarPanel } from '$lib/services/contents/editor/sidebar';
+  import { canUpdateSlug } from '$lib/services/contents/editor/slug';
+  import {
+    canDuplicateEntry,
+    getRemovalMenuItems,
+    getSaveFailure,
+  } from '$lib/services/contents/editor/toolbar';
+  import { getEntryRelativeAssets } from '$lib/services/contents/entry/assets';
   import { getEntrySummary } from '$lib/services/contents/entry/summary';
   import { getLocaleLabel } from '$lib/services/contents/i18n';
-  import { DEFAULT_I18N_CONFIG } from '$lib/services/contents/i18n/config';
+  import { getDraftI18nConfig } from '$lib/services/contents/i18n/config';
+  import { deployPollTimedOut } from '$lib/services/deployments';
+  import { recheckDeployments, retainDeployPolling } from '$lib/services/deployments/poll';
+  import { isSearchResultsPath } from '$lib/services/search/navigation';
   import { env } from '$lib/services/user/env.svelte';
   import { prefs } from '$lib/services/user/prefs.svelte';
-  import { openNewTab } from '$lib/services/utils/window';
+  import {
+    checkPublishedVersion,
+    getUnpublishedEntryByDraft,
+    isPendingDeletion,
+    isWorkflowEnabled,
+    workflowEnabled,
+  } from '$lib/services/workflow';
+  import { deleteOrDiscardEntries } from '$lib/services/workflow/delete';
+  import { getDiscardDialogStrings } from '$lib/services/workflow/dialogs';
+  import { openAuthoring } from '$lib/services/workflow/open-authoring';
+  import { discardWorkflowEntry, updateWorkflowStatus } from '$lib/services/workflow/save';
+  import { getWorkflowErrorMessage } from '$lib/services/workflow/verify';
+
+  /**
+   * @import { Entry, UnpublishedEntry, UpdateToastState } from '$lib/types/private';
+   * @import { EntryConflict } from '$lib/services/contents/draft/save/conflict';
+   * @import { ResetAction } from '$lib/services/contents/editor/reset';
+   */
 
   /**
    * @typedef {object} Props
    * @property {boolean} [disabled] Whether to disable controls other than the Back button.
    */
+
+  const entryDraft = getEntryDraftContext();
 
   /** @type {Props} */
   let {
@@ -54,106 +99,403 @@
   } = $props();
 
   let showValidationToast = $state(false);
-  let showEditSlugDialog = $state(false);
+  // Number of invalid fields when the last save failed validation. A snapshot rather than a live
+  // count: the fields are revalidated as they’re corrected, and a toast counting down to “0 fields
+  // have errors” while it’s still on screen would be confusing
+  let errorCount = $state(0);
   let showDeleteDialog = $state(false);
+  let showReviewDialog = $state(false);
+  /**
+   * Resolver for the review prompt, so the save can wait for the answer.
+   * @type {((sendForReview: boolean) => void) | undefined}
+   */
+  let resolveReviewPrompt = $state();
+  let showDiscardDialog = $state(false);
+  let showConflictDialog = $state(false);
+  /**
+   * Someone else’s change to the entry that the last save attempt would have overwritten, along
+   * with the options of that attempt, so the save can be repeated as asked once the user agrees.
+   * @type {{ conflict: EntryConflict, skipCI: boolean | undefined } | undefined}
+   */
+  let saveConflict = $state();
+  let showDeleteErrorToast = $state(false);
+  let deleteErrorMessage = $state('');
   let showErrorDialog = $state(false);
   let errorMessage = $state('');
   let saving = $state(false);
+  let deleting = $state(false);
+  /** Whether the entry is being duplicated, which takes a moment when it has assets to copy. */
+  let duplicating = $state(false);
+  /** I18n key of the message shown while a deletion is in flight. */
+  let progressMessage = $state('');
   /** @type {MenuButton | undefined} */
   let menuButton = $state();
+  /**
+   * Whether restoring the default values or clearing the fields would change anything. It takes
+   * going through the whole entry, so it’s only checked as the menu opens rather than on every
+   * change.
+   */
+  let resetAvailability = $state({ restore: false, clear: false });
+  /** @type {ResetAction} */
+  let resetAction = $state('restore');
+  let showResetDialog = $state(false);
 
-  const notFound = $derived($entryDraft === undefined);
-  const isNew = $derived($entryDraft?.isNew ?? true);
-  const isIndexFile = $derived($entryDraft?.isIndexFile ?? false);
-  const collection = $derived($entryDraft?.collection);
+  /**
+   * Check whether restoring the default values or clearing the fields would change anything.
+   */
+  const updateResetAvailability = () => {
+    const draft = entryDraft.current;
+
+    resetAvailability = {
+      restore: !!draft && canResetEntry({ draft, restore: true }),
+      clear: !!draft && canResetEntry({ draft }),
+    };
+  };
+
+  const notFound = $derived(entryDraft.current === undefined);
+  const isNew = $derived(entryDraft.current?.isNew ?? true);
+  const isIndexFile = $derived(!!entryDraft.current?.isIndexFile);
+  const collection = $derived(entryDraft.current?.collection);
   const entryCollection = $derived(collection?._type === 'entry' ? collection : undefined);
-  const collectionFile = $derived($entryDraft?.collectionFile);
-  const originalEntry = $derived($entryDraft?.originalEntry);
-  const { defaultLocale } = $derived((collectionFile ?? collection)?._i18n ?? DEFAULT_I18N_CONFIG);
+  const collectionFile = $derived(entryDraft.current?.collectionFile);
+  const originalEntry = $derived(entryDraft.current?.originalEntry);
+  const { defaultLocale } = $derived(getDraftI18nConfig(entryDraft.current));
   const collectionName = $derived(collection?.name);
   const fileName = $derived(collectionFile?.name);
+  /* v8 ignore start -- only read for an existing entry, which has a collection */
+  // `appLocale.current` is a key, because `getCollectionLabel` can return a localized label
   const collectionLabel = $derived(
-    // `appLocale.current` is a key, because `getCollectionLabel` can return a localized label
     appLocale.current && collection ? getCollectionLabel(collection) : '',
   );
+  /* v8 ignore stop */
   const collectionLabelSingular = $derived(
     // `appLocale.current` is a key, because `getCollectionLabel` can return a localized label
     appLocale.current && collection ? getCollectionLabel(collection, { useSingular: true }) : '',
   );
-  const canPreview = $derived($entryDraft?.canPreview ?? true);
-  const modified = $derived(isNew || $entryDraftModified);
-  const errorCount = $derived(
-    Object.values($entryDraft?.validities ?? {})
-      .flatMap((validity) => Object.values(validity).map(({ valid }) => !valid))
-      .filter(Boolean).length,
+  /* v8 ignore start -- only read for an existing entry, which has a collection */
+  const entrySummary = $derived(
+    collectionFile
+      ? getCollectionFileLabel(collectionFile)
+      : collection && originalEntry && appLocale.current
+        ? getEntrySummary(collection, originalEntry)
+        : '',
   );
-  const associatedAssets = $derived(
-    collectionName && originalEntry && getAssetFolder({ collectionName, fileName })?.entryRelative
-      ? getAssociatedAssets({ entry: originalEntry, collectionName, fileName, relative: true })
-      : [],
-  );
-  const previewURL = $derived(
-    collection && originalEntry
-      ? getEntryPreviewURL(originalEntry, defaultLocale, collection, collectionFile)
-      : undefined,
+  /* v8 ignore stop */
+  // Heading of the toolbar, also used as the document title while the editor is open
+  const title = $derived(
+    notFound
+      ? ''
+      : isNew
+        ? _('create_entry_title', { values: { name: collectionLabelSingular } })
+        : `${collectionLabel} › ${entrySummary}`,
   );
 
+  $effect(() => {
+    overlayTitle.current = title;
+
+    return () => {
+      overlayTitle.current = '';
+    };
+  });
+  // Saving, deleting or duplicating takes a moment and navigates away when it’s done, so the whole
+  // control group is locked meanwhile rather than just the button that started it
+  const busy = $derived(saving || deleting || duplicating);
+  const controlsDisabled = $derived(disabled || busy);
+  // A change still on its way to the draft counts, so a save can be started right after it
+  const modified = $derived(isNew || entryDraft.modified || fieldUpdatePending.current);
+  const associatedAssets = $derived(
+    collectionName && originalEntry
+      ? getEntryRelativeAssets({ entry: originalEntry, collectionName, fileName })
+      : [],
+  );
+  // Look the entry up in the store rather than using `originalEntry` directly, so the status button
+  // stays in sync when the status is changed elsewhere, e.g. on the Editorial Workflow page
+  const unpublishedEntry = $derived(
+    workflowEnabled.current && collectionName
+      ? getUnpublishedEntryByDraft({ collectionName, fileName, originalEntry })
+      : undefined,
+  );
+  // A collection can opt in or out of Editorial Workflow with its own `publish_mode` option, but an
+  // entry that already has a pull request stays in it until it’s published or discarded
+  const useWorkflow = $derived(!!unpublishedEntry || isWorkflowEnabled(collection));
+  // The `delete` option only blocks taking an entry off the site. Discarding a pull request leaves
+  // the published version untouched, so it stays available even when deletion is disabled
+  const canDelete = $derived(entryCollection?.delete !== false);
+  // The entry can be published from another view, so the check depends on `allEntries`
+  const publishedVersionExists = $derived(checkPublishedVersion(unpublishedEntry));
+  // Deleting an entry that was never published just throws the draft away; anything else takes an
+  // entry off the site
+  const discardsDraft = $derived(!!unpublishedEntry && !publishedVersionExists);
+  // Taking a published entry off the site is a maintainer’s call. An Open Authoring contributor can
+  // discard their own draft, but not propose the removal of something already live
+  const canDeleteEntry = $derived(canDelete && (discardsDraft || !openAuthoring.current));
+  // An entry awaiting deletion is read-only: there’s nothing to save or move through the stages,
+  // only the deletion itself to carry out or call off
+  const pendingDeletion = $derived(isPendingDeletion(unpublishedEntry));
+  // An entry in a read-only collection, or a read-only collection file, can only be viewed: there’s
+  // nothing to save, move through the stages, publish, discard or delete
+  const readonly = $derived(isDraftReadonly(entryDraft.current));
+  // Neither kind of entry can have its content changed
+  const locked = $derived(pendingDeletion || readonly);
+  const canDuplicate = $derived(
+    canDuplicateEntry({
+      collection,
+      collectionFile,
+      isIndexFile,
+      readonly,
+      creationDisabled: collectionState.current.creationDisabled,
+    }),
+  );
+  // A collection file is part of the collection definition, so it can only be discarded
+  const removalMenuItems = $derived(
+    getRemovalMenuItems({
+      publishedVersionExists,
+      canDeleteEntry,
+      isCollectionFile: !!collectionFile,
+      readonly,
+      locked,
+    }),
+  );
+  // The menu item either throws the pull request away or deletes the entry outright, depending on
+  // whether it has been published
+  const discardItemStrings = $derived(
+    getDiscardDialogStrings({ pendingDeletion, publishedVersionExists }),
+  );
+  // The discard dialog is only opened for an entry with a published version. Its text is kept as it
+  // is when the discarded entry goes away, so it doesn’t change while the dialog is closing
+  const discardDialogStrings = $derived(
+    getDiscardDialogStrings({ pendingDeletion, publishedVersionExists: true }),
+  );
+
+  // Keep the deploy state fresh while the editor is open, so a build that finishes in the
+  // background turns the preview link live without the user reloading. The release function is
+  // returned synchronously; awaiting anything first would lose the handle and leak the hold
+  $effect(() => retainDeployPolling());
+
   /**
-   * Go back to the previous page. If the entry is a singleton file, go to the collections list.
-   * Otherwise, go to the collection entries list.
+   * Go back to the previous page: the search results if the entry was opened from them. Otherwise,
+   * if the entry is a singleton file, go to the collections list, or go to the collection entries
+   * list — the folder being browsed for a nested collection, so the user lands where they opened
+   * the entry from.
    */
   const _goBack = () => {
-    goBack(collectionName === '_singletons' ? '/collections' : `/collections/${collectionName}`);
+    const options = { returnTo: isSearchResultsPath };
+
+    if (collectionName === '_singletons') {
+      goBack('/collections', options);
+
+      return;
+    }
+
+    const dirPath = collection && isNestedCollection(collection) ? nestedFilterPath.current : '';
+
+    goBack(
+      dirPath
+        ? encodeRoutePath(`/collections/${collectionName}/filter/${dirPath}`)
+        : `/collections/${collectionName}`,
+      options,
+    );
   };
+
+  /**
+   * Run the given deletion action, then go back to the entry list. The action reports what happened
+   * by returning a toast state, which is shown by the content library page: the editor is closed by
+   * then, so a toast rendered here would go with it. Errors are reported with a toast and leave the
+   * editor open.
+   * @param {() => Promise<Partial<UpdateToastState> | undefined>} action Action to be performed.
+   * @param {string} progressKey I18n key of the message shown while the action is in flight.
+   */
+  const runDeletion = async (action, progressKey) => {
+    /** @type {Partial<UpdateToastState> | undefined} */
+    let toastState;
+
+    progressMessage = progressKey;
+    deleting = true;
+
+    try {
+      toastState = await action();
+    } catch (/** @type {any} */ ex) {
+      deleteErrorMessage = getErrorMessage(ex, 'deleting_entry_failed');
+      showDeleteErrorToast = true;
+      // eslint-disable-next-line no-console
+      console.error(ex);
+
+      return;
+    } finally {
+      deleting = false;
+    }
+
+    if (toastState) {
+      contentUpdatesToast.current = { ...UPDATE_TOAST_DEFAULT_STATE, count: 1, ...toastState };
+    }
+
+    _goBack();
+  };
+
+  /**
+   * Delete the entry. With Editorial Workflow the removal goes through a pull request like any
+   * other change, so the entry stays on the site until that is published. An unpublished entry that
+   * has never been published is discarded instead, because there’s nothing on the configured branch
+   * to remove.
+   */
+  const deleteEntry = async () => {
+    await runDeletion(
+      () =>
+        deleteOrDiscardEntries({
+          drafts: discardsDraft ? [/** @type {UnpublishedEntry} */ (unpublishedEntry)] : [],
+          // The option is only offered for an existing entry
+          items: discardsDraft
+            ? []
+            : [{ entry: /** @type {Entry} */ (originalEntry), assets: associatedAssets }],
+          collection,
+          collectionFile,
+          useWorkflow,
+        }),
+      'workflow.deleting_entry',
+    );
+  };
+
+  /**
+   * Discard the unpublished changes by closing the pull request, leaving the published version of
+   * the entry untouched.
+   */
+  const discardChanges = async () => {
+    await runDeletion(
+      async () => {
+        /* v8 ignore next 3 -- the option is only offered for an unpublished entry */
+        if (unpublishedEntry) {
+          await discardWorkflowEntry(unpublishedEntry);
+        }
+
+        return pendingDeletion ? { deletionCancelled: true } : { discarded: true };
+      },
+      pendingDeletion ? 'workflow.cancelling_deletion' : 'workflow.discarding_changes',
+    );
+  };
+
+  /**
+   * Check whether the entry that has just been saved is complete enough to be handed over for
+   * review. Required fields aren’t enforced while an entry is a draft, so it may have been saved
+   * with some of them empty. The check leaves the editor state alone: nothing is wrong with the
+   * draft as saved, so no errors are shown for it.
+   * @returns {boolean} Result.
+   */
+  const isReadyForReview = () => {
+    const draft = entryDraft.current;
+
+    return !!draft && validateDraft({ draft }).valid;
+  };
+
+  /**
+   * Ask whether the entry just saved should be handed over for review, and wait for the answer.
+   * @returns {Promise<boolean>} `true` if the user wants to send it.
+   */
+  const askForReview = () =>
+    new Promise((resolve) => {
+      resolveReviewPrompt = resolve;
+      showReviewDialog = true;
+    });
 
   /**
    * Save the entry draft.
    * @param {object} [options] Options.
    * @param {boolean} [options.skipCI] Whether to disable automatic deployments for the change.
+   * @param {boolean} [options.overwrite] Whether to save over someone else’s change to the entry,
+   * once the user has been asked.
    */
-  const save = async ({ skipCI = undefined } = {}) => {
-    saving = true;
+  const save = async ({ skipCI = undefined, overwrite = false } = {}) => {
+    const draft = entryDraft.current;
 
-    if (!collection) {
+    if (!collection || !draft) {
       return;
     }
 
+    saving = true;
+
     try {
-      const savedEntry = await saveEntry({ skipCI });
+      // A change still on its way to the draft enabled the button, but may turn out to change
+      // nothing, e.g. a trailing space typed in a rich text editor
+      await awaitPendingFieldUpdates();
 
-      if (prefs.closeOnSave ?? true) {
-        _goBack();
-        $entryDraft = null;
-      } else {
-        if (isNew) {
-          // Update the URL
-          goto(`/collections/${collectionName}/entries/${savedEntry.subPath}`, {
-            replaceState: true,
-            notifyChange: false,
-            transitionType: 'backwards',
-          });
+      if (!isNew && !entryDraft.modified) {
+        return;
+      }
+
+      const savedEntry = await saveEntry({ draft, skipCI, overwrite });
+      const savedDraft = /** @type {UnpublishedEntry} */ (savedEntry);
+      let statusChangeFailed = false;
+
+      // Saving with Editorial Workflow leaves the entry as a draft, which nothing on screen says:
+      // it hasn’t been handed to anyone yet, and the status menu that would do it is easy to miss.
+      // Offer it as the next step instead, once, while the entry is still in the drafting stage
+      if (
+        useWorkflow &&
+        savedDraft.workflow?.status === 'draft' &&
+        // An incomplete entry isn’t ready to be handed over; the status menu is still there once
+        // the remaining fields have been filled in
+        isReadyForReview() &&
+        (await askForReview())
+      ) {
+        try {
+          await updateWorkflowStatus(savedDraft, 'pending_review');
+        } catch (/** @type {any} */ ex) {
+          showErrorDialog = true;
+          errorMessage = getWorkflowErrorMessage(ex, 'workflow.status_change_failed');
+          statusChangeFailed = true;
+          // eslint-disable-next-line no-console
+          console.error(ex);
         }
+      }
 
-        // Reset the draft
+      if (isNew) {
+        // Update the URL. A collection file is addressed by its name, while its `subPath` is the
+        // whole file path. This is done even when the editor is about to be closed, so the `new`
+        // route doesn’t stay in the session history: moving forward from the entry list then
+        // reopens the entry that was just created instead of a blank editor
+        goto(
+          encodeRoutePath(
+            `/collections/${collectionName}/entries/${fileName ?? savedEntry.subPath}`,
+          ),
+          { replaceState: true, notifyChange: false },
+        );
+      }
+
+      // The entry itself is saved, so a failed status change leaves the editor open rather than
+      // navigating away from something the user may want to retry from the status menu
+      if ((prefs.closeOnSave ?? true) && !statusChangeFailed) {
+        _goBack();
+        entryDraft.current = null;
+      } else {
+        // Reset the draft. The next save compares the draft’s original entry with the branch, so
+        // leaving the pre-save one in place would report the save that just landed as someone
+        // else’s change to the entry
         createDraft({
+          entryDraft,
           collection,
           collectionFile,
           originalEntry: savedEntry,
-          extraValues: $entryDraft?.extraValues,
-          expanderStates: $entryDraft?.expanderStates,
+          extraValues: draft.extraValues,
+          expanderStates: draft.expanderStates,
         });
       }
     } catch (/** @type {any} */ ex) {
-      if (ex.message === 'validation_failed') {
+      const failure = getSaveFailure(ex);
+
+      if (failure.type === 'validation') {
+        errorCount = countInvalidFields(draft.validities);
         showValidationToast = true;
-      } else if (ex.message === 'saving_failed') {
-        showErrorDialog = true;
-        errorMessage = ex.cause?.message ?? ex.message ?? _('unexpected_error');
+      } else if (failure.type === 'conflict') {
+        // Someone else has changed the entry since it was opened; let the user decide
+        saveConflict = { conflict: failure.conflict, skipCI };
+        showConflictDialog = true;
       } else {
         showErrorDialog = true;
-        errorMessage = '';
-        // eslint-disable-next-line no-console
-        console.error(ex);
+        errorMessage = failure.message;
+
+        if (failure.unexpected) {
+          // eslint-disable-next-line no-console
+          console.error(ex);
+        }
       }
     } finally {
       saving = false;
@@ -162,139 +504,58 @@
 </script>
 
 {#snippet overflowButtons()}
-  {@const Component = env.isSmallScreen ? MenuItem : Button}
-  {@const canDuplicate =
-    !isIndexFile &&
-    entryCollection?.duplicate !== false &&
-    !$collectionState.creationDisabled &&
-    // @todo Enable duplication for Hugo’s page bundles = the `path` option. We need to
-    // duplicate assets along with the entry.
-    // @see https://github.com/sveltia/sveltia-cms/issues/526
-    !entryCollection?.path}
-  {@const canDelete = entryCollection?.delete !== false}
-  {#if canDuplicate}
-    <Component
-      variant="ghost"
-      label={_('duplicate')}
-      aria-label={_('duplicate_entry')}
-      onclick={() => {
-        goto(`/collections/${collectionName}/new`, {
-          replaceState: true,
-          notifyChange: false,
-          transitionType: 'forwards',
-        });
-        duplicateDraft();
-      }}
-    />
-  {/if}
-  {#if canDelete}
-    <Component
-      variant="ghost"
-      label={_('delete')}
-      aria-label={_('delete_entry')}
-      onclick={() => {
-        showDeleteDialog = true;
-      }}
+  {#if !disabled && collection && originalEntry}
+    <PreviewLinkButton
+      entry={originalEntry}
+      locale={defaultLocale}
+      {collection}
+      {collectionFile}
+      pullRequest={unpublishedEntry?.workflow?.pullRequest}
+      iconic={!env.isLargeScreen}
+      as={env.isSmallScreen ? 'menuitem' : 'button'}
     />
   {/if}
 {/snippet}
 
-<Toolbar variant="primary" aria-label={_('primary')}>
+<Toolbar variant="primary" ariaLabel={_('primary')}>
   <BackButton
     aria-label={_('cancel_editing')}
-    useShortcut={prefs.closeWithEscape}
+    useShortcut={prefs.closeWithEscape && !activeInlineEditors.current}
     onclick={() => {
       _goBack();
     }}
   />
-  <h2 role="none">
-    {#if !notFound}
-      <TruncatedText>
-        {#if isNew}
-          {_('create_entry_title', { values: { name: collectionLabelSingular } })}
-        {:else}
-          {@const entrySummary = collectionFile
-            ? getCollectionFileLabel(collectionFile)
-            : collection && originalEntry && appLocale.current
-              ? getEntrySummary(collection, originalEntry)
-              : ''}
-          {#if env.isSmallScreen}
-            {entrySummary}
+  {#if env.isSmallScreen}
+    <Spacer flex />
+  {:else}
+    <h2 role="none">
+      {#if !notFound}
+        <TruncatedText>
+          {#if isNew}
+            {title}
           {:else}
-            {_('edit_entry_title', {
-              values: { collection: collectionLabel, entry: entrySummary },
-            })}
+            <bdi>{collectionLabel}</bdi> › <bdi>{entrySummary}</bdi>
           {/if}
-        {/if}
-      </TruncatedText>
-    {/if}
-  </h2>
-  {#if !disabled && previewURL}
-    <Button
-      variant="tertiary"
-      label={_('view_on_live_site')}
-      onclick={() => {
-        openNewTab(previewURL);
-      }}
-    />
+        </TruncatedText>
+      {/if}
+    </h2>
   {/if}
-  {#if !env.isSmallScreen && !disabled && !collectionFile && !isNew}
+  {#if !env.isSmallScreen}
     {@render overflowButtons()}
   {/if}
-  <MenuButton
-    {disabled}
-    variant="ghost"
-    iconic
-    popupPosition="bottom-right"
-    aria-label={_('show_editor_options')}
-    bind:this={menuButton}
-  >
-    {#snippet popup()}
-      <Menu aria-label={_('editor_options')}>
-        {#if env.isSmallScreen && !disabled && !collectionFile && !isNew}
-          {@render overflowButtons()}
-        {/if}
-        <MenuItem
-          label={_('edit_slug')}
-          disabled={!!collectionFile || isNew || isIndexFile || entryCollection?.delete === false}
-          onclick={() => {
-            showEditSlugDialog = true;
-          }}
-        />
-
-        {#if !(env.isSmallScreen || env.isMediumScreen)}
-          <Divider />
-          <MenuItemCheckbox
-            label={_('show_preview')}
-            checked={$entryEditorSettings?.showPreview}
-            disabled={!canPreview}
-            onChange={() => {
-              entryEditorSettings.update((view = {}) => ({
-                ...view,
-                showPreview: !view.showPreview,
-              }));
-            }}
-          />
-          <MenuItemCheckbox
-            label={_('sync_scrolling')}
-            checked={$entryEditorSettings?.syncScrolling}
-            disabled={!canPreview && Object.keys($entryDraft?.currentValues ?? {}).length === 1}
-            onChange={() => {
-              entryEditorSettings.update((view = {}) => ({
-                ...view,
-                syncScrolling: !view.syncScrolling,
-              }));
-            }}
-          />
-        {/if}
-      </Menu>
-    {/snippet}
-  </MenuButton>
-  {#if $skipCIConfigured}
+  {#if unpublishedEntry && !locked}
+    <EntryStatusMenu entry={unpublishedEntry} disabled={controlsDisabled} />
+  {/if}
+  {#if locked}
+    <!-- Nothing to save: the entry is read-only, or shown for reference until the deletion is
+    carried out -->
+  {:else if skipCIConfigured.current && !useWorkflow}
     <SplitButton
       variant="primary"
-      label={_($skipCIEnabled ? (saving ? 'saving' : 'save') : saving ? 'publishing' : 'publish')}
-      disabled={disabled || !modified || saving}
+      label={_(
+        skipCIEnabled.current ? (saving ? 'saving' : 'save') : saving ? 'publishing' : 'publish',
+      )}
+      disabled={controlsDisabled || !modified}
       keyShortcuts="Accel+S"
       onclick={() => {
         save();
@@ -304,9 +565,9 @@
         <!-- Show the opposite option: if automatic deployments are enabled, allow to disable it -->
         <Menu>
           <MenuItem
-            label={_($skipCIEnabled ? 'save_and_publish' : 'save_without_publishing')}
+            label={_(skipCIEnabled.current ? 'save_and_publish' : 'save_without_publishing')}
             onclick={() => {
-              save({ skipCI: !$skipCIEnabled });
+              save({ skipCI: !skipCIEnabled.current });
             }}
           />
         </Menu>
@@ -316,23 +577,154 @@
     <Button
       variant="primary"
       label={_(saving ? 'saving' : 'save')}
-      disabled={disabled || !modified || saving}
+      disabled={controlsDisabled || !modified}
       keyShortcuts="Accel+S"
       onclick={() => {
         save();
       }}
     />
   {/if}
+  {#if unpublishedEntry && !readonly}
+    <PublishEntryButton entry={unpublishedEntry} disabled={controlsDisabled} {modified} />
+  {/if}
+  <MenuButton
+    disabled={controlsDisabled}
+    variant="ghost"
+    iconic
+    popupPosition="bottom-right"
+    aria-label={_('show_editor_options')}
+    onclick={updateResetAvailability}
+    onkeydown={updateResetAvailability}
+    bind:this={menuButton}
+  >
+    {#snippet popup()}
+      <Menu ariaLabel={_('editor_options')}>
+        {#if env.isSmallScreen}
+          {@render overflowButtons()}
+          <!-- The sidebar doesn’t fit on a small screen, so its panels open in a bottom sheet. The
+            menu can’t be opened while the toolbar is disabled -->
+          {#if !notFound}
+            {#each getSidebarPanels(entryDraft.current) as { key, disabled: panelDisabled } (key)}
+              <MenuItem
+                label={_(`entry_sidebar.${key}.title`)}
+                disabled={panelDisabled}
+                onclick={() => {
+                  showSidebarPanel(key);
+                }}
+              />
+            {/each}
+            <Divider />
+          {/if}
+        {/if}
+        {#if !disabled && !isNew}
+          {#if canDuplicate}
+            <MenuItem
+              variant="ghost"
+              disabled={controlsDisabled}
+              label={_('duplicate')}
+              aria-label={_('duplicate_entry')}
+              onclick={async () => {
+                duplicating = true;
+
+                // The original’s own assets are copied along with the entry, so this can take a
+                // moment. The URL is updated only once the duplicate is in place
+                const duplicated = !!(await duplicateDraft(entryDraft));
+
+                duplicating = false;
+
+                if (duplicated) {
+                  goto(`/collections/${collectionName}/new`, {
+                    replaceState: true,
+                    notifyChange: false,
+                    transitionType: 'forwards',
+                  });
+                }
+              }}
+            />
+          {/if}
+          {#if removalMenuItems.discard}
+            <MenuItem
+              variant="ghost"
+              disabled={controlsDisabled}
+              label={discardItemStrings.label}
+              aria-label={discardItemStrings.title}
+              onclick={() => {
+                if (publishedVersionExists) {
+                  showDiscardDialog = true;
+                } else {
+                  showDeleteDialog = true;
+                }
+              }}
+            />
+          {/if}
+        {/if}
+        {#if removalMenuItems.delete}
+          <MenuItem
+            label={_('delete')}
+            onclick={() => {
+              showDeleteDialog = true;
+            }}
+          />
+        {/if}
+        <!-- A shortcut to the Slug panel, which a small screen lists above along with the other
+          sidebar panels -->
+        {#if !env.isSmallScreen}
+          <MenuItem
+            label={_('edit_slug')}
+            disabled={!canUpdateSlug(entryDraft.current)}
+            onclick={() => {
+              showSidebarPanel('slug');
+            }}
+          />
+        {/if}
+        <!-- A small screen lists the sidebar panels above, ending with a separator of their own -->
+        <!-- The fork hides every Revert command; see `docs/fork.md` -->
+        <ResetMenuItems
+          scope="entry"
+          separator={!env.isSmallScreen || (!disabled && !isNew)}
+          available={{
+            restore: resetAvailability.restore && !locked,
+            clear: resetAvailability.clear && !locked,
+          }}
+          onSelect={(action) => {
+            resetAction = action;
+            showResetDialog = true;
+          }}
+        />
+        {#if deployPollTimedOut.current}
+          <Divider />
+          <MenuItem
+            label={_('deploy_preview.check_again')}
+            onclick={() => {
+              recheckDeployments();
+            }}
+          />
+        {/if}
+        {#if env.isLargeScreen}
+          <ViewMenuItems />
+        {/if}
+      </Menu>
+    {/snippet}
+  </MenuButton>
 </Toolbar>
 
 <Toast bind:show={showValidationToast}>
   <Alert status="error">
     {_('entry_validation_errors', { values: { count: errorCount } })}
+    <Button
+      variant="secondary"
+      size="small"
+      label={_('show_errors')}
+      onclick={() => {
+        showValidationToast = false;
+        showSidebarPanel('validation');
+      }}
+    />
   </Alert>
 </Toast>
 
-<Toast id={$copyFromLocaleToast.id} bind:show={$copyFromLocaleToast.show}>
-  {@const { status, message, count, sourceLanguage } = $copyFromLocaleToast}
+<Toast id={copyFromLocaleToast.current.id} bind:show={copyFromLocaleToast.current.show}>
+  {@const { status, message, count, sourceLanguage } = copyFromLocaleToast.current}
   <Alert {status}>
     {_(`editor.${message}`, {
       values: {
@@ -343,29 +735,80 @@
   </Alert>
 </Toast>
 
-<EditSlugDialog bind:open={showEditSlugDialog} />
+<ResetDialog
+  bind:open={showResetDialog}
+  action={resetAction}
+  onClose={() => {
+    menuButton?.focus();
+  }}
+/>
 
 <ConfirmationDialog
-  bind:open={showDeleteDialog}
-  title={_('delete_entry')}
-  okLabel={_('delete')}
-  onOk={async () => {
-    if (originalEntry) {
-      await deleteEntries([originalEntry], associatedAssets);
-    }
+  bind:open={showReviewDialog}
+  title={_('workflow.send_for_review')}
+  okLabel={_('workflow.send_for_review')}
+  cancelLabel={_('later')}
+  onOk={() => {
+    resolveReviewPrompt?.(true);
+  }}
+  onClose={() => {
+    // Covers the Later button, the Escape key and any other way out. Sending has already settled
+    // the prompt, so this leaves it alone
+    resolveReviewPrompt?.(false);
+  }}
+>
+  {_('workflow.confirm_sending_for_review')}
+</ConfirmationDialog>
 
-    _goBack();
+<DeleteEntryDialog
+  bind:open={showDeleteDialog}
+  {discardsDraft}
+  {useWorkflow}
+  withAssets={!!associatedAssets.length}
+  onOk={async () => {
+    await deleteEntry();
+  }}
+  onClose={() => {
+    menuButton?.focus();
+  }}
+/>
+
+<ConfirmationDialog
+  bind:open={showDiscardDialog}
+  title={discardDialogStrings.title}
+  okLabel={discardDialogStrings.label}
+  onOk={async () => {
+    await discardChanges();
   }}
   onClose={() => {
     menuButton?.focus();
   }}
 >
-  {_(
-    associatedAssets.length
-      ? 'confirm_deleting_this_entry_with_assets'
-      : 'confirm_deleting_this_entry',
-  )}
+  {discardDialogStrings.message}
 </ConfirmationDialog>
+
+<SaveConflictDialog
+  bind:open={showConflictDialog}
+  conflict={saveConflict?.conflict}
+  onOverwrite={async () => {
+    await save({ skipCI: saveConflict?.skipCI, overwrite: true });
+  }}
+  onClose={() => {
+    menuButton?.focus();
+  }}
+/>
+
+<!-- Shown while the request is in flight. The result is reported by the content library page,
+because this toast goes away with the editor once the deletion has completed -->
+{#if progressMessage}
+  <Toast id={progressMessage} show={deleting} duration={0}>
+    <Alert status="info">{_(progressMessage)}</Alert>
+  </Toast>
+{/if}
+
+<Toast bind:show={showDeleteErrorToast}>
+  <Alert status="error">{deleteErrorMessage}</Alert>
+</Toast>
 
 <!-- @todo make the error message more informative -->
 <AlertDialog

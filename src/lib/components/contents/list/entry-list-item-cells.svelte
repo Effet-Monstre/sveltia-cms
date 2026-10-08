@@ -4,21 +4,26 @@
   reorder list row.
 -->
 <script>
-  import { locale as appLocale } from '@sveltia/i18n';
+  import { _, locale as appLocale } from '@sveltia/i18n';
   import { Checkbox, GridCell, Icon, TruncatedText } from '@sveltia/ui';
 
-  import Image from '$lib/components/assets/shared/image.svelte';
+  import EntryThumbnail from '$lib/components/contents/shared/entry-thumbnail.svelte';
+  import StatusBadge from '$lib/components/workflow/status-badge.svelte';
   import { selectedEntryIdSet } from '$lib/services/contents/collection/entries';
   import {
     getIndexFile,
     isCollectionIndexFile,
   } from '$lib/services/contents/collection/entries/index-file';
-  import { getEntryThumbnail } from '$lib/services/contents/entry/assets';
   import { getEntrySummary } from '$lib/services/contents/entry/summary';
   import { env } from '$lib/services/user/env.svelte';
 
   /**
-   * @import { Entry, InternalEntryCollection, ViewType } from '$lib/types/private';
+   * @import {
+   * Entry,
+   * InternalEntryCollection,
+   * UnpublishedEntry,
+   * ViewType,
+   * } from '$lib/types/private';
    */
 
   /**
@@ -41,14 +46,23 @@
     onSelect = undefined,
     /* eslint-enable prefer-const */
   } = $props();
+
+  // Editorial Workflow information, only present on an unpublished entry
+  const workflow = $derived(/** @type {UnpublishedEntry} */ (entry).workflow);
+  /* v8 ignore start -- the app locale is always set once the UI strings are loaded */
+  // Plain-text summary naming the selection checkbox, so a screen reader hears which entry it
+  // selects rather than an unlabelled checkbox. `appLocale.current` is a key, because the summary
+  // can include a localized label
+  const summary = $derived(appLocale.current ? getEntrySummary(collection, entry) : '');
+  /* v8 ignore stop */
 </script>
 
 {#if showCheckbox && !(env.isSmallScreen || env.isMediumScreen)}
   <GridCell class="checkbox">
     <Checkbox
-      role="none"
       tabindex="-1"
-      checked={$selectedEntryIdSet.has(entry.id)}
+      ariaLabel={_('select_item', { values: { name: summary } })}
+      checked={selectedEntryIdSet.current.has(entry.id)}
       onChange={({ detail: { checked } }) => {
         onSelect?.(checked);
       }}
@@ -57,24 +71,27 @@
 {/if}
 {#if collection._thumbnailFieldNames.length}
   <GridCell class="image">
-    {#await getEntryThumbnail(collection, entry) then src}
-      {#if src}
-        <Image {src} variant={viewType === 'list' ? 'icon' : 'tile'} cover />
-      {/if}
-    {/await}
+    <EntryThumbnail {collection} {entry} variant={viewType === 'list' ? 'icon' : 'tile'} />
   </GridCell>
 {/if}
 <GridCell class="title">
   <div role="none" class="label">
     <TruncatedText lines={2}>
       {#key appLocale.current}
-        {@html getEntrySummary(collection, entry, { useTemplate: true, allowMarkdown: true })}
+        <bdi>
+          {@html getEntrySummary(collection, entry, { useTemplate: true, allowMarkdown: true })}
+        </bdi>
       {/key}
       {#if isCollectionIndexFile(collection, entry)}
         <Icon name={getIndexFile(collection)?.icon} class="home" />
       {/if}
     </TruncatedText>
   </div>
+</GridCell>
+<GridCell class="status">
+  {#if workflow}
+    <StatusBadge status={workflow.status} />
+  {/if}
 </GridCell>
 
 <style>

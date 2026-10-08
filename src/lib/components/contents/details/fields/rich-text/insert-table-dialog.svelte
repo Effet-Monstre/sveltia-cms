@@ -4,8 +4,8 @@
   text editor.
 -->
 <script>
-  import { Dialog, NumberInput } from '@sveltia/ui';
   import { _ } from '@sveltia/i18n';
+  import { Dialog, NumberInput } from '@sveltia/ui';
 
   /**
    * @typedef {object} Props
@@ -16,7 +16,13 @@
    */
 
   /** @type {Props} */
-  let { open = $bindable(false), onConfirm, onCancel } = $props();
+  let {
+    /* eslint-disable prefer-const */
+    open = $bindable(false),
+    onConfirm,
+    onCancel,
+    /* eslint-enable prefer-const */
+  } = $props();
 
   let rows = $state(3);
   let cols = $state(3);
@@ -77,7 +83,7 @@
   </div>
 </Dialog>
 
-<style lang="scss">
+<style>
   .fields {
     display: table;
     margin: 16px 0 0;

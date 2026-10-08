@@ -7,12 +7,14 @@ describe('Test warnedOnceMap', () => {
   test('should have all deprecation keys set to false initially', () => {
     expect(warnedOnceMap).toEqual({
       slug_length: false,
+      slug_editor_tag: false,
       yaml_quote: false,
       uuid_read_only: false,
       save_all_locales: false,
       automatic_deployments: false,
       multiple_folders_i18n_root: false,
       omit_default_locale_from_filename: false,
+      logo_url: false,
     });
   });
 
@@ -45,6 +47,13 @@ describe('Test warningMessages', () => {
     expect(warningMessages.slug_length).toContain('slug_length');
     expect(warningMessages.slug_length).toContain('deprecated');
     expect(warningMessages.slug_length).toContain('slug.maxlength');
+  });
+
+  test('should contain useful information in slug_editor_tag message', () => {
+    expect(warningMessages.slug_editor_tag).toContain('{{fields._slug}}');
+    expect(warningMessages.slug_editor_tag).toContain('deprecated');
+    expect(warningMessages.slug_editor_tag).toContain('editable: true');
+    expect(warningMessages.slug_editor_tag).toContain('i18n: true');
   });
 
   test('should contain useful information in yaml_quote message', () => {
@@ -83,6 +92,14 @@ describe('Test warningMessages', () => {
     expect(warningMessages.omit_default_locale_from_filename).toContain(
       'omit_default_locale_from_file_path',
     );
+  });
+
+  test('should contain useful information in logo_url message', () => {
+    expect(warningMessages.logo_url).toContain('logo_url');
+    expect(warningMessages.logo_url).toContain('deprecated');
+    expect(warningMessages.logo_url).toContain('logo.src');
+    // It isn’t scheduled for removal in 1.0
+    expect(warningMessages.logo_url).toContain('a future version');
   });
 });
 

@@ -9,36 +9,44 @@
 <script>
   import { _ } from '@sveltia/i18n';
   import { ConfirmationDialog, TextArea } from '@sveltia/ui';
+  import { sleep } from '@sveltia/utils/misc';
   import { flushSync, getContext } from 'svelte';
+  import { flip } from 'svelte/animate';
 
   import SelectAssetsDialog from '$lib/components/assets/browser/select-assets-dialog.svelte';
   import ConflictResolutionDialog from '$lib/components/assets/shared/conflict-resolution-dialog.svelte';
   import DropZone from '$lib/components/assets/shared/drop-zone.svelte';
-  import OversizeAlertDialog from '$lib/components/assets/shared/oversize-alert-dialog.svelte';
+  import RejectedFilesAlertDialog from '$lib/components/assets/shared/rejected-files-alert-dialog.svelte';
   import FileEditorItem from '$lib/components/contents/details/fields/file/file-editor-item.svelte';
   import UploadButton from '$lib/components/contents/details/fields/file/upload-button.svelte';
-  import { entryDraft } from '$lib/services/contents/draft';
-  import { checkDuplicates } from '$lib/services/contents/fields/file/duplicates.svelte';
+  import { getEntryDraftContext } from '$lib/services/contents/draft/state.svelte';
   import {
-    getAssetLibraryFolderMap,
-    getTargetFolderPath,
-    listAssets,
-  } from '$lib/services/contents/fields/file/helper';
-  import { getUnsavedAssets, processResource } from '$lib/services/contents/fields/file/process';
-  import { allCloudStorageServices } from '$lib/services/integrations/media-libraries/cloud';
-  import { getDefaultMediaLibraryOptions } from '$lib/services/integrations/media-libraries/default';
-  import { isMultiple } from '$lib/services/integrations/media-libraries/shared';
-  import { SUPPORTED_IMAGE_TYPES } from '$lib/services/utils/media/image';
+    addMultiValueItems,
+    moveMultiValueItem,
+    removeMultiValueItem,
+  } from '$lib/services/contents/draft/update/list';
+  import { checkDuplicates } from '$lib/services/contents/fields/file/duplicates.svelte';
+  import { getTargetFolderPath, listAssets } from '$lib/services/contents/fields/file/helpers';
+  import { getUnsavedAssets } from '$lib/services/contents/fields/file/process';
+  import {
+    getMediaFieldAssetOptions,
+    getRejectedFileNames,
+    processResources,
+    toFieldValue,
+  } from '$lib/services/contents/fields/file/resources';
+  import { getAcceptedFileTypes } from '$lib/services/integrations/media-libraries/default';
+  import { isMultiple } from '$lib/services/integrations/media-libraries/multiple';
+  import { createDragSorter } from '$lib/services/utils/drag-sorting.svelte';
+  import { watchAsync } from '$lib/services/utils/state.svelte';
 
   /**
    * @import {
    * Asset,
-   * AssetFolderInfo,
    * FieldEditorContext,
    * FieldEditorProps,
    * SelectedResource,
    * } from '$lib/types/private';
-   * @import { MediaField } from '$lib/types/public';
+   * @import { FileField, MediaField } from '$lib/types/public';
    */
 
   /**
@@ -47,9 +55,16 @@
    * @property {string | string[] | undefined} currentValue Field value.
    */
 
+  const entryDraft = getEntryDraftContext();
+
   /** @type {FieldEditorContext} */
-  const { fieldContext = undefined } = getContext('field-editor') ?? {};
+  const {
+    valueStoreKey = 'currentValues',
+    fieldContext = undefined,
+    parentComponentNames = [],
+  } = getContext('field-editor') ?? {};
   const inEditorComponent = fieldContext === 'rich-text-editor-component';
+  const componentName = parentComponentNames.at(-1);
 
   /** @type {FieldEditorProps & Props} */
   let {
@@ -69,7 +84,7 @@
   let showSelectAssetsDialog = $state(false);
   let replaceMode = $state(false);
   let replaceIndex = $state(-1);
-  let showOversizeAlert = $state(false);
+  let showRejectedFilesAlert = $state(false);
   let showPhotoCreditDialog = $state(false);
   let photoCredit = $state('');
   /** @type {DropZone | undefined} */
@@ -77,10 +92,14 @@
   let processing = $state(false);
   /** @type {string[]} */
   let oversizedFileNames = $state([]);
+  /** @type {string[]} */
+  let invalidFileNames = $state([]);
   /** @type {File[]} */
   let pendingFiles = $state([]);
   /** @type {Asset[]} */
   let unsavedAssets = $state([]);
+  /** @type {HTMLElement | undefined} */
+  let itemList = $state();
 
   const {
     widget: fieldType,
@@ -89,31 +108,61 @@
     accept,
     choose_url: canEnterURL = true,
   } = $derived(fieldConfig);
-  const entry = $derived($entryDraft?.originalEntry);
-  const collectionName = $derived($entryDraft?.collectionName ?? '');
-  const fileName = $derived($entryDraft?.fileName);
-  const isIndexFile = $derived($entryDraft?.isIndexFile ?? false);
+  /** Whether the field takes a folder instead of a file, with the File field’s own option. */
+  const selectFolder = $derived(
+    fieldType === 'file' && /** @type {FileField} */ (fieldConfig).select_folder === true,
+  );
+  const entry = $derived(entryDraft.current?.originalEntry);
+  /* v8 ignore start -- the editor is only rendered while the draft is there */
+  const collectionName = $derived(entryDraft.current?.collectionName ?? '');
+  const fileName = $derived(entryDraft.current?.fileName);
+  const isIndexFile = $derived(entryDraft.current?.isIndexFile ?? false);
+  /* v8 ignore stop */
   const isImageField = $derived(fieldType === 'image');
   const kind = $derived(isImageField ? 'image' : undefined);
-  const defaultLibraryOptions = $derived(getDefaultMediaLibraryOptions({ fieldConfig }));
-  const libraryConfig = $derived(defaultLibraryOptions.config);
-  const assetLibraryFolderMap = $derived(
-    getAssetLibraryFolderMap({ collectionName, fileName, typedKeyPath, isIndexFile }),
+  const assetOptions = $derived(
+    getMediaFieldAssetOptions({
+      collectionName,
+      fileName,
+      isIndexFile,
+      componentName,
+      typedKeyPath,
+      fieldConfig,
+    }),
   );
-  const targetFolder = $derived(
-    /** @type {AssetFolderInfo} */ (
-      Object.values(assetLibraryFolderMap).find(({ enabled }) => enabled)?.folder
-    ),
+  const libraryConfig = $derived(assetOptions.libraryConfig);
+  // An image field accepts HEIC photos only if they’re converted on upload
+  const acceptedTypes = $derived(
+    getAcceptedFileTypes({
+      accept,
+      image: isImageField,
+      transformations: libraryConfig.transformations,
+    }),
   );
+  const assetLibraryFolderMap = $derived(assetOptions.folderMap);
+  const targetFolder = $derived(assetOptions.folder);
   const targetFolderPath = $derived(
-    getTargetFolderPath({ entry: $entryDraft?.originalEntry, folder: targetFolder }),
+    getTargetFolderPath({ entry: entryDraft.current?.originalEntry, folder: targetFolder }),
   );
   const listedAssets = $derived(
-    listAssets({ kind, folder: targetFolder, folderPath: targetFolderPath, unsavedAssets }),
+    listAssets({
+      kind,
+      folder: targetFolder,
+      folderPath: targetFolderPath,
+      unsavedAssets,
+      slugificationEnabled: libraryConfig.slugify_filename,
+    }),
   );
-  // Ignore the `multiple` option when the field is used in a rich text editor component
-  const multiple = $derived(isMultiple(fieldConfig) && !inEditorComponent);
+  const multiple = $derived(isMultiple(fieldConfig));
+  /* v8 ignore start -- only read while the list of files is rendered */
+  const itemCount = $derived(Array.isArray(currentValue) ? currentValue.length : 0);
+  /* v8 ignore stop */
   const maxSize = $derived(/** @type {number} */ (libraryConfig.max_file_size));
+  /**
+   * Whether a single file can be removed here. A required field can’t go without one, and within a
+   * rich text editor component or a list item it’s the component or the item that gets removed.
+   * @see https://github.com/sveltia/sveltia-cms/issues/372
+   */
   const showRemoveButton = $derived(
     !required &&
       (!fieldContext ||
@@ -124,21 +173,17 @@
     readonly,
     invalid,
     required,
-    showRemoveButton,
     collectionName,
     fileName,
+    componentName,
     typedKeyPath,
     entry,
   });
-  const enabledCloudServiceEntries = $derived(
-    Object.entries(allCloudStorageServices).filter(
-      ([, { isEnabled }]) => isEnabled?.(fieldConfig) ?? true,
-    ),
-  );
+  const enabledCloudServiceEntries = $derived(assetOptions.cloudServiceEntries);
   /**
    * Whether the default (internal) media library is available as a storage provider.
    */
-  const isDefaultLibraryAvailable = $derived(defaultLibraryOptions.enabled && !!targetFolder);
+  const isDefaultLibraryAvailable = $derived(assetOptions.enabled && !!targetFolder);
   /**
    * The total number of available media storage providers (default and/or cloud).
    */
@@ -147,9 +192,9 @@
   );
   /**
    * Disable the drop zone if there are no providers or multiple providers are available, to avoid
-   * confusion about where dropped files will be stored.
+   * confusion about where dropped files will be stored. A folder can’t be dropped at all.
    */
-  const allowDrop = $derived(totalProviders === 1);
+  const allowDrop = $derived(totalProviders === 1 && !selectFolder);
 
   /**
    * Reset the current selection.
@@ -168,7 +213,11 @@
    * @param {SelectedResource[]} selectedResources Selected resources.
    */
   const onResourcesSelect = async (selectedResources) => {
-    if (!$entryDraft) {
+    const draft = entryDraft.current;
+
+    // The dialog is closed along with the editor, so this is only a race with the editor closing
+    /* v8 ignore next 3 */
+    if (!draft) {
       return;
     }
 
@@ -178,66 +227,57 @@
     resetSelection();
     processing = true;
     oversizedFileNames = [];
+    invalidFileNames = [];
 
-    const resources = await Promise.all(
-      selectedResources.map((resource) =>
-        processResource({ draft: $entryDraft, resource, libraryConfig }),
-      ),
-    );
+    // The field must not stay in the processing state if something goes wrong along the way
+    try {
+      const resources = await processResources({
+        draft,
+        resources: selectedResources,
+        folder: targetFolder,
+        libraryConfig,
+      });
 
-    /** @type {string[]} */
-    const credits = [];
-    let hasValidResource = false;
+      const values = resources.flatMap(({ value }) => value ?? []);
+      const hasValidResource = !!values.length;
 
-    const lastIndex = multiple
-      ? (Object.keys($entryDraft.currentValues[locale])
-          .filter((key) => key.startsWith(`${keyPath}.`))
-          .map((key) => Number(key.replace(`${keyPath}.`, '')))
-          .pop() ?? -1)
-      : -1;
-
-    resources.forEach(({ value, credit, oversizedFileName }, index) => {
-      if (value) {
-        hasValidResource = true;
-
-        if (multiple) {
-          const targetIndex = replaceMode ? replaceIndex : lastIndex + 1 + index;
-
-          $entryDraft.currentValues[locale][`${keyPath}.${targetIndex}`] = value;
-        } else {
-          // Encode spaces as `%20` when the field is used in the rich text editor component to
-          // avoid issues with Markdown parsers that do not support unencoded spaces in URLs.
-          currentValue = inEditorComponent ? value.replaceAll(' ', '%20') : value;
-        }
+      if (multiple) {
+        addMultiValueItems({
+          draft,
+          locale,
+          valueStoreKey,
+          keyPath,
+          newValues: values,
+          replaceIndex: replaceMode ? replaceIndex : undefined,
+        });
+      } else if (hasValidResource) {
+        // A single-value field takes the last file, like it would if they were picked in turn
+        currentValue = toFieldValue(/** @type {string} */ (values.at(-1)), inEditorComponent);
       }
 
-      if (credit) {
-        credits.push(credit);
+      const credits = resources.flatMap(({ credit }) => credit || []);
+
+      ({ oversizedFileNames, invalidFileNames } = getRejectedFileNames(resources));
+
+      // Restore the previous value if no valid resources were processed, so that a failed
+      // upload/replace doesn’t leave an empty or invalid reference in the YAML
+      if (!hasValidResource && !multiple && previousValue !== undefined) {
+        currentValue = previousValue;
       }
 
-      if (oversizedFileName) {
-        oversizedFileNames.push(oversizedFileName);
+      if (credits.length) {
+        photoCredit = credits.join('\n');
+        showPhotoCreditDialog = true;
+      } else {
+        photoCredit = '';
       }
-    });
 
-    // Restore the previous value if no valid resources were processed, so that a failed
-    // upload/replace doesn’t leave an empty or invalid reference in the YAML
-    if (!hasValidResource && !multiple && previousValue !== undefined) {
-      currentValue = previousValue;
+      if (oversizedFileNames.length || invalidFileNames.length) {
+        showRejectedFilesAlert = true;
+      }
+    } finally {
+      processing = false;
     }
-
-    if (credits.length) {
-      photoCredit = credits.join('\n');
-      showPhotoCreditDialog = true;
-    } else {
-      photoCredit = '';
-    }
-
-    if (oversizedFileNames.length) {
-      showOversizeAlert = true;
-    }
-
-    processing = false;
   };
 
   /**
@@ -249,6 +289,9 @@
     if (!files.length) {
       return;
     }
+
+    // Dropped files are added, not taken as a replacement for the file last replaced
+    replaceMode = false;
 
     if (isDefaultLibraryAvailable) {
       const replace = await checkDuplicates({ files, listedAssets });
@@ -268,63 +311,79 @@
 
   /**
    * Remove an item from the list.
+   *
+   * The new list is deliberately not assigned to {@link currentValue}: `<FieldEditor>` binds the
+   * prop with a getter that recomputes it from the draft, so writing to it here would be discarded
+   * anyway. Updating the draft is what makes the list re-render.
    * @param {number} index Index of the item to remove.
    */
   const removeItem = (index) => {
-    if (!$entryDraft) {
+    const draft = entryDraft.current;
+
+    // The items are gone along with the draft, so this is only a race with the editor closing
+    /* v8 ignore next 3 */
+    if (!draft) {
       return;
     }
 
-    const valueMap = $state.snapshot($entryDraft.currentValues[locale]);
-    /** @type {string[]} */
-    const updatedValue = [];
-
-    for (let i = 0; ; i += 1) {
-      const currentKey = `${keyPath}.${i}`;
-      const nextKey = `${keyPath}.${i + 1}`;
-
-      if (i < index) {
-        updatedValue.push(valueMap[currentKey]);
-      } else if (nextKey in valueMap) {
-        updatedValue.push(valueMap[nextKey]);
-        $entryDraft.currentValues[locale][currentKey] = valueMap[nextKey];
-      } else {
-        $entryDraft.currentValues[locale][currentKey] = null;
-        delete $entryDraft.currentValues[locale][currentKey];
-        break;
-      }
-    }
-
-    currentValue = Object.values(updatedValue);
+    removeMultiValueItem({ draft, locale, valueStoreKey, keyPath, index });
   };
 
   /**
-   * Move an item down in the list.
-   * @param {number} index Index of the item to move down.
+   * Move an item to another position in the list.
+   * @param {number} from Source index.
+   * @param {number} to Destination index.
    */
-  const moveDown = (index) => {
-    if (!$entryDraft) {
+  const moveItem = (from, to) => {
+    const draft = entryDraft.current;
+
+    // The items are gone along with the draft, so this is only a race with the editor closing
+    /* v8 ignore next 3 */
+    if (!draft) {
       return;
     }
 
-    [
-      $entryDraft.currentValues[locale][`${keyPath}.${index}`],
-      $entryDraft.currentValues[locale][`${keyPath}.${index + 1}`],
-    ] = [
-      $entryDraft.currentValues[locale][`${keyPath}.${index + 1}`],
-      $entryDraft.currentValues[locale][`${keyPath}.${index}`],
-    ];
+    moveMultiValueItem({ draft, locale, valueStoreKey, keyPath, from, to });
   };
 
-  $effect(() => {
-    (async () => {
-      if ($entryDraft?.files) {
-        unsavedAssets = await getUnsavedAssets({ draft: $entryDraft, targetFolderPath });
-      } else {
-        unsavedAssets = [];
-      }
-    })();
+  const sorter = createDragSorter({
+    /**
+     * Get the number of items in the list.
+     * @returns {number} Item count.
+     */
+    getItemCount: () => itemCount,
+    /**
+     * Get the list element.
+     * @returns {HTMLElement | undefined} Element.
+     */
+    getListElement: () => itemList,
+    onMove: moveItem,
+    /**
+     * Wait for the moved item to be rendered in its new position.
+     * @returns {Promise<void>} Promise.
+     */
+    settle: () => sleep(50),
   });
+
+  // A read started for an earlier state of the draft can be answered after a later one, which
+  // `watchAsync` takes care of
+  watchAsync(
+    () => {
+      const draft = entryDraft.current;
+
+      // The editor is closed along with the draft, so this is only a race with the editor closing
+      /* v8 ignore next 3 */
+      if (!draft) {
+        return undefined;
+      }
+
+      // The draft’s files are read synchronously, so their changes are tracked as well
+      return getUnsavedAssets({ draft, targetFolderPath });
+    },
+    (assets) => {
+      unsavedAssets = assets;
+    },
+  );
 </script>
 
 {#snippet uploadButton()}
@@ -335,11 +394,16 @@
     {processing}
     {isImageField}
     {multiple}
+    {selectFolder}
     bind:showSelectAssetsDialog
     bind:replaceMode
-    onFilePaste={(file) => {
-      onResourcesSelect([{ file, folder: targetFolder }]);
-    }}
+    onFilePaste={selectFolder
+      ? undefined
+      : (file) => {
+          // A pasted file is added, not taken as a replacement for the file last replaced
+          replaceMode = false;
+          onResourcesSelect([{ file, folder: targetFolder }]);
+        }}
   />
 {/snippet}
 
@@ -347,21 +411,37 @@
   {#if !!currentValue?.length && !processing}
     {#if multiple}
       {#if Array.isArray(currentValue)}
-        <div role="none" class="item-list">
-          {#each currentValue as value, index (`${value}|${index}`)}
-            <FileEditorItem
-              {...itemArgs}
-              {value}
-              fieldId="{fieldId}-{index}"
-              onReplace={() => {
-                replaceMode = true;
-                replaceIndex = index;
-                showSelectAssetsDialog = true;
-              }}
-              onRemove={() => removeItem(index)}
-              onMoveUp={index > 0 ? () => moveDown(index - 1) : undefined}
-              onMoveDown={index < currentValue.length - 1 ? () => moveDown(index) : undefined}
-            />
+        <div
+          role="none"
+          class="item-list"
+          bind:this={itemList}
+          ondragovercapture={sorter.onDragOver}
+          ondropcapture={sorter.onDrop}
+        >
+          {#each sorter.displayOrder as index (`${currentValue[index]}|${index}`)}
+            <!--
+              The wrapper is what the `flip` animation moves: `animate:` only works on an element at
+              the top level of a keyed `each` block, not on a component.
+            -->
+            <div role="none" animate:flip={{ duration: 200 }}>
+              <FileEditorItem
+                {...itemArgs}
+                {index}
+                {itemCount}
+                value={currentValue[index]}
+                fieldId="{fieldId}-{index}"
+                dragging={sorter.dragIndex === index}
+                onReplace={() => {
+                  replaceMode = true;
+                  replaceIndex = index;
+                  showSelectAssetsDialog = true;
+                }}
+                onRemove={() => removeItem(index)}
+                onDragStart={() => sorter.onDragStart(index)}
+                onDragEnd={sorter.onDragEnd}
+                onMove={(to, action) => sorter.move(index, to, action)}
+              />
+            </div>
           {/each}
         </div>
         {#if currentValue.length < max}
@@ -377,7 +457,7 @@
           replaceMode = true;
           showSelectAssetsDialog = true;
         }}
-        onRemove={resetSelection}
+        onRemove={showRemoveButton ? resetSelection : undefined}
       />
     {/if}
   {:else}
@@ -386,11 +466,15 @@
 {/snippet}
 
 {#if allowDrop}
+  <!--
+    The drop zone is disabled while an item is being reordered: a reorder drag carries no file, so
+    letting it land anywhere outside the item list would only report an unsupported file type.
+  -->
   <DropZone
     bind:this={dropZone}
     {multiple}
-    disabled={readonly}
-    accept={accept ?? (isImageField ? SUPPORTED_IMAGE_TYPES.join(',') : undefined)}
+    disabled={readonly || sorter.dragIndex !== undefined}
+    accept={acceptedTypes}
     {onDrop}
   >
     {@render content()}
@@ -402,9 +486,10 @@
 <SelectAssetsDialog
   {kind}
   multiple={replaceMode ? false : multiple}
-  {accept}
+  accept={acceptedTypes}
   {canEnterURL}
-  {entryDraft}
+  {selectFolder}
+  draft={entryDraft.current}
   {fieldConfig}
   {assetLibraryFolderMap}
   {enabledCloudServiceEntries}
@@ -415,7 +500,12 @@
 
 <ConflictResolutionDialog />
 
-<OversizeAlertDialog bind:open={showOversizeAlert} {oversizedFileNames} {maxSize} />
+<RejectedFilesAlertDialog
+  bind:open={showRejectedFilesAlert}
+  {oversizedFileNames}
+  {invalidFileNames}
+  {maxSize}
+/>
 
 <ConfirmationDialog
   bind:open={showPhotoCreditDialog}
@@ -445,5 +535,9 @@
     display: flex;
     flex-direction: column;
     gap: 4px;
+
+    & ~ :global([role='button']) {
+      margin-top: calc(4px + var(--sui-focus-ring-width));
+    }
   }
 </style>

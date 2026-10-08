@@ -8,42 +8,62 @@
   import EntryListItem from '$lib/components/contents/list/entry-list-item.svelte';
   import EntryReorderList from '$lib/components/contents/list/entry-reorder-list.svelte';
   import CreateEntryButton from '$lib/components/contents/toolbar/create-entry-button.svelte';
+  import { getGroupLabel, isGroupCollapsed, setGroupCollapsed } from '$lib/services/common/view';
   import { selectedCollection } from '$lib/services/contents/collection';
   import {
-    currentView,
     entryGroups,
     listedEntries,
+    listedUnpublishedEntries,
     reordering,
   } from '$lib/services/contents/collection/view';
+  import { currentView } from '$lib/services/contents/collection/view/settings';
 
   /**
    * @import { Entry, InternalEntryCollection } from '$lib/types/private';
    */
 
   const collection = $derived(
-    /** @type {InternalEntryCollection | undefined} */ ($selectedCollection),
+    /** @type {InternalEntryCollection | undefined} */ (selectedCollection.current),
   );
-  const viewType = $derived($reordering ? 'list' : $currentView.type);
-  const allEntries = $derived($entryGroups.flatMap(({ entries }) => entries));
+  const viewType = $derived(reordering.current ? 'list' : currentView.current.type);
+  const allEntries = $derived(entryGroups.current.flatMap(({ entries }) => entries));
 </script>
 
 <ListContainer aria-label={_('entry_list')}>
   {#if collection}
-    {#if allEntries.length}
+    {#if allEntries.length || listedUnpublishedEntries.current.length}
       {@const { defaultLocale } = collection._i18n}
       <ListingGrid
         {viewType}
         id="entry-list"
         aria-label={_('entries')}
-        aria-rowcount={$listedEntries.length}
+        aria-rowcount={listedEntries.current.length + listedUnpublishedEntries.current.length}
       >
         <!-- @todo Implement custom table column option that can replace summary template -->
-        {#if $reordering}
+        {#if reordering.current}
           <EntryReorderList {collection} {viewType} />
         {:else}
-          {#each $entryGroups as { name, entries } (name)}
+          {#if listedUnpublishedEntries.current.length}
+            <GridBody label={_('workflow.unpublished_entries')}>
+              {#each listedUnpublishedEntries.current as entry (entry.id)}
+                <EntryListItem {collection} {entry} {viewType} />
+              {/each}
+            </GridBody>
+          {/if}
+          {#each entryGroups.current as { name, entries } (name)}
             {#await sleep() then}
-              <GridBody label={name !== '*' ? name : undefined}>
+              <GridBody
+                label={name !== '*'
+                  ? getGroupLabel(name)
+                  : listedUnpublishedEntries.current.length
+                    ? _('workflow.published_entries')
+                    : undefined}
+                collapsible={name !== '*'}
+                expanded={!isGroupCollapsed(currentView.current, name)}
+                onChange={({ detail: { expanded } }) => {
+                  currentView.current = setGroupCollapsed(currentView.current, name, !expanded);
+                }}
+              >
                 <InfiniteScroll
                   items={entries.filter(
                     ({ locales }) =>
@@ -62,7 +82,7 @@
           {/each}
         {/if}
       </ListingGrid>
-    {:else if $listedEntries.length}
+    {:else if listedEntries.current.length}
       <EmptyState>
         <span role="none">{_('no_entries_found')}</span>
       </EmptyState>

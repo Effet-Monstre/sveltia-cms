@@ -2,14 +2,15 @@
   import { _ } from '@sveltia/i18n';
   import { Icon, Menu, MenuItem, Spacer, Toolbar } from '@sveltia/ui';
   import { onMount } from 'svelte';
-  import { get } from 'svelte/store';
 
   import PageContainerMainArea from '$lib/components/common/page-container-main-area.svelte';
   import PageContainer from '$lib/components/common/page-container.svelte';
   import BackButton from '$lib/components/common/page-toolbar/back-button.svelte';
+  import NotFound from '$lib/components/global/not-found.svelte';
   import { panels } from '$lib/components/settings';
   import PanelContainer from '$lib/components/settings/panel-container.svelte';
   import {
+    announcedPageStatus,
     goBack,
     goto,
     parseLocation,
@@ -20,10 +21,10 @@
 
   /** @type {{ key: string, icon: string, component: import('svelte').Component } | undefined} */
   let selectedPanel = $state(undefined);
+  let notFound = $state(false);
 
   /**
    * Navigate to the index page or a specific page given the URL hash.
-   * @todo Show Not Found page.
    */
   const navigate = () => {
     const { path } = parseLocation();
@@ -35,7 +36,12 @@
 
     const { panelKey } = match.groups;
 
-    selectedPanel = panelKey ? get(panels).find((panel) => panel.key === panelKey) : undefined;
+    selectedPanel = panelKey ? panels.current.find((panel) => panel.key === panelKey) : undefined;
+    notFound = !!panelKey && !selectedPanel;
+
+    if (notFound) {
+      announcedPageStatus.current = _('page_not_found');
+    }
   };
 
   onMount(() => {
@@ -57,6 +63,9 @@
           {#if selectedPanel}
             <BackButton onclick={() => goBack('/settings')} />
             <h2 role="none">{_(`prefs.${selectedPanel.key}.title`)}</h2>
+          {:else if notFound}
+            <BackButton onclick={() => goBack('/settings')} />
+            <h2 role="none">{_('page_not_found')}</h2>
           {:else}
             <BackButton onclick={() => goBack('/menu')} />
             <h2 role="none">{_('settings')}</h2>
@@ -68,17 +77,21 @@
         <div role="none" class="wrapper">
           {#if selectedPanel}
             <PanelContainer Panel={selectedPanel.component} />
+          {:else if notFound}
+            <NotFound message={_('page_not_found')} backPath="/settings" />
           {:else}
-            <Menu aria-label={_('settings')}>
-              {#each get(panels) as { key, icon } (key)}
-                <MenuItem
-                  label={_(`prefs.${key}.title`)}
-                  onclick={() => goto(`/settings/${key}`, { transitionType: 'forwards' })}
-                >
-                  {#snippet startIcon()}
-                    <Icon name={icon} />
-                  {/snippet}
-                </MenuItem>
+            <Menu ariaLabel={_('settings')}>
+              {#each panels.current as { key, icon, enabled = true } (key)}
+                {#if enabled}
+                  <MenuItem
+                    label={_(`prefs.${key}.title`)}
+                    onclick={() => goto(`/settings/${key}`, { transitionType: 'forwards' })}
+                  >
+                    {#snippet startIcon()}
+                      <Icon name={icon} />
+                    {/snippet}
+                  </MenuItem>
+                {/if}
               {/each}
             </Menu>
           {/if}

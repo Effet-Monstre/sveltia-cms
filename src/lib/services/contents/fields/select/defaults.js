@@ -1,3 +1,5 @@
+import { getEmptyOptionValue, getOptionValue } from '$lib/services/contents/fields/select/helpers';
+
 /**
  * @import { GetDefaultValueMapFuncArgs } from '$lib/types/private';
  * @import { FieldKeyPath, RelationField, SelectField } from '$lib/types/public';
@@ -11,9 +13,16 @@
 export const getDefaultValueMap = ({ fieldConfig, keyPath, dynamicValue }) => {
   const config = /** @type {RelationField | SelectField} */ (fieldConfig);
   const { default: defaultValue, multiple = false } = config;
+  // A Relation field has no `options`, so its value is always a string
+  const [firstOption] = /** @type {SelectField} */ (config).options ?? [];
 
+  // A default can be given as an option object, whose `value` is what gets saved
   const value =
-    dynamicValue !== undefined ? dynamicValue.split(/,\s*/).map((val) => val.trim()) : defaultValue;
+    dynamicValue !== undefined
+      ? dynamicValue.split(/,\s*/).map((val) => val.trim())
+      : Array.isArray(defaultValue)
+        ? defaultValue.map(getOptionValue)
+        : getOptionValue(defaultValue);
 
   const isArray = Array.isArray(value) && !!value.length;
 
@@ -25,7 +34,9 @@ export const getDefaultValueMap = ({ fieldConfig, keyPath, dynamicValue }) => {
       return { [keyPath]: splitValue[0] || '' };
     }
 
-    return { [keyPath]: value !== undefined ? value : '' };
+    return {
+      [keyPath]: value !== undefined ? value : getEmptyOptionValue(getOptionValue(firstOption)),
+    };
   }
 
   if (isArray) {

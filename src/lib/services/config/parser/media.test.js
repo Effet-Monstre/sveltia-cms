@@ -8,10 +8,12 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 /** @type {Record<string, string>} */
 const mockI18nStrings = {
   'config.error.missing_media_folder': 'Missing media_folder',
-  'config.error.invalid_media_folder': 'Invalid media_folder',
-  'config.error.invalid_public_folder': 'Invalid public_folder',
   'config.error.public_folder_relative_path': 'Public folder cannot use relative paths',
   'config.error.public_folder_absolute_url': 'Public folder cannot be an absolute URL',
+  'config.warning.empty_public_folder': 'Empty public_folder',
+  'config.error.missing_asset_collection_name': 'Missing asset collection name at index {count}',
+  'config.error.invalid_asset_collection_name': 'Invalid asset collection name: {name}',
+  'config.error.duplicate_asset_collection_name': 'Duplicate asset collection name: {name}',
 };
 
 /**
@@ -38,10 +40,6 @@ vi.mock('@sveltia/i18n', () => ({
 }));
 
 const mockGetStore = vi.fn();
-
-vi.mock('svelte/store', () => ({
-  get: mockGetStore,
-}));
 
 vi.mock('$lib/services/integrations/media-libraries/cloud', () => ({
   CLOUD_MEDIA_LIBRARY_NAMES: ['cloudinary', 'uploadcare'],
@@ -96,23 +94,42 @@ describe('parseMediaConfig', () => {
 
       expect(collectors.errors.size).toBe(0);
     });
+  });
 
-    it('should error when media_folder is not a string', async () => {
+  describe('problems the schema reports', () => {
+    it('should leave option types to the schema', async () => {
       const { parseMediaConfig } = await import('./media.js');
       const collectors = createCollectors();
 
       /** @type {any} */
       const config = {
         media_folder: 123,
+        public_folder: 123,
+        asset_collections: {},
       };
 
       parseMediaConfig(config, collectors);
 
-      expect(collectors.errors.size).toBe(1);
+      expect([...collectors.errors]).toEqual([]);
+    });
 
-      const [error] = [...collectors.errors];
+    it('should still report the rules the schema can’t express', async () => {
+      const { parseMediaConfig } = await import('./media.js');
+      const collectors = createCollectors();
 
-      expect(error).toBe('Invalid media_folder');
+      /** @type {any} */
+      const config = {
+        media_folder: '/media',
+        public_folder: './relative',
+        asset_collections: [{ name: 'invalid name', media_folder: '/assets' }],
+      };
+
+      parseMediaConfig(config, collectors);
+
+      const errors = [...collectors.errors];
+
+      expect(errors.some((e) => e.includes('Public folder cannot use relative paths'))).toBe(true);
+      expect(errors.some((e) => e.includes('Invalid asset collection name'))).toBe(true);
     });
   });
 
@@ -259,25 +276,6 @@ describe('parseMediaConfig', () => {
       expect(collectors.errors.size).toBe(0);
     });
 
-    it('should error when public_folder is not a string', async () => {
-      const { parseMediaConfig } = await import('./media.js');
-      const collectors = createCollectors();
-
-      /** @type {any} */
-      const config = {
-        media_folder: '/media',
-        public_folder: 123,
-      };
-
-      parseMediaConfig(config, collectors);
-
-      expect(collectors.errors.size).toBe(1);
-
-      const [error] = [...collectors.errors];
-
-      expect(error).toBe('Invalid public_folder');
-    });
-
     it('should error when public_folder starts with ./', async () => {
       const { parseMediaConfig } = await import('./media.js');
       const collectors = createCollectors();
@@ -355,6 +353,44 @@ describe('parseMediaConfig', () => {
     });
   });
 
+  describe('empty public_folder', () => {
+    it('should warn when public_folder is an empty string', async () => {
+      const { parseMediaConfig } = await import('./media.js');
+      const collectors = createCollectors();
+      /** @type {any} */
+      const config = { media_folder: 'static/images', public_folder: '' };
+
+      parseMediaConfig(config, collectors);
+
+      expect([...collectors.errors]).toEqual([]);
+      expect([...collectors.warnings]).toEqual(['Empty public_folder']);
+    });
+
+    it('should not warn when media_folder is undefined', async () => {
+      const { parseMediaConfig } = await import('./media.js');
+      const collectors = createCollectors();
+      /** @type {any} */
+      const config = { media_library: { name: 'cloudinary' }, public_folder: '' };
+
+      parseMediaConfig(config, collectors);
+
+      expect([...collectors.warnings]).toEqual([]);
+    });
+
+    it('should not warn when public_folder is undefined or non-empty', async () => {
+      const { parseMediaConfig } = await import('./media.js');
+      const collectors = createCollectors();
+
+      parseMediaConfig(/** @type {any} */ ({ media_folder: 'static/images' }), collectors);
+      parseMediaConfig(
+        /** @type {any} */ ({ media_folder: 'static/images', public_folder: '/images' }),
+        collectors,
+      );
+
+      expect([...collectors.warnings]).toEqual([]);
+    });
+  });
+
   describe('combined validation', () => {
     it('should error for both missing media_folder and invalid public_folder', async () => {
       const { parseMediaConfig } = await import('./media.js');
@@ -388,6 +424,141 @@ describe('parseMediaConfig', () => {
       parseMediaConfig(config, collectors);
 
       expect(collectors.errors.size).toBe(0);
+    });
+  });
+
+  describe('asset_collections validation', () => {
+    it('should not error when asset_collections is undefined', async () => {
+      const { parseMediaConfig } = await import('./media.js');
+      const collectors = createCollectors();
+
+      /** @type {any} */
+      const config = {
+        media_folder: '/media',
+      };
+
+      parseMediaConfig(config, collectors);
+
+      expect(collectors.errors.size).toBe(0);
+    });
+
+    it('should error when asset collection name contains invalid characters', async () => {
+      const { parseMediaConfig } = await import('./media.js');
+      const collectors = createCollectors();
+
+      /** @type {any} */
+      const config = {
+        media_folder: '/media',
+        asset_collections: [
+          {
+            name: 'invalid name',
+            media_folder: '/assets',
+          },
+        ],
+      };
+
+      parseMediaConfig(config, collectors);
+
+      expect(collectors.errors.size).toBe(1);
+
+      const [error] = [...collectors.errors];
+
+      expect(error).toContain('Invalid asset collection name');
+    });
+
+    it('should error when asset collection names are duplicated', async () => {
+      const { parseMediaConfig } = await import('./media.js');
+      const collectors = createCollectors();
+
+      /** @type {any} */
+      const config = {
+        media_folder: '/media',
+        asset_collections: [
+          {
+            name: 'images',
+            media_folder: '/assets/images',
+          },
+          {
+            name: 'images',
+            media_folder: '/assets/other',
+          },
+        ],
+      };
+
+      parseMediaConfig(config, collectors);
+
+      expect(collectors.errors.size).toBe(1);
+
+      const [error] = [...collectors.errors];
+
+      expect(error).toContain('Duplicate asset collection name');
+    });
+
+    it('should accept valid asset collection', async () => {
+      const { parseMediaConfig } = await import('./media.js');
+      const collectors = createCollectors();
+
+      /** @type {any} */
+      const config = {
+        media_folder: '/media',
+        asset_collections: [
+          {
+            name: 'images',
+            media_folder: '/assets/images',
+          },
+        ],
+      };
+
+      parseMediaConfig(config, collectors);
+
+      expect(collectors.errors.size).toBe(0);
+    });
+
+    it('should accept multiple valid asset collections', async () => {
+      const { parseMediaConfig } = await import('./media.js');
+      const collectors = createCollectors();
+
+      /** @type {any} */
+      const config = {
+        media_folder: '/media',
+        asset_collections: [
+          {
+            name: 'images',
+            media_folder: '/assets/images',
+          },
+          {
+            name: 'videos',
+            media_folder: '/assets/videos',
+            label: 'Videos',
+          },
+        ],
+      };
+
+      parseMediaConfig(config, collectors);
+
+      expect(collectors.errors.size).toBe(0);
+    });
+
+    it('should report a problem with each asset collection name', async () => {
+      const { parseMediaConfig } = await import('./media.js');
+      const collectors = createCollectors();
+
+      /** @type {any} */
+      const config = {
+        media_folder: '/media',
+        asset_collections: [
+          { name: 'invalid name', media_folder: '/a' },
+          { name: 'images', media_folder: '/b' },
+          { name: 'images', media_folder: '/c' },
+        ],
+      };
+
+      parseMediaConfig(config, collectors);
+
+      const errors = [...collectors.errors];
+
+      expect(errors.some((e) => e.includes('Invalid asset collection name'))).toBe(true);
+      expect(errors.some((e) => e.includes('Duplicate asset collection name'))).toBe(true);
     });
   });
 });

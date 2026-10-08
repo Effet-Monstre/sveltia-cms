@@ -3,20 +3,29 @@
   Render the entry list in reorder mode. Each group is shown as its own `GridBody` with
   drag-and-drop reordering. The flattened ordered entries are published to the `reorderedEntries`
   store so the toolbar Save button can read it.
+
+  There is normally a single, unnamed group because entering reorder mode clears the active
+  grouping. A collection using `reorder: { group: '…' }` is grouped by the named view group instead,
+  in which case dragging is locked within a group: entries are renumbered group by group, and moving
+  an entry across groups wouldn’t update the field that determines which group it belongs to.
 -->
 <script>
   import { GridBody } from '@sveltia/ui';
   import { sleep } from '@sveltia/utils/misc';
   import { onMount } from 'svelte';
+  import { flip } from 'svelte/animate';
 
   import EntryReorderListItem from '$lib/components/contents/list/entry-reorder-list-item.svelte';
-  import { getIndexFile } from '$lib/services/contents/collection/entries/index-file';
-  import { sortEntriesByOrderField } from '$lib/services/contents/collection/entries/reorder';
+  import { getGroupLabel } from '$lib/services/common/view';
+  import { isCollectionIndexFile } from '$lib/services/contents/collection/entries/index-file';
+  import { sortEntriesByOrderField } from '$lib/services/contents/collection/entries/reorder/sort';
   import {
     entryGroups,
+    listedEntryIndexMap,
     reorderDirty,
     reorderedEntries,
   } from '$lib/services/contents/collection/view';
+  import { getDropIndex, getMoveTarget, moveListItem } from '$lib/services/utils/drag-sorting';
 
   /**
    * @import { Entry, InternalEntryCollection, ViewType } from '$lib/types/private';
@@ -31,29 +40,29 @@
   /** @type {Props} */
   const { collection, viewType } = $props();
 
+  // The entry lists, and the entries in them, are kept raw rather than deeply proxied by `$state`:
+  // they’re published to `reorderedEntries`, and the saved entries end up in the entry store, where
+  // the content editor clones them with `structuredClone()`, which throws on a proxy. Each change
+  // therefore replaces the object rather than mutating it
   /**
-   * Mutable per-group entry lists maintained during reorder mode.
+   * Per-group entry lists maintained during reorder mode.
    * @type {{ [groupName: string]: Entry[] }}
    */
-  let reorderGroups = $state({});
+  let reorderGroups = $state.raw({});
 
   /**
-   * Name of the group that contains the currently dragged entry.
-   * @type {string}
+   * The group name and entry order as they were when the current drag started, so that an abandoned
+   * drag can put the entries back, and so drops in any other group can be rejected. `undefined`
+   * while no drag is in progress.
+   * @type {{ name: string, entries: Entry[] } | undefined}
    */
-  let dragGroupName = $state('');
+  let dragOrigin = $state.raw();
 
   /**
-   * Index of the entry currently being dragged within its group.
-   * @type {number | undefined}
+   * The entry currently being dragged.
+   * @type {Entry | undefined}
    */
-  let dragIndex = $state(undefined);
-
-  /**
-   * Insertion position during drag: the dragged entry will be placed *before* this index.
-   * @type {number | undefined}
-   */
-  let dropIndex = $state(undefined);
+  let draggedEntry = $state.raw();
 
   /**
    * Sync the flattened ordered entries back to the shared store so the toolbar Save button can read
@@ -62,42 +71,95 @@
    * {@link reorderGroups}.
    */
   const publishOrder = (groups = reorderGroups) => {
-    reorderedEntries.set($entryGroups.flatMap(({ name, entries }) => groups[name] ?? entries));
+    /* v8 ignore next 3 -- every group has been snapshotted on mount */
+    reorderedEntries.current = entryGroups.current.flatMap(
+      ({ name, entries }) => groups[name] ?? entries,
+    );
+  };
+
+  /* v8 ignore start -- every group has been snapshotted on mount */
+  /**
+   * Get the entries of a group as they are being reordered.
+   * @param {string} name Group name.
+   * @param {Entry[]} entries Entries as listed, used until the group is snapshotted on mount.
+   * @returns {Entry[]} Entries.
+   */
+  const getLocalEntries = (name, entries) => reorderGroups[name] ?? entries;
+  /* v8 ignore stop */
+
+  /**
+   * Get the 1-based `aria-rowindex` of an entry, or `undefined` for an entry that isn’t in the
+   * listed index, so the attribute is omitted rather than set to an invalid value.
+   * @param {Entry} entry Entry.
+   * @returns {number | undefined} Row index.
+   */
+  const rowIndex = (entry) => {
+    const index = listedEntryIndexMap.current.get(entry.id);
+
+    return index === undefined ? undefined : index + 1;
   };
 
   /**
-   * Move an entry within a group from one index to another.
+   * Move an entry within a group from one index to another, and mark the new order as unsaved.
+   * This is the committed move behind the Move Up / Move Down buttons; a drag previews the move
+   * first and only commits it on drop.
    * @param {string} groupName Group name.
    * @param {number} from Source index.
    * @param {number} to Destination index.
    */
   const moveEntry = (groupName, from, to) => {
+    /* v8 ignore next -- the buttons are disabled at either end of the list */
     if (from === to) return;
 
-    const group = [...(reorderGroups[groupName] ?? [])];
-    const [item] = group.splice(from, 1);
+    /* v8 ignore next -- every group has been snapshotted on mount */
+    const list = reorderGroups[groupName] ?? [];
 
-    group.splice(to, 0, item);
-    reorderGroups[groupName] = group;
-    reorderDirty.set(true);
+    reorderGroups = { ...reorderGroups, [groupName]: moveListItem(list, from, to) };
+    reorderDirty.current = true;
     publishOrder();
   };
 
+  /**
+   * End the current drag, either keeping the previewed order or restoring the one from before it.
+   *
+   * `drop` fires before `dragend`, so a completed drop clears the origin here and the `dragend`
+   * that follows finds nothing left to undo.
+   * @param {boolean} commit Whether to keep the previewed order.
+   */
+  const finishDrag = (commit) => {
+    if (dragOrigin) {
+      const { name, entries } = dragOrigin;
+
+      if (commit) {
+        // The pointer may well have returned to where it started, in which case nothing moved
+        /* v8 ignore next -- every group has been snapshotted on mount */
+        if ((reorderGroups[name] ?? []).some((entry, index) => entry.id !== entries[index]?.id)) {
+          reorderDirty.current = true;
+          publishOrder();
+        }
+      } else {
+        reorderGroups = { ...reorderGroups, [name]: entries };
+      }
+    }
+
+    dragOrigin = undefined;
+    draggedEntry = undefined;
+  };
+
   // Snapshot the entry groups exactly once when this component mounts (i.e. when the user enters
-  // reorder mode). Any subsequent reactive updates to `$entryGroups` — for example, a background
-  // refresh after another tab’s commit — must not clobber the user’s in-progress drag arrangement.
+  // reorder mode). Any subsequent reactive updates to `entryGroups.current` — for example, a
+  // background refresh after another tab’s commit — must not clobber the user’s in-progress drag
+  // arrangement.
   // The reorder UI takes ownership of the list until Save or Cancel. `onMount` runs once and never
   // re-subscribes, which is exactly the lifetime we need here (vs. `$effect` + `untrack`).
   onMount(() => {
     // Exclude the index file (e.g. Hugo `_index.md`) from reorder: it is always pinned to the top
     // of the list regardless of its `order` value, so dragging it has no effect.
-    const indexFileName = getIndexFile(collection)?.name;
-
     const initial = Object.fromEntries(
-      $entryGroups.map(({ name, entries }) => [
+      entryGroups.current.map(({ name, entries }) => [
         name,
         sortEntriesByOrderField(
-          indexFileName ? entries.filter((entry) => entry.slug !== indexFileName) : entries,
+          entries.filter((entry) => !isCollectionIndexFile(collection, entry)),
           collection,
         ),
       ]),
@@ -109,58 +171,91 @@
 </script>
 
 <div role="none" class="wrapper">
-  {#each $entryGroups as { name, entries } (name)}
+  {#each entryGroups.current as { name, entries } (name)}
     {#await sleep() then}
-      <GridBody label={name !== '*' ? name : undefined}>
-        {@const localEntries = reorderGroups[name] ?? entries}
+      <GridBody label={name !== '*' ? getGroupLabel(name) : undefined}>
+        {@const localEntries = getLocalEntries(name, entries)}
         {#each localEntries as entry, index (entry.id)}
-          <EntryReorderListItem
-            {collection}
-            {entry}
-            {viewType}
-            dragging={dragIndex === index && dragGroupName === name}
-            dropBefore={dropIndex === index &&
-              dragGroupName === name &&
-              dragIndex !== index &&
-              dragIndex !== index - 1}
-            dropAfter={dropIndex === localEntries.length &&
-              index === localEntries.length - 1 &&
-              dragGroupName === name &&
-              dragIndex !== localEntries.length - 1}
-            canMoveUp={index > 0}
-            canMoveDown={index < localEntries.length - 1}
-            onDragStart={() => {
-              dragGroupName = name;
-              dragIndex = index;
+          <!--
+            The row is written out here rather than with `<GridRow>` because `animate:` only works
+            on an element at the top level of a keyed `each` block, never on a component. Dragging
+            reorders `reorderGroups` as the pointer moves, so the other rows slide out of the way
+            and the gap the entry would land in follows the pointer.
+          -->
+          <div
+            role="row"
+            class="sui grid-row"
+            class:drag-source={draggedEntry?.id === entry.id}
+            tabindex="0"
+            aria-rowindex={rowIndex(entry)}
+            aria-selected="false"
+            draggable="true"
+            ondragstart={(/** @type {DragEvent} */ event) => {
+              dragOrigin = { name, entries: [...localEntries] };
+              draggedEntry = entry;
+
+              if (event.dataTransfer) {
+                event.dataTransfer.effectAllowed = 'move';
+              }
             }}
-            onDragOver={(/** @type {number} */ clientY, /** @type {DOMRect} */ rect) => {
-              dragGroupName = name;
-              dropIndex = clientY < rect.top + rect.height / 2 ? index : index + 1;
-            }}
-            onDrop={() => {
-              if (
-                dragIndex !== undefined &&
-                dropIndex !== undefined &&
-                dropIndex !== dragIndex &&
-                dropIndex !== dragIndex + 1
-              ) {
-                moveEntry(name, dragIndex, dropIndex > dragIndex ? dropIndex - 1 : dropIndex);
+            ondragover={(/** @type {DragEvent & { currentTarget: HTMLElement }} */ event) => {
+              // Reject the drop when it targets another group, so the browser shows a “no drop”
+              // cursor. This also rejects anything dragged in from outside the list, where there is
+              // no drag origin at all.
+              const accepted = name === dragOrigin?.name;
+
+              if (accepted) {
+                event.preventDefault();
+
+                /* v8 ignore next -- every group has been snapshotted on mount */
+                const list = reorderGroups[name] ?? [];
+                const from = list.findIndex(({ id }) => id === draggedEntry?.id);
+
+                const to = getMoveTarget({
+                  dragIndex: from,
+                  dropIndex: getDropIndex({
+                    index,
+                    clientY: event.clientY,
+                    rect: event.currentTarget.getBoundingClientRect(),
+                  }),
+                });
+
+                if (to !== undefined) {
+                  reorderGroups = { ...reorderGroups, [name]: moveListItem(list, from, to) };
+                }
               }
 
-              dragIndex = undefined;
-              dropIndex = undefined;
+              if (event.dataTransfer) {
+                event.dataTransfer.dropEffect = accepted ? 'move' : 'none';
+              }
             }}
-            onDragEnd={() => {
-              dragIndex = undefined;
-              dropIndex = undefined;
+            ondrop={(/** @type {DragEvent} */ event) => {
+              event.preventDefault();
+              // `AppShell` accepts every drop so the browser doesn’t navigate away from a stray
+              // file, which means a drop rejected above can still land here. Releasing over another
+              // group shows the “no drop” cursor, so it has to put the entries back rather than
+              // commit the arrangement the pointer left behind.
+              finishDrag(name === dragOrigin?.name);
             }}
-            onMoveUp={() => {
-              if (index > 0) moveEntry(name, index, index - 1);
+            ondragend={() => {
+              finishDrag(false);
             }}
-            onMoveDown={() => {
-              if (index < localEntries.length - 1) moveEntry(name, index, index + 1);
-            }}
-          />
+            animate:flip={{ duration: 200 }}
+          >
+            <EntryReorderListItem
+              {collection}
+              {entry}
+              {viewType}
+              canMoveUp={index > 0}
+              canMoveDown={index < localEntries.length - 1}
+              onMoveUp={() => {
+                moveEntry(name, index, index - 1);
+              }}
+              onMoveDown={() => {
+                moveEntry(name, index, index + 1);
+              }}
+            />
+          </div>
         {/each}
       </GridBody>
     {/await}
@@ -170,21 +265,23 @@
 <style>
   .wrapper {
     :global {
+      /* The rows aren’t `<GridRow>` components, so they don’t get its scoped layout rules */
+      .grid-row {
+        display: table-row;
+        height: var(--sui-primary-row-height);
+      }
+
+      /* The dragged row is left as a faint placeholder marking the gap it would drop into. The
+        pointer already carries the browser’s own drag image of it, so showing it twice at full
+        strength would just be confusing. */
+
       .grid-row.drag-source {
-        opacity: 0.4;
+        opacity: 0.25;
         cursor: grabbing;
       }
 
       .grid-row[draggable='true']:not(.drag-source) {
         cursor: grab;
-      }
-
-      .grid-row.drop-before .grid-cell {
-        border-top: 3px solid var(--sui-primary-accent-color) !important;
-      }
-
-      .grid-row.drop-after .grid-cell {
-        border-bottom: 3px solid var(--sui-primary-accent-color) !important;
       }
     }
   }

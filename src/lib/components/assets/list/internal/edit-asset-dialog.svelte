@@ -1,0 +1,120 @@
+<script>
+  import { _ } from '@sveltia/i18n';
+  import { Dialog, Switch, TextArea } from '@sveltia/ui';
+
+  import { saveAssets } from '$lib/services/assets/data/create';
+  import { getAssetBlob } from '$lib/services/assets/info';
+  import { editingAsset } from '$lib/services/assets/state';
+  import { showAssetOverlay } from '$lib/services/assets/view';
+
+  /**
+   * @import { Asset } from '$lib/types/private';
+   */
+
+  const asset = $derived(editingAsset.current);
+  let open = $state(false);
+  /** @type {Blob | undefined} */
+  let blob = $state();
+  /** @type {string | undefined} */
+  let originalValue = $state();
+  /** @type {string | undefined} */
+  let currentValue = $state();
+  /** @type {boolean | 'mixed'} */
+  let wrap = $state(false);
+
+  /**
+   * Initialize the state.
+   */
+  const initState = async () => {
+    blob = await getAssetBlob(/** @type {Asset} */ (asset));
+    originalValue = await blob.text();
+    currentValue = originalValue;
+    open = true;
+  };
+
+  /**
+   * Reset the state.
+   */
+  const resetState = () => {
+    editingAsset.current = undefined;
+    blob = undefined;
+    originalValue = undefined;
+    currentValue = undefined;
+  };
+
+  /**
+   * Save the edited asset.
+   */
+  const saveAsset = async () => {
+    /* v8 ignore next 10 -- the dialog is only shown once the asset is loaded */
+    if (asset && blob && typeof currentValue === 'string') {
+      await saveAssets(
+        {
+          folder: asset.folder,
+          files: [new File([currentValue], asset.name, { type: blob.type })],
+          originalAssets: [asset],
+        },
+        { commitType: 'uploadMedia' },
+      );
+    }
+  };
+
+  /* v8 ignore start -- the title is only read while the dialog is open, for an asset */
+  const title = $derived(_('edit_x', { values: { name: asset?.name ?? '' } }));
+  /* v8 ignore stop */
+
+  $effect(() => {
+    if (asset && blob === undefined) {
+      initState();
+    }
+  });
+
+  $effect(() => {
+    if (!showAssetOverlay.current) {
+      open = false;
+    }
+  });
+</script>
+
+<Dialog
+  size="x-large"
+  {title}
+  bind:open
+  okLabel={_('save')}
+  okDisabled={currentValue === originalValue}
+  okShortcuts="Accel+S"
+  onOk={() => {
+    saveAsset();
+  }}
+  onClose={() => {
+    resetState();
+  }}
+>
+  <div role="none" class="wrapper" class:wrap>
+    <TextArea dir="auto" bind:value={currentValue} flex />
+  </div>
+  {#snippet footerExtra()}
+    <Switch label={_('wrap_long_lines')} bind:checked={wrap} />
+  {/snippet}
+</Dialog>
+
+<style>
+  .wrapper {
+    display: contents;
+
+    :global {
+      textarea {
+        min-height: 40dvh;
+        max-height: 80dvh;
+        font-family: var(--sui-font-family-monospace);
+        font-size: var(--sui-font-size-monospace);
+        text-wrap: nowrap;
+        resize: vertical;
+      }
+
+      &.wrap textarea {
+        text-wrap: wrap;
+      }
+    }
+  }
+</style>

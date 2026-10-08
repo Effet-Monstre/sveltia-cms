@@ -1,7 +1,10 @@
-import { get } from 'svelte/store';
+import equal from 'fast-deep-equal';
 
-import { entryDraft } from '$lib/services/contents/draft';
+import { collectFieldValues } from '$lib/services/contents/draft';
 import { getField } from '$lib/services/contents/entry/fields';
+import { isKeyPathWithin } from '$lib/services/contents/entry/key-paths';
+import { syncAllDuplicateKeys } from '$lib/services/contents/fields/key-value/duplicate-keys';
+import { getKeyValueField } from '$lib/services/contents/fields/key-value/pairs';
 import { isNumeric } from '$lib/services/utils/number';
 
 /**
@@ -47,8 +50,39 @@ export const resolveOriginalKeyPath = (valueMap, keyPath) => {
 };
 
 /**
+ * Collect the values stored at the given key path and under it, keyed by their path relative to it,
+ * leaving out empty object/array placeholders. See {@link collectFieldValues}.
+ * @param {Record<string, any>} valueMap Flat value map for a locale.
+ * @param {FieldKeyPath} keyPath Field key path.
+ * @returns {Record<string, any>} Values keyed by their relative key path; the field’s own value, if
+ * any, is keyed by an empty string.
+ */
+const getFieldValues = (valueMap, keyPath) =>
+  collectFieldValues(valueMap, keyPath, { relative: true, dropEmptyPlaceholders: true });
+
+/**
+ * Check if the given field has been changed from its original value, so its changes can be
+ * reverted. The field’s own value and all the values under it are compared, because a List,
+ * Object, KeyValue or custom field stores its value under its child key paths.
+ * @param {object} args Arguments.
+ * @param {Record<string, any>} args.currentValueMap Current flat value map for the locale.
+ * @param {Record<string, any>} args.originalValueMap Original flat value map for the locale.
+ * @param {FieldKeyPath} args.keyPath Field key path.
+ * @returns {boolean} Whether the field has been changed.
+ */
+export const isFieldChanged = ({ currentValueMap, originalValueMap, keyPath }) => {
+  // For fields inside list items, use the original key path if the item was reordered
+  const originalKeyPath =
+    resolveOriginalKeyPath(currentValueMap, keyPath)?.originalKeyPath ?? keyPath;
+
+  return !equal(
+    getFieldValues(currentValueMap, keyPath),
+    getFieldValues(originalValueMap, originalKeyPath),
+  );
+};
+
+/**
  * Revert the changes made to the given field or all the fields to the default value(s).
- * @internal
  * @param {object} args Arguments.
  * @param {FieldKeyPath} args.keyPath Field key path to revert. If empty, all the fields will be
  * reverted.
@@ -72,10 +106,16 @@ export const revertFields = ({
   const { valueMap = {} } = getFieldArgs;
 
   Object.entries(valueMap).forEach(([_keyPath, value]) => {
-    if (!keyPath || _keyPath.startsWith(keyPath)) {
-      const fieldConfig = getField({ ...getFieldArgs, keyPath: _keyPath });
+    if (!keyPath || isKeyPathWithin(_keyPath, keyPath)) {
+      const fieldConfig =
+        getField({ ...getFieldArgs, keyPath: _keyPath }) ??
+        // A KeyValue pair is governed by its field
+        getKeyValueField({ ...getFieldArgs, keyPath: _keyPath });
 
-      if (isDefaultLocale || [true, 'translate'].includes(fieldConfig?.i18n ?? false)) {
+      if (
+        isDefaultLocale ||
+        [true, 'translate', 'duplicate_keys'].includes(fieldConfig?.i18n ?? false)
+      ) {
         if (reset) {
           delete currentValues[locale][_keyPath];
         } else {
@@ -92,7 +132,6 @@ export const revertFields = ({
 
 /**
  * Revert the changes made to the given locale.
- * @internal
  * @param {object} args Arguments.
  * @param {EntryDraft} args.draft Entry draft.
  * @param {FieldKeyPath} args.keyPath Field key path to revert. If empty, all the fields will be
@@ -145,22 +184,48 @@ export const revertLocale = ({ draft, keyPath, locale }) => {
 
 /**
  * Revert the changes made to the given field or all the fields to the default value(s).
- * @param {object} [args] Arguments.
+ * @param {object} args Arguments.
+ * @param {EntryDraft} args.draft Entry draft.
  * @param {InternalLocaleCode} [args.locale] Target locale, e.g. `ja`. Can be empty if reverting
  * everything.
  * @param {FieldKeyPath} [args.keyPath] Flattened (dot-notated) object keys that will be used for
  * searching the source values. Omit this if copying all the fields. If the triggered field is the
  * List or Object type, this will likely match multiple fields.
  */
-export const revertChanges = ({ locale: targetLanguage = '', keyPath = '' } = {}) => {
-  const draft = /** @type {EntryDraft} */ (get(entryDraft));
-  const { collection, collectionFile, currentValues } = draft;
-  const { allLocales } = (collectionFile ?? collection)._i18n;
+export const revertChanges = ({ draft, locale: targetLanguage = '', keyPath = '' }) => {
+  const {
+    collection,
+    collectionName,
+    collectionFile,
+    fileName,
+    isIndexFile,
+    currentValues,
+    originalPath,
+    originalSlugs,
+  } = draft;
+
+  const { allLocales, defaultLocale } = (collectionFile ?? collection)._i18n;
   const locales = targetLanguage ? [targetLanguage] : allLocales;
+  // Reverting one field or one locale only touches values. Reverting everything restores where the
+  // entry goes as well — the folder chosen with the path editor and the slugs, which name the file
+  // or its folder in each locale — or a move or rename would survive the revert and still be
+  // committed on the next save
+  const revertsEverything = !targetLanguage && !keyPath;
 
   locales.forEach((locale) => {
     revertLocale({ draft, keyPath, locale });
   });
 
-  entryDraft.update(() => ({ ...draft, currentValues }));
+  // Keys reverted in the default locale have to reach the other locales, and pairs reverted in
+  // another locale have to line up with the default locale again
+  syncAllDuplicateKeys({
+    valueStore: currentValues,
+    defaultLocale,
+    getFieldArgs: { collectionName, fileName, isIndexFile },
+  });
+
+  if (revertsEverything) {
+    draft.currentPath = originalPath;
+    draft.currentSlugs = { ...originalSlugs };
+  }
 };

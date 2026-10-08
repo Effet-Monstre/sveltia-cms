@@ -11,7 +11,7 @@ global.fetch = vi.fn();
 
 const defaultOptions = {
   apiKey: 'AIzaSyTestKey1234567890abcdefghijk',
-  model: 'gemini-3.1-flash-lite',
+  model: 'gemini-3.5-flash-lite',
   systemPrompt: 'You are a helpful assistant.',
   userMessage: 'Hello!',
 };
@@ -47,14 +47,17 @@ describe('Google Gemini AI Client', () => {
       );
     });
 
-    it('should include the API key in the URL query string', async () => {
+    it('should send the API key in a header rather than the URL', async () => {
       vi.mocked(fetch).mockResolvedValueOnce(successResponse('ok'));
 
       await complete(defaultOptions);
 
-      const url = /** @type {string} */ (vi.mocked(fetch).mock.calls[0][0]);
+      const [url, init] = vi.mocked(fetch).mock.calls[0];
 
-      expect(url).toContain(`key=${defaultOptions.apiKey}`);
+      expect(url).not.toContain(defaultOptions.apiKey);
+      expect(init?.headers).toEqual(
+        expect.objectContaining({ 'x-goog-api-key': defaultOptions.apiKey }),
+      );
     });
 
     it('should send system prompt, user message, and model in the request body', async () => {

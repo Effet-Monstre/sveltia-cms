@@ -11,61 +11,74 @@
   import { selectedCollection } from '$lib/services/contents/collection';
   import { selectedEntries } from '$lib/services/contents/collection/entries';
   import {
-    currentView,
     entryGroups,
     listedEntries,
+    listedUnpublishedEntries,
     reordering,
   } from '$lib/services/contents/collection/view';
   import { viewFilters } from '$lib/services/contents/collection/view/filter';
   import { viewGroups } from '$lib/services/contents/collection/view/group';
+  import { currentView } from '$lib/services/contents/collection/view/settings';
   import { sortKeys } from '$lib/services/contents/collection/view/sort-keys';
   import { env } from '$lib/services/user/env.svelte';
+  import { openAuthoring } from '$lib/services/workflow/open-authoring';
 
   /**
    * @import { InternalEntryCollection } from '$lib/types/private';
    */
 
   const entryCollection = $derived(
-    $selectedCollection?._type === 'entry'
-      ? /** @type {InternalEntryCollection} */ ($selectedCollection)
+    selectedCollection.current?._type === 'entry'
+      ? /** @type {InternalEntryCollection} */ (selectedCollection.current)
       : undefined,
   );
   const collectionName = $derived(entryCollection?.name);
+  /* v8 ignore start -- only read for an entry collection */
   const thumbnailFieldNames = $derived(entryCollection?._thumbnailFieldNames ?? []);
-  const hasListedEntries = $derived(!!$listedEntries.length);
-  const hasMultipleEntries = $derived($listedEntries.length > 1);
+  /* v8 ignore stop */
+  // The unpublished entries are listed in their own group above the published ones, so they count
+  // towards the list total as well
+  const listedEntryCount = $derived(
+    listedEntries.current.length + listedUnpublishedEntries.current.length,
+  );
+  const hasListedEntries = $derived(!!listedEntryCount);
+  const hasMultipleEntries = $derived(listedEntryCount > 1);
 </script>
 
-{#if entryCollection && !$reordering}
-  <Toolbar variant="secondary" aria-label={_('entry_list')}>
-    {#if !(env.isSmallScreen || env.isMediumScreen)}
+{#if entryCollection && !reordering.current}
+  <Toolbar variant="secondary" ariaLabel={_('entry_list')}>
+    {#if !(env.isSmallScreen || env.isMediumScreen) && !openAuthoring.current}
       <ItemSelector
-        allItems={$entryGroups.flatMap(({ entries }) => entries)}
+        allItems={[
+          ...listedUnpublishedEntries.current,
+          ...entryGroups.current.flatMap(({ entries }) => entries),
+        ]}
         selectedItems={selectedEntries}
       />
     {/if}
     <Spacer flex />
     <SortMenu
-      disabled={!hasMultipleEntries || !$sortKeys.length}
+      disabled={!hasMultipleEntries || !sortKeys.current.length}
       {currentView}
-      sortKeys={$sortKeys}
+      sortKeys={sortKeys.current}
       {collectionName}
       aria-controls="entry-list"
     />
-    {#if $viewFilters?.length}
+    {#if viewFilters.current?.length}
       <FilterMenu
         disabled={!hasMultipleEntries}
         {currentView}
-        filters={$viewFilters}
+        filters={viewFilters.current}
         multiple={true}
         aria-controls="entry-list"
       />
     {/if}
-    {#if $viewGroups?.length}
+    {#if viewGroups.current?.length}
       <GroupMenu
         disabled={!hasMultipleEntries}
         {currentView}
-        groups={$viewGroups}
+        groups={viewGroups.current}
+        groupNames={entryGroups.current.map(({ name }) => name)}
         aria-controls="entry-list"
       />
     {/if}
@@ -78,15 +91,15 @@
         variant="ghost"
         iconic
         disabled={!hasListedEntries || !getAssetFolder({ collectionName })}
-        pressed={!!$currentView.showMedia}
-        aria-controls="collection-assets"
-        aria-expanded={$currentView.showMedia}
-        aria-label={_($currentView.showMedia ? 'hide_assets' : 'show_assets')}
+        pressed={!!currentView.current.showMedia}
+        aria-controls={currentView.current.showMedia ? 'collection-assets' : undefined}
+        aria-expanded={currentView.current.showMedia}
+        aria-label={_(currentView.current.showMedia ? 'hide_assets' : 'show_assets')}
         onclick={() => {
-          currentView.update((view) => ({
-            ...view,
-            showMedia: !$currentView.showMedia,
-          }));
+          currentView.current = {
+            ...currentView.current,
+            showMedia: !currentView.current.showMedia,
+          };
         }}
       >
         {#snippet startIcon()}

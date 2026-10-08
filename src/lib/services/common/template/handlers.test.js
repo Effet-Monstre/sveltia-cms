@@ -2,6 +2,33 @@ import { describe, expect, test } from 'vitest';
 
 import { handleDateTimeTag, handleFilePathTag, handleSlugTag, handleUuidTag } from './handlers';
 
+/**
+ * Creates a typed slug handler context for tests.
+ * @param {Partial<Parameters<typeof handleSlugTag>[1]>} [overrides] Override values for the
+ * context.
+ * @returns {Parameters<typeof handleSlugTag>[1]} The slug handler context.
+ */
+const createSlugContext = (overrides = {}) =>
+  /** @type {Parameters<typeof handleSlugTag>[1]} */ ({
+    collection: {
+      name: 'posts',
+      folder: 'content/posts',
+      fields: [],
+      _type: 'entry',
+      _file: {
+        extension: 'md',
+        format: 'yaml-frontmatter',
+        basePath: 'content/posts',
+      },
+    },
+    currentSlug: undefined,
+    type: undefined,
+    isIndexFile: false,
+    content: {},
+    identifierField: 'title',
+    ...overrides,
+  });
+
 describe('Template handler functions', () => {
   describe('handleDateTimeTag()', () => {
     test('should return date-time field value when tag matches', () => {
@@ -65,43 +92,147 @@ describe('Template handler functions', () => {
 
   describe('handleSlugTag()', () => {
     test('should return slug when tag is slug and currentSlug exists', () => {
-      expect(handleSlugTag('slug', 'my-post', 'path', false)).toBe('my-post');
-      expect(handleSlugTag('slug', 'another-slug', 'filename', false)).toBe('another-slug');
+      expect(handleSlugTag('slug', createSlugContext({ currentSlug: 'my-post' }))).toBe('my-post');
+      expect(handleSlugTag('slug', createSlugContext({ currentSlug: 'another-slug' }))).toBe(
+        'another-slug',
+      );
     });
 
     test('should return undefined when tag is not slug', () => {
-      expect(handleSlugTag('title', 'my-post', 'path', false)).toBeUndefined();
-      expect(handleSlugTag('year', 'my-post', 'path', false)).toBeUndefined();
+      expect(handleSlugTag('title', createSlugContext({ currentSlug: 'my-post' }))).toBeUndefined();
+      expect(handleSlugTag('year', createSlugContext({ currentSlug: 'my-post' }))).toBeUndefined();
     });
 
-    test('should return undefined when currentSlug is undefined', () => {
-      expect(handleSlugTag('slug', undefined, 'path', false)).toBeUndefined();
+    test('should fall back to the entry summary when currentSlug is undefined', () => {
+      expect(
+        handleSlugTag(
+          'slug',
+          createSlugContext({ currentSlug: undefined, content: { title: 'My Entry' } }),
+        ),
+      ).toBe('My Entry');
+      expect(
+        handleSlugTag(
+          'slug',
+          createSlugContext({
+            currentSlug: undefined,
+            content: { author: 'Jane Doe' },
+            identifierField: 'author',
+          }),
+        ),
+      ).toBe('Jane Doe');
     });
 
     test('should return empty string for preview_path with index file', () => {
-      expect(handleSlugTag('slug', '_index', 'preview_path', true)).toBe('');
-      expect(handleSlugTag('slug', 'any-slug', 'preview_path', true)).toBe('');
+      expect(
+        handleSlugTag(
+          'slug',
+          createSlugContext({ currentSlug: '_index', type: 'preview_path', isIndexFile: true }),
+        ),
+      ).toBe('');
+      expect(
+        handleSlugTag(
+          'slug',
+          createSlugContext({ currentSlug: 'any-slug', type: 'preview_path', isIndexFile: true }),
+        ),
+      ).toBe('');
+    });
+
+    describe('nested collections', () => {
+      /**
+       * Create a context for a nested collection whose entries all share one file name.
+       * @param {Record<string, any>} overrides Override values for the context.
+       * @returns {Parameters<typeof handleSlugTag>[1]} The slug handler context.
+       */
+      const createNestedContext = (overrides) =>
+        createSlugContext({
+          type: 'preview_path',
+          ...overrides,
+          collection: /** @type {any} */ ({
+            name: 'pages',
+            folder: 'content/pages',
+            fields: [],
+            _type: 'entry',
+            nested: {},
+            meta: { path: { widget: 'string', index_file: '_index' } },
+          }),
+        });
+
+      test('should drop the shared index file name from the preview path', () => {
+        // @see https://github.com/decaporg/decap-cms/issues/4963
+        expect(
+          handleSlugTag('slug', createNestedContext({ currentSlug: 'guides/intro/_index' })),
+        ).toBe('guides/intro');
+      });
+
+      test('should return an empty string for the collection’s own index file', () => {
+        expect(handleSlugTag('slug', createNestedContext({ currentSlug: '_index' }))).toBe('');
+      });
+
+      test('should leave a slug that doesn’t end with the shared file name alone', () => {
+        expect(handleSlugTag('slug', createNestedContext({ currentSlug: 'guides/intro' }))).toBe(
+          'guides/intro',
+        );
+      });
+
+      test('should leave the slug alone outside a preview path', () => {
+        expect(
+          handleSlugTag(
+            'slug',
+            createNestedContext({ currentSlug: 'guides/intro/_index', type: 'media_folder' }),
+          ),
+        ).toBe('guides/intro/_index');
+      });
     });
 
     test('should return slug for preview_path with non-index file', () => {
-      expect(handleSlugTag('slug', 'my-post', 'preview_path', false)).toBe('my-post');
+      expect(
+        handleSlugTag(
+          'slug',
+          createSlugContext({ currentSlug: 'my-post', type: 'preview_path', isIndexFile: false }),
+        ),
+      ).toBe('my-post');
     });
 
     test('should return slug for non-preview_path types even with index file', () => {
-      expect(handleSlugTag('slug', '_index', 'path', true)).toBe('_index');
-      expect(handleSlugTag('slug', '_index', 'filename', true)).toBe('_index');
+      expect(
+        handleSlugTag(
+          'slug',
+          createSlugContext({ currentSlug: '_index', type: undefined, isIndexFile: true }),
+        ),
+      ).toBe('_index');
+      expect(
+        handleSlugTag(
+          'slug',
+          createSlugContext({ currentSlug: '_index', type: undefined, isIndexFile: true }),
+        ),
+      ).toBe('_index');
     });
   });
 
   describe('handleFilePathTag()', () => {
     test('should return dirname from entry file path', () => {
+      // The folder is relative to the collection folder, with no leading slash
+      // @see https://github.com/decaporg/decap-cms/issues/7752
       expect(handleFilePathTag('dirname', 'content/posts/2024/my-post.md', 'content/posts')).toBe(
-        '/2024',
+        '2024',
       );
       expect(handleFilePathTag('dirname', 'content/blog/article.md', 'content/blog')).toBe('');
       expect(
         handleFilePathTag('dirname', 'content/posts/nested/folder/file.md', 'content/posts'),
-      ).toBe('/nested/folder');
+      ).toBe('nested/folder');
+    });
+
+    test('should return dirname below a base path with the locale placeholder', () => {
+      const basePath = 'content/{{locale}}/posts';
+
+      // The locale folder is part of the base path, not of the returned folder
+      expect(handleFilePathTag('dirname', 'content/en/posts/2024/my-post.md', basePath)).toBe(
+        '2024',
+      );
+      expect(handleFilePathTag('dirname', 'content/fr/posts/a/b/my-post.md', basePath)).toBe('a/b');
+      expect(handleFilePathTag('dirname', 'content/fr/posts/my-post.md', basePath)).toBe('');
+      // The default locale may be omitted from the path
+      expect(handleFilePathTag('dirname', 'content/posts/2024/my-post.md', basePath)).toBe('2024');
     });
 
     test('should return filename without extension', () => {
@@ -109,7 +240,12 @@ describe('Template handler functions', () => {
         'my-post',
       );
       expect(handleFilePathTag('filename', 'path/to/article.html', 'path/to')).toBe('article');
-      expect(handleFilePathTag('filename', 'file.component.tsx', undefined)).toBe('file');
+      expect(handleFilePathTag('filename', 'file.component.tsx', undefined)).toBe('file.component');
+      expect(handleFilePathTag('filename', 'content/my.post.md', 'content')).toBe('my.post');
+      expect(handleFilePathTag('filename', 'content/README', 'content')).toBe('README');
+      expect(handleFilePathTag('filename', 'content/my.post.en.md', 'content', ['en'])).toBe(
+        'my.post',
+      );
     });
 
     test('should return file extension', () => {
@@ -118,6 +254,7 @@ describe('Template handler functions', () => {
       );
       expect(handleFilePathTag('extension', 'path/to/article.html', 'path/to')).toBe('html');
       expect(handleFilePathTag('extension', 'file.component.tsx', undefined)).toBe('tsx');
+      expect(handleFilePathTag('extension', 'content/README', 'content')).toBe('');
     });
 
     test('should return empty string when entry file path is undefined', () => {

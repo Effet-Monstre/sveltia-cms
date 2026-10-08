@@ -1,3 +1,5 @@
+import { postJSON } from '$lib/services/integrations/ai/api';
+
 /**
  * @import { LanguagePair, TranslationOptions, TranslationService } from '$lib/types/private';
  */
@@ -7,7 +9,9 @@ const serviceLabel = 'Google Cloud Translation';
 const apiLabel = 'Cloud Translation API';
 const developerURL = 'https://console.cloud.google.com/apis/library/translate.googleapis.com';
 const apiKeyURL = 'https://console.cloud.google.com/apis/api/translate.googleapis.com/credentials';
-const apiKeyPattern = /AIza[0-9A-Za-z-_]{35}/;
+// Anchored, so a key for another service entered while this one is selected isn’t accepted and sent
+// to the wrong API
+const apiKeyPattern = /^AIza[0-9A-Za-z-_]{35}$/;
 
 /**
  * Supported source/target languages for Google Cloud Translation API.
@@ -44,32 +48,51 @@ const SUPPORTED_LANGUAGES = [
   .split(',');
 
 /**
- * Normalize a locale code to a supported language code.
- * @param {string} locale Locale code, e.g., 'en', 'fr-FR', 'zh-CN'.
- * @returns {string | undefined} Normalized language code, e.g., 'en', 'fr-FR', 'zh-CN'.
+ * Language codes that Google Cloud Translation API knows under a different code.
+ * @type {Record<string, string>}
+ */
+const LANGUAGE_ALIASES = {
+  // Norwegian written standard, which Google calls Norwegian
+  nb: 'no',
+};
+
+/**
+ * Normalize a locale code to a supported language code. A locale can have a script code, like
+ * `zh-Hant` or `pa-Arab`, and a region code, like `fr-FR`, in either case and separated with a
+ * hyphen or an underscore.
+ * @param {string} locale Locale code, e.g., 'en', 'fr-FR', 'zh-CN', 'zh-Hant'.
+ * @returns {string | undefined} Normalized language code, e.g., 'en', 'fr-FR', 'zh-CN', 'zh-TW'.
  */
 export const normalizeLanguage = (locale) => {
-  const normalizedLocale = locale.replace(
-    /^([a-z]{2,3})[-_]([a-z]{2,4})$/i,
-    (_match, lang, region) => `${lang.toLowerCase()}-${region.toUpperCase()}`,
-  );
+  const [language, ...parts] = locale.split(/[-_]/);
+  const lang = language.toLowerCase();
+  const scriptTag = parts.find((tag) => /^[a-z]{4}$/i.test(tag));
+  const regionTag = parts.find((tag) => /^(?:[a-z]{2}|\d{3})$/i.test(tag));
 
-  if (SUPPORTED_LANGUAGES.includes(normalizedLocale)) {
-    return normalizedLocale;
+  const script = scriptTag
+    ? `${scriptTag[0].toUpperCase()}${scriptTag.slice(1).toLowerCase()}`
+    : undefined;
+
+  const region = regionTag?.toUpperCase();
+
+  // Chinese: We should not fall back to `zh` for Traditional Chinese, because it’s Simplified
+  if (lang === 'zh') {
+    if (script === 'Hant' || (!script && ['TW', 'HK', 'MO'].includes(region ?? ''))) {
+      return 'zh-TW';
+    }
+
+    if (script === 'Hans' || (!script && ['CN', 'SG'].includes(region ?? ''))) {
+      return 'zh-CN';
+    }
   }
 
-  // Traditional Chinese variants: We should not fall back to `zh` because it’s Simplified Chinese
-  if (['zh-HK', 'zh-MO'].includes(normalizedLocale)) {
-    return 'zh-TW';
-  }
+  const candidates = [
+    script ? `${lang}-${script}` : undefined,
+    region ? `${lang}-${region}` : undefined,
+    LANGUAGE_ALIASES[lang] ?? lang,
+  ];
 
-  const [lang] = normalizedLocale.split('-');
-
-  if (SUPPORTED_LANGUAGES.includes(lang)) {
-    return lang;
-  }
-
-  return undefined;
+  return candidates.find((code) => !!code && SUPPORTED_LANGUAGES.includes(code));
 };
 
 /**
@@ -112,39 +135,18 @@ const translate = async (texts, { sourceLanguage, targetLanguage, apiKey }) => {
     format: 'html',
   };
 
-  try {
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-goog-api-key': apiKey,
-      },
-      body: JSON.stringify(requestBody),
-    });
+  const { data } = /** @type {{ data: { translations: { translatedText: string }[] } }} */ (
+    await postJSON({
+      endpoint: url,
+      headers: { 'Content-Type': 'application/json', 'X-goog-api-key': apiKey },
+      apiLabel: 'Google Translate',
+      body: requestBody,
+    })
+  );
 
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}));
-
-      throw new Error(
-        `Google Translate API error: ${response.status} ${response.statusText}` +
-          `${errorData.error?.message ? ` - ${errorData.error.message}` : ''}`,
-      );
-    }
-
-    const { data } = /** @type {{ data: { translations: { translatedText: string }[] } }} */ (
-      await response.json()
-    );
-
-    // cspell:disable-next-line
-    // Decode apostrophes in translated text (e.g., "Aujourd&#39;hui" → "Aujourd'hui")
-    return data.translations.map((t) => t.translatedText.replace(/&#39;/g, "'"));
-  } catch (error) {
-    if (error instanceof Error) {
-      throw error;
-    }
-
-    throw new Error('Failed to translate text with Google Translate API.');
-  }
+  // cspell:disable-next-line
+  // Decode apostrophes in translated text (e.g., "Aujourd&#39;hui" → "Aujourd'hui")
+  return data.translations.map((t) => t.translatedText.replace(/&#39;/g, "'"));
 };
 
 /**

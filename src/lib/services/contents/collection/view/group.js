@@ -1,15 +1,30 @@
-import { _ } from '@sveltia/i18n';
-import { derived, get } from 'svelte/store';
-
-import { buildGroupMap } from '$lib/services/common/view';
+import {
+  buildGroupMap,
+  getConditionKey,
+  getViewConditions,
+  hasComparison,
+  OTHER_GROUP_NAME,
+} from '$lib/services/common/view';
 import { selectedCollection } from '$lib/services/contents/collection';
-import { currentView } from '$lib/services/contents/collection/view';
-import { parseViewOptions } from '$lib/services/contents/collection/view/utils';
-import { getPropertyValue } from '$lib/services/contents/entry/fields';
+import { getReorderGroupName } from '$lib/services/contents/collection/entries/reorder/config';
+import {
+  matchesConditions,
+  prepareConditions,
+} from '$lib/services/contents/collection/view/conditions';
+import { parseViewOptions } from '$lib/services/contents/collection/view/options';
+import { currentView } from '$lib/services/contents/collection/view/settings';
+import { getField } from '$lib/services/contents/entry/fields';
+import { getPropertyValue } from '$lib/services/contents/entry/values';
+import { createDerivedState } from '$lib/services/utils/state.svelte';
 
 /**
- * @import { Entry, GroupingConditions, InternalCollection } from '$lib/types/private';
- * @import { ViewGroup, ViewGroups } from '$lib/types/public';
+ * @import {
+ * Entry,
+ * GroupingConditions,
+ * InternalCollection,
+ * InternalEntryCollection,
+ * } from '$lib/types/private';
+ * @import { DateTimeField, ViewGroup, ViewGroups } from '$lib/types/public';
  */
 
 /**
@@ -19,27 +34,121 @@ import { getPropertyValue } from '$lib/services/contents/entry/fields';
  * @returns {{ options: ViewGroup[], default?: GroupingConditions }} Parsed view groups.
  * @see https://decapcms.org/docs/configuration-options/#view_groups
  * @see https://staticjscms.netlify.app/docs/collection-overview#view-groups
- * @see https://sveltiacms.app/en/docs/collections/entries#grouping
+ * @see https://sveltiacms.app/en/docs/collections/entries/views#grouping
  */
 export const parseGroupConfig = (filters) =>
   /** @type {{ options: ViewGroup[], default?: GroupingConditions }} */
   (parseViewOptions(filters, 'groups'));
 
 /**
+ * Get the grouping conditions to be applied while the given collection is in reorder mode, by
+ * resolving the group named with the collection’s `reorder.group` option against its `view_groups`
+ * definitions. Entries are then reordered within their own group, which is useful when the order
+ * field is only consumed per group.
+ * @param {InternalCollection | undefined} collection Collection.
+ * @returns {GroupingConditions | undefined} Conditions, or `undefined` if reorder grouping is not
+ * configured or the named group is not defined in `view_groups`.
+ * @see https://sveltiacms.app/en/docs/collections/entries/views#grouping
+ */
+export const getReorderGroupingConditions = (collection) => {
+  // Grouping is only available for entry collections
+  if (collection?._type !== 'entry') {
+    return undefined;
+  }
+
+  const name = getReorderGroupName(collection);
+
+  if (!name) {
+    return undefined;
+  }
+
+  const group = parseGroupConfig(collection.view_groups).options.find((g) => g.name === name);
+
+  return group ? getViewConditions(group) : undefined;
+};
+
+/**
+ * Split the given entries into the ones satisfying a group’s comparison conditions and the rest.
+ * @param {Entry[]} entries Entry list.
+ * @param {InternalEntryCollection} collection Collection that the entries belong to. Grouping is
+ * only available for entry collections, which are the ones with `view_groups`.
+ * @param {GroupingConditions} conditions Grouping conditions with a comparison operator.
+ * @param {Date} now Current date and time, which the template tags in the conditions resolve to.
+ * @returns {{ name: string, entries: Entry[] }[]} The group of matching entries, named after the
+ * label of the view group the conditions came from, so that a group labelled “Upcoming” lists the
+ * upcoming events under that heading, followed by the {@link OTHER_GROUP_NAME} group. An empty
+ * group is left out.
+ */
+const groupEntriesByComparison = (entries, collection, conditions, now) => {
+  const {
+    name: collectionName,
+    view_groups: viewGroups,
+    _i18n: { defaultLocale: locale },
+  } = collection;
+
+  const { field } = conditions;
+  const key = getConditionKey(conditions);
+  const fieldConfig = getField({ collectionName, keyPath: field });
+
+  const dateFieldConfig =
+    fieldConfig?.widget === 'datetime' ? /** @type {DateTimeField} */ (fieldConfig) : undefined;
+
+  const prepared = prepareConditions(conditions, { dateFieldConfig, now });
+
+  // The conditions are what the view holds, so the label has to be looked up. It can be missing
+  // from a group that has been removed from the configuration since the view was saved
+  const label =
+    parseGroupConfig(viewGroups).options.find(
+      (option) => getConditionKey(getViewConditions(option)) === key,
+    )?.label || field;
+
+  /** @type {Entry[]} */
+  const matched = [];
+  /** @type {Entry[]} */
+  const others = [];
+
+  entries.forEach((entry) => {
+    const args = { entry, locale, collectionName, key: field };
+    const rawValue = getPropertyValue({ ...args, resolveRef: false });
+    const refValue = getPropertyValue({ ...args });
+
+    (matchesConditions({ rawValue, refValue, conditions: prepared }) ? matched : others).push(
+      entry,
+    );
+  });
+
+  return [
+    { name: label, entries: matched },
+    { name: OTHER_GROUP_NAME, entries: others },
+  ].filter((group) => group.entries.length);
+};
+
+/**
  * Group the given entries.
  * @param {Entry[]} entries Entry list.
  * @param {InternalCollection} collection Collection that the entries belong to.
  * @param {GroupingConditions | null | undefined} conditions Grouping conditions.
+ * @param {Date} [now] Current date and time, which the template tags in the conditions resolve to.
  * @returns {{ name: string, entries: Entry[] }[]} Grouped entries, where each group object contains
- * a name and an entry list. When ungrouped, there will still be one group object named `*`.
+ * a name, displayed with `getGroupLabel()`, and an entry list. When ungrouped, there will still be
+ * one group object named `*`.
  * @see https://decapcms.org/docs/configuration-options/#view_groups
- * @see https://sveltiacms.app/en/docs/collections/entries#grouping
+ * @see https://sveltiacms.app/en/docs/collections/entries/views#grouping
  */
-export const groupEntries = (entries, collection, conditions) => {
+export const groupEntries = (entries, collection, conditions, now = new Date()) => {
   const { field, pattern } = conditions ?? { field: '', pattern: undefined };
 
   if (!field) {
     return entries.length ? [{ name: '*', entries }] : [];
+  }
+
+  if (hasComparison(conditions)) {
+    return groupEntriesByComparison(
+      entries,
+      /** @type {InternalEntryCollection} */ (collection),
+      /** @type {GroupingConditions} */ (conditions),
+      now,
+    );
   }
 
   const {
@@ -47,14 +156,10 @@ export const groupEntries = (entries, collection, conditions) => {
     _i18n: { defaultLocale: locale },
   } = collection;
 
-  const sortCondition = get(currentView).sort;
-  const otherKey = _('other');
+  const sortCondition = currentView.current.sort;
 
-  const sortedGroups = buildGroupMap(
-    entries,
-    pattern,
-    (entry) => getPropertyValue({ entry, locale, collectionName, key: field }),
-    otherKey,
+  const sortedGroups = buildGroupMap(entries, pattern, (entry) =>
+    getPropertyValue({ entry, locale, collectionName, key: field }),
   ).map(([name, _entries]) => ({ name, entries: _entries }));
 
   // Keep the descending order if already sorted, especially on the date field
@@ -66,33 +171,16 @@ export const groupEntries = (entries, collection, conditions) => {
 };
 
 /**
- * Initialize view groups for the given collection.
- * @internal
- * @param {InternalCollection | undefined} collection Collection to initialize groups for.
- * @param {(value: ViewGroup[]) => void} set Function to set the groups.
+ * View groups for the selected entry collection.
+ * @type {{ readonly current: ViewGroup[] }}
  */
-export const initializeViewGroups = (collection, set) => {
-  // Disable grouping for file/singleton collection
-  if (!collection || !('folder' in collection)) {
-    set([]);
+export const viewGroups = createDerivedState(() => {
+  const collection = selectedCollection.current;
 
-    return;
+  // Disable grouping for file/singleton collection
+  if (collection?._type !== 'entry') {
+    return [];
   }
 
-  const { options, default: defaultGroup } = parseGroupConfig(collection.view_groups);
-
-  set(options);
-
-  currentView.update((_view) => ({
-    ..._view,
-    group: _view.group === undefined ? defaultGroup : _view.group,
-  }));
-};
-
-/**
- * View groups for the selected entry collection.
- * @type {import('svelte/store').Readable<ViewGroup[]>}
- */
-export const viewGroups = derived([selectedCollection], ([collection], set) => {
-  initializeViewGroups(collection, set);
+  return parseGroupConfig(collection.view_groups).options;
 });

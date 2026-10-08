@@ -33,7 +33,7 @@ export const BUILTIN_FIELD_TYPES = [
  * List of field types that support a simple value: boolean, number or string.
  * @type {string[]}
  */
-export const SIMPLE_VALUE_FIELD_TYPES = [
+const SIMPLE_VALUE_FIELD_TYPES = [
   'boolean',
   'color',
   'compute',
@@ -48,10 +48,31 @@ export const SIMPLE_VALUE_FIELD_TYPES = [
 ];
 
 /**
+ * List of field types whose value is always a string. Unlike the Number, Select and Relation field
+ * types, which accept numeric values, anything stored in these fields can be safely stringified.
+ * @type {string[]}
+ */
+export const STRING_VALUE_FIELD_TYPES = SIMPLE_VALUE_FIELD_TYPES.filter(
+  (type) => !['boolean', 'number'].includes(type),
+);
+
+/**
  * List of field types that support media files.
  * @type {string[]}
  */
 export const MEDIA_FIELD_TYPES = ['file', 'image'];
+
+/**
+ * List of field types that hold Markdown text, which can embed images.
+ * @type {string[]}
+ */
+export const RICH_TEXT_FIELD_TYPES = ['richtext', 'markdown'];
+
+/**
+ * List of field types that hold free text, which can be translated.
+ * @type {string[]}
+ */
+export const TEXT_FIELD_TYPES = ['text', 'string', ...RICH_TEXT_FIELD_TYPES];
 
 /**
  * List of field types that support the `multiple` option.
