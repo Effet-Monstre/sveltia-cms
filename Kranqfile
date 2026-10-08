@@ -1,0 +1,10 @@
+MEMORY 8GiB
+CPUS 4
+
+COPY .nvmrc ci/tasks/install-node.sh .
+RUN bash install-node.sh
+
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .
+RUN CI=true pnpm install --frozen-lockfile
+
+RUN pnpm exec playwright install --with-deps chromium || npx --yes playwright@latest install --with-deps chromium
