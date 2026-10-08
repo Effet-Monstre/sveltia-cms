@@ -1,4 +1,5 @@
 import { MONOLINGUAL_CONFIG, MONOLINGUAL_FILES } from '../../fixtures/configs/monolingual.js';
+import { expandAll } from '../../fixtures/expanders.js';
 import { expect, test } from '../../fixtures/test.js';
 
 test.use({ config: MONOLINGUAL_CONFIG });
@@ -22,6 +23,10 @@ test('edits a nested field in a YAML file', async ({ cms, page }) => {
   await page.getByRole('row', { name: 'Contact Page' }).click();
 
   const editor = page.getByRole('group', { name: 'Content Editor' });
+
+  // The fork starts the expanders collapsed; see `docs/fork.md`
+  await expandAll(editor);
+
   const city = editor.getByRole('group', { name: /Office/ }).getByRole('textbox', { name: 'City' });
 
   await expect(city).toHaveValue('Toronto');

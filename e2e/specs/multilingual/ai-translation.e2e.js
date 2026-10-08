@@ -108,33 +108,29 @@ test.beforeEach(async ({ cms }) => {
   await cms.signIn();
 });
 
-PROVIDERS.forEach(({ label, endpoint, apiKey, getKey, getPrompts, reply }) => {
+// The fork offers no machine translation: the translate buttons are hidden, in the pane header
+// and in the field options alike, so none of these services is ever called, whichever one is
+// picked in the Settings dialog. See `docs/fork.md`; upstream translates a field with each of
+// them here, and reports what the service answers
+PROVIDERS.forEach(({ label, endpoint, getKey, getPrompts, reply }) => {
   test.describe(label, () => {
     /**
-     * Answer the service’s requests: translate each text by tagging it with the target language,
-     * as the system prompt names it, and keep the requests to check them.
+     * Answer the service’s requests, so a translation that did go out would be seen here.
      * @param {Page} page Page.
-     * @param {object} [options] Options.
-     * @param {number} [options.status] HTTP status, to make the request fail.
      * @returns {Promise<{ key?: string, system: string, texts: string[] }[]>} Requests received
      * so far.
      */
-    const mockService = async (page, { status = 200 } = {}) => {
+    const mockService = async (page) => {
       /** @type {{ key?: string, system: string, texts: string[] }[]} */
       const requests = [];
 
       await page.route(endpoint, (route) => {
         const request = route.request();
         const { system, user } = getPrompts(request.postDataJSON());
-        // The user message holds the texts as a JSON array, on its second line
         const texts = JSON.parse(user.split('\n')[1]);
         const target = system.match(/ to (\w+)\./)?.[1] ?? '';
 
         requests.push({ key: getKey(request), system, texts });
-
-        if (status !== 200) {
-          return route.fulfill({ status, json: { error: { message: 'Invalid API key' } } });
-        }
 
         return route.fulfill({
           json: reply(
@@ -146,7 +142,7 @@ PROVIDERS.forEach(({ label, endpoint, apiKey, getKey, getPrompts, reply }) => {
       return requests;
     };
 
-    test('translates a field with the service picked in the settings', async ({ cms, page }) => {
+    test('is never called, as the fork offers no translation', async ({ cms, page }) => {
       const requests = await mockService(page);
 
       await selectService(cms, page, label);
@@ -164,31 +160,20 @@ PROVIDERS.forEach(({ label, endpoint, apiKey, getKey, getPrompts, reply }) => {
       const french = await showLocale(page, 1, 'French');
       const field = french.getByRole('group', { name: /Summary.*Field/ });
 
-      await cms.chooseMenuItem(
-        field.getByRole('button', { name: 'Translate' }),
-        page.getByRole('menuitem', { name: /Translate from.*English/ }),
+      // Neither the pane nor the field offers to translate
+      await expect(french.getByRole('button', { name: 'Translate' })).toHaveCount(0);
+      await cms.openPopup(
+        field.getByRole('button', { name: 'Show Field Options' }),
+        page.getByRole('menu', { name: 'Field Options' }),
       );
-      await page
-        .getByRole('alertdialog', { name: 'Translate Field' })
-        .getByRole('textbox', { name: 'API Key' })
-        .fill(apiKey);
-      await expect(
-        page.getByRole('status').filter({ hasText: /Field translated from/ }),
-      ).toBeVisible();
-      await expect(field.getByRole('textbox', { name: 'Summary' })).toHaveValue(
-        'French: Eat after dark.',
-      );
+      await expect(page.getByRole('menuitem', { name: /Translate from/ })).toHaveCount(0);
+      await page.keyboard.press('Escape');
 
-      // The prompt names the languages, and the key goes with the request
-      expect(requests).toEqual([
-        {
-          key: apiKey,
-          system: expect.stringContaining('Translate the given texts from English to French.'),
-          texts: ['Eat after dark.'],
-        },
-      ]);
-
+      // The entry is saved with what the editor typed, and the service was never called
       await french.getByRole('textbox', { name: 'Title' }).fill('Marchés de nuit');
+      await french
+        .getByRole('textbox', { name: 'Summary' })
+        .fill('Mangez après la tombée du jour.');
       await french.getByRole('textbox', { name: 'Body' }).click();
       await page.keyboard.type('Suivez les lanternes.');
 
@@ -199,44 +184,19 @@ PROVIDERS.forEach(({ label, endpoint, apiKey, getKey, getPrompts, reply }) => {
       await page.keyboard.type('اتبع الفوانيس.');
       await save(page);
 
+      expect(requests).toEqual([]);
+
       expect((await cms.readRepo())['content/articles/night-markets.fr.md']).toBe(
         markdown(
           {
             title: 'Marchés de nuit',
             date: '2026-05-01',
             tags: [],
-            summary: 'French: Eat after dark.',
+            summary: 'Mangez après la tombée du jour.',
           },
           'Suivez les lanternes.',
         ),
       );
-    });
-
-    test('says when the service refuses the request', async ({ cms, page }) => {
-      const requests = await mockService(page, { status: 401 });
-
-      await selectService(cms, page, label);
-      await page.getByRole('button', { name: 'Create New Entry' }).first().click();
-      await getEditPane(page, 'English').getByRole('textbox', { name: 'Summary' }).fill('Hi.');
-
-      const french = await showLocale(page, 1, 'French');
-      const field = french.getByRole('group', { name: /Summary.*Field/ });
-
-      await cms.chooseMenuItem(
-        field.getByRole('button', { name: 'Translate' }),
-        page.getByRole('menuitem', { name: /Translate from.*English/ }),
-      );
-      await page
-        .getByRole('alertdialog', { name: 'Translate Field' })
-        .getByRole('textbox', { name: 'API Key' })
-        .fill(apiKey);
-
-      await expect(
-        page.getByRole('alert').filter({ hasText: 'Translation failed.' }),
-      ).toBeVisible();
-      await expect(field.getByRole('textbox', { name: 'Summary' })).toHaveValue('');
-      // The failure is the selected service’s answer
-      expect(requests).toHaveLength(1);
     });
   });
 });

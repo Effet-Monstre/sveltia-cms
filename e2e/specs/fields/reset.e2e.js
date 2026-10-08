@@ -111,7 +111,9 @@ test('restores the default values of the entry and saves them', async ({ cms, pa
     );
 });
 
-test('reverts a cleared list', async ({ page }) => {
+// Upstream reverts the cleared list from the field options, which the fork hides; see
+// `docs/fork.md`. What’s left to check is that clearing the list works and can’t be undone there
+test('clears a list, which the field options offer no way to revert', async ({ page }) => {
   const editor = page.getByRole('group', { name: 'Content Editor' });
   const links = editor.getByRole('group', { name: /Links.*Field/ });
   const optionsButton = links.getByRole('button', { name: 'Show Field Options' }).first();
@@ -121,15 +123,8 @@ test('reverts a cleared list', async ({ page }) => {
   await expect(links.getByText('0 Links')).toBeVisible();
   await expect(editor.getByRole('button', { name: 'Save' })).toBeEnabled();
 
-  // The items come back in their original order, and the entry is no longer modified
+  await expect(page.locator('dialog.popup:not([inert])')).toHaveCount(0);
   await optionsButton.click();
-  await page.getByRole('menuitem', { name: 'Revert Changes' }).click();
-  await expect
-    .poll(() =>
-      links
-        .getByRole('textbox', { name: 'URL' })
-        .evaluateAll((inputs) => inputs.map((input) => /** @type {any} */ (input).value)),
-    )
-    .toEqual(['https://example.com', 'https://example.org']);
-  await expect(editor.getByRole('button', { name: 'Save' })).toBeDisabled();
+  await expect(page.getByRole('menuitem', { name: 'Revert Changes' })).toHaveCount(0);
+  await expect(links.getByRole('textbox', { name: 'URL' })).toHaveCount(0);
 });

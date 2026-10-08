@@ -1,4 +1,5 @@
 import { FIELD_TYPES_CONFIG, FIELD_TYPES_FILES } from '../../fixtures/configs/field-types.js';
+import { expandAll } from '../../fixtures/expanders.js';
 import { expect, test } from '../../fixtures/test.js';
 
 // The editor renders a field once it’s scrolled into view, so make every field visible at once
@@ -28,6 +29,9 @@ const readStarParty = async (cms) =>
 test('reorders list items with the keyboard', async ({ cms, page }) => {
   const editor = page.getByRole('group', { name: 'Content Editor' });
   const speakers = editor.getByRole('group', { name: /Speakers.*Field/ });
+
+  // The fork starts the list items collapsed; see `docs/fork.md`
+  await expandAll(speakers);
 
   await speakers.getByRole('button', { name: 'Reorder Item' }).first().focus();
   await page.keyboard.press('ArrowDown');
@@ -89,6 +93,8 @@ test('shows the summary of collapsed items', async ({ page }) => {
     .getByRole('group', { name: 'Content Editor' })
     .getByRole('group', { name: /Speakers.*Field/ });
 
+  // The fork starts the list items collapsed; see `docs/fork.md`
+  await expandAll(speakers);
   await speakers.getByRole('button', { name: 'Collapse All' }).click();
   await expect(speakers.getByRole('textbox')).toHaveCount(0);
   await expect(speakers.getByText('Jane Doe (Host)')).toBeVisible();
@@ -102,6 +108,8 @@ test('expands a collapsed item of a list with types from the preview', async ({ 
   const editor = page.getByRole('group', { name: 'Content Editor' });
   const sections = editor.getByRole('group', { name: /Sections.*Field/ });
 
+  // The fork starts the list items collapsed; see `docs/fork.md`
+  await expandAll(sections);
   await sections.getByRole('button', { name: 'Collapse All' }).click();
   await expect(sections.getByRole('textbox')).toHaveCount(0);
 
@@ -116,6 +124,8 @@ test('expands a collapsed item of a list with types to show an error on saving',
   const editor = page.getByRole('group', { name: 'Content Editor' });
   const sections = editor.getByRole('group', { name: /Sections.*Field/ });
 
+  // The fork starts the list items collapsed; see `docs/fork.md`
+  await expandAll(sections);
   await sections.getByRole('textbox', { name: 'Author' }).clear();
   await sections.getByRole('button', { name: 'Collapse All' }).click();
   await expect(sections.getByRole('textbox')).toHaveCount(0);
@@ -134,7 +144,10 @@ test('duplicates an item and adds one below another', async ({ cms, page }) => {
   const sections = editor.getByRole('group', { name: /Sections.*Field/ });
   const options = sections.getByRole('button', { name: 'List Item Options' });
 
+  // The fork starts the list items collapsed; see `docs/fork.md`
+  await expandAll(sections);
   await cms.chooseMenuItem(options.first(), page.getByRole('menuitem', { name: 'Duplicate' }));
+  await expandAll(sections);
   await expect(sections.getByRole('textbox', { name: 'Body' })).toHaveCount(2);
   await sections.getByRole('textbox', { name: 'Body' }).nth(1).fill('Bring snacks too.');
 
@@ -143,6 +156,7 @@ test('duplicates an item and adds one below another', async ({ cms, page }) => {
 
   await cms.openPopup(options.last(), addBelow);
   await cms.chooseMenuItem(addBelow, page.getByRole('menuitem', { name: 'Text' }));
+  await expandAll(sections);
   await sections.getByRole('textbox', { name: 'Body' }).last().fill('See you there.');
   await editor.getByRole('button', { name: 'Save' }).click();
 

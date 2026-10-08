@@ -16,11 +16,6 @@ import { getEditPane, save, showLocale } from './helpers.js';
 test.use({ config: MULTILINGUAL_CONFIG });
 
 /**
- * A made-up Google Cloud Translation API key, in the format the CMS accepts.
- */
-const API_KEY = `AIza${'0'.repeat(35)}`;
-
-/**
  * Answer the Google Cloud Translation API requests with a fake translation, which tags each text
  * with the target language, e.g. `AR: `, and keep the requests to check them.
  * @param {Page} page Page.
@@ -77,6 +72,8 @@ test.beforeEach(async ({ cms, page }) => {
   await page.keyboard.type('Follow the **lanterns**.');
 });
 
+// The fork copies the values of the whole entry as they are, rather than the translatable fields
+// one by one, and shows no toast; see `docs/fork.md`
 test('copies the fields from another locale', async ({ cms, page }) => {
   const french = await showLocale(page, 1, 'French');
 
@@ -86,7 +83,6 @@ test('copies the fields from another locale', async ({ cms, page }) => {
     page.getByRole('menuitem', { name: 'Copy from…' }),
   );
   await page.getByRole('menuitem', { name: 'English' }).click();
-  await expect(page.getByRole('status').filter({ hasText: /3 fields copied from/ })).toBeVisible();
   await expect(french.getByRole('textbox', { name: 'Title' })).toHaveValue('Night Markets');
   await expect(french.getByRole('textbox', { name: 'Body' })).toHaveText('Follow the lanterns.');
 
@@ -97,86 +93,51 @@ test('copies the fields from another locale', async ({ cms, page }) => {
   await page.keyboard.type('اتبع الفوانيس.');
   await save(page);
 
-  // The field that isn’t localized isn’t copied
+  // Every value of the source locale is copied as it is, the field that isn’t localized included
   expect((await cms.readRepo())['content/articles/night-markets.fr.md']).toBe(
     markdown(
-      { title: 'Night Markets', date: '2026-05-01', tags: ['food'], summary: 'Eat after dark.' },
+      {
+        title: 'Night Markets',
+        date: '2026-05-01',
+        author: 'Lina Saleh',
+        tags: ['food'],
+        summary: 'Eat after dark.',
+      },
       'Follow the **lanterns**.',
     ),
   );
 });
 
-test('translates one field, asking for the API key first', async ({ cms, page }) => {
+// The fork offers no machine translation: the translate buttons are hidden, in the pane header
+// and in the field options alike, so no translation service is ever called; see `docs/fork.md`
+test('offers no way to translate one field', async ({ cms, page }) => {
   const requests = await mockTranslator(page);
   const french = await showLocale(page, 1, 'French');
   const field = french.getByRole('group', { name: /Body.*Field/ });
 
-  await cms.chooseMenuItem(
-    field.getByRole('button', { name: 'Translate' }),
-    page.getByRole('menuitem', { name: /Translate from.*English/ }),
+  await expect(field.getByRole('button', { name: 'Translate' })).toHaveCount(0);
+  await cms.openPopup(
+    field.getByRole('button', { name: 'Show Field Options' }),
+    page.getByRole('menu', { name: 'Field Options' }),
   );
-
-  const dialog = page.getByRole('alertdialog', { name: 'Translate Field' });
-
-  await dialog.getByRole('textbox', { name: 'API Key' }).fill(API_KEY);
-  await expect(page.getByRole('status').filter({ hasText: /Field translated from/ })).toBeVisible();
-  await expect(field.getByRole('textbox', { name: 'Body' })).toHaveText('FR: Follow the lanterns.');
-  // The other fields are left alone
-  await expect(french.getByRole('textbox', { name: 'Title' })).toHaveValue('');
-
-  // The Markdown is sent as HTML
-  expect(requests).toEqual([
-    {
-      q: ['<p dir="auto">Follow the <strong>lanterns</strong>.</p>\n'],
-      source: 'en',
-      target: 'fr',
-      apiKey: API_KEY,
-    },
-  ]);
+  await expect(page.getByRole('menuitem', { name: /Translate from/ })).toHaveCount(0);
+  await page.keyboard.press('Escape');
+  expect(requests).toEqual([]);
 });
 
-test('translates every empty field of a locale at once', async ({ cms, page }) => {
+test('offers no way to translate a whole locale', async ({ cms, page }) => {
   const requests = await mockTranslator(page);
   const arabic = await showLocale(page, 1, 'Arabic');
 
-  // A field filled in already is kept
-  await arabic.getByRole('textbox', { name: 'Title' }).fill('أسواق الليل');
-  // The pane’s button comes before those of the fields
-  await cms.chooseMenuItem(
-    arabic.getByRole('button', { name: 'Translate' }).first(),
-    page.getByRole('menuitem', { name: /Translate from.*English/ }),
+  await expect(arabic.getByRole('button', { name: 'Translate' })).toHaveCount(0);
+  await cms.openPopup(
+    arabic.getByRole('button', { name: /Content Options/ }),
+    page.getByRole('menu', { name: /Content Options/ }),
   );
-  await page
-    .getByRole('alertdialog', { name: 'Translate Fields' })
-    .getByRole('textbox', { name: 'API Key' })
-    .fill(API_KEY);
-  await expect(
-    page.getByRole('status').filter({ hasText: /2 fields translated from/ }),
-  ).toBeVisible();
-  await expect(arabic.getByRole('textbox', { name: 'Title' })).toHaveValue('أسواق الليل');
-  await expect(arabic.getByRole('textbox', { name: 'Summary' })).toHaveValue('AR: Eat after dark.');
-  await expect(arabic.getByRole('textbox', { name: 'Body' })).toHaveText(
-    'AR: Follow the lanterns.',
-  );
-  expect(requests.map(({ q, target }) => ({ q, target }))).toEqual([
-    {
-      q: ['Eat after dark.', '<p dir="auto">Follow the <strong>lanterns</strong>.</p>\n'],
-      target: 'ar',
-    },
-  ]);
+  await expect(page.getByRole('menuitem', { name: /Translate from/ })).toHaveCount(0);
+  await page.keyboard.press('Escape');
 
-  const french = await showLocale(page, 1, 'French');
-
-  await french.getByRole('textbox', { name: 'Title' }).fill('Marchés de nuit');
-  await french.getByRole('textbox', { name: 'Body' }).click();
-  await page.keyboard.type('Suivez les lanternes.');
-  await save(page);
-
-  // The field that isn’t localized isn’t translated
-  expect((await cms.readRepo())['content/articles/night-markets.ar.md']).toBe(
-    markdown(
-      { title: 'أسواق الليل', date: '2026-05-01', tags: ['food'], summary: 'AR: Eat after dark.' },
-      'AR: Follow the **lanterns**.',
-    ),
-  );
+  // The fields are left as they were, and no service was called
+  await expect(arabic.getByRole('textbox', { name: 'Summary' })).toHaveValue('');
+  expect(requests).toEqual([]);
 });

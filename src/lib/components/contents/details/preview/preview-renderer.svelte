@@ -95,15 +95,14 @@
    */
   const objectURLToDataURI = async (objectURL) => {
     const blob = await (await fetch(objectURL)).blob();
+    const { promise, resolve, reject } = Promise.withResolvers();
+    const reader = new FileReader();
 
-    // eslint-disable-next-line jsdoc/require-jsdoc
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader();
+    reader.addEventListener('loadend', () => resolve(reader.result));
+    reader.addEventListener('error', () => reject(reader.error));
+    reader.readAsDataURL(blob);
 
-      reader.onloadend = () => resolve(/** @type {string} */ (reader.result));
-      reader.onerror = reject;
-      reader.readAsDataURL(blob);
-    });
+    return /** @type {Promise<string>} */ (promise);
   };
 
   /**

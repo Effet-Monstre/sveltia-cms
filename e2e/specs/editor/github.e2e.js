@@ -1,3 +1,4 @@
+import { expandAll } from '../../fixtures/expanders.js';
 import { expect, GITHUB_CONFIG, test } from '../../fixtures/test.js';
 
 /**
@@ -283,6 +284,8 @@ test.describe('draft backup', () => {
     // content left the keys of the last items in place, which were saved as extra values
     await cms.open();
     await editAndLeave(page, async (editor) => {
+      // The fork starts the expanders collapsed; see `docs/fork.md`
+      await expandAll(editor);
       await editor
         .getByRole('group', { name: /Tags/ })
         .getByRole('button', { name: 'Remove' })

@@ -1,3 +1,4 @@
+import { expandAll } from '../../fixtures/expanders.js';
 import { expect, test } from '../../fixtures/test.js';
 
 /**
@@ -241,6 +242,8 @@ test('hides the Add buttons and the item options of a list that doesn’t allow 
 }) => {
   const links = getField(page, 'Links');
 
+  // The fork starts the list items collapsed; see `docs/fork.md`
+  await expandAll(links);
   await expect(links.getByRole('textbox', { name: 'Text' })).toHaveCount(2);
   await expect(links.getByRole('button', { name: /Add/ })).toHaveCount(0);
   // The item options only add items: duplicate, add above and add below
@@ -271,6 +274,8 @@ test('hides the Remove buttons of a list of strings that doesn’t allow removin
 }) => {
   const tags = getField(page, 'Tags');
 
+  // The fork starts the list items collapsed; see `docs/fork.md`
+  await expandAll(tags);
   await expect(tags.getByRole('textbox', { name: 'Tag' })).toHaveCount(2);
   await expect(tags.getByRole('button', { name: 'Remove' })).toHaveCount(0);
   await tags.getByRole('button', { name: /Add.*Tag/ }).click();
@@ -290,6 +295,8 @@ test('hides the reorder handles and Duplicate of a list that allows neither', as
   const steps = getField(page, 'Steps');
   const options = steps.getByRole('button', { name: 'List Item Options' });
 
+  // The fork starts the list items collapsed; see `docs/fork.md`
+  await expandAll(steps);
   await expect(steps.getByRole('textbox', { name: 'Step Name' })).toHaveCount(2);
   await expect(steps.getByRole('button', { name: 'Reorder Item' })).toHaveCount(0);
   await expect(steps.getByRole('button', { name: 'Remove' })).toHaveCount(2);
@@ -312,12 +319,15 @@ test('adds an item to the top of a list with types', async ({ cms, page }) => {
   const blocks = getField(page, 'Blocks');
   const add = blocks.getByRole('button', { name: /Add.*Block/ });
 
+  // The fork starts the list items collapsed; see `docs/fork.md`
+  await expandAll(blocks);
   // The Add button is above the items, and not repeated below them
   await expect(add).toHaveCount(1);
   await expectAbove(add, blocks.getByRole('textbox', { name: 'Body' }));
 
   await cms.chooseMenuItem(add, page.getByRole('menuitem', { name: 'Image' }));
   await expect(blocks.getByText('2 Blocks')).toBeVisible();
+  await expandAll(blocks);
   await blocks.getByRole('textbox', { name: 'Alt Text' }).fill('A comet');
   // The new item comes first
   await expectAbove(
@@ -334,6 +344,8 @@ test('adds an item to the top of a list with types', async ({ cms, page }) => {
 test('adds an item to the top of a list of strings', async ({ cms, page }) => {
   const news = getField(page, 'News');
 
+  // The fork starts the list items collapsed; see `docs/fork.md`
+  await expandAll(news);
   await expect(news.getByRole('button', { name: /Add.*Headline/ })).toHaveCount(1);
   await expectAbove(
     news.getByRole('button', { name: /Add.*Headline/ }),
@@ -356,6 +368,8 @@ test('keeps the items of a list with types that allows no changes to them', asyn
 }) => {
   const cards = getField(page, 'Cards');
 
+  // The fork starts the list items collapsed; see `docs/fork.md`
+  await expandAll(cards);
   await expect(cards.getByText('2 Cards')).toBeVisible();
   await expect(cards.getByRole('button', { name: /Add/ })).toHaveCount(0);
   await expect(cards.getByRole('button', { name: 'List Item Options' })).toHaveCount(0);
@@ -380,6 +394,8 @@ test('collapses the whole list with `minimize_collapsed`', async ({ cms, page })
 
   await toggle.click();
   await expect(toggle).toHaveAttribute('aria-expanded', 'true');
+  // The fork starts the list items collapsed; see `docs/fork.md`
+  await expandAll(gallery);
   await expect(gallery.getByRole('textbox', { name: 'Caption' })).toHaveCount(2);
   await toggle.click();
   await expect(gallery.getByRole('textbox')).toHaveCount(0);
@@ -387,6 +403,7 @@ test('collapses the whole list with `minimize_collapsed`', async ({ cms, page })
   // While collapsed, the Add button is above the list, and adding an item expands it
   await gallery.getByRole('button', { name: /Add.*Photo/ }).click();
   await expect(toggle).toHaveAttribute('aria-expanded', 'true');
+  await expandAll(gallery);
   await expect(gallery.getByRole('textbox', { name: 'Caption' })).toHaveCount(3);
   await gallery.getByRole('textbox', { name: 'Caption' }).last().fill('Jupiter');
   await save(page);
@@ -491,5 +508,7 @@ test('offers no way to clear a list that doesn’t allow removing items', async 
     .click();
   await expect(getField(page, 'Steps').getByText('0 Steps')).toBeVisible();
   await expect(tags.getByText('2 Tags')).toBeVisible();
+  // The fork starts the list items collapsed; see `docs/fork.md`
+  await expandAll(tags);
   await expect(tags.getByRole('textbox', { name: 'Tag' }).first()).toHaveValue('space');
 });

@@ -118,7 +118,9 @@ test.describe('CMS.init()', () => {
       })} });`,
     });
     await cms.open();
-    await cms.signIn();
+    // The fork signs in automatically with the configured backend, so there is no sign-in screen
+    // to go through here; see `docs/fork.md`
+    await expect(page.getByRole('button', { name: 'Show Account Menu' })).toBeVisible();
 
     await expect(
       page.getByRole('tree', { name: 'Collection List' }).getByRole('treeitem'),

@@ -99,17 +99,17 @@ test('renames an entry with Edit Slug', async ({ cms, page }) => {
   expect(files).not.toHaveProperty('content/posts/2026-01-first-light.md');
 });
 
-test('reverts all changes', async ({ cms, page }) => {
+// Upstream reverts every change from the editor options, which the fork hides; see
+// `docs/fork.md`. Clearing the fields, which the fork keeps, is what’s checked instead
+test('offers no way to revert all changes, but clears the entry', async ({ page }) => {
   const editor = await openFirstLight(page);
   const title = editor.getByRole('textbox', { name: 'Title' });
   const tags = editor.getByRole('textbox', { name: 'Item Value' });
   const save = editor.getByRole('button', { name: 'Save' });
   const menuButton = page.getByRole('button', { name: 'Show Editor Options' });
-  const revert = page.getByRole('menuitem', { name: 'Revert All Changes' });
 
-  // Nothing to revert yet
   await menuButton.click();
-  await expect(revert).toBeDisabled();
+  await expect(page.getByRole('menuitem', { name: /Revert/ })).toHaveCount(0);
   await page.keyboard.press('Escape');
 
   await title.fill('Last Light');
@@ -118,20 +118,20 @@ test('reverts all changes', async ({ cms, page }) => {
   await expect(tags).toHaveCount(1);
   await expect(save).toBeEnabled();
 
-  await cms.chooseMenuItem(menuButton, revert);
+  await menuButton.click();
+  await expect(page.getByRole('menuitem', { name: /Revert/ })).toHaveCount(0);
+  await page.getByRole('menuitem', { name: 'Clear All' }).click();
 
-  // Nothing is reverted until confirmed
+  // Nothing is cleared until confirmed
   const dialog = page.getByRole('alertdialog');
 
-  await expect(dialog).toContainText('revert all the changes made to this entry?');
+  await expect(dialog).toContainText('clear all the fields');
   await expect(title).toHaveValue('Last Light');
-  await dialog.getByRole('button', { name: 'Revert All Changes' }).click();
+  await dialog.getByRole('button', { name: 'Clear All' }).click();
 
-  await expect(title).toHaveValue('First Light');
-  await expect(editor.getByRole('switch', { name: 'Draft' })).not.toBeChecked();
-  await expect(tags).toHaveCount(2);
-  await expect(tags.first()).toHaveValue('astronomy');
-  await expect(save).toBeDisabled();
+  await expect(title).toHaveValue('');
+  // A list keeps one empty item when it’s cleared
+  await expect(tags).toHaveValue('');
 });
 
 test.describe('panes', () => {

@@ -1,5 +1,6 @@
 import { stringify } from 'yaml';
 
+import { expandAll } from '../../fixtures/expanders.js';
 import { expect, test } from '../../fixtures/test.js';
 
 import { openEntry, save, showLocale } from './helpers.js';
@@ -65,6 +66,8 @@ test('keeps the duplicated subfields in a locale enabled for an entry', async ({
 
   await french.getByRole('button', { name: /Enable.*French/ }).click();
   await french.getByRole('textbox', { name: 'Title' }).fill('Vieille ville');
+  // The fork starts the expanders collapsed; see `docs/fork.md`
+  await expandAll(french);
   // The stops used to be left out of the French content, as their subfields aren’t localized
   await expect(french.getByRole('textbox', { name: 'Place' }).first()).toHaveValue('Cathedral');
   await save(page);

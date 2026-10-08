@@ -1,3 +1,4 @@
+import { expandAll } from '../../fixtures/expanders.js';
 import { expect, test } from '../../fixtures/test.js';
 
 import { getEditor, getEditPane, showLocale } from './helpers.js';
@@ -71,6 +72,10 @@ test.beforeEach(async ({ cms, page }) => {
 
 test('shows the duplicated values read-only in another locale', async ({ page }) => {
   const french = await showLocale(page, 1, 'French');
+
+  // The fork starts the expanders collapsed; see `docs/fork.md`
+  await expandAll(french);
+
   const links = french.getByRole('group', { name: /Links.*Field/ });
   const venue = french.getByRole('group', { name: /Venue.*Field/ });
 

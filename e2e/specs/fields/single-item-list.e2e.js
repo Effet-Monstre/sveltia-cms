@@ -1,3 +1,4 @@
+import { expandAll } from '../../fixtures/expanders.js';
 import { expect, test } from '../../fixtures/test.js';
 
 /**
@@ -53,6 +54,8 @@ test('fills in the item of a required list limited to one item', async ({ cms, p
   const sponsor = editor.getByRole('group', { name: 'Sponsor', exact: true });
 
   await editor.getByRole('textbox', { name: 'Title' }).fill('Night Sky');
+  // The fork starts the expanders collapsed; see `docs/fork.md`
+  await expandAll(editor);
   // The author’s subfields are there to fill in, without the list controls
   await author.getByRole('textbox', { name: 'Name' }).fill('Melvin');
   await expect(author.getByRole('button', { name: 'Remove' })).toHaveCount(0);
@@ -75,6 +78,10 @@ test('adds the missing item to an existing entry without counting it as a change
 
   const editor = page.getByRole('group', { name: 'Content Editor' });
   const saveButton = editor.getByRole('button', { name: 'Save' });
+
+  // The fork starts the expanders collapsed; see `docs/fork.md`
+  await expandAll(editor);
+
   const name = editor.getByRole('group', { name: 'Author', exact: true }).getByRole('textbox');
 
   await expect(name).toBeVisible();
