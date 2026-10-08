@@ -2,10 +2,14 @@ import { _ } from '@sveltia/i18n';
 import { generateRandomId, generateUUID, getHash } from '@sveltia/utils/crypto';
 import { isObject } from '@sveltia/utils/object';
 import { LocalStorage } from '@sveltia/utils/storage';
-import { get, writable } from 'svelte/store';
 
+import {
+  requestAccessToken,
+  apiConfig as sharedApiConfig,
+} from '$lib/services/backends/git/shared/api';
 import { cmsConfig } from '$lib/services/config';
-import { isSecureURL } from '$lib/services/utils/networking';
+import { USER_STORAGE_KEY } from '$lib/services/user/constants';
+import { createRawState } from '$lib/services/utils/state.svelte';
 
 /**
  * @import {
@@ -13,11 +17,23 @@ import { isSecureURL } from '$lib/services/utils/networking';
  * AuthTokens,
  * InternalCmsConfig,
  * SignInOptions,
+ * User,
  * } from '$lib/types/private';
  * @import { GitBackend } from '$lib/types/public';
  */
 
-export const inAuthPopup = writable(false);
+/**
+ * Whether the app is running in the authentication popup window.
+ */
+export const inAuthPopup = createRawState(false);
+
+/**
+ * Create the error thrown when the user closes the authentication popup, which callers tell apart
+ * from a failure by its name.
+ * @returns {Error} Error.
+ */
+const createAbortError = () =>
+  Object.assign(new Error('Authentication aborted'), { name: 'AbortError' });
 
 /**
  * Open a popup window for authentication.
@@ -41,16 +57,28 @@ export const openPopup = ({ authURL }) => {
  * @param {object} args Arguments.
  * @param {string} args.backendName Backend name, e.g. `github`.
  * @param {string} args.authURL Authentication site URL.
+ * @param {Window | null} [args.popup] Optional pre-opened popup window. If not provided, a new
+ * popup will be opened.
  * @returns {Promise<AuthTokens>} Auth access token and refresh token.
  * @throws {Error} When authentication failed or the popup window is closed before the auth process
  * is complete.
  * @see https://decapcms.org/docs/backends-overview/
  * @see https://sveltiacms.app/en/docs/backends
  */
-export const authorize = async ({ backendName, authURL }) => {
-  const popup = openPopup({ authURL });
+export const authorize = async ({ backendName, authURL, popup }) => {
+  const authPopup = popup ?? openPopup({ authURL });
+
+  // Without a popup, there’s no window the result could come from
+  if (!authPopup) {
+    throw createAbortError();
+  }
 
   return new Promise((resolve, reject) => {
+    // Detaches the `message` listener below. Every exit path aborts it, including the one where the
+    // user closes the popup: otherwise each cancelled sign-in would leave a listener — and the
+    // popup and promise callbacks it captures — attached to the window for the rest of the session.
+    const controller = new AbortController();
+
     /**
      * Timer to check if the popup is closed. This doesn’t work with GitLab; `window.closed` will
      * always be `true`.
@@ -58,21 +86,24 @@ export const authorize = async ({ backendName, authURL }) => {
     const timer =
       backendName === 'github'
         ? setInterval(() => {
-            if (popup?.closed) {
+            if (authPopup.closed) {
+              controller.abort();
               clearInterval(timer);
-              reject(Object.assign(new Error('Authentication aborted'), { name: 'AbortError' }));
+              reject(createAbortError());
             }
           }, 1000)
         : 0;
 
     /**
-     * Message event handler.
+     * Message event handler. Only messages from the popup itself are handled, so another window,
+     * even on the same origin, can neither take part in the handshake nor inject a token.
      * @param {object} args Arguments.
      * @param {string} args.origin Origin URL.
      * @param {string} args.data Passed data.
+     * @param {MessageEventSource | null} args.source Window that sent the message.
      */
-    const handler = ({ origin, data }) => {
-      if (origin !== new URL(authURL).origin || typeof data !== 'string') {
+    const handler = ({ origin, data, source }) => {
+      if (source !== authPopup || origin !== new URL(authURL).origin || typeof data !== 'string') {
         return;
       }
 
@@ -80,7 +111,7 @@ export const authorize = async ({ backendName, authURL }) => {
 
       // First message
       if (data === `authorizing:${provider}`) {
-        popup?.postMessage(data, origin);
+        authPopup.postMessage(data, origin);
 
         return;
       }
@@ -118,12 +149,12 @@ export const authorize = async ({ backendName, authURL }) => {
         );
       }
 
-      window.removeEventListener('message', handler);
+      controller.abort();
       clearInterval(timer);
-      popup?.close();
+      authPopup.close();
     };
 
-    window.addEventListener('message', handler);
+    window.addEventListener('message', handler, { signal: controller.signal });
   });
 };
 
@@ -201,9 +232,18 @@ export const createAuthSecrets = async () => {
  * @see https://docs.gitlab.com/ee/api/oauth2.html#authorization-code-with-proof-key-for-code-exchange-pkce
  */
 export const initClientSideAuth = async ({ backendName, clientId, authURL, scope }) => {
-  const { csrfToken, codeVerifier, codeChallenge } = await createAuthSecrets();
   const { origin, pathname } = window.location;
   const redirectURL = `${origin}${pathname}`;
+  // Open the popup immediately to prevent Safari from blocking it. Safari blocks popups that aren’t
+  // opened synchronously from a user interaction.
+  const popup = openPopup({ authURL: redirectURL });
+
+  if (!popup) {
+    throw createAbortError();
+  }
+
+  // Perform async operations after opening the popup
+  const { csrfToken, codeVerifier, codeChallenge } = await createAuthSecrets();
 
   const params = new URLSearchParams({
     client_id: clientId,
@@ -224,11 +264,17 @@ export const initClientSideAuth = async ({ backendName, clientId, authURL, scope
 
   // Store the user info only with the backend name, so the automatic sign-in flow that triggers
   // `finishClientSideAuth` below will work
-  await LocalStorage.set('sveltia-cms.user', { backendName });
+  await LocalStorage.set(USER_STORAGE_KEY, { backendName });
+
+  // Check if the popup was closed while we were doing async operations
+  if (popup.closed) {
+    throw createAbortError();
+  }
 
   return authorize({
     backendName,
     authURL: redirectURL,
+    popup,
   });
 };
 
@@ -247,11 +293,17 @@ export const sendMessage = ({ provider = 'unknown', token, refreshToken, error, 
   const content = error ? { provider, error, errorCode } : { provider, token, refreshToken };
 
   /**
-   * Listener for messages from the window opener.
+   * Listener for messages from the window opener. The tokens are only sent back to the opener, and
+   * only when it’s on the same origin as this popup, so no other window holding a reference to the
+   * popup can obtain them by starting the handshake.
    * @param {MessageEvent} event Event.
    */
-  const onMessage = ({ data, origin }) => {
-    if (data === `authorizing:${provider}`) {
+  const onMessage = ({ data, origin, source }) => {
+    if (
+      source === window.opener &&
+      origin === window.location.origin &&
+      data === `authorizing:${provider}`
+    ) {
       window.opener?.postMessage(
         `authorization:${provider}:${_state}:${JSON.stringify(content)}`,
         origin,
@@ -296,38 +348,21 @@ export const finishClientSideAuth = async ({ backendName, apiConfig, code, state
     });
   }
 
-  let response;
   let token = '';
   let refreshToken = '';
   let error = '';
 
-  if (!isSecureURL(tokenURL)) {
-    return sendMessage({
-      provider,
-      error: _('sign_in_error.TOKEN_REQUEST_FAILED'),
-      errorCode: 'TOKEN_REQUEST_FAILED',
-    });
-  }
-
-  try {
-    response = await fetch(tokenURL, {
-      method: 'POST',
-      headers: {
-        Accept: 'application/json',
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        grant_type: 'authorization_code',
-        client_id: clientId,
-        code,
-        redirect_uri: redirectURL,
-        code_verifier: codeVerifier,
-      }),
-      ...(includeCredentials && { credentials: 'include' }),
-    });
-  } catch {
-    //
-  }
+  const response = await requestAccessToken(
+    tokenURL,
+    {
+      grant_type: 'authorization_code',
+      client_id: clientId,
+      code,
+      redirect_uri: redirectURL,
+      code_verifier: codeVerifier,
+    },
+    { includeCredentials },
+  );
 
   if (!response) {
     return sendMessage({
@@ -358,7 +393,7 @@ export const finishClientSideAuth = async ({ backendName, apiConfig, code, state
  * @param {ApiEndpointConfig} args.apiConfig API endpoint configuration.
  */
 export const handleClientSideAuthPopup = async ({ backendName, apiConfig }) => {
-  inAuthPopup.set(true);
+  inAuthPopup.current = true;
 
   const { search } = window.location;
   const { code, state } = Object.fromEntries(new URLSearchParams(search));
@@ -378,7 +413,6 @@ export const handleClientSideAuthPopup = async ({ backendName, apiConfig }) => {
  * Handle the authentication flow for a Git service provider. This function decides whether to
  * initiate a client-side or server-side authentication flow based on the configured backend name
  * and authentication type.
- * @internal
  * @param {object} args Arguments.
  * @param {boolean} args.auto Whether the sign-in process is automatic.
  * @param {ApiEndpointConfig} args.apiConfig API endpoint configuration.
@@ -386,7 +420,7 @@ export const handleClientSideAuthPopup = async ({ backendName, apiConfig }) => {
  * the sign-in process is automatic or the flow is being done in a popup window.
  */
 export const handleAuthFlow = async ({ auto, apiConfig }) => {
-  const { backend } = /** @type {InternalCmsConfig} */ (get(cmsConfig));
+  const { backend } = /** @type {InternalCmsConfig} */ (cmsConfig.current);
 
   const {
     name: backendName,
@@ -442,3 +476,30 @@ export const getTokens = async ({ options: { token, refreshToken, auto = false }
 
   return { token, refreshToken };
 };
+
+/**
+ * Sign in with a backend’s REST API: the tokens are obtained by running the authentication flow if
+ * necessary, then the user profile is fetched with the backend-specific function.
+ * @param {object} args Arguments.
+ * @param {SignInOptions} args.options Options.
+ * @param {(tokens: AuthTokens) => Promise<User>} args.getUserProfile Function to retrieve the
+ * authenticated user’s profile information from the backend’s REST API.
+ * @returns {Promise<User | void>} User info, or nothing when finishing PKCE auth flow in a popup or
+ * the sign-in flow cannot be started.
+ * @throws {Error} When there was an authentication error.
+ */
+export const signInToBackend = async ({ options, getUserProfile }) => {
+  const { token, refreshToken } = (await getTokens({ options, apiConfig: sharedApiConfig })) ?? {};
+
+  if (!token) {
+    return undefined;
+  }
+
+  return getUserProfile({ token, refreshToken });
+};
+
+/**
+ * Sign out from the backend. Nothing to do here.
+ * @returns {Promise<void>}
+ */
+export const signOut = async () => undefined;

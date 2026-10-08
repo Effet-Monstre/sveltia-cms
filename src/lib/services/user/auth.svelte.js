@@ -1,14 +1,34 @@
 import { _ } from '@sveltia/i18n';
 import { isObject } from '@sveltia/utils/object';
 import { LocalStorage } from '@sveltia/utils/storage';
-import { get } from 'svelte/store';
 
 import { goto, parseLocation } from '$lib/services/app/navigation';
-import { backend, backendName } from '$lib/services/backends';
+import { backend, backendName, selectBackend } from '$lib/services/backends';
+import { lockedBranch, mergeLockedBranch } from '$lib/services/backends/branch-access';
+import { NOT_COLLABORATOR_ERROR_MESSAGE } from '$lib/services/backends/git/shared/errors';
+import { repositoryHead } from '$lib/services/backends/git/shared/fetch';
+import { startRemoteChangePolling, stopRemoteChangePolling } from '$lib/services/backends/poll';
 import { cmsConfig } from '$lib/services/config';
 import { dataLoaded } from '$lib/services/contents';
+import { arrayFileItems } from '$lib/services/contents/file/process';
+import { resetDeployments } from '$lib/services/deployments';
+import { resetPageLiveness } from '$lib/services/deployments/ping';
+import { initDeployments } from '$lib/services/deployments/resolve';
 import { user } from '$lib/services/user/account.svelte';
+import { LEGACY_USER_STORAGE_KEYS, USER_STORAGE_KEY } from '$lib/services/user/constants';
 import { prefs } from '$lib/services/user/prefs.svelte';
+import {
+  publishingBranches,
+  unpublishedEntries,
+  unpublishedEntriesLoaded,
+} from '$lib/services/workflow';
+import { resetDeployingEntries } from '$lib/services/workflow/deploy';
+import { loadUnpublishedEntries, startLoadingPullRequests } from '$lib/services/workflow/load';
+import {
+  forkedRepository,
+  forkPermissionRequest,
+  openAuthoringInitialized,
+} from '$lib/services/workflow/open-authoring';
 
 /**
  * @import { BackendService, InternalCmsConfig, User } from '$lib/types/private';
@@ -28,15 +48,36 @@ export const auth = $state({
   unauthenticated: true,
   /** Whether a sign-in is in progress. */
   signingIn: false,
+  /**
+   * Account that a magic link signs the user in to, while they’re asked whether to go ahead. The
+   * link can be crafted by anyone, so it’s only used once the user has recognized the account.
+   * @type {{ account: User, resolve: (confirmed: boolean) => void } | undefined}
+   */
+  magicLinkConfirmation: undefined,
 });
 
 /**
- * Clear the cached user token so the sign-in form is shown on next load.
+ * Clear the cached user token so the sign-in form is shown on next load. The user caches left by
+ * Netlify/Decap CMS, which may also hold a token, are removed as well.
  */
 const clearUserCache = async () => {
-  await LocalStorage.set('sveltia-cms.user', {});
+  await Promise.all([
+    LocalStorage.set(USER_STORAGE_KEY, {}),
+    ...LEGACY_USER_STORAGE_KEYS.map((key) => LocalStorage.delete(key)),
+  ]);
   user.account = undefined;
   auth.unauthenticated = true;
+};
+
+/**
+ * Remove the API keys and log-in credentials for integrations, such as translation services and
+ * cloud storage, from the user preferences, so they don’t remain on the device once the user has
+ * signed out. Other preferences, like the theme and language, are kept. This is only done on an
+ * explicit sign-out, not when an expired or revoked token sends the user back to the sign-in form.
+ */
+const clearIntegrationCredentials = () => {
+  prefs.apiKeys = {};
+  delete prefs.logins;
 };
 
 /**
@@ -48,7 +89,7 @@ const clearUserCache = async () => {
 const clearUserCacheIfNeeded = async (error) => {
   const isAuthError =
     typeof (/** @type {any} */ (error?.cause)?.status) === 'number' ||
-    error?.message === 'Not a collaborator of the repository';
+    error?.message === NOT_COLLABORATOR_ERROR_MESSAGE;
 
   if (isAuthError) {
     await clearUserCache();
@@ -76,7 +117,7 @@ export const logError = (ex, context = 'authentication') => {
 
   if (ex.name === 'AbortError') {
     message = _(
-      get(backendName) === 'local'
+      backendName.current === 'local'
         ? 'sign_in_error.picker_dismissed'
         : 'sign_in_error.authentication_aborted',
     );
@@ -89,7 +130,6 @@ export const logError = (ex, context = 'authentication') => {
 
 /**
  * Parse a magic link URL generated for QR code sign-in to extract the token and preferences.
- * @internal
  * @returns {{ _user: { token: string } | undefined, copiedPrefs: Record<string, any> | undefined
  * }} Object containing the user token and copied preferences.
  */
@@ -128,21 +168,20 @@ export const parseMagicLink = () => {
 
 /**
  * Find cached user info, including a compatible Netlify/Decap CMS user object.
- * @internal
  * @returns {Promise<Record<string, any> | undefined>} Cached user info, or undefined if not found.
  */
 export const getUserCache = async () => {
-  const userCache =
-    (await LocalStorage.get('sveltia-cms.user')) ||
-    (await LocalStorage.get('decap-cms-user')) ||
-    (await LocalStorage.get('netlify-cms-user'));
+  // Read the keys one at a time, stopping at the first hit
+  const userCache = await [USER_STORAGE_KEY, ...LEGACY_USER_STORAGE_KEYS].reduce(
+    async (previous, key) => (await previous) || LocalStorage.get(key),
+    /** @type {Promise<any>} */ (Promise.resolve(undefined)),
+  );
 
   return isObject(userCache) && typeof userCache.backendName === 'string' ? userCache : undefined;
 };
 
 /**
  * Get the backend instance based on the cached user info or site config.
- * @internal
  * @param {Record<string, any> | undefined} _user Cached user info.
  * @returns {BackendService | undefined} Backend instance to be used.
  */
@@ -156,11 +195,86 @@ export const getBackend = (_user) => {
   const _backendName =
     _user?.backendName === 'local' || _user?.backendName === 'proxy'
       ? 'local'
-      : /** @type {InternalCmsConfig} */ (get(cmsConfig)).backend.name;
+      : /** @type {InternalCmsConfig} */ (cmsConfig.current).backend.name;
 
-  backendName.set(_backendName);
+  return selectBackend(_backendName);
+};
 
-  return get(backend);
+/**
+ * Verify the token passed with a magic link, and ask the user to confirm the account it belongs
+ * to. Since anyone can craft a link, it could otherwise sign the user in to someone else’s account
+ * without their knowledge, overwriting their session, and copy the settings in the link, such as a
+ * deploy hook URL, to their device.
+ * @param {string} token Token passed with the link.
+ * @returns {Promise<User | undefined>} User info if the token is valid and the user has confirmed
+ * the account, or `undefined` otherwise.
+ */
+export const confirmMagicLink = async (token) => {
+  const _backend = getBackend(undefined);
+
+  if (!_backend) {
+    return undefined;
+  }
+
+  /** @type {User | undefined} */
+  let account = undefined;
+
+  auth.signingIn = true;
+
+  try {
+    // The user store is left untouched, so an existing session stays cached until the user agrees
+    // to replace it
+    account = /** @type {User | undefined} */ (await _backend.signIn({ token, auto: true }));
+  } catch {
+    //
+  }
+
+  auth.signingIn = false;
+
+  if (!account) {
+    return undefined;
+  }
+
+  const confirmed = await new Promise((resolve) => {
+    auth.magicLinkConfirmation = { account: /** @type {User} */ (account), resolve };
+  });
+
+  auth.magicLinkConfirmation = undefined;
+
+  return confirmed ? account : undefined;
+};
+
+/**
+ * Copy the user preferences passed with a magic link. The deploy hook URL and its `Authorization`
+ * header are only copied together, so a link that has a URL but no header can’t leave the header
+ * already on this device to be sent to the new URL.
+ * @param {Record<string, any>} copiedPrefs Preferences passed with the link.
+ */
+export const copyMagicLinkPrefs = (copiedPrefs) => {
+  if ('deployHookURL' in copiedPrefs) {
+    delete prefs.deployHookAuthHeader;
+  }
+
+  Object.assign(prefs, copiedPrefs);
+};
+
+/**
+ * Load the files and unpublished entries from the backend the user has just signed in to, then
+ * start keeping them up to date.
+ * @param {BackendService} _backend Backend.
+ */
+const loadRepositoryData = async (_backend) => {
+  // The pull requests don’t depend on the files, so they’re requested at the same time
+  const pullRequests = startLoadingPullRequests();
+
+  await _backend.fetchFiles();
+  await loadUnpublishedEntries(pullRequests);
+  // The deploy state is a nicety, so it’s resolved in the background rather than delaying the UI.
+  // The files were loaded from the branch head, which is the commit the production site is built
+  // from, so it isn’t fetched again
+  initDeployments({ head: repositoryHead.current });
+  // From here on, someone else’s commits are picked up as they land
+  startRemoteChangePolling();
 };
 
 /**
@@ -170,22 +284,24 @@ export const getBackend = (_user) => {
 export const signInAutomatically = async () => {
   resetError();
 
+  const { _user: magicLinkUser, copiedPrefs } = parseMagicLink();
   /** @type {Record<string, any> | undefined} */
-  let _user = undefined;
-  /** @type {Record<string, any> | undefined} */
-  let copiedPrefs = undefined;
+  let _user = magicLinkUser ? await confirmMagicLink(magicLinkUser.token) : undefined;
+  // The account has been verified already if the user has accepted a magic link
+  const verified = !!_user;
 
-  ({ _user, copiedPrefs } = parseMagicLink());
+  // Fall back to the cached user, which also covers a declined or invalid magic link
   _user ??= await getUserCache();
+
+  // Initialize the backend, which is needed on the login page
+  const _backend = getBackend(_user);
 
   // If no cached user info is found, simply return as we cannot sign in automatically
   if (!_user) {
     return;
   }
 
-  const _backend = getBackend(_user);
-
-  if (_user && _backend) {
+  if (!verified && _backend) {
     // Temporarily populate the `user` store with the cache, otherwise it’s not updated in
     // `refreshAccessToken`
     user.account = /** @type {User} */ (_user);
@@ -214,12 +330,12 @@ export const signInAutomatically = async () => {
   user.account = /** @type {User} */ (_user);
 
   // Copy user preferences passed with QR code
-  if (copiedPrefs) {
-    Object.assign(prefs, copiedPrefs);
+  if (verified && copiedPrefs) {
+    copyMagicLinkPrefs(copiedPrefs);
   }
 
   try {
-    await _backend.fetchFiles();
+    await loadRepositoryData(_backend);
   } catch (/** @type {any} */ ex) {
     // The API request may fail if the cached token has been expired or revoked. Then let the user
     // sign in again. 404 Not Found is also considered an authentication error.
@@ -241,9 +357,8 @@ export const signInAutomatically = async () => {
  */
 export const signInManually = async (_backendName, token) => {
   resetError();
-  backendName.set(_backendName);
 
-  const _backend = get(backend);
+  const _backend = selectBackend(_backendName);
 
   if (!_backend) {
     return;
@@ -282,7 +397,7 @@ export const signInManually = async (_backendName, token) => {
   user.account = _user;
 
   try {
-    await _backend.fetchFiles();
+    await loadRepositoryData(_backend);
   } catch (/** @type {any} */ ex) {
     logError(ex, 'dataFetch');
     await clearUserCacheIfNeeded(ex);
@@ -293,13 +408,30 @@ export const signInManually = async (_backendName, token) => {
  * Sign out from the current backend.
  */
 export const signOut = async () => {
-  await get(backend)?.signOut();
+  stopRemoteChangePolling();
+  await backend.current?.signOut();
   await clearUserCache();
+  clearIntegrationCredentials();
 
-  backendName.set(undefined);
-  dataLoaded.set(false);
+  selectBackend(undefined);
+  dataLoaded.current = false;
+  // The items of the files storing all the entries of a collection belong to this repository
+  arrayFileItems.clear();
+  repositoryHead.current = '';
+  lockedBranch.current = undefined;
+  mergeLockedBranch.current = undefined;
+  unpublishedEntries.current = [];
+  unpublishedEntriesLoaded.current = false;
+  publishingBranches.current = [];
+  // The fork belongs to the signed-out user, so the next user needs Open Authoring set up again
+  forkPermissionRequest.current?.respond(false);
+  forkedRepository.current = undefined;
+  openAuthoringInitialized.current = false;
+  resetDeployingEntries();
+  resetDeployments();
+  resetPageLiveness();
 
-  const redirectURL = get(cmsConfig)?.logout_redirect_url;
+  const redirectURL = cmsConfig.current?.logout_redirect_url;
 
   if (redirectURL) {
     window.location.href = redirectURL;

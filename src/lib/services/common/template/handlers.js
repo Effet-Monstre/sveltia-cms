@@ -1,11 +1,24 @@
 import { generateUUID } from '@sveltia/utils/crypto';
+import { stripSlashes } from '@sveltia/utils/string';
 
 import { DATE_TIME_FIELDS } from '$lib/services/common/template/constants';
+import { getFileNameParts } from '$lib/services/common/template/utils';
+import {
+  getSharedEntryFileName,
+  stripIndexFileName,
+} from '$lib/services/contents/collection/nested';
 import { getEntrySummaryFromContent } from '$lib/services/contents/entry/summary';
+import {
+  hasLocalePlaceholder,
+  stripLocaleFolderPath,
+} from '$lib/services/contents/i18n/placeholder';
+
+/**
+ * @import { ReplaceSubContext } from '$lib/services/common/template/replacers';
+ */
 
 /**
  * Handles date-time related template tags.
- * @internal
  * @param {string} tag The template tag.
  * @param {Record<string, string>} dateTimeParts Date-time parts object.
  * @returns {string | undefined} The date-time value or undefined if not a date-time tag.
@@ -15,7 +28,6 @@ export const handleDateTimeTag = (tag, dateTimeParts) =>
 
 /**
  * Handles UUID-related template tags.
- * @internal
  * @param {string} tag The template tag.
  * @returns {string | undefined} The UUID value or undefined if not a UUID tag.
  */
@@ -34,17 +46,16 @@ export const handleUuidTag = (tag) => {
 
 /**
  * Handles slug-related template tags.
- * @internal
- * @param {string} tag The template tag.
- * @param {string | undefined} currentSlug Current slug value.
- * @param {string} type Template type.
- * @param {boolean} isIndexFile Whether this is an index file.
+ * @param {string} tag Field name or special tag.
+ * @param {ReplaceSubContext} context Replacement context.
  * @returns {string | undefined} The slug value or undefined if not a slug tag.
  */
-export const handleSlugTag = (tag, currentSlug, type, isIndexFile) => {
-  if (tag !== 'slug' || !currentSlug) {
+export const handleSlugTag = (tag, context) => {
+  if (tag !== 'slug') {
     return undefined;
   }
+
+  const { type, isIndexFile, currentSlug, content, identifierField, collection } = context;
 
   // Return an empty string instead of `_index` when generating the preview path for an index file
   // @see https://github.com/sveltia/sveltia-cms/issues/468
@@ -52,63 +63,60 @@ export const handleSlugTag = (tag, currentSlug, type, isIndexFile) => {
     return '';
   }
 
-  return currentSlug;
+  const slug = currentSlug ?? getEntrySummaryFromContent(content, { identifierField });
+
+  // In a nested collection, an entry’s slug is its path within the collection folder, which ends
+  // with the file name shared by every entry, e.g. `guides/intro/_index`. That file name is an
+  // implementation detail of the content folder, not part of the entry’s URL.
+  // @see https://github.com/decaporg/decap-cms/issues/4963
+  if (type === 'preview_path' && collection) {
+    // The collection’s own index file stands for the root of the preview path, so nothing is left
+    if (slug === getSharedEntryFileName(collection)) {
+      return '';
+    }
+
+    return stripIndexFileName(collection, slug);
+  }
+
+  return slug;
 };
 
 /**
  * Handles file path related template tags.
- * @internal
  * @param {string} tag The template tag.
  * @param {string | undefined} entryFilePath Entry file path.
  * @param {string | undefined} basePath Base path.
+ * @param {string[]} [localeSuffixes] Locale codes that can follow the file name, with the
+ * `multiple_files` i18n structure.
  * @returns {string | undefined} The file path value or undefined if not a file path tag.
  */
-export const handleFilePathTag = (tag, entryFilePath, basePath) => {
+export const handleFilePathTag = (tag, entryFilePath, basePath, localeSuffixes = []) => {
   if (!entryFilePath) {
     return '';
   }
 
   switch (tag) {
     case 'dirname': {
-      const pathAfterBase = entryFilePath.replace(basePath ?? '', '');
+      // The folder is relative to the collection folder, so it must not keep the slash left behind
+      // by the removed base path, or a template like `media/{{dirname}}` would produce `media//sub`
+      // A base path with the `{{locale}}` placeholder stands for a folder per locale
+      // @see https://github.com/decaporg/decap-cms/issues/7752
+      const pathAfterBase = stripSlashes(
+        basePath && hasLocalePlaceholder(basePath)
+          ? stripLocaleFolderPath(entryFilePath, basePath)
+          : entryFilePath.replace(basePath ?? '', ''),
+      );
+
       const lastSlashIndex = pathAfterBase.lastIndexOf('/');
 
       return lastSlashIndex > 0 ? pathAfterBase.substring(0, lastSlashIndex) : '';
     }
 
-    case 'filename': {
-      const fileName = /** @type {string} */ (entryFilePath.split('/').pop());
-
-      return fileName.split('.').shift();
-    }
-
-    case 'extension': {
-      const fileName = /** @type {string} */ (entryFilePath.split('/').pop());
-
-      return fileName.split('.').pop();
-    }
+    case 'filename':
+    case 'extension':
+      return getFileNameParts(entryFilePath, localeSuffixes)[tag];
 
     default:
       return undefined;
   }
-};
-
-/**
- * Gets field value from the value map.
- * @internal
- * @param {string} tag The template tag.
- * @param {Record<string, any>} valueMap Value map object.
- * @param {string} identifierField Identifier field name.
- * @returns {any} The field value.
- */
-export const getFieldValue = (tag, valueMap, identifierField) => {
-  if (tag.startsWith('fields.')) {
-    return valueMap[tag.replace(/^fields\./, '')];
-  }
-
-  if (tag === 'slug') {
-    return getEntrySummaryFromContent(valueMap, { identifierField });
-  }
-
-  return valueMap[tag];
 };

@@ -1,11 +1,17 @@
-// @vitest-environment jsdom
+// @vitest-environment happy-dom
 
 import { decodeBase64, getPathInfo } from '@sveltia/utils/file';
 import { beforeEach, describe, expect, test, vi } from 'vitest';
 
 import { fetchLastCommit } from '$lib/services/backends/git/gitea/commits';
+import {
+  getWorkflowRepository,
+  initOpenAuthoring,
+  isOpenAuthoringConfigured,
+} from '$lib/services/backends/git/gitea/fork';
 import { checkInstanceVersion, instance } from '$lib/services/backends/git/gitea/instance';
 import {
+  checkBranchAccess,
   checkRepositoryAccess,
   fetchDefaultBranchName,
   repository,
@@ -13,12 +19,15 @@ import {
 import { fetchAPI } from '$lib/services/backends/git/shared/api';
 import { fetchAndParseFiles } from '$lib/services/backends/git/shared/fetch';
 import { dataLoadedProgress } from '$lib/services/contents';
+import { forkedRepository, openAuthoringInitialized } from '$lib/services/workflow/open-authoring';
 
 import {
+  createBatches,
   fetchBlob,
   fetchFileContents,
   fetchFileList,
   fetchFiles,
+  fetchRawFile,
   parseFileContents,
 } from './files.js';
 
@@ -36,6 +45,12 @@ vi.mock('$lib/services/backends/git/gitea/commits', () => ({
   fetchLastCommit: vi.fn(),
 }));
 
+vi.mock('$lib/services/backends/git/gitea/fork', () => ({
+  getWorkflowRepository: vi.fn(() => ({ owner: 'test-owner', repo: 'test-repo' })),
+  initOpenAuthoring: vi.fn(),
+  isOpenAuthoringConfigured: vi.fn(() => false),
+}));
+
 vi.mock('$lib/services/backends/git/gitea/instance', () => ({
   checkInstanceVersion: vi.fn(),
   instance: { isForgejo: false },
@@ -47,6 +62,7 @@ vi.mock('$lib/services/backends/git/gitea/repository', () => ({
     repo: 'test-repo',
     branch: 'main',
   },
+  checkBranchAccess: vi.fn(),
   checkRepositoryAccess: vi.fn(),
   fetchDefaultBranchName: vi.fn(),
 }));
@@ -59,15 +75,39 @@ vi.mock('$lib/services/backends/git/shared/fetch', () => ({
   fetchAndParseFiles: vi.fn(),
 }));
 
+// Record every value set on the progress state, so the tests can verify the sequence
+const progressValues = vi.hoisted(() => /** @type {(number | undefined)[]} */ ([]));
+
 vi.mock('$lib/services/contents', () => ({
-  dataLoadedProgress: { set: vi.fn() },
+  dataLoadedProgress: {
+    /**
+     * Get the last value.
+     * @returns {number | undefined} Value.
+     */
+    get current() {
+      return progressValues.at(-1);
+    },
+    /**
+     * Record a new value.
+     * @param {number | undefined} value Value.
+     */
+    set current(value) {
+      progressValues.push(value);
+    },
+  },
 }));
 
 describe('Gitea Files Service', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    progressValues.length = 0;
     // Reset instance to default state
     vi.mocked(instance).isForgejo = false;
+    // A maintainer works on the configured repository unless a test says otherwise
+    vi.mocked(getWorkflowRepository).mockReturnValue({ owner: 'test-owner', repo: 'test-repo' });
+    vi.mocked(isOpenAuthoringConfigured).mockReturnValue(false);
+    forkedRepository.current = undefined;
+    openAuthoringInitialized.current = false;
   });
 
   describe('fetchFileList', () => {
@@ -174,10 +214,10 @@ describe('Gitea Files Service', () => {
         { path: 'file2.txt', sha: 'def456', size: 200, type: 'entry', name: 'file2.txt' },
       ];
 
-      const results = [
-        { content: 'SGVsbG8gd29ybGQ=', encoding: 'base64' },
-        { content: 'VGVzdCBjb250ZW50', encoding: 'base64' },
-      ];
+      const results = {
+        'file1.md': { content: 'SGVsbG8gd29ybGQ=', encoding: 'base64' },
+        'file2.txt': { content: 'VGVzdCBjb250ZW50', encoding: 'base64' },
+      };
 
       vi.mocked(decodeBase64)
         .mockResolvedValueOnce('Hello world')
@@ -205,21 +245,36 @@ describe('Gitea Files Service', () => {
     test('should handle files without content', async () => {
       // @ts-ignore - Type compatibility in test
       const fetchingFiles = [
-        { path: 'file1.md', sha: 'abc123', size: 0, type: 'entry', name: 'file1.md' },
+        { path: 'file1.md', sha: 'abc123', size: undefined, type: 'entry', name: 'file1.md' },
       ];
 
-      const results = [null];
+      const results = { 'file1.md': null };
       // @ts-ignore - Type compatibility in test
       const result = await parseFileContents(fetchingFiles, results);
 
+      // Neither text nor metadata, so the file isn’t cached as fetched and is requested again
       expect(result).toEqual({
         'file1.md': {
           sha: 'abc123',
           size: 0,
-          text: '',
-          meta: {},
+          text: undefined,
+          meta: undefined,
         },
       });
+    });
+
+    test('should keep the empty content of an empty file', async () => {
+      /** @type {BaseFileListItem[]} */
+      const fetchingFiles = [
+        // @ts-ignore - Type compatibility in test
+        { path: 'file1.md', sha: 'abc123', size: 0, type: 'entry', name: 'file1.md' },
+      ];
+
+      const result = await parseFileContents(fetchingFiles, {
+        'file1.md': { path: 'file1.md', content: '', encoding: 'base64' },
+      });
+
+      expect(result).toEqual({ 'file1.md': { sha: 'abc123', size: 0, text: '', meta: {} } });
     });
 
     test('should handle files with non-base64 encoding', async () => {
@@ -229,7 +284,7 @@ describe('Gitea Files Service', () => {
         { path: 'file1.md', sha: 'abc123', size: 100, type: 'entry', name: 'file1.md' },
       ];
 
-      const results = [{ content: 'plain text', encoding: null }];
+      const results = { 'file1.md': { content: 'plain text', encoding: null } };
       const result = await parseFileContents(fetchingFiles, results);
 
       expect(result).toEqual({
@@ -249,9 +304,9 @@ describe('Gitea Files Service', () => {
         { path: 'file1.md', sha: 'abc123', size: undefined, type: 'entry', name: 'file1.md' },
       ];
 
-      const results = /** @type {import('./files.js').PartialContentsListItem[]} */ ([
-        { content: 'SGVsbG8=', encoding: 'base64' },
-      ]);
+      const results = /** @type {Record<string, import('./files.js').PartialContentsListItem>} */ ({
+        'file1.md': { content: 'SGVsbG8=', encoding: 'base64' },
+      });
 
       vi.mocked(decodeBase64).mockResolvedValueOnce('Hello');
 
@@ -266,6 +321,62 @@ describe('Gitea Files Service', () => {
         },
       });
     });
+
+    test('should leave a file that the API didn’t return to be fetched again', async () => {
+      /** @type {BaseFileListItem[]} */
+      const fetchingFiles = [
+        // @ts-ignore - Type compatibility in test
+        { path: 'file1.md', sha: 'abc123', size: 100, type: 'entry', name: 'file1.md' },
+      ];
+
+      const result = await parseFileContents(fetchingFiles, {});
+
+      // An empty text with metadata would be cached as the file’s content for good, and the entry
+      // would lose its content the next time it’s saved
+      expect(result).toEqual({
+        'file1.md': { sha: 'abc123', size: 100, text: undefined, meta: undefined },
+      });
+    });
+
+    test('should mark an asset, whose content is never requested, as fetched', async () => {
+      /** @type {BaseFileListItem[]} */
+      const fetchingFiles = [
+        // @ts-ignore - Type compatibility in test
+        { path: 'img.png', sha: 'abc123', size: 100, type: 'asset', name: 'img.png' },
+      ];
+
+      const result = await parseFileContents(fetchingFiles, {});
+
+      expect(result).toEqual({ 'img.png': { sha: 'abc123', size: 100, text: '', meta: {} } });
+    });
+  });
+
+  describe('createBatches', () => {
+    test('should return no batch for an empty list', () => {
+      expect(createBatches([], { maxItems: 10, maxResponseSize: Infinity })).toEqual([]);
+    });
+
+    test('should treat a file of unknown size as empty', () => {
+      // Intentionally testing undefined size
+      const files = /** @type {any[]} */ ([{ path: 'a.md' }, { path: 'b.md' }]);
+
+      expect(createBatches(files, { maxItems: 10, maxResponseSize: 100 })).toEqual([files]);
+    });
+
+    test('should give a file that exceeds the response size on its own a batch of its own', () => {
+      const files = /** @type {any[]} */ ([
+        { path: 'a.md', size: 10 },
+        { path: 'huge.md', size: 10_000 },
+        { path: 'b.md', size: 10 },
+      ]);
+
+      // A batch is never left empty, so the oversized file doesn’t stall the loop
+      expect(createBatches(files, { maxItems: 10, maxResponseSize: 100 })).toEqual([
+        [files[0]],
+        [files[1]],
+        [files[2]],
+      ]);
+    });
   });
 
   describe('fetchFileContents', () => {
@@ -279,8 +390,8 @@ describe('Gitea Files Service', () => {
       ];
 
       const mockResults = [
-        { content: 'SGVsbG8gd29ybGQ=', encoding: 'base64' },
-        { content: 'VGVzdCBjb250ZW50', encoding: 'base64' },
+        { path: 'file1.md', content: 'SGVsbG8gd29ybGQ=', encoding: 'base64' },
+        { path: 'file2.txt', content: 'VGVzdCBjb250ZW50', encoding: 'base64' },
       ];
 
       // Mock API settings response
@@ -303,9 +414,8 @@ describe('Gitea Files Service', () => {
           body: { files: ['file1.md', 'file2.txt'] },
         },
       );
-      expect(dataLoadedProgress.set).toHaveBeenCalledWith(0);
-      expect(dataLoadedProgress.set).toHaveBeenCalledWith(100);
-      expect(dataLoadedProgress.set).toHaveBeenCalledWith(undefined);
+      expect(progressValues).toEqual([0, 100, undefined]);
+      expect(dataLoadedProgress.current).toBeUndefined();
     });
 
     test('should fetch file contents for Forgejo', async () => {
@@ -318,7 +428,7 @@ describe('Gitea Files Service', () => {
         { path: 'file1.md', sha: 'abc123', size: 100, type: 'entry', name: 'file1.md' },
       ];
 
-      const mockResults = [{ content: 'SGVsbG8gd29ybGQ=', encoding: 'base64' }];
+      const mockResults = [{ sha: 'abc123', content: 'SGVsbG8gd29ybGQ=', encoding: 'base64' }];
 
       vi.mocked(fetchAPI)
         .mockResolvedValueOnce({ default_paging_num: 30 })
@@ -347,8 +457,20 @@ describe('Gitea Files Service', () => {
 
       vi.mocked(fetchAPI)
         .mockResolvedValueOnce({ default_paging_num: 30 })
-        .mockResolvedValueOnce(Array(30).fill({ content: 'dGVzdA==', encoding: 'base64' }))
-        .mockResolvedValueOnce(Array(5).fill({ content: 'dGVzdA==', encoding: 'base64' }));
+        .mockResolvedValueOnce(
+          Array.from({ length: 30 }, (_, i) => ({
+            path: `file${i}.md`,
+            content: 'dGVzdA==',
+            encoding: 'base64',
+          })),
+        )
+        .mockResolvedValueOnce(
+          Array.from({ length: 5 }, (_, i) => ({
+            path: `file${i + 30}.md`,
+            content: 'dGVzdA==',
+            encoding: 'base64',
+          })),
+        );
 
       vi.mocked(decodeBase64).mockResolvedValue('test');
 
@@ -369,7 +491,7 @@ describe('Gitea Files Service', () => {
 
       vi.mocked(fetchAPI)
         .mockResolvedValueOnce({ default_paging_num: 30 })
-        .mockResolvedValueOnce([{ content: 'dGVzdA==', encoding: 'base64' }]);
+        .mockResolvedValueOnce([{ path: 'file1.md', content: 'dGVzdA==', encoding: 'base64' }]);
 
       vi.mocked(decodeBase64).mockResolvedValue('test');
 
@@ -383,6 +505,179 @@ describe('Gitea Files Service', () => {
           body: { files: ['file1.md'] }, // only entry files
         },
       );
+    });
+
+    test('should match the results to the files by identifier, not by position', async () => {
+      // An asset sits between the entry and the config file, but the request skips it, so a result
+      // can’t be matched to a file by its position in the list
+      /** @type {BaseFileListItem[]} */
+      const fetchingFiles = [
+        // @ts-ignore - Type compatibility in test
+        { path: 'content/a.md', sha: 'sha1', size: 10, type: 'entry', name: 'a.md' },
+        // @ts-ignore - Type compatibility in test
+        { path: 'static/img.png', sha: 'sha2', size: 20, type: 'asset', name: 'img.png' },
+        // @ts-ignore - Type compatibility in test
+        { path: '.gitattributes', sha: 'sha3', size: 30, type: 'config', name: '.gitattributes' },
+      ];
+
+      vi.mocked(fetchAPI)
+        .mockResolvedValueOnce({ default_paging_num: 30 })
+        .mockResolvedValueOnce([
+          { path: 'content/a.md', content: 'QQ==', encoding: 'base64' },
+          { path: '.gitattributes', content: 'Qg==', encoding: 'base64' },
+        ]);
+
+      vi.mocked(decodeBase64).mockImplementation(async (content) =>
+        content === 'QQ==' ? 'entry text' : 'config text',
+      );
+
+      const result = await fetchFileContents(fetchingFiles);
+
+      expect(result['content/a.md'].text).toBe('entry text');
+      expect(result['.gitattributes'].text).toBe('config text');
+      // The asset’s content was never requested, so it gets none
+      expect(result['static/img.png'].text).toBe('');
+    });
+
+    test('should read an oversized blob from the raw endpoint', async () => {
+      /** @type {BaseFileListItem[]} */
+      const fetchingFiles = [
+        // @ts-ignore - Type compatibility in test
+        { path: 'content/small.md', sha: 'sha1', size: 100, type: 'entry', name: 'small.md' },
+        // @ts-ignore - Type compatibility in test
+        { path: 'content/large.md', sha: 'sha2', size: 2000, type: 'entry', name: 'large.md' },
+      ];
+
+      vi.mocked(fetchAPI).mockImplementation(async (path) => {
+        if (path === '/settings/api') {
+          return { default_paging_num: 30, default_max_blob_size: 1000 };
+        }
+
+        if (path.startsWith('/repos/test-owner/test-repo/raw/')) {
+          return 'Complete content of large.md';
+        }
+
+        return [{ path: 'content/small.md', content: 'QQ==', encoding: 'base64' }];
+      });
+
+      vi.mocked(decodeBase64).mockResolvedValue('Content of small.md');
+
+      const result = await fetchFileContents(fetchingFiles);
+
+      // Only the file within the limit is requested in bulk
+      expect(fetchAPI).toHaveBeenCalledWith('/repos/test-owner/test-repo/file-contents?ref=main', {
+        method: 'POST',
+        body: { files: ['content/small.md'] },
+      });
+
+      expect(fetchAPI).toHaveBeenCalledWith(
+        '/repos/test-owner/test-repo/raw/content/large.md?ref=main',
+        { responseType: 'text' },
+      );
+
+      expect(result['content/small.md'].text).toBe('Content of small.md');
+      expect(result['content/large.md']).toEqual({
+        sha: 'sha2',
+        size: 2000,
+        text: 'Complete content of large.md',
+        meta: {},
+      });
+      expect(progressValues).toContain(100);
+    });
+
+    test('should encode the path of an oversized blob segment by segment', async () => {
+      /** @type {BaseFileListItem[]} */
+      const fetchingFiles = [
+        // @ts-ignore - Type compatibility in test
+        { path: 'content/c#/a?b.md', sha: 'sha1', size: 2000, type: 'entry', name: 'a?b.md' },
+      ];
+
+      vi.mocked(fetchAPI).mockImplementation(async (path) =>
+        path === '/settings/api' ? { default_max_blob_size: 1000 } : 'Content',
+      );
+
+      await fetchFileContents(fetchingFiles);
+
+      expect(fetchAPI).toHaveBeenCalledWith(
+        '/repos/test-owner/test-repo/raw/content/c%23/a%3Fb.md?ref=main',
+        { responseType: 'text' },
+      );
+    });
+
+    test('should keep a batch within the item limit the instance reports', async () => {
+      /** @type {BaseFileListItem[]} */
+      // @ts-ignore - Type compatibility in test
+      const fetchingFiles = Array.from({ length: 6 }, (_, i) => ({
+        path: `file${i}.md`,
+        sha: `sha${i}`,
+        size: 100,
+        type: 'entry',
+        name: `file${i}.md`,
+      }));
+
+      // An instance can be configured to page more items than it will actually return
+      vi.mocked(fetchAPI)
+        .mockResolvedValueOnce({ default_paging_num: 30, max_response_items: 4 })
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([]);
+
+      await fetchFileContents(fetchingFiles);
+
+      expect(vi.mocked(fetchAPI).mock.calls[1][1]?.body).toEqual({
+        files: ['file0.md', 'file1.md', 'file2.md', 'file3.md'],
+      });
+      expect(vi.mocked(fetchAPI).mock.calls[2][1]?.body).toEqual({
+        files: ['file4.md', 'file5.md'],
+      });
+    });
+
+    test('should keep a batch within the combined response size', async () => {
+      /** @type {BaseFileListItem[]} */
+      // @ts-ignore - Type compatibility in test
+      const fetchingFiles = Array.from({ length: 3 }, (_, i) => ({
+        path: `file${i}.md`,
+        sha: `sha${i}`,
+        size: 300,
+        type: 'entry',
+        name: `file${i}.md`,
+      }));
+
+      // Base64 turns each 300-byte file into 400 bytes, so only two fit in one response
+      vi.mocked(fetchAPI)
+        .mockResolvedValueOnce({
+          default_paging_num: 30,
+          default_max_blob_size: 1000,
+          default_max_response_size: 1000,
+        })
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([]);
+
+      await fetchFileContents(fetchingFiles);
+
+      expect(vi.mocked(fetchAPI).mock.calls[1][1]?.body).toEqual({
+        files: ['file0.md', 'file1.md'],
+      });
+      expect(vi.mocked(fetchAPI).mock.calls[2][1]?.body).toEqual({ files: ['file2.md'] });
+    });
+
+    test('should skip the bulk request when every file is oversized', async () => {
+      /** @type {BaseFileListItem[]} */
+      const fetchingFiles = [
+        // @ts-ignore - Type compatibility in test
+        { path: 'content/large.md', sha: 'sha1', size: 2000, type: 'entry', name: 'large.md' },
+      ];
+
+      vi.mocked(fetchAPI).mockImplementation(async (path) =>
+        path === '/settings/api'
+          ? { default_paging_num: 30, default_max_blob_size: 1000 }
+          : 'Complete content',
+      );
+
+      const result = await fetchFileContents(fetchingFiles);
+
+      // The settings request and the raw one, with no bulk request in between
+      expect(fetchAPI).toHaveBeenCalledTimes(2);
+      expect(result['content/large.md'].text).toBe('Complete content');
     });
 
     test('should return empty object when no files to fetch', async () => {
@@ -400,17 +695,25 @@ describe('Gitea Files Service', () => {
   });
 
   describe('fetchFiles', () => {
+    /**
+     * Get the access check handed to the shared fetch function by the last `fetchFiles()` call.
+     * @returns {() => Promise<void>} Access check.
+     */
+    const getCheckAccess = () =>
+      /** @type {() => Promise<void>} */ (
+        vi.mocked(fetchAndParseFiles).mock.calls[0][0].checkAccess
+      );
+
     test('should orchestrate the complete file fetching process', async () => {
-      vi.mocked(checkInstanceVersion).mockResolvedValue();
-      vi.mocked(checkRepositoryAccess).mockResolvedValue();
       vi.mocked(fetchAndParseFiles).mockResolvedValue();
 
       await fetchFiles();
 
-      expect(checkInstanceVersion).toHaveBeenCalled();
-      expect(checkRepositoryAccess).toHaveBeenCalled();
+      // The checks are handed over so they can run alongside the branch and commit requests
       expect(fetchAndParseFiles).toHaveBeenCalledWith({
         repository,
+        checkAccess: expect.any(Function),
+        checkBranchAccess,
         fetchDefaultBranchName,
         fetchLastCommit,
         fetchFileList,
@@ -418,13 +721,76 @@ describe('Gitea Files Service', () => {
       });
     });
 
-    test('should handle errors from instance version check', async () => {
-      const error = new Error('Version check failed');
+    test('should check the instance version and the repository access at the same time', async () => {
+      const { promise, resolve } = Promise.withResolvers();
 
-      vi.mocked(checkInstanceVersion).mockRejectedValue(error);
+      vi.mocked(checkInstanceVersion).mockReturnValue(/** @type {Promise<void>} */ (promise));
+      vi.mocked(checkRepositoryAccess).mockResolvedValue();
+      vi.mocked(fetchAndParseFiles).mockResolvedValue();
 
-      await expect(fetchFiles()).rejects.toThrow('Version check failed');
+      await fetchFiles();
+
+      const checking = getCheckAccess()();
+
+      // The repository is checked while the version check is still in flight
+      expect(checkRepositoryAccess).toHaveBeenCalled();
+      resolve(undefined);
+      await expect(checking).resolves.toBeUndefined();
+    });
+
+    test('should set up Open Authoring instead of the plain access check when configured', async () => {
+      vi.mocked(isOpenAuthoringConfigured).mockReturnValue(true);
+      vi.mocked(checkInstanceVersion).mockResolvedValue();
+      vi.mocked(initOpenAuthoring).mockResolvedValue();
+      vi.mocked(fetchAndParseFiles).mockResolvedValue();
+
+      await fetchFiles();
+
+      // The version check comes first, because the set-up asks the instance for what only a
+      // supported version offers. The repository is read through the fork set-up, so no separate
+      // access check is handed over
+      expect(checkInstanceVersion).toHaveBeenCalledBefore(vi.mocked(initOpenAuthoring));
       expect(checkRepositoryAccess).not.toHaveBeenCalled();
+      expect(vi.mocked(fetchAndParseFiles).mock.calls[0][0].checkAccess).toBeUndefined();
+    });
+
+    test('should set the fork up once, however often the files are fetched', async () => {
+      vi.mocked(isOpenAuthoringConfigured).mockReturnValue(true);
+      vi.mocked(checkInstanceVersion).mockResolvedValue();
+      vi.mocked(initOpenAuthoring).mockImplementation(async () => {
+        openAuthoringInitialized.current = true;
+      });
+      vi.mocked(fetchAndParseFiles).mockResolvedValue();
+
+      await fetchFiles();
+      await fetchFiles();
+
+      // Setting it up again would reset the fork state a workflow commit may be relying on
+      expect(initOpenAuthoring).toHaveBeenCalledTimes(1);
+    });
+
+    test('should leave the branch check out for a contributor', async () => {
+      vi.mocked(isOpenAuthoringConfigured).mockReturnValue(true);
+      vi.mocked(checkInstanceVersion).mockResolvedValue();
+      vi.mocked(initOpenAuthoring).mockImplementation(async () => {
+        forkedRepository.current = { owner: 'me', repo: 'repo' };
+      });
+      vi.mocked(fetchAndParseFiles).mockResolvedValue();
+
+      await fetchFiles();
+
+      // Their changes go to their fork, so the branch they can’t push to doesn’t matter
+      expect(vi.mocked(fetchAndParseFiles).mock.calls[0][0].checkBranchAccess).toBeUndefined();
+    });
+
+    test('should report an unsupported instance before a repository access error', async () => {
+      vi.mocked(checkInstanceVersion).mockRejectedValue(new Error('Version check failed'));
+      vi.mocked(checkRepositoryAccess).mockRejectedValue(new Error('Access denied'));
+      vi.mocked(fetchAndParseFiles).mockResolvedValue();
+
+      await fetchFiles();
+
+      await expect(getCheckAccess()()).rejects.toThrow('Version check failed');
     });
 
     test('should handle errors from repository access check', async () => {
@@ -433,9 +799,124 @@ describe('Gitea Files Service', () => {
       const error = new Error('Access denied');
 
       vi.mocked(checkRepositoryAccess).mockRejectedValue(error);
+      vi.mocked(fetchAndParseFiles).mockResolvedValue();
 
-      await expect(fetchFiles()).rejects.toThrow('Access denied');
-      expect(fetchAndParseFiles).not.toHaveBeenCalled();
+      await fetchFiles();
+
+      await expect(getCheckAccess()()).rejects.toThrow('Access denied');
+    });
+  });
+
+  describe('branch name encoding', () => {
+    // Left as is, `#` would start a fragment and cut the request URL short
+    const branch = 'release#1';
+
+    /**
+     * Run the given function with the configured branch replaced.
+     * @param {() => Promise<any>} fn Function to run.
+     */
+    const withBranch = async (fn) => {
+      repository.branch = branch;
+
+      try {
+        await fn();
+      } finally {
+        repository.branch = 'main';
+      }
+    };
+
+    test('encodes the branch in the file list request', async () => {
+      vi.mocked(fetchAPI).mockResolvedValue({ tree: [], truncated: false });
+
+      await withBranch(() => fetchFileList());
+
+      expect(fetchAPI).toHaveBeenCalledWith(
+        '/repos/test-owner/test-repo/git/trees/release%231?recursive=1&page=1',
+      );
+    });
+
+    test('encodes the branch in the bulk file contents request', async () => {
+      vi.mocked(fetchAPI)
+        .mockResolvedValueOnce({ default_paging_num: 30 })
+        .mockResolvedValueOnce([]);
+
+      await withBranch(() =>
+        fetchFileContents([
+          // @ts-ignore - Type compatibility in test
+          { path: 'file1.md', sha: 'abc123', size: 100, type: 'entry', name: 'file1.md' },
+        ]),
+      );
+
+      expect(fetchAPI).toHaveBeenNthCalledWith(
+        2,
+        '/repos/test-owner/test-repo/file-contents?ref=release%231',
+        { method: 'POST', body: { files: ['file1.md'] } },
+      );
+    });
+
+    test('encodes the branch in the media request', async () => {
+      vi.mocked(fetchAPI).mockResolvedValue(new Blob([]));
+
+      await withBranch(() =>
+        fetchBlob(/** @type {any} */ ({ path: 'images/photo.jpg', name: 'photo.jpg' })),
+      );
+
+      expect(fetchAPI).toHaveBeenCalledWith(
+        '/repos/test-owner/test-repo/media/release%231/images/photo.jpg',
+        { responseType: 'blob' },
+      );
+    });
+  });
+
+  describe('fetchRawFile', () => {
+    test('should read the file from the configured branch by default', async () => {
+      vi.mocked(fetchAPI).mockResolvedValue('# Hello');
+
+      await expect(fetchRawFile('content/posts/hello.md')).resolves.toBe('# Hello');
+
+      expect(fetchAPI).toHaveBeenCalledWith(
+        '/repos/test-owner/test-repo/raw/content/posts/hello.md?ref=main',
+        { responseType: 'text' },
+      );
+    });
+
+    test('should read the file from the given branch', async () => {
+      vi.mocked(fetchAPI).mockResolvedValue('# Hello');
+
+      await fetchRawFile('content/posts/hello.md', 'cms/posts/hello');
+
+      expect(fetchAPI).toHaveBeenCalledWith(
+        '/repos/test-owner/test-repo/raw/content/posts/hello.md?ref=cms%2Fposts%2Fhello',
+        { responseType: 'text' },
+      );
+    });
+
+    test('should read a workflow branch from the contributor’s fork', async () => {
+      vi.mocked(getWorkflowRepository).mockReturnValue({ owner: 'me', repo: 'fork' });
+      vi.mocked(fetchAPI).mockResolvedValue('# Hello');
+
+      await fetchRawFile('content/posts/hello.md', 'cms/me/fork/posts/hello');
+
+      expect(fetchAPI).toHaveBeenCalledWith(
+        '/repos/me/fork/raw/content/posts/hello.md?ref=cms%2Fme%2Ffork%2Fposts%2Fhello',
+        { responseType: 'text' },
+      );
+    });
+
+    test('should fall back to an empty ref without a configured branch', async () => {
+      const { branch } = repository;
+
+      repository.branch = undefined;
+      vi.mocked(fetchAPI).mockResolvedValue('# Hello');
+
+      await fetchRawFile('content/posts/hello.md');
+
+      expect(fetchAPI).toHaveBeenCalledWith(
+        '/repos/test-owner/test-repo/raw/content/posts/hello.md?ref=',
+        { responseType: 'text' },
+      );
+
+      repository.branch = branch;
     });
   });
 
@@ -484,7 +965,70 @@ describe('Gitea Files Service', () => {
       await fetchBlob(mockAsset);
 
       expect(fetchAPI).toHaveBeenCalledWith(
-        '/repos/test-owner/test-repo/media/main/images/photo%20with%20spaces%20&%20symbols.jpg',
+        '/repos/test-owner/test-repo/media/main/images/photo%20with%20spaces%20%26%20symbols.jpg',
+        { responseType: 'blob' },
+      );
+    });
+
+    test('should encode characters that would otherwise end the path', async () => {
+      /** @type {Asset} */
+      const mockAsset = {
+        path: 'images/photo #1?.jpg',
+        sha: 'abc123',
+        size: 1024,
+        name: 'photo #1?.jpg',
+        kind: 'image',
+        // @ts-ignore - Type compatibility in test
+        folder: 'images',
+      };
+
+      vi.mocked(fetchAPI).mockResolvedValue(new Blob([]));
+
+      await fetchBlob(mockAsset);
+
+      // Left as is, `#` would start a fragment and `?` a query, cutting the path short
+      expect(fetchAPI).toHaveBeenCalledWith(
+        '/repos/test-owner/test-repo/media/main/images/photo%20%231%3F.jpg',
+        { responseType: 'blob' },
+      );
+    });
+
+    test('should read a contributor’s unpublished asset from their fork', async () => {
+      vi.mocked(getWorkflowRepository).mockReturnValue({ owner: 'me', repo: 'fork' });
+      vi.mocked(fetchAPI).mockResolvedValue(new Blob(['binary data']));
+
+      await fetchBlob(
+        /** @type {any} */ ({
+          path: 'images/photo.jpg',
+          workflow: { branch: 'cms/me/fork/posts/hello' },
+        }),
+      );
+
+      expect(fetchAPI).toHaveBeenCalledWith(
+        '/repos/me/fork/media/cms/me/fork/posts/hello/images/photo.jpg',
+        { responseType: 'blob' },
+      );
+    });
+
+    test('should read an unpublished asset from its workflow branch', async () => {
+      /** @type {Asset} */
+      const mockAsset = {
+        path: 'images/photo.jpg',
+        sha: 'abc123',
+        size: 1024,
+        name: 'photo.jpg',
+        kind: 'image',
+        // @ts-ignore - Type compatibility in test
+        folder: 'images',
+        workflow: { branch: 'cms/posts/hello' },
+      };
+
+      vi.mocked(fetchAPI).mockResolvedValue(new Blob(['binary data']));
+
+      await fetchBlob(mockAsset);
+
+      expect(fetchAPI).toHaveBeenCalledWith(
+        '/repos/test-owner/test-repo/media/cms/posts/hello/images/photo.jpg',
         { responseType: 'blob' },
       );
     });

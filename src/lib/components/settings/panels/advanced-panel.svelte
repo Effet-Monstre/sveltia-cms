@@ -1,8 +1,9 @@
 <script>
   import { _ } from '@sveltia/i18n';
-  import { TextInput } from '@sveltia/ui';
+  import { Button, ConfirmationDialog, TextInput } from '@sveltia/ui';
 
   import PrefSwitch from '$lib/components/settings/controls/pref-switch.svelte';
+  import { clearFileCache, eraseAllData } from '$lib/services/app/cache';
   import { skipCIConfigured } from '$lib/services/backends/git/shared/integration';
   import { prefs } from '$lib/services/user/prefs.svelte';
 
@@ -21,6 +22,27 @@
     onChange = undefined,
     /* eslint-enable prefer-const */
   } = $props();
+
+  let showClearCacheDialog = $state(false);
+  let showEraseDataDialog = $state(false);
+
+  /* v8 ignore start -- reloading the page would tear the test down */
+  /**
+   * Clear the file cache, then reload the page to start over.
+   */
+  const clearCache = async () => {
+    await clearFileCache();
+    window.location.reload();
+  };
+
+  /**
+   * Erase all the data stored in the browser, then reload the page to start over.
+   */
+  const eraseData = async () => {
+    await eraseAllData();
+    window.location.reload();
+  };
+  /* v8 ignore stop */
 </script>
 
 <section>
@@ -49,7 +71,7 @@
     />
   </div>
 </section>
-{#if $skipCIConfigured}
+{#if skipCIConfigured.current}
   <section>
     <h3>
       {_('prefs.advanced.deploy_hook.title')}
@@ -62,7 +84,7 @@
         dir="ltr"
         bind:value={prefs.deployHookURL}
         flex
-        aria-label={_('prefs.advanced.deploy_hook.url.field_label')}
+        ariaLabel={_('prefs.advanced.deploy_hook.url.field_label')}
         showInlineLabel={true}
         onchange={() => {
           onChange?.({
@@ -80,7 +102,7 @@
         dir="ltr"
         bind:value={prefs.deployHookAuthHeader}
         flex
-        aria-label={_('prefs.advanced.deploy_hook.auth.field_label')}
+        ariaLabel={_('prefs.advanced.deploy_hook.auth.field_label')}
         showInlineLabel={true}
         onchange={() => {
           onChange?.({
@@ -95,3 +117,50 @@
     </div>
   </section>
 {/if}
+<section>
+  <h3>
+    {_('prefs.advanced.clear_data.title')}
+  </h3>
+  <p>
+    {_('prefs.advanced.clear_data.file_cache.description')}
+  </p>
+  <div role="none">
+    <Button
+      variant="tertiary"
+      label={_('prefs.advanced.clear_data.file_cache.button_label')}
+      onclick={() => {
+        showClearCacheDialog = true;
+      }}
+    />
+  </div>
+  <p>
+    {_('prefs.advanced.clear_data.all_data.description')}
+  </p>
+  <div role="none">
+    <Button
+      variant="tertiary"
+      label={_('prefs.advanced.clear_data.all_data.button_label')}
+      onclick={() => {
+        showEraseDataDialog = true;
+      }}
+    />
+  </div>
+</section>
+
+<ConfirmationDialog
+  bind:open={showClearCacheDialog}
+  title={_('prefs.advanced.clear_data.file_cache.button_label')}
+  okLabel={_('prefs.advanced.clear_data.file_cache.button_label')}
+  onOk={clearCache}
+>
+  {_('prefs.advanced.clear_data.file_cache.confirmation')}
+</ConfirmationDialog>
+
+<ConfirmationDialog
+  bind:open={showEraseDataDialog}
+  title={_('prefs.advanced.clear_data.all_data.button_label')}
+  okLabel={_('prefs.advanced.clear_data.all_data.button_label')}
+  onOk={eraseData}
+>
+  {_('prefs.advanced.clear_data.all_data.confirmation')}
+</ConfirmationDialog>

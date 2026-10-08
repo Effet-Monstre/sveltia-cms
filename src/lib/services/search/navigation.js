@@ -1,8 +1,13 @@
-import { get } from 'svelte/store';
-
 import { searchMode, searchTerms } from '$lib/services/search';
 
 const ROUTE_REGEX = /^\/search\/(?<terms>.+)$/;
+
+/**
+ * Check if the given URL path is the search results page, without navigating to it.
+ * @param {string} path URL path.
+ * @returns {boolean} Result.
+ */
+export const isSearchResultsPath = (path) => ROUTE_REGEX.test(path);
 
 /**
  * Navigate to the search results page with the given path. The path should be in the format of
@@ -20,12 +25,12 @@ export const isSearchRoute = (path) => {
 
   const { terms } = groups;
 
-  if (terms && terms !== get(searchTerms)) {
-    searchTerms.set(terms);
+  if (terms && terms !== searchTerms.current) {
+    searchTerms.current = terms;
   }
 
-  if (!get(searchMode)) {
-    searchMode.set('contents');
+  if (!searchMode.current) {
+    searchMode.current = 'contents';
   }
 
   return true;

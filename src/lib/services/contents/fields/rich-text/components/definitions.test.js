@@ -1,12 +1,15 @@
 // @ts-nocheck
+// @vitest-environment happy-dom
 /* eslint-disable jsdoc/require-jsdoc */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { customComponentRegistry } from '$lib/services/api/registries.js';
+
 import {
-  customComponentRegistry,
   getBuiltInComponentDefs,
   getComponentDef,
+  getCustomComponentName,
   IMAGE_COMPONENT,
   LINKED_IMAGE_COMPONENT,
 } from './definitions.js';
@@ -306,6 +309,109 @@ describe('definitions', () => {
     });
   });
 
+  describe('HTML syntax of the image components', () => {
+    /**
+     * Parse HTML into an inert template and get its first element.
+     * @param {string} html HTML.
+     * @returns {HTMLElement} Element.
+     */
+    const parse = (html) => {
+      const template = document.createElement('template');
+
+      template.innerHTML = html;
+
+      return template.content.firstElementChild;
+    };
+
+    it('should write an image as an element', () => {
+      expect(
+        IMAGE_COMPONENT.toBlockHTML({ src: 'a b.png', alt: 'Tom & "Jerry"', title: 'it’s' })
+          .outerHTML,
+      ).toBe('<img src="a b.png" alt="Tom &amp; &quot;Jerry&quot;" title="it’s">');
+      // The title is left out if empty, while the alt text is always there
+      expect(IMAGE_COMPONENT.toBlockHTML({ src: 'a.png' }).outerHTML).toBe(
+        '<img src="a.png" alt="">',
+      );
+      // Nothing without a source, like the Markdown
+      expect(IMAGE_COMPONENT.toBlockHTML({ alt: 'x' })).toBe('');
+    });
+
+    it('should read an image from an element, with decoded values', () => {
+      expect(IMAGE_COMPONENT.htmlSelector).toBe('img');
+      expect(
+        IMAGE_COMPONENT.fromBlockHTML(
+          parse('<img alt=\'x > &amp; y\' src="/a.png" class="wide" title="T&nbsp;!">'),
+        ),
+      ).toEqual({ src: '/a.png', alt: 'x > & y', title: 'T\u00A0!' });
+      expect(IMAGE_COMPONENT.fromBlockHTML(parse('<img src=a.png />'))).toEqual({
+        src: 'a.png',
+        alt: '',
+        title: '',
+      });
+      expect(IMAGE_COMPONENT.fromBlockHTML(parse('<img alt="A">'))).toEqual({
+        src: '',
+        alt: 'A',
+        title: '',
+      });
+    });
+
+    it('should round-trip an image', () => {
+      const props = { src: 'a&b.png', alt: '"A" & <B>\u00A0', title: 'it’s' };
+
+      expect(
+        IMAGE_COMPONENT.fromBlockHTML(parse(IMAGE_COMPONENT.toBlockHTML(props).outerHTML)),
+      ).toEqual(props);
+    });
+
+    it('should write a linked image as an element', () => {
+      expect(
+        LINKED_IMAGE_COMPONENT.toBlockHTML({ src: 'a.png', alt: 'A', link: '/?a=1&b=2' }).outerHTML,
+      ).toBe('<a href="/?a=1&amp;b=2"><img src="a.png" alt="A"></a>');
+      expect(LINKED_IMAGE_COMPONENT.toBlockHTML({ src: 'a.png', link: '' }).outerHTML).toBe(
+        '<img src="a.png" alt="">',
+      );
+      expect(LINKED_IMAGE_COMPONENT.toBlockHTML({ link: '/x' })).toBe('');
+    });
+
+    it('should read a linked image or a bare image from an element', () => {
+      expect(LINKED_IMAGE_COMPONENT.htmlSelector).toBe('a:has(> img:only-child), img');
+      expect(
+        LINKED_IMAGE_COMPONENT.fromBlockHTML(
+          parse('<a href="/?a=1&amp;b=2" target="_blank">\n  <img src="a.png" alt="A">\n</a>'),
+        ),
+      ).toEqual({ src: 'a.png', alt: 'A', title: '', link: '/?a=1&b=2' });
+      expect(LINKED_IMAGE_COMPONENT.fromBlockHTML(parse('<img src="b.png">'))).toEqual({
+        src: 'b.png',
+        alt: '',
+        title: '',
+        link: '',
+      });
+      // A link without the `href` attribute
+      expect(LINKED_IMAGE_COMPONENT.fromBlockHTML(parse('<a><img src="c.png"></a>'))).toEqual({
+        src: 'c.png',
+        alt: '',
+        title: '',
+        link: '',
+      });
+    });
+
+    it('should not take a link with text for a linked image', () => {
+      expect(
+        LINKED_IMAGE_COMPONENT.fromBlockHTML(parse('<a href="/x">See <img src="a.png"></a>')),
+      ).toBeUndefined();
+    });
+
+    it('should round-trip a linked image', () => {
+      const props = { src: 'a.png', alt: 'A', title: 'T', link: 'https://example.com/?q="x"' };
+
+      expect(
+        LINKED_IMAGE_COMPONENT.fromBlockHTML(
+          parse(LINKED_IMAGE_COMPONENT.toBlockHTML(props).outerHTML),
+        ),
+      ).toEqual(props);
+    });
+  });
+
   describe('getBuiltInComponentDefs', () => {
     it('should return array of built-in component definitions', () => {
       const builtInDefs = getBuiltInComponentDefs();
@@ -323,6 +429,12 @@ describe('definitions', () => {
       expect(linkedImageComponent).toBeDefined();
     });
 
+    it('should insert an empty image in the plain text mode', () => {
+      getBuiltInComponentDefs().forEach((def) => {
+        expect(/** @type {any} */ (def).createMarkdown()).toBe('![]()');
+      });
+    });
+
     it('should return components with localized labels', () => {
       const builtInDefs = getBuiltInComponentDefs();
 
@@ -330,6 +442,39 @@ describe('definitions', () => {
         expect(typeof def.label).toBe('string');
         expect(def.label.length).toBeGreaterThan(0);
       });
+    });
+  });
+
+  describe('getCustomComponentName', () => {
+    it('should return undefined for an empty name', () => {
+      expect(getCustomComponentName(undefined)).toBeUndefined();
+      expect(getCustomComponentName('')).toBeUndefined();
+    });
+
+    it('should resolve a registered name as is', () => {
+      customComponentRegistry.set('youtube', { id: 'youtube', fields: [] });
+
+      expect(getCustomComponentName('youtube')).toBe('youtube');
+    });
+
+    it('should resolve a prefixed ID to the registered name', () => {
+      customComponentRegistry.set('youtube', { id: 'youtube', fields: [] });
+
+      expect(getCustomComponentName('x-youtube')).toBe('youtube');
+    });
+
+    it('should prefer a name registered with the prefix', () => {
+      customComponentRegistry.set('x-youtube', { id: 'x-youtube', fields: [] });
+
+      expect(getCustomComponentName('x-youtube')).toBe('x-youtube');
+      expect(getCustomComponentName('x-x-youtube')).toBe('x-youtube');
+      expect(getCustomComponentName('youtube')).toBeUndefined();
+    });
+
+    it('should return undefined for a built-in or unknown component', () => {
+      expect(getCustomComponentName('image')).toBeUndefined();
+      expect(getCustomComponentName('x-image')).toBeUndefined();
+      expect(getCustomComponentName('x-unknown')).toBeUndefined();
     });
   });
 
@@ -370,7 +515,27 @@ describe('definitions', () => {
 
       const result = getComponentDef('custom-component');
 
-      expect(result).toBe(customComponent);
+      expect(result).toBeDefined();
+      expect(result?.id).toBe('x-custom-component');
+      expect(result?.label).toBe('Custom Component');
+      expect(result?.pattern).toEqual(/custom/);
+      expect(result?.toBlock).toBe(customComponent.toBlock);
+      expect(result?.toPreview).toBe(customComponent.toPreview);
+    });
+
+    it('should fall back to the registered name for a custom component without a label', () => {
+      customComponentRegistry.set('no-label', {
+        id: 'no-label',
+        fields: [],
+        pattern: /no-label/,
+        toBlock: () => 'no-label',
+      });
+
+      const result = getComponentDef('x-no-label');
+
+      expect(result?.id).toBe('x-no-label');
+      expect(result?.label).toBe('no-label');
+      expect(result?.toPreview).toBeUndefined();
     });
 
     it('should prioritize custom components over built-in ones', () => {
@@ -387,8 +552,38 @@ describe('definitions', () => {
 
       const result = getComponentDef('image');
 
-      expect(result).toBe(customImageComponent);
+      expect(result).toBeDefined();
+      expect(result?.id).toBe('x-image');
       expect(result?.label).toBe('Custom Image Component');
+      expect(result?.pattern).toEqual(/custom-image/);
+      expect(result?.toBlock).toBe(customImageComponent.toBlock);
+      expect(result?.toPreview).toBe(customImageComponent.toPreview);
+    });
+
+    it('should return custom component by prefixed id', () => {
+      const customComponent = {
+        id: 'youtube',
+        label: 'YouTube',
+        fields: [{ name: 'id', label: 'ID', required: true }],
+        pattern: /youtube/,
+        toBlock: () => 'youtube',
+      };
+
+      customComponentRegistry.set('youtube', customComponent);
+
+      const result = getComponentDef('x-youtube');
+
+      expect(result?.id).toBe('x-youtube');
+      expect(result?.label).toBe('YouTube');
+      expect(result?.fields).toBe(customComponent.fields);
+      // Resolving the ID again gives the same definition
+      expect(getComponentDef(/** @type {string} */ (result?.id))?.id).toBe('x-youtube');
+    });
+
+    it('should not strip the prefix from a built-in or unknown component', () => {
+      expect(getComponentDef('x-image')).toBeUndefined();
+      expect(getComponentDef('x-linked-image')).toBeUndefined();
+      expect(getComponentDef('x-non-existent')).toBeUndefined();
     });
 
     it('should return undefined for non-existent component', () => {
@@ -577,7 +772,12 @@ describe('definitions', () => {
 
       const result = getComponentDef('custom');
 
-      expect(result).toBe(customComponent);
+      expect(result).toBeDefined();
+      expect(result?.id).toBe('x-custom');
+      expect(result?.label).toBe('Custom');
+      expect(result?.pattern).toEqual(/test/);
+      expect(result?.toBlock).toBe(customComponent.toBlock);
+      expect(result?.toPreview).toBe(customComponent.toPreview);
 
       customComponentRegistry.delete('custom');
     });

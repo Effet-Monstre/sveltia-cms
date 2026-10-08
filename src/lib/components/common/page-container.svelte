@@ -1,10 +1,8 @@
 <script>
   import { ResizableHandle, ResizablePane, ResizablePaneGroup } from '@sveltia/ui';
-  import { IndexedDB } from '@sveltia/utils/storage';
-  import { get } from 'svelte/store';
 
   import { hasOverlay } from '$lib/services/app/navigation';
-  import { backend } from '$lib/services/backends';
+  import { getSidebarWidth, saveSidebarWidth } from '$lib/services/app/ui-settings';
   import { env } from '$lib/services/user/env.svelte';
 
   /**
@@ -36,41 +34,37 @@
   /** @type {number | undefined} */
   let sidebarWidth = $state();
 
-  /** @type {IndexedDB | null} */
-  let uiSettingsDB = null;
-
   /**
-   * Restore the sidebar width from IndexedDB, or use the default width if not set.
+   * Restore the sidebar width from the UI settings, or use the default width if not set.
    */
   const restoreSidebarWidth = async () => {
     if (!uiSettingsKey) return;
 
-    const { databaseName } = get(backend)?.repository ?? {};
-
-    uiSettingsDB = databaseName ? new IndexedDB(databaseName, 'ui-settings') : null;
-    sidebarWidth = (await uiSettingsDB?.get(uiSettingsKey))?.sidebarWidth ?? 240;
+    sidebarWidth = await getSidebarWidth(uiSettingsKey);
   };
 
   /**
-   * Save the sidebar width to IndexedDB.
+   * Save the sidebar width to the UI settings.
    * @param {number} percent Sidebar width as a percentage of the container’s width.
    */
-  const saveSidebarWidth = async (percent) => {
-    if (!uiSettingsDB || !uiSettingsKey || !container) return;
+  const onResize = async (percent) => {
+    // The panes are only shown once the width has been restored, which takes a settings key, and
+    // the container is there by then
+    const { clientWidth } = /** @type {HTMLElement} */ (container);
 
-    await uiSettingsDB.set(uiSettingsKey, {
-      ...(await uiSettingsDB.get(uiSettingsKey)),
-      sidebarWidth: Math.round(container.clientWidth * (percent / 100)),
-    });
+    await saveSidebarWidth(
+      /** @type {string} */ (uiSettingsKey),
+      Math.round(clientWidth * (percent / 100)),
+    );
   };
 
   $effect.pre(() => {
-    void [$hasOverlay];
+    void [hasOverlay.current];
 
     // `ResizablePaneGroup` doesn’t work well when the container is inert, so we need to wait until
     // the overlay is actually gone before restoring the sidebar width.
     window.requestAnimationFrame(() => {
-      if (!$hasOverlay) {
+      if (!hasOverlay.current) {
         restoreSidebarWidth();
       }
     });
@@ -81,7 +75,7 @@
   role="group"
   id="page-container"
   class="outer {className}"
-  inert={$hasOverlay}
+  inert={hasOverlay.current}
   {...rest}
   bind:this={container}
 >
@@ -91,7 +85,7 @@
   {:else if sidebarWidth !== undefined}
     <ResizablePaneGroup
       onResize={({ sizes }) => {
-        saveSidebarWidth(sizes[0]);
+        onResize(sizes[0]);
       }}
     >
       <ResizablePane defaultSize="{sidebarWidth}px" minSize="160px" maxSize="480px">
@@ -213,6 +207,50 @@
           [role='option'].dragover {
             color: var(--sui-primary-accent-color-inverted) !important;
             background-color: var(--sui-primary-accent-color) !important;
+          }
+        }
+
+        /* Styled like the listbox above, so the two sidebars look alike */
+        [role='tree'] {
+          margin: 8px;
+          border-width: 0;
+          background-color: transparent;
+
+          /* No item can expand, so the space kept for the chevrons is dropped */
+          &.flat .chevron.placeholder {
+            display: none;
+          }
+
+          [role='treeitem'] {
+            > .row {
+              border-radius: var(--sui-control-medium-border-radius);
+
+              @media (pointer: coarse) {
+                min-height: 48px;
+              }
+
+              .icon {
+                flex: none;
+                transition: color 200ms;
+              }
+
+              .count {
+                flex: none;
+                padding: 2px;
+                color: var(--sui-tertiary-foreground-color);
+                font-size: var(--sui-font-size-small);
+                transition: color 200ms;
+              }
+            }
+
+            &[aria-selected='true'] > .row .count {
+              color: var(--sui-highlighted-foreground-color);
+            }
+
+            &.dragover > .row {
+              color: var(--sui-primary-accent-color-inverted) !important;
+              background-color: var(--sui-primary-accent-color) !important;
+            }
           }
         }
 

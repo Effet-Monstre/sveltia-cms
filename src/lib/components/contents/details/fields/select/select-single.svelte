@@ -2,8 +2,13 @@
   import { _ } from '@sveltia/i18n';
   import { Option, Radio, RadioGroup, Select } from '@sveltia/ui';
 
+  import {
+    getEmptyOptionValue,
+    getOptionValueType,
+  } from '$lib/services/contents/fields/select/helpers';
+
   /**
-   * @import { SelectFieldSelectorProps } from '$lib/types/private';
+   * @import { SelectFieldSelectorOption, SelectFieldSelectorProps } from '$lib/types/private';
    * @import { SelectFieldValue } from '$lib/types/public';
    */
 
@@ -26,31 +31,33 @@
   } = $props();
 
   const { dropdown_threshold: dropdownThreshold = 5 } = $derived(fieldConfig);
-  /** @type {string | undefined} */
-  let valueType = $state(undefined);
-
-  $effect(() => {
-    if (!valueType) {
-      valueType = options[0]?.value !== undefined ? typeof options[0]?.value : 'string';
-    }
-  });
-
-  $effect(() => {
-    // Allow to deselect an option if the field is optional
-    if (!required && !options.some(({ value }) => !value)) {
-      options = [
-        {
-          label: _('unselected_option'),
-          value: valueType === 'number' ? null : '',
-          searchValue: '',
-        },
-        ...options,
-      ];
-    }
-  });
+  /** Whether one of the options already clears the value, so no “unselected” option is needed. */
+  const hasEmptyOption = $derived(options.some(({ value }) => value === null || value === ''));
+  /**
+   * Options to render, with an extra “unselected” option prepended so the user can clear the value
+   * if the field is optional. This is derived rather than written back to the `options` prop from
+   * an `$effect`. An effect that reads and writes the same state renders the field twice, and the
+   * second pass tears down and rebuilds every option, because the `{#each}` key contains the
+   * option index and prepending invalidates all of them. Worse, the write happens inside a running
+   * reaction, where Svelte cannot memoize its dirty-marking traversal, so the cost grows with the
+   * depth of the editor tree — a select nested in a list can lock up the browser for minutes.
+   * @type {SelectFieldSelectorOption[]}
+   */
+  const allOptions = $derived(
+    !required && !hasEmptyOption
+      ? [
+          {
+            label: _('unselected_option'),
+            value: getEmptyOptionValue(options[0]?.value),
+            searchValue: '',
+          },
+          ...options,
+        ]
+      : options,
+  );
 </script>
 
-{#if options.length > dropdownThreshold}
+{#if allOptions.length > dropdownThreshold}
   <Select
     bind:value={currentValue}
     {readonly}
@@ -59,8 +66,15 @@
     aria-labelledby="{fieldId}-label"
     aria-errormessage="{fieldId}-error"
   >
-    {#each options as { label, value, searchValue } (value)}
-      <Option {label} {value} {valueType} {searchValue} selected={value === currentValue} wrap />
+    {#each allOptions as { label, value, searchValue }, index (`${index}-${value}`)}
+      <Option
+        {label}
+        {value}
+        valueType={getOptionValueType(value)}
+        {searchValue}
+        selected={value === currentValue}
+        wrap
+      />
     {/each}
   </Select>
 {:else}
@@ -74,8 +88,13 @@
       currentValue = value;
     }}
   >
-    {#each options as { label, value } (value)}
-      <Radio {label} {value} {valueType} checked={value === currentValue} />
+    {#each allOptions as { label, value }, index (`${index}-${value}`)}
+      <Radio
+        {label}
+        {value}
+        valueType={getOptionValueType(value)}
+        checked={value === currentValue}
+      />
     {/each}
   </RadioGroup>
 {/if}

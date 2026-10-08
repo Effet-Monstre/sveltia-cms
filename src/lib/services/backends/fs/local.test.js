@@ -1,18 +1,16 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { cmsConfig } from '$lib/services/config';
+
 // Mock dependencies
-const mockGet = vi.fn();
 const mockLoadFiles = vi.fn();
+const mockReadFile = vi.fn();
 const mockSaveChanges = vi.fn();
 const mockInit = vi.fn();
 // Shared mock functions for IndexedDB instances — controlled by individual tests
 const mockDBGet = vi.fn();
 const mockDBSet = vi.fn();
 const mockDBDelete = vi.fn();
-
-vi.mock('svelte/store', () => ({
-  get: mockGet,
-}));
 
 vi.mock('@sveltia/utils/storage', () => {
   /**
@@ -34,17 +32,24 @@ vi.mock('@sveltia/utils/storage', () => {
   };
 });
 
-vi.mock('$lib/services/backends/fs/shared/files', () => ({
-  loadFiles: mockLoadFiles,
+vi.mock('$lib/services/backends/fs/shared/save', () => ({
   saveChanges: mockSaveChanges,
 }));
 
-vi.mock('$lib/services/config', () => ({
-  cmsConfig: { subscribe: vi.fn() },
+vi.mock('$lib/services/backends/fs/shared/load', () => ({
+  loadFiles: mockLoadFiles,
 }));
 
-vi.mock('$lib/services/backends', () => ({
-  allBackendServices: {
+vi.mock('$lib/services/backends/fs/shared/handles', () => ({
+  readFile: mockReadFile,
+}));
+
+vi.mock('$lib/services/config', () => ({
+  cmsConfig: { current: undefined },
+}));
+
+vi.mock('$lib/services/backends/git/services', () => ({
+  gitBackendServices: {
     github: { init: mockInit },
     gitlab: { init: mockInit },
   },
@@ -81,7 +86,7 @@ describe('Local Backend Service', () => {
         showDirectoryPicker: /** @type {any} */ (vi.fn()),
       });
 
-      mockGet.mockReturnValue({
+      cmsConfig.current = /** @type {any} */ ({
         backend: { name: 'github' },
       });
       mockInit.mockReturnValue({
@@ -405,6 +410,7 @@ describe('Local Backend Service', () => {
         signIn: expect.any(Function),
         signOut: expect.any(Function),
         fetchFiles: expect.any(Function),
+        fetchBlob: expect.any(Function),
         commitChanges: expect.any(Function),
       });
     });
@@ -427,7 +433,7 @@ describe('Local Backend Service', () => {
         databaseName: 'test-db',
       };
 
-      mockGet.mockReturnValue({
+      cmsConfig.current = /** @type {any} */ ({
         backend: { name: 'github' },
       });
 
@@ -442,7 +448,7 @@ describe('Local Backend Service', () => {
     });
 
     it('should initialize without remote repository when backend has no databaseName', async () => {
-      mockGet.mockReturnValue({
+      cmsConfig.current = /** @type {any} */ ({
         backend: { name: 'github' },
       });
 
@@ -471,7 +477,7 @@ describe('Local Backend Service', () => {
         databaseName: 'gitlab-db',
       };
 
-      mockGet.mockReturnValue({
+      cmsConfig.current = /** @type {any} */ ({
         backend: { name: 'gitlab' },
       });
 
@@ -661,7 +667,7 @@ describe('Local Backend Service', () => {
     });
 
     it('should handle signOut when no DB is initialized', async () => {
-      mockGet.mockReturnValue({
+      cmsConfig.current = /** @type {any} */ ({
         backend: { name: 'github' },
       });
 
@@ -695,6 +701,9 @@ describe('Local Backend Service', () => {
       mockDBGet.mockResolvedValue(null);
       mockLoadFiles.mockResolvedValue(undefined);
 
+      cmsConfig.current = /** @type {any} */ ({ backend: { name: 'github' } });
+      mockInit.mockReturnValue({ service: 'github', databaseName: 'test-db' });
+
       const service = localBackend.default;
 
       service.init();
@@ -703,6 +712,10 @@ describe('Local Backend Service', () => {
 
       // Should not throw
       await expect(service.fetchFiles()).resolves.toBeUndefined();
+      // The asset hash cache store in the repository database is passed along
+      expect(mockLoadFiles).toHaveBeenCalledWith(mockDirHandle, {
+        hashCacheDB: expect.objectContaining({ get: mockDBGet }),
+      });
     });
   });
 
@@ -748,6 +761,44 @@ describe('Local Backend Service', () => {
     });
   });
 
+  describe('fetchBlob', () => {
+    it('should read the asset file with the directory handle', async () => {
+      const file = new File(['image'], 'a.png');
+
+      mockDirHandle.requestPermission.mockResolvedValue('granted');
+      mockDirHandle.entries.mockReturnValue({
+        next: vi.fn().mockResolvedValue({ done: false }),
+      });
+      mockDirHandle.getDirectoryHandle.mockResolvedValue({});
+
+      // @ts-ignore - Mock setup
+      global.window = /** @type {any} */ ({
+        showDirectoryPicker: /** @type {any} */ (vi.fn().mockResolvedValue(mockDirHandle)),
+      });
+
+      mockDBGet.mockResolvedValue(null);
+      mockReadFile.mockResolvedValue(file);
+
+      const service = localBackend.default;
+
+      service.init();
+
+      await service.signIn({ auto: false });
+
+      await expect(service.fetchBlob({ path: 'static/a.png' })).resolves.toBe(file);
+      expect(mockReadFile).toHaveBeenCalledWith(mockDirHandle, 'static/a.png');
+    });
+
+    it('should fail before signing in', async () => {
+      const service = localBackend.default;
+
+      await expect(service.fetchBlob({ path: 'static/a.png' })).rejects.toThrow(
+        'Root directory handle is not available',
+      );
+      expect(mockReadFile).not.toHaveBeenCalled();
+    });
+  });
+
   describe('repository', () => {
     it('should proxy to remote repository when available', async () => {
       const mockRepoInfo = {
@@ -759,7 +810,7 @@ describe('Local Backend Service', () => {
         databaseName: 'test-db',
       };
 
-      mockGet.mockReturnValue({
+      cmsConfig.current = /** @type {any} */ ({
         backend: { name: 'github' },
       });
 
@@ -775,7 +826,7 @@ describe('Local Backend Service', () => {
     });
 
     it('should use empty repository props when no remote repository', async () => {
-      mockGet.mockReturnValue({
+      cmsConfig.current = /** @type {any} */ ({
         backend: { name: 'github' },
       });
 

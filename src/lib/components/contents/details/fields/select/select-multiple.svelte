@@ -2,8 +2,8 @@
   import { Checkbox, CheckboxGroup, SelectTags } from '@sveltia/ui';
   import { getContext } from 'svelte';
 
-  import { entryDraft } from '$lib/services/contents/draft';
-  import { updateListField } from '$lib/services/contents/draft/update/list';
+  import { getEntryDraftContext } from '$lib/services/contents/draft/state.svelte';
+  import { updateListFieldForLocales } from '$lib/services/contents/draft/update/list';
 
   /**
    * @import { FieldEditorContext, SelectFieldSelectorProps } from '$lib/types/private';
@@ -14,6 +14,8 @@
    * @typedef {object} Props
    * @property {SelectFieldValue[] | undefined} currentValue Field value.
    */
+
+  const entryDraft = getEntryDraftContext();
 
   /** @type {FieldEditorContext} */
   const { valueStoreKey = 'currentValues' } = getContext('field-editor') ?? {};
@@ -38,15 +40,22 @@
   /**
    * Update the value for the list.
    * @param {(arg: { valueList: any[], expanderStateList: any[] }) => void} manipulate See
-   * {@link updateListField}.
+   * {@link updateListFieldForLocales}.
    */
   const updateList = (manipulate) => {
+    const draft = entryDraft.current;
+
     // Avoid an error while navigating pages
-    if ($entryDraft) {
-      Object.keys($state.snapshot($entryDraft[valueStoreKey]) ?? {}).forEach((_locale) => {
-        if (!(i18n !== 'duplicate' && _locale !== locale)) {
-          updateListField({ locale: _locale, valueStoreKey, keyPath, manipulate });
-        }
+    /* v8 ignore next 11 */
+    if (draft) {
+      updateListFieldForLocales({
+        draft,
+        locale,
+        i18n,
+        fieldConfig,
+        valueStoreKey,
+        keyPath,
+        manipulate,
       });
     }
   };
@@ -67,7 +76,12 @@
    */
   const removeValue = (value) => {
     updateList(({ valueList }) => {
-      valueList.splice(valueList.indexOf(value), 1);
+      const index = valueList.indexOf(value);
+
+      // A duplicated locale may not have the value; `-1` would remove its last value instead
+      if (index > -1) {
+        valueList.splice(index, 1);
+      }
     });
   };
 </script>
@@ -97,7 +111,7 @@
   />
 {:else}
   <CheckboxGroup aria-labelledby="{fieldId}-label">
-    {#each options as { label, value } (value)}
+    {#each options as { label, value }, index (`${index}-${value}`)}
       <Checkbox
         {label}
         {value}

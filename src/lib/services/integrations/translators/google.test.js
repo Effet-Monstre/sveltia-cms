@@ -266,16 +266,6 @@ describe('Google Translator Service', () => {
       );
     });
 
-    it('should handle unknown errors', async () => {
-      const mockFetch = vi.mocked(fetch);
-
-      mockFetch.mockRejectedValueOnce('Unknown error');
-
-      await expect(googleTranslator.translate(['Hello'], mockOptions)).rejects.toThrow(
-        'Failed to translate text with Google Translate API.',
-      );
-    });
-
     it('should handle empty text array', async () => {
       const mockResponse = {
         data: {
@@ -522,6 +512,31 @@ describe('Google Translator Service', () => {
         expect(normalizeLanguage('zh-MO')).toBe('zh-TW');
         expect(normalizeLanguage('zh_HK')).toBe('zh-TW'); // with underscore
         expect(normalizeLanguage('zh_MO')).toBe('zh-TW'); // with underscore
+      });
+
+      it('should map script codes to the matching Chinese variant', () => {
+        expect(normalizeLanguage('zh-Hant')).toBe('zh-TW');
+        expect(normalizeLanguage('zh-hant')).toBe('zh-TW');
+        expect(normalizeLanguage('zh_Hant_TW')).toBe('zh-TW');
+        expect(normalizeLanguage('zh-Hant-HK')).toBe('zh-TW');
+        expect(normalizeLanguage('zh-Hans')).toBe('zh-CN');
+        expect(normalizeLanguage('zh-Hans-SG')).toBe('zh-CN');
+        expect(normalizeLanguage('zh-SG')).toBe('zh-CN');
+      });
+
+      it('should match supported codes that have a script code', () => {
+        expect(normalizeLanguage('pa-Arab')).toBe('pa-Arab');
+        expect(normalizeLanguage('pa-arab')).toBe('pa-Arab');
+        expect(normalizeLanguage('ms-Arab')).toBe('ms-Arab');
+        expect(normalizeLanguage('mni-Mtei')).toBe('mni-Mtei');
+        expect(normalizeLanguage('mni-MTEI-IN')).toBe('mni-Mtei');
+        expect(normalizeLanguage('sr-Latn')).toBe('sr');
+      });
+
+      it('should map the Norwegian nb code to no', () => {
+        expect(normalizeLanguage('nb')).toBe('no');
+        expect(normalizeLanguage('nb-NO')).toBe('no');
+        expect(normalizeLanguage('no-NO')).toBe('no');
       });
 
       it('should fallback to language code when region is not supported', () => {

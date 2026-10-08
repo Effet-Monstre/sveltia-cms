@@ -1,30 +1,29 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 
-import { getCollection, isEntryCollection } from '$lib/services/contents/collection';
-import {
-  getIndexFile,
-  isCollectionIndexFile,
-} from '$lib/services/contents/collection/entries/index-file';
+import { customFieldTypeRegistry } from '$lib/services/api/registries';
+import { getCollection } from '$lib/services/contents/collection';
+import { getIndexFile } from '$lib/services/contents/collection/entries/index-file';
+import { isEntryCollection } from '$lib/services/contents/collection/predicates';
 import {
   fieldConfigCacheMap,
+  getCurrentValue,
   getField,
-  getFieldDisplayValue,
-  getPropertyValue,
-  getVisibleFieldDisplayValue,
+  getFieldKind,
+  getTypedKeyPath,
   hasRootField,
   isFieldMultiple,
   isFieldRequired,
   LIST_KEY_PATH_REGEX,
 } from '$lib/services/contents/entry/fields';
-import { getDateTimeFieldDisplayValue } from '$lib/services/contents/fields/date-time/helper';
-import { getReferencedOptionLabel } from '$lib/services/contents/fields/relation/helper';
 import { getComponentDef } from '$lib/services/contents/fields/rich-text/components/definitions';
-import { getOptionLabel } from '$lib/services/contents/fields/select/helper';
-import { isMultiple } from '$lib/services/integrations/media-libraries/shared';
+import { isMultiple } from '$lib/services/integrations/media-libraries/multiple';
 
 // Mock dependencies
 vi.mock('$lib/services/contents/collection', () => ({
   getCollection: vi.fn(),
+}));
+
+vi.mock('$lib/services/contents/collection/predicates', () => ({
   isEntryCollection: vi.fn(),
 }));
 
@@ -33,14 +32,23 @@ vi.mock('$lib/services/contents/collection/entries/index-file', () => ({
   isCollectionIndexFile: vi.fn(),
 }));
 
-vi.mock('$lib/services/contents/i18n', () => ({
-  getCanonicalLocale: vi.fn((locale) => locale),
-  getListFormatter: vi.fn(() => ({
-    format: vi.fn((items) => items.join(', ')),
-  })),
-}));
-
 vi.mock('$lib/services/contents/fields', () => ({
+  BUILTIN_FIELD_TYPES: [
+    'boolean',
+    'string',
+    'text',
+    'number',
+    'datetime',
+    'date',
+    'select',
+    'relation',
+    'list',
+    'object',
+    'file',
+    'image',
+    'markdown',
+    'richtext',
+  ],
   MEDIA_FIELD_TYPES: ['file', 'image'],
   MULTI_VALUE_FIELD_TYPES: ['file', 'image', 'relation', 'select'],
 }));
@@ -49,32 +57,19 @@ vi.mock('$lib/services/contents/fields/rich-text/components/definitions', () => 
   getComponentDef: vi.fn(),
 }));
 
-vi.mock('$lib/services/contents/fields/date-time/helper', () => ({
-  getDateTimeFieldDisplayValue: vi.fn(),
-  parseDateTimeConfig: vi.fn(() => ({})),
-}));
-
-vi.mock('$lib/services/contents/fields/relation/helper', () => ({
-  getReferencedOptionLabel: vi.fn(),
-}));
-
-vi.mock('$lib/services/contents/fields/select/helper', () => ({
-  getOptionLabel: vi.fn(),
-}));
-
-vi.mock('$lib/services/integrations/media-libraries/shared', () => ({
+vi.mock('$lib/services/integrations/media-libraries/multiple', () => ({
   isMultiple: vi.fn(),
+}));
+
+vi.mock('$lib/services/api/registries', () => ({
+  customFieldTypeRegistry: new Map(),
 }));
 
 const mockGetCollection = vi.mocked(getCollection);
 const mockIsEntryCollection = vi.mocked(isEntryCollection);
 const mockIsMultiple = vi.mocked(isMultiple);
 const mockGetIndexFile = vi.mocked(getIndexFile);
-const mockIsCollectionIndexFile = vi.mocked(isCollectionIndexFile);
 const mockGetComponentDef = vi.mocked(getComponentDef);
-const mockGetDateTimeFieldDisplayValue = vi.mocked(getDateTimeFieldDisplayValue);
-const mockGetReferencedOptionLabel = vi.mocked(getReferencedOptionLabel);
-const mockGetOptionLabel = vi.mocked(getOptionLabel);
 
 describe('Internal helpers (exported for testing)', () => {
   describe('LIST_KEY_PATH_REGEX', () => {
@@ -960,7 +955,7 @@ describe('Test getField()', () => {
         expect(mockGetCollection).toHaveBeenCalledTimes(2);
       });
 
-      test('should use cache for identical valueMap objects', () => {
+      test('should NOT cache results with variable type fields', () => {
         // @ts-expect-error - Simplified mock for testing
         mockGetCollection.mockReturnValue(mockCollection);
 
@@ -978,11 +973,11 @@ describe('Test getField()', () => {
         // Second call with same valueMap object
         getField(args);
 
-        // Should only call `getCollection` once due to caching
-        expect(mockGetCollection).toHaveBeenCalledTimes(1);
+        // Should call `getCollection` twice because fields with variable types are not cached
+        expect(mockGetCollection).toHaveBeenCalledTimes(2);
       });
 
-      test('should use cache for equivalent valueMap objects with different references', () => {
+      test('should NOT cache even with equivalent valueMap objects', () => {
         // @ts-expect-error - Simplified mock for testing
         mockGetCollection.mockReturnValue(mockCollection);
 
@@ -1002,8 +997,8 @@ describe('Test getField()', () => {
         getField(args1);
         getField(args2);
 
-        // Should only call `getCollection` once due to JSON.stringify cache key
-        expect(mockGetCollection).toHaveBeenCalledTimes(1);
+        // Should call `getCollection` twice because variable type fields are not cached
+        expect(mockGetCollection).toHaveBeenCalledTimes(2);
       });
     });
   });
@@ -1039,6 +1034,90 @@ describe('Test getField()', () => {
       });
 
       expect(result).toEqual({ name: 'title', widget: 'string' });
+    });
+  });
+
+  describe('getTypedKeyPath()', () => {
+    const collectionName = 'posts';
+
+    beforeEach(() => {
+      // @ts-expect-error - Simplified mock for testing
+      mockGetCollection.mockReturnValue({
+        ...mockCollection,
+        fields: [
+          ...mockCollection.fields,
+          { name: 'photos', widget: 'list', field: { name: 'src', widget: 'image' } },
+          { name: 'gallery', widget: 'image', multiple: true },
+        ],
+      });
+    });
+
+    test('should return a plain key path as is', () => {
+      expect(getTypedKeyPath({ collectionName, keyPath: 'title' })).toBe('title');
+      expect(getTypedKeyPath({ collectionName, keyPath: 'author.name' })).toBe('author.name');
+    });
+
+    test('should replace a list index with an asterisk', () => {
+      expect(getTypedKeyPath({ collectionName, keyPath: 'images.1.src' })).toBe('images.*.src');
+      expect(getTypedKeyPath({ collectionName, keyPath: 'sections.0.content.items.2' })).toBe(
+        'sections.*.content.items.*.item',
+      );
+    });
+
+    test('should add the subfield name to a single-subfield list item', () => {
+      expect(getTypedKeyPath({ collectionName, keyPath: 'photos.0' })).toBe('photos.*.src');
+      expect(getTypedKeyPath({ collectionName, keyPath: 'objectList.3.title' })).toBe(
+        'objectList.*.item.title',
+      );
+    });
+
+    test('should drop the index of a multi-value field', () => {
+      mockIsMultiple.mockReturnValue(true);
+
+      expect(getTypedKeyPath({ collectionName, keyPath: 'gallery.1' })).toBe('gallery');
+      expect(getTypedKeyPath({ collectionName, keyPath: 'cities.0' })).toBe('cities');
+    });
+
+    test('should spell out the variable type of a list item', () => {
+      const valueMap = { 'blocks.0.type': 'text', 'blocks.1.type': 'image' };
+
+      expect(getTypedKeyPath({ collectionName, keyPath: 'blocks.0.content', valueMap })).toBe(
+        'blocks.*<text>.content',
+      );
+      expect(getTypedKeyPath({ collectionName, keyPath: 'blocks.1.src', valueMap })).toBe(
+        'blocks.*<image>.src',
+      );
+      expect(getTypedKeyPath({ collectionName, keyPath: 'blocks.1', valueMap })).toBe(
+        'blocks.*<image>',
+      );
+    });
+
+    test('should support a custom type key', () => {
+      const valueMap = { 'blocksWithCustomType.0.blockType': 'text' };
+
+      expect(
+        getTypedKeyPath({ collectionName, keyPath: 'blocksWithCustomType.0.content', valueMap }),
+      ).toBe('blocksWithCustomType.*<text>.content');
+    });
+
+    test('should spell out the variable type of an object', () => {
+      const valueMap = { 'widget.type': 'button' };
+
+      expect(getTypedKeyPath({ collectionName, keyPath: 'widget.label', valueMap })).toBe(
+        'widget<button>.label',
+      );
+      expect(getTypedKeyPath({ collectionName, keyPath: 'widget', valueMap })).toBe(
+        'widget<button>',
+      );
+    });
+
+    test('should leave the type out if it cannot be resolved', () => {
+      expect(getTypedKeyPath({ collectionName, keyPath: 'blocks.0.src' })).toBe('blocks.*.src');
+      expect(getTypedKeyPath({ collectionName, keyPath: 'widget.label' })).toBe('widget.label');
+    });
+
+    test('should handle an unknown field', () => {
+      expect(getTypedKeyPath({ collectionName, keyPath: 'unknown.0.name' })).toBe('unknown.*.name');
     });
   });
 
@@ -1094,6 +1173,172 @@ describe('Test getField()', () => {
       getField({ collectionName: 'posts', keyPath: 'body' });
 
       expect(mockGetCollection).toHaveBeenCalledTimes(2);
+    });
+
+    describe('Conditional caching with variable type fields', () => {
+      test('should cache simple fields without variable types', () => {
+        // @ts-expect-error - Simplified mock for testing
+        mockGetCollection.mockReturnValue(mockCollection);
+
+        const args = {
+          collectionName: 'posts',
+          keyPath: 'author.name',
+        };
+
+        // First call - should populate cache
+        getField(args);
+        expect(mockGetCollection).toHaveBeenCalledTimes(1);
+
+        // Second call - should use cache
+        getField(args);
+        expect(mockGetCollection).toHaveBeenCalledTimes(1); // No additional call
+      });
+
+      test('should NOT cache fields in paths containing variable type list fields', () => {
+        // @ts-expect-error - Simplified mock for testing
+        mockGetCollection.mockReturnValue(mockCollection);
+
+        const args = {
+          collectionName: 'posts',
+          keyPath: 'blocks.0.content',
+          valueMap: { 'blocks.0.type': 'text' },
+        };
+
+        // First call - should NOT populate cache (blocks has variable types)
+        getField(args);
+        expect(mockGetCollection).toHaveBeenCalledTimes(1);
+
+        // Second call - should NOT use cache
+        getField(args);
+        expect(mockGetCollection).toHaveBeenCalledTimes(2); // New call because variable type field
+      });
+
+      test('should NOT cache fields in paths containing variable type object fields', () => {
+        // @ts-expect-error - Simplified mock for testing
+        mockGetCollection.mockReturnValue(mockCollection);
+
+        const args = {
+          collectionName: 'posts',
+          keyPath: 'widget.label',
+          valueMap: { 'widget.type': 'button' },
+        };
+
+        // First call - should NOT populate cache (widget has variable types)
+        getField(args);
+        expect(mockGetCollection).toHaveBeenCalledTimes(1);
+
+        // Second call - should NOT use cache
+        getField(args);
+        expect(mockGetCollection).toHaveBeenCalledTimes(2); // New call because variable type field
+      });
+
+      test('should cache simple list item access without variable types', () => {
+        // @ts-expect-error - Simplified mock for testing
+        mockGetCollection.mockReturnValue(mockCollection);
+
+        const args = {
+          collectionName: 'posts',
+          keyPath: 'tags.0',
+        };
+
+        // First call - should populate cache (tags is a simple list field)
+        getField(args);
+        expect(mockGetCollection).toHaveBeenCalledTimes(1);
+
+        // Second call - should use cache
+        getField(args);
+        expect(mockGetCollection).toHaveBeenCalledTimes(1); // No additional call
+      });
+
+      test('should NOT cache nested variable type fields', () => {
+        // @ts-expect-error - Simplified mock for testing
+        mockGetCollection.mockReturnValue(mockCollection);
+
+        const args = {
+          collectionName: 'posts',
+          keyPath: 'blocks.1.src',
+          valueMap: { 'blocks.1.type': 'image' },
+        };
+
+        // First call
+        getField(args);
+        expect(mockGetCollection).toHaveBeenCalledTimes(1);
+
+        // Second call with different index
+        const args2 = {
+          collectionName: 'posts',
+          keyPath: 'blocks.2.src',
+          valueMap: { 'blocks.2.type': 'image' },
+        };
+
+        getField(args2);
+        // Different keyPath, should be separate calls
+        expect(mockGetCollection).toHaveBeenCalledTimes(2);
+      });
+
+      test('should create proper simplified cache keys for simple fields', () => {
+        // @ts-expect-error - Simplified mock for testing
+        mockGetCollection.mockReturnValue(mockCollection);
+
+        // Cache should work based on: collectionName|fileName|componentName|keyPath|isIndexFile
+        const args1 = {
+          collectionName: 'posts',
+          keyPath: 'title',
+        };
+
+        const args2 = {
+          collectionName: 'posts',
+          keyPath: 'title',
+          fileName: undefined,
+          componentName: undefined,
+        };
+
+        getField(args1);
+        getField(args2);
+
+        // Both should use the same cache entry
+        expect(mockGetCollection).toHaveBeenCalledTimes(1);
+      });
+
+      test('should handle cache keys with different file names', () => {
+        // @ts-expect-error - Simplified mock for testing
+        mockGetCollection.mockReturnValue(mockFileCollection);
+
+        getField({
+          collectionName: 'config',
+          fileName: 'site-config',
+          keyPath: 'title',
+        });
+
+        getField({
+          collectionName: 'config',
+          fileName: 'site-config',
+          keyPath: 'title',
+        });
+
+        // Should use cache when fileName is the same
+        expect(mockGetCollection).toHaveBeenCalledTimes(1);
+      });
+
+      test('should not mix cache entries for different files', () => {
+        // @ts-expect-error - Simplified mock for testing
+        mockGetCollection.mockReturnValue(mockFileCollection);
+
+        getField({
+          collectionName: 'config',
+          fileName: 'site-config',
+          keyPath: 'title',
+        });
+
+        getField({
+          collectionName: 'config',
+          fileName: 'other-config',
+          keyPath: 'title',
+        });
+
+        // Different file names should create different cache entries
+        expect(mockGetCollection).toHaveBeenCalledTimes(2);
+      });
     });
   });
 
@@ -1724,1499 +1969,6 @@ describe('Test isFieldRequired()', () => {
     expect(isFieldRequired({ fieldConfig: { name, required: ['ja'] }, locale })).toBe(false);
     expect(isFieldRequired({ fieldConfig: { name, required: ['en', 'ja'] }, locale })).toBe(true);
     expect(isFieldRequired({ fieldConfig: { name, required: [] }, locale })).toBe(false);
-  });
-});
-
-describe('Test getFieldDisplayValue()', () => {
-  const mockCollection = {
-    name: 'posts',
-    folder: 'content/posts',
-    _type: 'entry',
-    fields: [
-      { name: 'title', widget: 'string' },
-      { name: 'body', widget: 'markdown' },
-      { name: 'published', widget: 'boolean' },
-      { name: 'publishDate', widget: 'datetime', format: 'YYYY-MM-DD' },
-      {
-        name: 'author',
-        widget: 'relation',
-        collection: 'authors',
-        value_field: 'name',
-        display_fields: ['name', 'email'],
-      },
-      {
-        name: 'category',
-        widget: 'select',
-        options: [
-          { label: 'Blog', value: 'blog' },
-          { label: 'News', value: 'news' },
-        ],
-      },
-      {
-        name: 'simpleTags',
-        widget: 'list',
-        // No field, fields, or types - this makes it a simple list
-      },
-      {
-        name: 'tags',
-        widget: 'list',
-        field: { name: 'tag', widget: 'string' },
-      },
-      {
-        name: 'images',
-        widget: 'list',
-        fields: [
-          { name: 'src', widget: 'image' },
-          { name: 'alt', widget: 'string' },
-        ],
-      },
-      // Number fields for testing
-      { name: 'intNumber', widget: 'number', value_type: 'int' },
-      { name: 'floatNumber', widget: 'number', value_type: 'float' },
-      { name: 'defaultNumber', widget: 'number' }, // Defaults to 'int'
-      { name: 'customTypeNumber', widget: 'number', value_type: 'custom' },
-    ],
-  };
-
-  beforeEach(() => {
-    fieldConfigCacheMap.clear();
-    vi.clearAllMocks();
-    // @ts-expect-error - Simplified mock for testing
-    mockGetCollection.mockReturnValue(mockCollection);
-  });
-
-  afterEach(() => {
-    vi.restoreAllMocks();
-    fieldConfigCacheMap.clear();
-  });
-
-  describe('Basic value handling', () => {
-    test('should return string representation of primitive values', () => {
-      const valueMap = {
-        title: 'Hello World',
-        published: true,
-        count: 42,
-        rating: 4.5,
-      };
-
-      expect(
-        getFieldDisplayValue({
-          collectionName: 'posts',
-          valueMap,
-          keyPath: 'title',
-          locale: 'en',
-        }),
-      ).toBe('Hello World');
-
-      expect(
-        getFieldDisplayValue({
-          collectionName: 'posts',
-          valueMap,
-          keyPath: 'published',
-          locale: 'en',
-        }),
-      ).toBe('true');
-
-      expect(
-        getFieldDisplayValue({
-          collectionName: 'posts',
-          valueMap,
-          keyPath: 'count',
-          locale: 'en',
-        }),
-      ).toBe('42');
-
-      expect(
-        getFieldDisplayValue({
-          collectionName: 'posts',
-          valueMap,
-          keyPath: 'rating',
-          locale: 'en',
-        }),
-      ).toBe('4.5');
-    });
-
-    test('should return empty string for null and undefined values', () => {
-      const valueMap = {
-        nullValue: null,
-        // undefinedValue is not set
-      };
-
-      expect(
-        getFieldDisplayValue({
-          collectionName: 'posts',
-          valueMap,
-          keyPath: 'nullValue',
-          locale: 'en',
-        }),
-      ).toBe('');
-
-      expect(
-        getFieldDisplayValue({
-          collectionName: 'posts',
-          valueMap,
-          keyPath: 'undefinedValue',
-          locale: 'en',
-        }),
-      ).toBe('');
-    });
-
-    test('should return empty string for false boolean value', () => {
-      const valueMap = {
-        published: false,
-      };
-
-      expect(
-        getFieldDisplayValue({
-          collectionName: 'posts',
-          valueMap,
-          keyPath: 'published',
-          locale: 'en',
-        }),
-      ).toBe('false');
-    });
-
-    test('should return empty string for zero value', () => {
-      const valueMap = {
-        count: 0,
-      };
-
-      expect(
-        getFieldDisplayValue({
-          collectionName: 'posts',
-          valueMap,
-          keyPath: 'count',
-          locale: 'en',
-        }),
-      ).toBe('0');
-    });
-
-    test('should return empty string for empty string value', () => {
-      const valueMap = {
-        title: '',
-      };
-
-      expect(
-        getFieldDisplayValue({
-          collectionName: 'posts',
-          valueMap,
-          keyPath: 'title',
-          locale: 'en',
-        }),
-      ).toBe('');
-    });
-  });
-
-  describe('Array value handling', () => {
-    test('should format array values using list formatter', () => {
-      const valueMap = {
-        someArray: ['javascript', 'web development', 'tutorial'],
-      };
-
-      const result = getFieldDisplayValue({
-        collectionName: 'posts',
-        valueMap,
-        keyPath: 'someArray',
-        locale: 'en',
-      });
-
-      // List formatter typically joins with commas and "and"
-      expect(result).toContain('javascript');
-      expect(result).toContain('web development');
-      expect(result).toContain('tutorial');
-    });
-
-    test('should return empty string for empty array', () => {
-      const valueMap = {
-        someArray: [],
-      };
-
-      expect(
-        getFieldDisplayValue({
-          collectionName: 'posts',
-          valueMap,
-          keyPath: 'someArray',
-          locale: 'en',
-        }),
-      ).toBe('');
-    });
-  });
-
-  describe('List field handling', () => {
-    test('should format simple list values', () => {
-      const valueMap = {
-        'simpleTags.0': 'javascript',
-        'simpleTags.1': 'web development',
-        'simpleTags.2': 'tutorial',
-      };
-
-      const result = getFieldDisplayValue({
-        collectionName: 'posts',
-        valueMap,
-        keyPath: 'simpleTags',
-        locale: 'en',
-      });
-
-      expect(result).toContain('javascript');
-      expect(result).toContain('web development');
-      expect(result).toContain('tutorial');
-    });
-
-    test('should ignore complex list field types (with fields or types)', () => {
-      const valueMap = {
-        'images.0.src': 'image1.jpg',
-        'images.0.alt': 'First image',
-        'images.1.src': 'image2.jpg',
-        'images.1.alt': 'Second image',
-      };
-
-      const result = getFieldDisplayValue({
-        collectionName: 'posts',
-        valueMap,
-        keyPath: 'images',
-        locale: 'en',
-      });
-
-      // Complex list field types should not be formatted as simple lists
-      expect(result).toBe('');
-    });
-
-    test('should format list field types with field property', () => {
-      const valueMap = {
-        'tags.0': 'javascript',
-        'tags.1': 'web development',
-      };
-
-      const result = getFieldDisplayValue({
-        collectionName: 'posts',
-        valueMap,
-        keyPath: 'tags',
-        locale: 'en',
-      });
-
-      // List field types with field property should be formatted as simple lists
-      expect(result).toContain('javascript');
-      expect(result).toContain('web development');
-    });
-
-    test('should reuse cached regex when getFieldDisplayValue is called twice with the same keyPath', () => {
-      // Exercises the listItemDisplayRegexCache hit path added by the perf optimisation.
-      const valueMap = {
-        'simpleTags.0': 'react',
-        'simpleTags.1': 'svelte',
-      };
-
-      const args = { collectionName: 'posts', valueMap, keyPath: 'simpleTags', locale: 'en' };
-      const result1 = getFieldDisplayValue(args);
-      // Second call with the same keyPath — should retrieve the cached RegExp.
-      const result2 = getFieldDisplayValue(args);
-
-      expect(result1).toBe(result2);
-      expect(result1).toContain('react');
-    });
-  });
-
-  describe('Relation field handling', () => {
-    test('should handle relation field type recognition (line 243-250)', () => {
-      // This test ensures the relation field branch is tested
-      // The actual relation handling is tested in other test files
-      const mockCollectionWithRelation = {
-        ...mockCollection,
-        fields: [
-          ...mockCollection.fields,
-          {
-            name: 'author',
-            widget: 'relation',
-            collection: 'authors',
-          },
-        ],
-      };
-
-      // @ts-expect-error - Mock for testing
-      mockGetCollection.mockReturnValue(mockCollectionWithRelation);
-
-      // Just verify the field config can be fetched
-      const fieldConfig = getField({
-        collectionName: 'posts',
-        valueMap: {},
-        keyPath: 'author',
-      });
-
-      expect(fieldConfig?.widget).toBe('relation');
-    });
-
-    test('should call getReferencedOptionLabel for relation field (line 243-250)', () => {
-      const mockCollectionWithRelation = {
-        ...mockCollection,
-        fields: [
-          {
-            name: 'author',
-            widget: 'relation',
-            collection: 'authors',
-            value_field: 'name',
-            display_fields: ['name', 'email'],
-          },
-        ],
-      };
-
-      // @ts-expect-error - Mock for testing
-      mockGetCollection.mockReturnValue(mockCollectionWithRelation);
-      mockGetReferencedOptionLabel.mockReturnValue('John Doe');
-
-      const valueMap = {
-        author: 'john-doe',
-      };
-
-      const result = getFieldDisplayValue({
-        collectionName: 'posts',
-        valueMap,
-        keyPath: 'author',
-        locale: 'en',
-      });
-
-      expect(mockGetReferencedOptionLabel).toHaveBeenCalledWith(
-        expect.objectContaining({
-          fieldConfig: expect.objectContaining({ widget: 'relation' }),
-          valueMap,
-          keyPath: 'author',
-          locale: 'en',
-        }),
-      );
-      expect(result).toBe('John Doe');
-    });
-  });
-
-  describe('Select field handling', () => {
-    test('should handle select field type recognition (line 253-259)', () => {
-      // Verify select field branch is recognized
-      const mockCollectionWithSelect = {
-        ...mockCollection,
-        fields: [
-          ...mockCollection.fields,
-          {
-            name: 'category',
-            widget: 'select',
-            options: ['blog', 'news'],
-          },
-        ],
-      };
-
-      // @ts-expect-error - Mock for testing
-      mockGetCollection.mockReturnValue(mockCollectionWithSelect);
-
-      // Just verify the field config can be fetched
-      const fieldConfig = getField({
-        collectionName: 'posts',
-        valueMap: {},
-        keyPath: 'category',
-      });
-
-      expect(fieldConfig?.widget).toBe('select');
-    });
-
-    test('should call getOptionLabel for select field (line 253-259)', () => {
-      const mockCollectionWithSelect = {
-        ...mockCollection,
-        fields: [
-          {
-            name: 'category',
-            widget: 'select',
-            options: [
-              { label: 'Blog', value: 'blog' },
-              { label: 'News', value: 'news' },
-            ],
-          },
-        ],
-      };
-
-      // @ts-expect-error - Mock for testing
-      mockGetCollection.mockReturnValue(mockCollectionWithSelect);
-      mockGetOptionLabel.mockReturnValue('Blog');
-
-      const valueMap = {
-        category: 'blog',
-      };
-
-      const result = getFieldDisplayValue({
-        collectionName: 'posts',
-        valueMap,
-        keyPath: 'category',
-        locale: 'en',
-      });
-
-      expect(mockGetOptionLabel).toHaveBeenCalledWith(
-        expect.objectContaining({
-          fieldConfig: expect.objectContaining({ widget: 'select' }),
-          valueMap,
-          keyPath: 'category',
-        }),
-      );
-      expect(result).toBe('Blog');
-    });
-  });
-
-  describe('Datetime field handling', () => {
-    test('should recognize datetime field type (lines 230-240)', () => {
-      // Verify datetime field branch is recognized
-      const mockCollectionWithDatetime = {
-        ...mockCollection,
-        fields: [
-          ...mockCollection.fields,
-          {
-            name: 'publishDate',
-            widget: 'datetime',
-            format: 'YYYY-MM-DD',
-          },
-        ],
-      };
-
-      // @ts-expect-error - Mock for testing
-      mockGetCollection.mockReturnValue(mockCollectionWithDatetime);
-
-      // Just verify the field config can be fetched
-      const fieldConfig = getField({
-        collectionName: 'posts',
-        valueMap: {},
-        keyPath: 'publishDate',
-      });
-
-      expect(fieldConfig?.widget).toBe('datetime');
-    });
-
-    test('should call getDateTimeFieldDisplayValue when datetime field has no date transformation (line 230-240)', () => {
-      const mockCollectionWithDatetime = {
-        ...mockCollection,
-        fields: [
-          {
-            name: 'publishDate',
-            widget: 'datetime',
-            format: 'YYYY-MM-DD',
-          },
-        ],
-      };
-
-      // @ts-expect-error - Mock for testing
-      mockGetCollection.mockReturnValue(mockCollectionWithDatetime);
-      mockGetDateTimeFieldDisplayValue.mockReturnValue('2024-01-15');
-
-      const valueMap = {
-        publishDate: '2024-01-15T10:30:00Z',
-      };
-
-      const result = getFieldDisplayValue({
-        collectionName: 'posts',
-        valueMap,
-        keyPath: 'publishDate',
-        locale: 'en',
-      });
-
-      expect(mockGetDateTimeFieldDisplayValue).toHaveBeenCalled();
-      expect(result).toBe('2024-01-15');
-    });
-
-    test('should call getDateTimeFieldDisplayValue when no date transformation is provided (line 230-240)', () => {
-      // Clear previous mock calls
-      mockGetDateTimeFieldDisplayValue.mockClear();
-
-      const mockCollectionWithDatetime = {
-        ...mockCollection,
-        fields: [
-          {
-            name: 'publishDate',
-            widget: 'datetime',
-            format: 'YYYY-MM-DD',
-          },
-        ],
-      };
-
-      // @ts-expect-error - Mock for testing
-      mockGetCollection.mockReturnValue(mockCollectionWithDatetime);
-      mockGetDateTimeFieldDisplayValue.mockReturnValue('2024-01-15');
-
-      const valueMap = {
-        publishDate: '2024-01-15T10:30:00Z',
-      };
-
-      // When transformations array is empty or doesn't contain a date transformation,
-      // getDateTimeFieldDisplayValue SHOULD be called
-      const result = getFieldDisplayValue({
-        collectionName: 'posts',
-        valueMap,
-        keyPath: 'publishDate',
-        locale: 'en',
-        transformations: ['upper'], // Non-date transformation
-      });
-
-      expect(mockGetDateTimeFieldDisplayValue).toHaveBeenCalledWith(
-        expect.objectContaining({
-          fieldConfig: expect.objectContaining({ widget: 'datetime' }),
-          currentValue: '2024-01-15T10:30:00Z',
-          locale: 'en',
-        }),
-      );
-      expect(result).toBe('2024-01-15');
-    });
-
-    test('should skip getDateTimeFieldDisplayValue when date transformation is provided (line 299 false)', () => {
-      // Test the FALSE branch of line 299: when transformations array
-      // contains a date transformation, the if condition is false,
-      // so getDateTimeFieldDisplayValue is NOT called
-      mockGetDateTimeFieldDisplayValue.mockClear();
-
-      const mockCollectionWithDatetime = {
-        ...mockCollection,
-        fields: [
-          {
-            name: 'publishDate',
-            widget: 'datetime',
-            format: 'YYYY-MM-DD',
-          },
-        ],
-      };
-
-      // @ts-expect-error - Mock for testing
-      mockGetCollection.mockReturnValue(mockCollectionWithDatetime);
-      mockGetDateTimeFieldDisplayValue.mockReturnValue('formatted');
-
-      const valueMap = {
-        publishDate: '2024-01-15T10:30:00Z',
-      };
-
-      // With an empty transformations array, !transformations?.some()
-      // returns true, so getDateTimeFieldDisplayValue WILL be called
-      getFieldDisplayValue({
-        collectionName: 'posts',
-        valueMap,
-        keyPath: 'publishDate',
-        locale: 'en',
-        transformations: [], // Empty transformations
-      });
-
-      expect(mockGetDateTimeFieldDisplayValue).toHaveBeenCalled();
-      mockGetDateTimeFieldDisplayValue.mockClear();
-
-      // To test the FALSE branch more directly, we just verify that
-      // when transformations include a date pattern, the condition
-      // !transformations?.some() is false
-      // We can test this by checking the transformations array exists
-      const transformations = ['someOtherTrans'];
-      const hasDateTransformation = transformations.some((tf) => tf.startsWith('date('));
-
-      expect(hasDateTransformation).toBe(false);
-    });
-
-    test('should handle datetime field when transformations is undefined (line 299)', () => {
-      // Test datetime field display with transformations undefined
-      mockGetDateTimeFieldDisplayValue.mockClear();
-
-      const mockCollectionWithDatetime = {
-        ...mockCollection,
-        fields: [
-          {
-            name: 'publishDate',
-            widget: 'datetime',
-            format: 'YYYY-MM-DD',
-          },
-        ],
-      };
-
-      // @ts-expect-error - Mock for testing
-      mockGetCollection.mockReturnValue(mockCollectionWithDatetime);
-      mockGetDateTimeFieldDisplayValue.mockReturnValue('2024-01-15');
-
-      const valueMap = {
-        publishDate: '2024-01-15T10:30:00Z',
-      };
-
-      // When transformations is undefined, !transformations?.some() is true
-      // so getDateTimeFieldDisplayValue WILL be called
-      const result = getFieldDisplayValue({
-        collectionName: 'posts',
-        valueMap,
-        keyPath: 'publishDate',
-        locale: 'en',
-        // transformations is undefined
-      });
-
-      expect(mockGetDateTimeFieldDisplayValue).toHaveBeenCalled();
-      expect(result).toBe('2024-01-15');
-    });
-
-    test('should skip getDateTimeFieldDisplayValue when transformations contain a date pattern (line 343 false branch)', () => {
-      // When transformations contains a date() pattern, !some() = false,
-      // so getDateTimeFieldDisplayValue is NOT called (line 343 false branch).
-      mockGetDateTimeFieldDisplayValue.mockClear();
-
-      const mockCollectionWithDatetime = {
-        ...mockCollection,
-        fields: [
-          {
-            name: 'publishDate',
-            widget: 'datetime',
-            format: 'YYYY-MM-DD',
-          },
-        ],
-      };
-
-      // @ts-expect-error - Mock for testing
-      mockGetCollection.mockReturnValue(mockCollectionWithDatetime);
-
-      const valueMap = { publishDate: '2024-01-15T10:30:00Z' };
-
-      getFieldDisplayValue({
-        collectionName: 'posts',
-        valueMap,
-        keyPath: 'publishDate',
-        locale: 'en',
-        transformations: ["date('YYYY-MM-DD')"], // matches DATE_TRANSFORMATION_REGEX
-      });
-
-      // getDateTimeFieldDisplayValue should NOT be called when a date() transformation is present
-      expect(mockGetDateTimeFieldDisplayValue).not.toHaveBeenCalled();
-    });
-  });
-
-  describe('Transformations', () => {
-    test('should apply transformations when provided', () => {
-      const valueMap = {
-        title: 'hello world',
-      };
-
-      const result = getFieldDisplayValue({
-        collectionName: 'posts',
-        valueMap,
-        keyPath: 'title',
-        locale: 'en',
-        transformations: ['upper'],
-      });
-
-      expect(result).toBe('HELLO WORLD');
-    });
-
-    test('should return empty string when field is undefined and transformations are applied', () => {
-      const valueMap = {};
-
-      const result = getFieldDisplayValue({
-        collectionName: 'posts',
-        valueMap,
-        keyPath: 'nonexistent',
-        locale: 'en',
-        transformations: ['upper'],
-      });
-
-      expect(result).toBe('');
-    });
-  });
-
-  describe('Edge cases', () => {
-    test('should handle non-existent collection', () => {
-      mockGetCollection.mockReturnValue(undefined);
-
-      const valueMap = {
-        title: 'Hello World',
-      };
-
-      const result = getFieldDisplayValue({
-        collectionName: 'nonexistent',
-        valueMap,
-        keyPath: 'title',
-        locale: 'en',
-      });
-
-      expect(result).toBe('Hello World');
-    });
-
-    test('should handle non-existent field config', () => {
-      const valueMap = {
-        unknownField: 'some value',
-      };
-
-      const result = getFieldDisplayValue({
-        collectionName: 'posts',
-        valueMap,
-        keyPath: 'unknownField',
-        locale: 'en',
-      });
-
-      expect(result).toBe('some value');
-    });
-  });
-
-  describe('Number field handling', () => {
-    beforeEach(() => {
-      // Mock Intl.NumberFormat to return predictable values for testing
-      vi.spyOn(Intl, 'NumberFormat').mockImplementation((locale) => ({
-        format: vi.fn((number) => {
-          // Simple mock that adds locale-specific formatting
-          if (locale === 'en' || locale === 'en-US') {
-            return number.toLocaleString('en-US');
-          }
-
-          return number.toString();
-        }),
-        resolvedOptions: vi.fn(),
-        formatToParts: vi.fn(),
-        formatRange: vi.fn(),
-        formatRangeToParts: vi.fn(),
-      }));
-    });
-
-    afterEach(() => {
-      vi.restoreAllMocks();
-    });
-
-    test('should format integer numbers using Intl.NumberFormat', () => {
-      const valueMap = {
-        intNumber: 1234,
-      };
-
-      const result = getFieldDisplayValue({
-        collectionName: 'posts',
-        valueMap,
-        keyPath: 'intNumber',
-        locale: 'en',
-      });
-
-      expect(result).toBe('1,234');
-      expect(Intl.NumberFormat).toHaveBeenCalledWith('en');
-    });
-
-    test('should format float numbers using Intl.NumberFormat', () => {
-      const valueMap = {
-        floatNumber: 1234.56,
-      };
-
-      const result = getFieldDisplayValue({
-        collectionName: 'posts',
-        valueMap,
-        keyPath: 'floatNumber',
-        locale: 'en',
-      });
-
-      expect(result).toBe('1,234.56');
-    });
-
-    test('should format numbers when value_type defaults to int', () => {
-      const valueMap = {
-        defaultNumber: 5678,
-      };
-
-      const result = getFieldDisplayValue({
-        collectionName: 'posts',
-        valueMap,
-        keyPath: 'defaultNumber',
-        locale: 'en',
-      });
-
-      expect(result).toBe('5,678');
-    });
-
-    test('should not format numbers for custom value_type', () => {
-      const valueMap = {
-        customTypeNumber: 9999,
-      };
-
-      const result = getFieldDisplayValue({
-        collectionName: 'posts',
-        valueMap,
-        keyPath: 'customTypeNumber',
-        locale: 'en',
-      });
-
-      // Should return the raw number as string since value_type is not 'int' or 'float'
-      expect(result).toBe('9999');
-      expect(Intl.NumberFormat).not.toHaveBeenCalled();
-    });
-
-    test('should handle string numbers for int type', () => {
-      const valueMap = {
-        intNumber: '2345',
-      };
-
-      const result = getFieldDisplayValue({
-        collectionName: 'posts',
-        valueMap,
-        keyPath: 'intNumber',
-        locale: 'en',
-      });
-
-      expect(result).toBe('2,345');
-    });
-
-    test('should handle string numbers for float type', () => {
-      const valueMap = {
-        floatNumber: '2345.67',
-      };
-
-      const result = getFieldDisplayValue({
-        collectionName: 'posts',
-        valueMap,
-        keyPath: 'floatNumber',
-        locale: 'en',
-      });
-
-      expect(result).toBe('2,345.67');
-    });
-
-    test('should handle zero values for number fields', () => {
-      const valueMap = {
-        intNumber: 0,
-        floatNumber: 0.0,
-      };
-
-      const intResult = getFieldDisplayValue({
-        collectionName: 'posts',
-        valueMap,
-        keyPath: 'intNumber',
-        locale: 'en',
-      });
-
-      const floatResult = getFieldDisplayValue({
-        collectionName: 'posts',
-        valueMap,
-        keyPath: 'floatNumber',
-        locale: 'en',
-      });
-
-      expect(intResult).toBe('0');
-      expect(floatResult).toBe('0');
-    });
-
-    test('should handle negative numbers', () => {
-      const valueMap = {
-        intNumber: -1234,
-        floatNumber: -1234.56,
-      };
-
-      const intResult = getFieldDisplayValue({
-        collectionName: 'posts',
-        valueMap,
-        keyPath: 'intNumber',
-        locale: 'en',
-      });
-
-      const floatResult = getFieldDisplayValue({
-        collectionName: 'posts',
-        valueMap,
-        keyPath: 'floatNumber',
-        locale: 'en',
-      });
-
-      expect(intResult).toBe('-1,234');
-      expect(floatResult).toBe('-1,234.56');
-    });
-
-    test('should handle different locales', () => {
-      const valueMap = {
-        intNumber: 1234,
-      };
-
-      // Test with Japanese locale
-      const result = getFieldDisplayValue({
-        collectionName: 'posts',
-        valueMap,
-        keyPath: 'intNumber',
-        locale: 'ja',
-      });
-
-      expect(result).toBe('1234'); // Our mock returns toString() for non-en locales
-      expect(Intl.NumberFormat).toHaveBeenCalledWith('ja');
-    });
-
-    test('should reuse the cached number formatter for the same locale', () => {
-      // Use 'de' which no other test uses — guarantees a cache miss on the first call.
-      vi.spyOn(Intl, 'NumberFormat').mockImplementation((locale) => ({
-        format: vi.fn((n) => `${locale}:${n}`),
-        resolvedOptions: vi.fn(),
-        formatToParts: vi.fn(),
-        formatRange: vi.fn(),
-        formatRangeToParts: vi.fn(),
-      }));
-
-      const args = {
-        collectionName: 'posts',
-        valueMap: { intNumber: 42 },
-        keyPath: 'intNumber',
-        locale: 'de',
-      };
-
-      const result1 = getFieldDisplayValue(args);
-      const result2 = getFieldDisplayValue(args);
-
-      // Intl.NumberFormat was constructed only once; the second call reused the cache.
-      expect(Intl.NumberFormat).toHaveBeenCalledTimes(1);
-      expect(result1).toBe(result2);
-    });
-
-    test('should handle invalid number values gracefully', () => {
-      const valueMap = {
-        intNumber: NaN,
-        floatNumber: Infinity,
-        defaultNumber: 'invalid',
-      };
-
-      const nanResult = getFieldDisplayValue({
-        collectionName: 'posts',
-        valueMap,
-        keyPath: 'intNumber',
-        locale: 'en',
-      });
-
-      const infinityResult = getFieldDisplayValue({
-        collectionName: 'posts',
-        valueMap,
-        keyPath: 'floatNumber',
-        locale: 'en',
-      });
-
-      const invalidResult = getFieldDisplayValue({
-        collectionName: 'posts',
-        valueMap,
-        keyPath: 'defaultNumber',
-        locale: 'en',
-      });
-
-      // These would be handled by Number() constructor and Intl.NumberFormat
-      expect(nanResult).toBe('NaN');
-      expect(infinityResult).toBe('∞'); // toLocaleString returns ∞ for Infinity
-      expect(invalidResult).toBe('NaN');
-    });
-  });
-});
-
-describe('Test getVisibleFieldDisplayValue()', () => {
-  // Mock collection for testing getVisibleFieldDisplayValue
-  const testMockCollection = {
-    name: 'posts',
-    folder: 'content/posts',
-    _type: 'entry',
-    fields: [
-      {
-        name: 'item',
-        widget: 'list',
-        fields: [
-          { name: 'title', widget: 'string' },
-          { name: 'name', widget: 'string' },
-          { name: 'description', widget: 'text' },
-          { name: 'count', widget: 'number' },
-          { name: 'hidden_field', widget: 'hidden' },
-          { name: 'visible_field', widget: 'string' },
-        ],
-      },
-    ],
-  };
-
-  beforeEach(() => {
-    fieldConfigCacheMap.clear();
-    vi.clearAllMocks();
-    // @ts-expect-error - Simplified mock for testing
-    mockGetCollection.mockReturnValue(testMockCollection);
-    mockIsEntryCollection.mockReturnValue(true);
-  });
-
-  afterEach(() => {
-    vi.restoreAllMocks();
-    fieldConfigCacheMap.clear();
-  });
-
-  test('should return title field value when available', () => {
-    const valueMap = {
-      'item.0.title': 'Test Title',
-      'item.0.name': 'Test Name',
-      'item.0.description': 'Test Description',
-    };
-
-    const result = getVisibleFieldDisplayValue({
-      valueMap,
-      locale: 'en',
-      keyPath: 'item.0',
-      keyPathRegex: /^item\.0\./,
-      getFieldArgs: { collectionName: 'posts', keyPath: '', valueMap },
-    });
-
-    expect(result).toBe('Test Title');
-  });
-
-  test('should return name field value when title is not available', () => {
-    const valueMap = {
-      'item.0.name': 'Test Name',
-      'item.0.description': 'Test Description',
-    };
-
-    const result = getVisibleFieldDisplayValue({
-      valueMap,
-      locale: 'en',
-      keyPath: 'item.0',
-      keyPathRegex: /^item\.0\./,
-      getFieldArgs: { collectionName: 'posts', keyPath: '', valueMap },
-    });
-
-    expect(result).toBe('Test Name');
-  });
-
-  test('should return first available field when title and name are not available', () => {
-    const valueMap = {
-      'item.0.description': 'Test Description',
-      'item.0.count': 42,
-    };
-
-    const result = getVisibleFieldDisplayValue({
-      valueMap,
-      locale: 'en',
-      keyPath: 'item.0',
-      keyPathRegex: /^item\.0\./,
-      getFieldArgs: { collectionName: 'posts', keyPath: '', valueMap },
-    });
-
-    expect(result).toBe('Test Description');
-  });
-
-  test('should skip hidden fields', () => {
-    const valueMap = {
-      'item.0.hidden_field': 'Hidden Value',
-      'item.0.visible_field': 'Visible Value',
-    };
-
-    const result = getVisibleFieldDisplayValue({
-      valueMap,
-      locale: 'en',
-      keyPath: 'item.0',
-      keyPathRegex: /^item\.0\./,
-      getFieldArgs: { collectionName: 'posts', keyPath: '', valueMap },
-    });
-
-    expect(result).toBe('Visible Value');
-  });
-
-  test('should skip empty string values', () => {
-    const valueMap = {
-      'item.0.title': '',
-      'item.0.name': '   ', // whitespace only
-      'item.0.description': 'Valid Description',
-    };
-
-    const result = getVisibleFieldDisplayValue({
-      valueMap,
-      locale: 'en',
-      keyPath: 'item.0',
-      keyPathRegex: /^item\.0\./,
-      getFieldArgs: { collectionName: 'posts', keyPath: '', valueMap },
-    });
-
-    expect(result).toBe('Valid Description');
-  });
-
-  test('should accept numeric values', () => {
-    const valueMap = {
-      'item.0.count': 0, // zero should be valid
-    };
-
-    const result = getVisibleFieldDisplayValue({
-      valueMap,
-      locale: 'en',
-      keyPath: 'item.0',
-      keyPathRegex: /^item\.0\./,
-      getFieldArgs: { collectionName: 'posts', keyPath: '', valueMap },
-    });
-
-    expect(result).toBe('0');
-  });
-
-  test('should skip fields that do not match the key path regex', () => {
-    const valueMap = {
-      'item.1.title': 'Other Item Title', // different item
-      'item.0.description': 'Current Item Description',
-    };
-
-    const result = getVisibleFieldDisplayValue({
-      valueMap,
-      locale: 'en',
-      keyPath: 'item.0',
-      keyPathRegex: /^item\.0\./,
-      getFieldArgs: { collectionName: 'posts', keyPath: '', valueMap },
-    });
-
-    expect(result).toBe('Current Item Description');
-  });
-
-  test('should return empty string when no visible fields have values', () => {
-    const valueMap = {
-      'item.0.title': '',
-      'item.0.name': null,
-      'item.0.description': undefined,
-    };
-
-    const result = getVisibleFieldDisplayValue({
-      valueMap,
-      locale: 'en',
-      keyPath: 'item.0',
-      keyPathRegex: /^item\.0\./,
-      getFieldArgs: { collectionName: 'posts', keyPath: '', valueMap },
-    });
-
-    expect(result).toBe('');
-  });
-
-  test('should return empty string when no fields match the regex', () => {
-    const valueMap = {
-      'other.field': 'Some Value',
-    };
-
-    const result = getVisibleFieldDisplayValue({
-      valueMap,
-      locale: 'en',
-      keyPath: 'item.0',
-      keyPathRegex: /^item\.0\./,
-      getFieldArgs: { collectionName: 'posts', keyPath: '', valueMap },
-    });
-
-    expect(result).toBe('');
-  });
-
-  test('should prioritize title over name and other fields', () => {
-    const valueMap = {
-      'item.0.description': 'Description',
-      'item.0.name': 'Name',
-      'item.0.title': 'Title',
-      'item.0.count': 5,
-    };
-
-    const result = getVisibleFieldDisplayValue({
-      valueMap,
-      locale: 'en',
-      keyPath: 'item.0',
-      keyPathRegex: /^item\.0\./,
-      getFieldArgs: { collectionName: 'posts', keyPath: '', valueMap },
-    });
-
-    expect(result).toBe('Title');
-  });
-
-  test('should handle undefined field configuration gracefully', () => {
-    // Mock getField to return undefined for certain paths
-    mockGetCollection.mockReturnValue(undefined);
-
-    const valueMap = {
-      'item.0.unknown_field': 'Unknown Value',
-    };
-
-    const result = getVisibleFieldDisplayValue({
-      valueMap,
-      locale: 'en',
-      keyPath: 'item.0',
-      keyPathRegex: /^item\.0\./,
-      getFieldArgs: { collectionName: 'unknown_collection', keyPath: '', valueMap },
-    });
-
-    // When field config is not found, the function should return empty string
-    expect(result).toBe('');
-  });
-});
-
-describe('Test getPropertyValue()', () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-  });
-
-  test('should return slug when key is "slug"', () => {
-    // @ts-ignore - Testing with minimal mock
-    const entry = {
-      slug: 'my-post',
-      locales: { en: { content: {} } },
-    };
-
-    const result = getPropertyValue({
-      // @ts-expect-error - Using minimal mock for testing
-      entry,
-      locale: 'en',
-      collectionName: 'posts',
-      key: 'slug',
-    });
-
-    expect(result).toBe('my-post');
-  });
-
-  test('should return commit author name when key is "commit_author"', () => {
-    // @ts-ignore - Testing with minimal mock
-    const entry = {
-      locales: { en: { content: {} } },
-      commitAuthor: { name: 'Jane Smith', login: 'jane', email: 'jane@example.com' },
-    };
-
-    const result = getPropertyValue({
-      // @ts-expect-error - Using minimal mock for testing
-      entry,
-      locale: 'en',
-      collectionName: 'posts',
-      key: 'commit_author',
-    });
-
-    expect(result).toBe('Jane Smith');
-  });
-
-  test('should return commit date when key is "commit_date"', () => {
-    // @ts-ignore - Testing with minimal mock
-    const entry = {
-      locales: { en: { content: {} } },
-      commitDate: '2024-01-01T00:00:00Z',
-    };
-
-    const result = getPropertyValue({
-      // @ts-expect-error - Using minimal mock for testing
-      entry,
-      locale: 'en',
-      collectionName: 'posts',
-      key: 'commit_date',
-    });
-
-    expect(result).toBe('2024-01-01T00:00:00Z');
-  });
-
-  test('should return field value from content', () => {
-    // @ts-ignore - Testing with minimal mock
-    const entry = {
-      locales: {
-        en: {
-          content: { title: 'My Post' },
-        },
-      },
-    };
-
-    // @ts-ignore - Testing with minimal mock
-    mockGetCollection.mockReturnValue({
-      _type: 'entry',
-      fields: [{ name: 'title', widget: 'string' }],
-    });
-
-    const result = getPropertyValue({
-      // @ts-expect-error - Using minimal mock for testing
-      entry,
-      locale: 'en',
-      collectionName: 'posts',
-      key: 'title',
-    });
-
-    expect(result).toBe('My Post');
-  });
-
-  test('should return undefined when locale content is not available', () => {
-    // @ts-ignore - Testing with minimal mock
-    const entry = {
-      locales: {
-        en: { content: { title: 'My Post' } },
-      },
-    };
-
-    const result = getPropertyValue({
-      // @ts-expect-error - Using minimal mock for testing
-      entry,
-      locale: 'fr',
-      collectionName: 'posts',
-      key: 'title',
-    });
-
-    expect(result).toBe(undefined);
-  });
-
-  test('should return undefined when collection is not found', () => {
-    // @ts-ignore - Testing with minimal mock
-    const entry = {
-      locales: {
-        en: { content: { title: 'My Post' } },
-      },
-    };
-
-    mockGetCollection.mockReturnValue(undefined);
-
-    const result = getPropertyValue({
-      // @ts-expect-error - Using minimal mock for testing
-      entry,
-      locale: 'en',
-      collectionName: 'unknown',
-      key: 'title',
-    });
-
-    expect(result).toBe(undefined);
-  });
-
-  test('should resolve relation field value when resolveRef is true (lines 390-397)', () => {
-    // Create mock collection with relation field
-    const mockCollectionWithRelation = {
-      _type: 'entry',
-      fields: [
-        {
-          name: 'author',
-          widget: 'relation',
-          collection: 'authors',
-          search_fields: ['name'],
-          value_field: 'name',
-          display_fields: ['name'],
-        },
-      ],
-      _i18n: {
-        i18nEnabled: false,
-      },
-    };
-
-    // @ts-ignore - Testing with minimal mock
-    const entry = {
-      locales: {
-        en: {
-          content: {
-            author: 'john-doe',
-          },
-        },
-      },
-    };
-
-    // @ts-ignore - Mock collection
-    mockGetCollection.mockReturnValue(mockCollectionWithRelation);
-    mockIsCollectionIndexFile.mockReturnValue(false);
-    mockGetReferencedOptionLabel.mockReturnValue('John Doe');
-
-    const result = getPropertyValue({
-      // @ts-expect-error - Using minimal mock for testing
-      entry,
-      locale: 'en',
-      collectionName: 'posts',
-      key: 'author',
-      resolveRef: true,
-    });
-
-    expect(result).toBe('John Doe');
-    expect(mockGetReferencedOptionLabel).toHaveBeenCalled();
-  });
-
-  test('should not resolve relation field value when resolveRef is false', () => {
-    // Create mock collection with relation field
-    const mockCollectionWithRelation = {
-      _type: 'entry',
-      fields: [
-        {
-          name: 'author',
-          widget: 'relation',
-          collection: 'authors',
-        },
-      ],
-      _i18n: {
-        i18nEnabled: false,
-      },
-    };
-
-    // @ts-ignore - Testing with minimal mock
-    const entry = {
-      locales: {
-        en: {
-          content: {
-            author: 'john-doe',
-          },
-        },
-      },
-    };
-
-    // @ts-ignore - Mock collection
-    mockGetCollection.mockReturnValue(mockCollectionWithRelation);
-
-    const result = getPropertyValue({
-      // @ts-expect-error - Using minimal mock for testing
-      entry,
-      locale: 'en',
-      collectionName: 'posts',
-      key: 'author',
-      resolveRef: false,
-    });
-
-    expect(result).toBe('john-doe');
-  });
-
-  test('should return raw field value for non-relation fields', () => {
-    const mockNormalCollection = {
-      _type: 'entry',
-      fields: [{ name: 'title', widget: 'string' }],
-      _i18n: {
-        i18nEnabled: false,
-      },
-    };
-
-    // @ts-ignore - Testing with minimal mock
-    const entry = {
-      locales: {
-        en: {
-          content: {
-            title: 'My Post',
-          },
-        },
-      },
-    };
-
-    // @ts-ignore - Mock collection
-    mockGetCollection.mockReturnValue(mockNormalCollection);
-
-    const result = getPropertyValue({
-      // @ts-expect-error - Using minimal mock for testing
-      entry,
-      locale: 'en',
-      collectionName: 'posts',
-      key: 'title',
-      resolveRef: true,
-    });
-
-    expect(result).toBe('My Post');
-  });
-
-  test('should return login when name is not available (line 365)', () => {
-    // @ts-ignore - Testing with minimal mock
-    const entry = {
-      locales: { en: { content: {} } },
-      commitAuthor: { login: 'john_doe', email: 'john@example.com' },
-    };
-
-    const result = getPropertyValue({
-      // @ts-expect-error - Using minimal mock for testing
-      entry,
-      locale: 'en',
-      collectionName: 'posts',
-      key: 'commit_author',
-    });
-
-    expect(result).toBe('john_doe');
-  });
-
-  test('should return email when name and login are not available (line 365)', () => {
-    // @ts-ignore - Testing with minimal mock
-    const entry = {
-      locales: { en: { content: {} } },
-      commitAuthor: { email: 'john@example.com' },
-    };
-
-    const result = getPropertyValue({
-      // @ts-expect-error - Using minimal mock for testing
-      entry,
-      locale: 'en',
-      collectionName: 'posts',
-      key: 'commit_author',
-    });
-
-    expect(result).toBe('john@example.com');
-  });
-
-  test('should return falsy value when no commit author info available (line 365)', () => {
-    // @ts-ignore - Testing with minimal mock
-    const entry = {
-      locales: { en: { content: {} } },
-      commitAuthor: {},
-    };
-
-    const result = getPropertyValue({
-      // @ts-expect-error - Using minimal mock for testing
-      entry,
-      locale: 'en',
-      collectionName: 'posts',
-      key: 'commit_author',
-    });
-
-    // When none of name, login, email are available, the || operator chain returns undefined
-    expect(result).toBeUndefined();
   });
 });
 
@@ -4129,7 +2881,7 @@ describe('Test getField() with explicit variable type syntax', () => {
   });
 
   describe('Caching with explicit types', () => {
-    test('should cache results with explicit type syntax', () => {
+    test('should NOT cache results with explicit type syntax on variable type fields', () => {
       // @ts-expect-error - Simplified mock for testing
       mockGetCollection.mockReturnValue(mockCollectionWithVariableTypes);
 
@@ -4143,7 +2895,8 @@ describe('Test getField() with explicit variable type syntax', () => {
       expect(mockGetCollection).toHaveBeenCalledTimes(1);
 
       getField(args);
-      expect(mockGetCollection).toHaveBeenCalledTimes(1); // Should use cache
+      // Should NOT use cache for variable type fields
+      expect(mockGetCollection).toHaveBeenCalledTimes(2);
     });
 
     test('should create separate cache entries for different explicit types', () => {
@@ -4181,7 +2934,7 @@ describe('Test getField() with explicit variable type syntax', () => {
                 name: 'image',
                 fields: [
                   { name: 'src', widget: 'image' },
-                  { name: 'title', widget: 'string' }, // shared field
+                  { name: 'title', widget: 'string' },
                   { name: 'alt', widget: 'string' },
                 ],
               },
@@ -4189,7 +2942,7 @@ describe('Test getField() with explicit variable type syntax', () => {
                 name: 'video',
                 fields: [
                   { name: 'url', widget: 'string' },
-                  { name: 'title', widget: 'string' }, // same field name
+                  { name: 'title', widget: 'string' },
                   { name: 'description', widget: 'text' },
                 ],
               },
@@ -4197,7 +2950,7 @@ describe('Test getField() with explicit variable type syntax', () => {
                 name: 'text',
                 fields: [
                   { name: 'content', widget: 'markdown' },
-                  { name: 'title', widget: 'string' }, // also has title
+                  { name: 'title', widget: 'string' },
                 ],
               },
             ],
@@ -4274,7 +3027,7 @@ describe('Test getField() with explicit variable type syntax', () => {
               {
                 name: 'button',
                 fields: [
-                  { name: 'label', widget: 'string' }, // shared
+                  { name: 'label', widget: 'string' },
                   { name: 'action', widget: 'string' },
                   { name: 'color', widget: 'string' },
                 ],
@@ -4282,7 +3035,7 @@ describe('Test getField() with explicit variable type syntax', () => {
               {
                 name: 'link',
                 fields: [
-                  { name: 'label', widget: 'string' }, // shared
+                  { name: 'label', widget: 'string' },
                   { name: 'url', widget: 'string' },
                   { name: 'target', widget: 'string' },
                 ],
@@ -4290,7 +3043,7 @@ describe('Test getField() with explicit variable type syntax', () => {
               {
                 name: 'dropdown',
                 fields: [
-                  { name: 'label', widget: 'string' }, // shared
+                  { name: 'label', widget: 'string' },
                   { name: 'items', widget: 'list' },
                   { name: 'defaultValue', widget: 'string' },
                 ],
@@ -4394,6 +3147,795 @@ describe('Test getField() with explicit variable type syntax', () => {
       });
 
       expect(videoTitle).toEqual({ name: 'title', widget: 'string' });
+    });
+  });
+});
+
+describe('Test getCurrentValue()', () => {
+  describe('Single value field (not isList, not isCustomFieldType)', () => {
+    test('should return value directly for simple string value', () => {
+      const result = getCurrentValue({
+        keyPath: 'title',
+        valueMap: { title: 'Hello World' },
+        isList: false,
+      });
+
+      expect(result).toBe('Hello World');
+    });
+
+    test('should return value directly for numeric value', () => {
+      const result = getCurrentValue({
+        keyPath: 'count',
+        valueMap: { count: 42 },
+        isList: false,
+      });
+
+      expect(result).toBe(42);
+    });
+
+    test('should return undefined if value is undefined', () => {
+      const result = getCurrentValue({
+        keyPath: 'missing',
+        valueMap: {},
+        isList: false,
+      });
+
+      expect(result).toBeUndefined();
+    });
+
+    test('should return null if value is null', () => {
+      const result = getCurrentValue({
+        keyPath: 'nullable',
+        valueMap: { nullable: null },
+        isList: false,
+      });
+
+      expect(result).toBeNull();
+    });
+
+    test('should return boolean value correctly', () => {
+      const result = getCurrentValue({
+        keyPath: 'active',
+        valueMap: { active: true },
+        isList: false,
+      });
+
+      expect(result).toBe(true);
+    });
+
+    test('should return empty string value', () => {
+      const result = getCurrentValue({
+        keyPath: 'description',
+        valueMap: { description: '' },
+        isList: false,
+      });
+
+      expect(result).toBe('');
+    });
+
+    test('should return zero value', () => {
+      const result = getCurrentValue({
+        keyPath: 'zero',
+        valueMap: { zero: 0 },
+        isList: false,
+      });
+
+      expect(result).toBe(0);
+    });
+  });
+
+  describe('Object value field', () => {
+    test('should assemble the object from its child key paths', () => {
+      // A Code field stores an empty object placeholder at its own key path
+      const result = getCurrentValue({
+        keyPath: 'snippet',
+        valueMap: {
+          'snippet.code': 'const a = 1;',
+          'snippet.lang': 'js',
+          snippet: {},
+        },
+        isList: false,
+      });
+
+      expect(result).toEqual({ code: 'const a = 1;', lang: 'js' });
+    });
+
+    test('should assemble a nested object', () => {
+      const result = getCurrentValue({
+        keyPath: 'meta',
+        valueMap: {
+          meta: {},
+          'meta.author.name': 'Kohei',
+          'meta.author.url': 'https://example.com',
+          'meta.draft': true,
+        },
+        isList: false,
+      });
+
+      expect(result).toEqual({
+        author: { name: 'Kohei', url: 'https://example.com' },
+        draft: true,
+      });
+    });
+
+    test('should keep an empty object when the key path has no children', () => {
+      const result = getCurrentValue({
+        keyPath: 'empty',
+        valueMap: { empty: {} },
+        isList: false,
+      });
+
+      expect(result).toEqual({});
+    });
+
+    test('should assemble the object for a custom field type', () => {
+      const result = getCurrentValue({
+        keyPath: 'custom',
+        valueMap: {
+          'custom.foo': 'bar',
+          custom: {},
+        },
+        isList: false,
+        isCustomFieldType: true,
+      });
+
+      expect(result).toEqual({ foo: 'bar' });
+    });
+
+    test('should not touch a non-object value that has children', () => {
+      // A scalar stored where sub-values exist is left alone; `normalizeContent()` reconciles it
+      const result = getCurrentValue({
+        keyPath: 'weird',
+        valueMap: { weird: 'scalar', 'weird.foo': 'bar' },
+        isList: false,
+      });
+
+      expect(result).toBe('scalar');
+    });
+  });
+
+  describe('Multi-value field (isList = true)', () => {
+    test('should return array of values when multiple items exist', () => {
+      const result = getCurrentValue({
+        keyPath: 'tags',
+        valueMap: {
+          'tags.0': 'javascript',
+          'tags.1': 'svelte',
+          'tags.2': 'testing',
+        },
+        isList: true,
+      });
+
+      expect(result).toEqual(['javascript', 'svelte', 'testing']);
+    });
+
+    test('should return empty array when the key path has no list items', () => {
+      const result = getCurrentValue({
+        keyPath: 'tags',
+        valueMap: {
+          title: 'Some Title',
+        },
+        isList: true,
+      });
+
+      expect(result).toEqual([]);
+    });
+
+    test('should filter out undefined values from array', () => {
+      const result = getCurrentValue({
+        keyPath: 'items',
+        valueMap: {
+          'items.0': 'first',
+          'items.1': undefined,
+          'items.2': 'third',
+          'items.3': 'fourth',
+        },
+        isList: true,
+      });
+
+      expect(result).toEqual(['first', 'third', 'fourth']);
+    });
+
+    test('should handle list with mixed types', () => {
+      const result = getCurrentValue({
+        keyPath: 'mixed',
+        valueMap: {
+          'mixed.0': 'string',
+          'mixed.1': 42,
+          'mixed.2': true,
+          'mixed.3': null,
+        },
+        isList: true,
+      });
+
+      expect(result).toEqual(['string', 42, true, null]);
+    });
+
+    test('should handle list with nested objects', () => {
+      const obj = { name: 'test' };
+
+      const result = getCurrentValue({
+        keyPath: 'objects',
+        valueMap: {
+          'objects.0': obj,
+          'objects.1': { name: 'another' },
+        },
+        isList: true,
+      });
+
+      expect(result).toEqual([obj, { name: 'another' }]);
+    });
+
+    test('should return all items regardless of insertion order', () => {
+      const result = getCurrentValue({
+        keyPath: 'ordered',
+        valueMap: {
+          'ordered.2': 'third',
+          'ordered.0': 'first',
+          'ordered.1': 'second',
+        },
+        isList: true,
+      });
+
+      // Object.entries doesn't guarantee numeric key order, just verify all items are present
+      expect(result).toHaveLength(3);
+      expect(result).toEqual(expect.arrayContaining(['first', 'second', 'third']));
+    });
+
+    test('should handle single item list', () => {
+      const result = getCurrentValue({
+        keyPath: 'single',
+        valueMap: {
+          'single.0': 'only-item',
+        },
+        isList: true,
+      });
+
+      expect(result).toEqual(['only-item']);
+    });
+
+    test('should ignore base keyPath value when isList is true', () => {
+      const result = getCurrentValue({
+        keyPath: 'items',
+        valueMap: {
+          items: 'should-be-ignored',
+          'items.0': 'first',
+          'items.1': 'second',
+        },
+        isList: true,
+      });
+
+      expect(result).toEqual(['first', 'second']);
+    });
+  });
+
+  describe('Custom field type (isCustomFieldType = true)', () => {
+    test('should return value directly for custom field type', () => {
+      const value = { customData: 'test' };
+
+      const result = getCurrentValue({
+        keyPath: 'customField',
+        valueMap: { customField: value },
+        isList: false,
+        isCustomFieldType: true,
+      });
+
+      // Use numeric regex so base key doesn't match, allowing custom field value to be returned
+      expect(result).toBe(value);
+    });
+
+    test('should return undefined for undefined custom field', () => {
+      const result = getCurrentValue({
+        keyPath: 'customField',
+        valueMap: {},
+        isList: false,
+        isCustomFieldType: true,
+      });
+
+      expect(result).toBeUndefined();
+    });
+
+    test('should return value for custom field without list structure', () => {
+      const value = { customData: 'test' };
+
+      const result = getCurrentValue({
+        keyPath: 'customField',
+        valueMap: { customField: value, other: 'unrelated' },
+        isList: false,
+        isCustomFieldType: true,
+      });
+
+      // Custom field type returns the value directly (numeric regex so base key doesn't match)
+      expect(result).toBe(value);
+    });
+
+    // A loaded entry has no placeholder at the field’s own key path, since `flatten()` only writes
+    // the leaves; neither has a list item after the list has been manipulated
+    // @see https://github.com/sveltia/sveltia-cms/issues/969
+    test('should assemble an object value without a placeholder', () => {
+      const result = getCurrentValue({
+        keyPath: 'photo',
+        valueMap: {
+          'photo.original': '/a.webp',
+          'photo.thumbnail': '/a.thumb.webp',
+          'photo.aspectRatio': 1.5,
+        },
+        isList: false,
+        isCustomFieldType: true,
+      });
+
+      expect(result).toEqual({
+        original: '/a.webp',
+        thumbnail: '/a.thumb.webp',
+        aspectRatio: 1.5,
+      });
+    });
+
+    test('should assemble an object value inside a list item without a placeholder', () => {
+      const valueMap = {
+        'featuredOn.0.logo.original': '/a.webp',
+        'featuredOn.0.logo.aspectRatio': 1,
+        'featuredOn.0.url': 'https://example.com',
+        'featuredOn.1.logo.original': '/b.webp',
+        'featuredOn.1.logo.aspectRatio': 2,
+        'featuredOn.1.url': 'https://example.org',
+      };
+
+      expect(
+        getCurrentValue({
+          keyPath: 'featuredOn.0.logo',
+          valueMap,
+          isList: false,
+          isCustomFieldType: true,
+        }),
+      ).toEqual({ original: '/a.webp', aspectRatio: 1 });
+
+      expect(
+        getCurrentValue({
+          keyPath: 'featuredOn.1.logo',
+          valueMap,
+          isList: false,
+          isCustomFieldType: true,
+        }),
+      ).toEqual({ original: '/b.webp', aspectRatio: 2 });
+    });
+
+    test('should assemble an array of objects without a placeholder', () => {
+      const result = getCurrentValue({
+        keyPath: 'photos',
+        valueMap: {
+          'photos.0.original': '/a.webp',
+          'photos.1.original': '/b.webp',
+        },
+        isList: false,
+        isCustomFieldType: true,
+      });
+
+      expect(result).toEqual([{ original: '/a.webp' }, { original: '/b.webp' }]);
+    });
+
+    test('should return a primitive value as-is even if it has children', () => {
+      const result = getCurrentValue({
+        keyPath: 'photo',
+        valueMap: { photo: '/a.webp', 'photo.original': '/b.webp' },
+        isList: false,
+        isCustomFieldType: true,
+      });
+
+      expect(result).toBe('/a.webp');
+    });
+  });
+
+  describe('Invalid value shapes', () => {
+    // A single value stored where a list is expected — and vice versa — is reconciled up front by
+    // the entry normalization module, so this function no longer papers over the mismatch
+    // @see $lib/services/contents/draft/create/normalize
+    test('should return an empty array for a single value stored in a list field', () => {
+      const result = getCurrentValue({
+        keyPath: 'tags',
+        valueMap: { tags: 'single-tag' },
+        isList: true,
+      });
+
+      expect(result).toEqual([]);
+    });
+  });
+
+  describe('Complex scenarios with nested paths', () => {
+    test('should only collect the direct list items of a nested key path', () => {
+      const valueMap = {
+        'sections.0.items.0': 'item1',
+        'sections.0.items.1': 'item2',
+        'sections.1.items.0': 'item3',
+      };
+
+      expect(
+        getCurrentValue({
+          keyPath: 'sections.0.items',
+          valueMap,
+          isList: true,
+        }),
+      ).toEqual(['item1', 'item2']);
+
+      expect(
+        getCurrentValue({
+          keyPath: 'sections.1.items',
+          valueMap,
+          isList: true,
+        }),
+      ).toEqual(['item3']);
+
+      // `sections` itself has no direct list items, only nested ones
+      expect(
+        getCurrentValue({
+          keyPath: 'sections',
+          valueMap,
+          isList: true,
+        }),
+      ).toEqual([]);
+    });
+
+    test('should handle complex object fields', () => {
+      const result = getCurrentValue({
+        keyPath: 'authors',
+        valueMap: {
+          'authors.0': { name: 'John', email: 'john@example.com' },
+          'authors.1': { name: 'Jane', email: 'jane@example.com' },
+        },
+        isList: true,
+      });
+
+      expect(result).toEqual([
+        { name: 'John', email: 'john@example.com' },
+        { name: 'Jane', email: 'jane@example.com' },
+      ]);
+    });
+  });
+
+  describe('Edge cases', () => {
+    test('should handle empty valueMap', () => {
+      const result = getCurrentValue({
+        keyPath: 'field',
+        valueMap: {},
+        isList: false,
+      });
+
+      expect(result).toBeUndefined();
+    });
+
+    test('should handle valueMap with many unrelated keys', () => {
+      const result = getCurrentValue({
+        keyPath: 'target',
+        valueMap: {
+          other: 'value1',
+          'other.0': 'value2',
+          'other.1': 'value3',
+          'target.0': 'correct1',
+          'target.1': 'correct2',
+          'unrelated.0': 'value4',
+        },
+        isList: true,
+      });
+
+      expect(result).toEqual(['correct1', 'correct2']);
+    });
+
+    test('should handle false value in list', () => {
+      const result = getCurrentValue({
+        keyPath: 'booleans',
+        valueMap: {
+          'booleans.0': true,
+          'booleans.1': false,
+          'booleans.2': true,
+        },
+        isList: true,
+      });
+
+      expect(result).toEqual([true, false, true]);
+    });
+
+    test('should handle false boolean as valid value not converting to array', () => {
+      const result = getCurrentValue({
+        keyPath: 'active',
+        valueMap: { active: false },
+        isList: false,
+      });
+
+      expect(result).toBe(false);
+    });
+
+    test('should handle various falsy values correctly', () => {
+      const result = getCurrentValue({
+        keyPath: 'items',
+        valueMap: {
+          'items.0': 0,
+          'items.1': false,
+          'items.2': '',
+          'items.3': null,
+        },
+        isList: true,
+      });
+
+      expect(result).toEqual([0, false, '', null]);
+    });
+
+    test('should handle special characters in keyPath', () => {
+      const result = getCurrentValue({
+        keyPath: 'field-with-dash',
+        valueMap: { 'field-with-dash': 'value' },
+        isList: false,
+      });
+
+      expect(result).toBe('value');
+    });
+
+    test('should handle very large index numbers', () => {
+      const result = getCurrentValue({
+        keyPath: 'items',
+        valueMap: {
+          'items.999': 'item1',
+          'items.1000': 'item2',
+          'items.9999': 'item3',
+        },
+        isList: true,
+      });
+
+      expect(result).toEqual(['item1', 'item2', 'item3']);
+    });
+  });
+
+  describe('Test getFieldKind()', () => {
+    beforeEach(() => {
+      // Import fresh mocks for each test
+      vi.resetModules();
+    });
+
+    describe('builtin field types', () => {
+      test('should return "builtin" for string widget (explicit)', () => {
+        const fieldConfig = { name: 'title', widget: 'string' };
+
+        expect(getFieldKind(fieldConfig)).toBe('builtin');
+      });
+
+      test('should return "builtin" for text widget', () => {
+        const fieldConfig = { name: 'description', widget: 'text' };
+
+        expect(getFieldKind(fieldConfig)).toBe('builtin');
+      });
+
+      test('should return "builtin" for number widget', () => {
+        const fieldConfig = { name: 'count', widget: 'number' };
+
+        expect(getFieldKind(fieldConfig)).toBe('builtin');
+      });
+
+      test('should return "builtin" for boolean widget', () => {
+        const fieldConfig = { name: 'published', widget: 'boolean' };
+
+        expect(getFieldKind(fieldConfig)).toBe('builtin');
+      });
+
+      test('should return "builtin" for datetime widget', () => {
+        const fieldConfig = { name: 'date', widget: 'datetime' };
+
+        expect(getFieldKind(fieldConfig)).toBe('builtin');
+      });
+
+      test('should return "builtin" for date widget', () => {
+        const fieldConfig = { name: 'publish_date', widget: 'date' };
+
+        expect(getFieldKind(fieldConfig)).toBe('builtin');
+      });
+
+      test('should return "builtin" for select widget', () => {
+        const fieldConfig = {
+          name: 'status',
+          widget: 'select',
+          options: ['draft', 'published'],
+        };
+
+        expect(getFieldKind(fieldConfig)).toBe('builtin');
+      });
+
+      test('should return "builtin" for relation widget', () => {
+        const fieldConfig = {
+          name: 'author',
+          widget: 'relation',
+          collection: 'authors',
+        };
+
+        expect(getFieldKind(fieldConfig)).toBe('builtin');
+      });
+
+      test('should return "builtin" for list widget', () => {
+        const fieldConfig = { name: 'tags', widget: 'list' };
+
+        expect(getFieldKind(fieldConfig)).toBe('builtin');
+      });
+
+      test('should return "builtin" for object widget', () => {
+        const fieldConfig = { name: 'meta', widget: 'object', fields: [] };
+
+        expect(getFieldKind(fieldConfig)).toBe('builtin');
+      });
+
+      test('should return "builtin" for file widget', () => {
+        const fieldConfig = { name: 'document', widget: 'file' };
+
+        expect(getFieldKind(fieldConfig)).toBe('builtin');
+      });
+
+      test('should return "builtin" for image widget', () => {
+        const fieldConfig = { name: 'featured_image', widget: 'image' };
+
+        expect(getFieldKind(fieldConfig)).toBe('builtin');
+      });
+
+      test('should return "builtin" for markdown widget', () => {
+        const fieldConfig = { name: 'body', widget: 'markdown' };
+
+        expect(getFieldKind(fieldConfig)).toBe('builtin');
+      });
+
+      test('should return "builtin" for richtext widget', () => {
+        const fieldConfig = { name: 'content', widget: 'richtext' };
+
+        expect(getFieldKind(fieldConfig)).toBe('builtin');
+      });
+    });
+
+    describe('default widget type', () => {
+      test('should default to "string" widget when widget is not specified', () => {
+        const fieldConfig = { name: 'title' };
+
+        expect(getFieldKind(fieldConfig)).toBe('builtin');
+      });
+
+      test('should default to "string" widget when widget is undefined', () => {
+        const fieldConfig = { name: 'title', widget: undefined };
+
+        expect(getFieldKind(fieldConfig)).toBe('builtin');
+      });
+
+      test('should use provided widget even when widget is falsy (but explicitly set)', () => {
+        const fieldConfig = /** @type {any} */ ({ name: 'field', widget: null });
+
+        // null is falsy, so it defaults to 'string', which is builtin
+        expect(getFieldKind(fieldConfig)).toBe('builtin');
+      });
+    });
+
+    describe('custom field types', () => {
+      test('should return "custom" for registered custom field type', () => {
+        // @ts-ignore - Mock custom field type for testing
+        customFieldTypeRegistry.set('star-rating', { control: 'my-control' });
+
+        const fieldConfig = { name: 'rating', widget: 'star-rating' };
+
+        expect(getFieldKind(fieldConfig)).toBe('custom');
+
+        // Cleanup
+        customFieldTypeRegistry.delete('star-rating');
+      });
+
+      test('should return "unknown" when only the field name matches the registry', () => {
+        // @ts-ignore - Mock custom field type for testing
+        customFieldTypeRegistry.set('my-custom-field', { control: 'my-control' });
+
+        // The registry is keyed by widget name, so a matching field `name` must not count
+        const fieldConfig = { name: 'my-custom-field', widget: 'unknown-widget' };
+
+        expect(getFieldKind(fieldConfig)).toBe('unknown');
+
+        // Cleanup
+        customFieldTypeRegistry.delete('my-custom-field');
+      });
+
+      test('should return "builtin" for custom field name when widget is builtin', () => {
+        // @ts-ignore - Mock custom field type for testing
+        customFieldTypeRegistry.set('custom-button', { control: 'button-control' });
+
+        const fieldConfig = { name: 'custom-button', widget: 'string' };
+
+        // The widget 'string' is builtin, so the widget type takes priority
+        expect(getFieldKind(fieldConfig)).toBe('builtin');
+
+        // Cleanup
+        customFieldTypeRegistry.delete('custom-button');
+      });
+
+      test('should return "custom" for multiple registered custom field types', () => {
+        // @ts-ignore - Mock custom field types for testing
+        customFieldTypeRegistry.set('widget-a', { control: 'control-a' });
+        // @ts-ignore - Mock custom field types for testing
+        customFieldTypeRegistry.set('widget-b', { control: 'control-b' });
+
+        expect(getFieldKind({ name: 'field-a', widget: 'widget-a' })).toBe('custom');
+        expect(getFieldKind({ name: 'field-b', widget: 'widget-b' })).toBe('custom');
+
+        // Cleanup
+        customFieldTypeRegistry.delete('widget-a');
+        customFieldTypeRegistry.delete('widget-b');
+      });
+    });
+
+    describe('unknown field types', () => {
+      test('should return "unknown" for non-existent widget type', () => {
+        const fieldConfig = { name: 'field', widget: 'non-existent-widget' };
+
+        expect(getFieldKind(fieldConfig)).toBe('unknown');
+      });
+
+      test('should return "unknown" for unregistered custom field name without builtin widget', () => {
+        const fieldConfig = {
+          name: 'unregistered-custom-field',
+          widget: 'custom-unknown-widget',
+        };
+
+        expect(getFieldKind(fieldConfig)).toBe('unknown');
+      });
+
+      test('should return "unknown" for empty widget name', () => {
+        const fieldConfig = { name: 'field', widget: '' };
+
+        expect(getFieldKind(fieldConfig)).toBe('unknown');
+      });
+
+      test('should return "unknown" for typo in builtin widget name', () => {
+        const fieldConfig = { name: 'field', widget: 'strng' }; // typo: 'strng' instead of 'string'
+
+        expect(getFieldKind(fieldConfig)).toBe('unknown');
+      });
+    });
+
+    describe('priority and edge cases', () => {
+      test('should check widget type before checking custom registry', () => {
+        // @ts-ignore - Mock custom field type for testing
+        customFieldTypeRegistry.set('string', { control: 'string-control' }); // Register 'string' as custom
+
+        const fieldConfig = { name: 'string', widget: 'string' };
+
+        // Should return 'builtin' because 'string' is a builtin widget type
+        expect(getFieldKind(fieldConfig)).toBe('builtin');
+
+        // Cleanup
+        customFieldTypeRegistry.delete('string');
+      });
+
+      test('should handle field names with special characters', () => {
+        const fieldConfig = { name: 'field-with-dashes', widget: 'string' };
+
+        expect(getFieldKind(fieldConfig)).toBe('builtin');
+      });
+
+      test('should handle field names with underscores', () => {
+        const fieldConfig = { name: 'field_with_underscores', widget: 'number' };
+
+        expect(getFieldKind(fieldConfig)).toBe('builtin');
+      });
+
+      test('should handle field names with numbers', () => {
+        const fieldConfig = { name: 'field123', widget: 'text' };
+
+        expect(getFieldKind(fieldConfig)).toBe('builtin');
+      });
+
+      test('should be case-sensitive for widget type', () => {
+        const fieldConfig = { name: 'field', widget: 'String' }; // uppercase
+
+        expect(getFieldKind(fieldConfig)).toBe('unknown');
+      });
+
+      test('should be case-sensitive for custom field type', () => {
+        // @ts-ignore - Mock custom field type for testing
+        customFieldTypeRegistry.set('CustomWidget', { control: 'field-control' });
+
+        expect(getFieldKind({ name: 'field', widget: 'CustomWidget' })).toBe('custom');
+        expect(getFieldKind({ name: 'field', widget: 'customwidget' })).toBe('unknown');
+
+        // Cleanup
+        customFieldTypeRegistry.delete('CustomWidget');
+      });
     });
   });
 });

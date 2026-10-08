@@ -1,15 +1,21 @@
 // @ts-nocheck
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { createCommitMessage } from './commits';
+import {
+  assertBranchNotMoved,
+  createCommitMessage,
+  dedupeFileCommits,
+  fetchPerPathCommits,
+  hasSkipCIMarker,
+} from './commits';
+import { MAX_CONCURRENT_REQUESTS } from './concurrency';
 
-// Mock the get function from svelte/store
-const mockCmsConfig = {
+const mockCmsConfig = vi.hoisted(() => ({
   backend: {
     commit_messages: {},
     skip_ci: false,
   },
-};
+}));
 
 const mockUser = vi.hoisted(() => ({
   login: 'test-user',
@@ -17,19 +23,23 @@ const mockUser = vi.hoisted(() => ({
   email: '',
 }));
 
-vi.mock('svelte/store', () => ({
-  get: vi.fn((store) => {
-    // Mock different returns based on what store is being accessed
-    if (store?.name === 'cmsConfig') {
-      return mockCmsConfig;
-    }
-
-    return null;
-  }),
-}));
+// Whether the commit is being made by an Open Authoring contributor
+const mockState = vi.hoisted(() => ({ openAuthoring: false }));
 
 vi.mock('$lib/services/config', () => ({
-  cmsConfig: { name: 'cmsConfig' },
+  cmsConfig: { current: mockCmsConfig },
+}));
+
+vi.mock('$lib/services/workflow/open-authoring', () => ({
+  openAuthoring: {
+    /**
+     * Get the current mock value.
+     * @returns {boolean} Value.
+     */
+    get current() {
+      return mockState.openAuthoring;
+    },
+  },
 }));
 
 vi.mock('$lib/services/contents/collection', () => ({
@@ -42,6 +52,7 @@ vi.mock('$lib/services/user/account.svelte', () => ({
 
 describe('git/shared/commits', () => {
   afterEach(() => {
+    mockState.openAuthoring = false;
     vi.clearAllMocks();
     // Reset mock data
     mockCmsConfig.backend = {
@@ -73,6 +84,57 @@ describe('git/shared/commits', () => {
       const message = createCommitMessage(changes, options);
 
       expect(message).toBe('Create Blog Post “my-post”');
+    });
+
+    it('should insert values containing replacement patterns as they are', () => {
+      // `String.prototype.replaceAll()` would read `$&` as the matched text, `$'` as what follows
+      // it, and `$$` as a single `$`
+      const message = createCommitMessage([{ slug: "$&-$'-$$", path: 'content/posts/$&.md' }], {
+        commitType: 'create',
+        collection: mockCollection,
+      });
+
+      expect(message).toBe("Create Blog Post “$&-$'-$$”");
+
+      mockCmsConfig.backend.commit_messages = { uploadMedia: 'Upload {{path}}' };
+
+      expect(createCommitMessage([{ path: 'static/$`.jpg' }], { commitType: 'uploadMedia' })).toBe(
+        'Upload static/$`.jpg',
+      );
+    });
+
+    it('should not expand a placeholder found in an inserted value', () => {
+      mockCmsConfig.backend.commit_messages = { create: 'Create {{slug}} by {{author-login}}' };
+
+      const message = createCommitMessage(
+        [{ slug: '{{author-email}}', path: 'content/posts/a.md' }],
+        { commitType: 'create', collection: mockCollection },
+      );
+
+      expect(message).toBe('Create {{author-email}} by test-user');
+    });
+
+    it('should leave a placeholder without a value as it is', () => {
+      mockCmsConfig.backend.commit_messages = { uploadMedia: 'Upload {{path}} for {{slug}}' };
+
+      expect(createCommitMessage([{ path: 'static/a.jpg' }], { commitType: 'uploadMedia' })).toBe(
+        'Upload static/a.jpg for {{slug}}',
+      );
+    });
+
+    it('should insert values containing replacement patterns in the openAuthoring template', () => {
+      mockState.openAuthoring = true;
+      mockUser.login = '$&';
+      mockCmsConfig.backend.commit_messages = {
+        openAuthoring: '{{message}} (by {{author-login}})',
+      };
+
+      const message = createCommitMessage([{ slug: '$`', path: 'content/posts/a.md' }], {
+        commitType: 'create',
+        collection: mockCollection,
+      });
+
+      expect(message).toBe('Create Blog Post “$`” (by $&)');
     });
 
     it('should create default update message', () => {
@@ -155,22 +217,58 @@ describe('git/shared/commits', () => {
       expect(message).toBe('Create Blog Post “my-post”');
     });
 
-    it('should handle openAuthoring commit type', () => {
+    it('should leave the message alone for open authoring by default', () => {
+      mockState.openAuthoring = true;
+
       const message = createCommitMessage(mockChanges, {
-        commitType: 'openAuthoring',
+        commitType: 'create',
+        collection: mockCollection,
       });
 
-      expect(message).toBe('openAuthoring');
+      expect(message).toBe('Create Blog Post “my-post”');
     });
 
-    it('should add [skip ci] prefix for openAuthoring when enabled', () => {
-      mockCmsConfig.backend.skip_ci = true;
+    it('should wrap the message with the custom openAuthoring template', () => {
+      mockState.openAuthoring = true;
+      mockCmsConfig.backend.commit_messages = {
+        openAuthoring: '{{message}} (by {{author-login}})',
+      };
 
       const message = createCommitMessage(mockChanges, {
-        commitType: 'openAuthoring',
+        commitType: 'create',
+        collection: mockCollection,
       });
 
-      expect(message).toBe('[skip ci] openAuthoring');
+      expect(message).toBe('Create Blog Post “my-post” (by test-user)');
+    });
+
+    it('should not wrap the message when open authoring is off', () => {
+      mockCmsConfig.backend.commit_messages = {
+        openAuthoring: '{{message}} (by {{author-login}})',
+      };
+
+      const message = createCommitMessage(mockChanges, {
+        commitType: 'create',
+        collection: mockCollection,
+      });
+
+      expect(message).toBe('Create Blog Post “my-post”');
+    });
+
+    it('should add [skip ci] prefix outside the openAuthoring wrapper', () => {
+      mockState.openAuthoring = true;
+      mockCmsConfig.backend.skip_ci = true;
+      mockCmsConfig.backend.commit_messages = {
+        openAuthoring: '{{message}} (by {{author-name}} <{{author-email}}>)',
+      };
+      mockUser.email = 'me@example.com';
+
+      const message = createCommitMessage(mockChanges, {
+        commitType: 'create',
+        collection: mockCollection,
+      });
+
+      expect(message).toBe('[skip ci] Create Blog Post “my-post” (by Test User <me@example.com>)');
     });
 
     it('should not add [skip ci] prefix for deleteMedia operations', () => {
@@ -325,28 +423,12 @@ describe('git/shared/commits', () => {
       expect(message).toBe('Delete “static/images/photo1.jpg” +2');
     });
 
-    it('should handle openAuthoring without collection', () => {
-      const message = createCommitMessage(mockChanges, {
-        commitType: 'openAuthoring',
-      });
-
-      expect(message).toBe('openAuthoring');
-    });
-
-    it('should apply [skip ci] prefix to openAuthoring', () => {
-      mockCmsConfig.backend = {
-        commit_messages: {},
-        skip_ci: true,
+    it('should wrap the message after the +N suffix for open authoring', () => {
+      mockState.openAuthoring = true;
+      mockCmsConfig.backend.commit_messages = {
+        openAuthoring: '{{message}} (by {{author-login}})',
       };
 
-      const message = createCommitMessage(mockChanges, {
-        commitType: 'openAuthoring',
-      });
-
-      expect(message).toBe('[skip ci] openAuthoring');
-    });
-
-    it('should append +N for openAuthoring with multiple changes', () => {
       const multiChanges = [
         { path: 'content/posts/a.md', slug: 'a' },
         { path: 'content/posts/b.md', slug: 'b' },
@@ -354,10 +436,11 @@ describe('git/shared/commits', () => {
       ];
 
       const message = createCommitMessage(multiChanges, {
-        commitType: 'openAuthoring',
+        commitType: 'create',
+        collection: mockCollection,
       });
 
-      expect(message).toBe('openAuthoring +2');
+      expect(message).toBe('Create Blog Post “a” +2 (by test-user)');
     });
 
     it('should not apply [skip ci] when skipCI is explicitly false', () => {
@@ -668,5 +751,144 @@ describe('git/shared/commits', () => {
       expect(typeof message).toBe('string');
       expect(message).not.toBe('');
     });
+  });
+
+  describe('hasSkipCIMarker', () => {
+    it('should match the marker this CMS writes', () => {
+      expect(hasSkipCIMarker('[skip ci] Update Post “hello”')).toBe(true);
+    });
+
+    it('should match the other markers the Git services honour', () => {
+      [
+        '[ci skip] Update',
+        '[no ci] Update',
+        '[skip actions] Update',
+        '[actions skip] Update',
+        '[skip-ci] Update',
+        '[cf-pages-skip] Update',
+      ].forEach((message) => {
+        expect(hasSkipCIMarker(message)).toBe(true);
+      });
+    });
+
+    it('should ignore the case, as the services do', () => {
+      expect(hasSkipCIMarker('[Skip CI] Update')).toBe(true);
+    });
+
+    it('should match a marker anywhere in the message', () => {
+      expect(hasSkipCIMarker('Merge pull request #1\n\nUpdate posts [ci skip]')).toBe(true);
+    });
+
+    it('should not match an ordinary message', () => {
+      ['Update Post “hello”', 'Fix the skip ci docs', 'Mention [ci] in the guide'].forEach(
+        (message) => {
+          expect(hasSkipCIMarker(message)).toBe(false);
+        },
+      );
+    });
+  });
+});
+
+describe('assertBranchNotMoved()', () => {
+  it('throws if the head has moved', async () => {
+    await expect(
+      assertBranchNotMoved('abc', vi.fn().mockResolvedValue({ hash: 'def' })),
+    ).rejects.toThrow('The branch has moved since the site data was loaded.');
+  });
+
+  it('returns if the head is where it was expected', async () => {
+    await expect(
+      assertBranchNotMoved('abc', vi.fn().mockResolvedValue({ hash: 'abc' })),
+    ).resolves.toBeUndefined();
+  });
+
+  it('returns if the head can’t be looked up', async () => {
+    await expect(
+      assertBranchNotMoved('abc', vi.fn().mockRejectedValue(new Error('Network error'))),
+    ).resolves.toBeUndefined();
+  });
+});
+
+describe('dedupeFileCommits()', () => {
+  it('keeps the first occurrence of each commit and sorts them newest first', () => {
+    const older = { sha: 'a', authorName: 'A', date: new Date('2026-01-01') };
+    const newer = { sha: 'b', authorName: 'B', date: new Date('2026-02-01') };
+    const duplicate = { ...older, authorName: 'Duplicate' };
+
+    expect(dedupeFileCommits([older, newer, duplicate])).toEqual([newer, older]);
+  });
+});
+
+describe('fetchPerPathCommits()', () => {
+  /**
+   * Convert a raw commit to a file commit.
+   * @param {{ id: string, date: string }} commit Raw commit.
+   * @returns {import('$lib/types/private').FileCommit} File commit.
+   */
+  const parseCommit = (commit) => ({
+    sha: commit.id,
+    authorName: 'Alice',
+    date: new Date(commit.date),
+  });
+
+  it('merges the histories of all paths, keeping the first occurrence of each commit', async () => {
+    /** @type {Record<string, { id: string, date: string, from: string }[]>} */
+    const histories = {
+      'a.md': [
+        { id: 'shared', date: '2024-01-02T00:00:00Z', from: 'a.md' },
+        { id: 'a1', date: '2024-01-01T00:00:00Z', from: 'a.md' },
+      ],
+      'b.md': [
+        { id: 'b1', date: '2024-01-03T00:00:00Z', from: 'b.md' },
+        { id: 'shared', date: '2024-01-02T00:00:00Z', from: 'b.md' },
+      ],
+    };
+
+    // Resolve the first path last to make sure results are still ordered by path
+    const fetchHistory = vi.fn(
+      (path) =>
+        new Promise((resolve) => {
+          setTimeout(() => resolve(histories[path]), path === 'a.md' ? 10 : 0);
+        }),
+    );
+
+    const result = await fetchPerPathCommits(['a.md', 'b.md'], fetchHistory, (commit) => ({
+      ...parseCommit(commit),
+      authorLogin: commit.from,
+    }));
+
+    expect(fetchHistory).toHaveBeenCalledTimes(2);
+    expect(result.map(({ sha }) => sha)).toEqual(['b1', 'shared', 'a1']);
+    expect(result.find(({ sha }) => sha === 'shared')?.authorLogin).toBe('a.md');
+  });
+
+  it('returns an empty list when there are no paths', async () => {
+    const fetchHistory = vi.fn();
+
+    expect(await fetchPerPathCommits([], fetchHistory, parseCommit)).toEqual([]);
+    expect(fetchHistory).not.toHaveBeenCalled();
+  });
+
+  it('limits the number of requests in flight', async () => {
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const paths = Array.from({ length: MAX_CONCURRENT_REQUESTS * 2 }, (_, i) => `${i}.md`);
+
+    const fetchHistory = vi.fn(async (path) => {
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await new Promise((resolve) => {
+        setTimeout(resolve, 0);
+      });
+      inFlight -= 1;
+
+      return [{ id: path, date: '2024-01-01T00:00:00Z' }];
+    });
+
+    const result = await fetchPerPathCommits(paths, fetchHistory, parseCommit);
+
+    expect(fetchHistory).toHaveBeenCalledTimes(paths.length);
+    expect(maxInFlight).toBe(MAX_CONCURRENT_REQUESTS);
+    expect(result).toHaveLength(paths.length);
   });
 });

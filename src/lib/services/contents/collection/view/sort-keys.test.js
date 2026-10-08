@@ -1,7 +1,9 @@
 /* eslint-disable jsdoc/require-jsdoc */
 
-import { writable } from 'svelte/store';
 import { describe, expect, test, vi } from 'vitest';
+
+import { allEntries } from '$lib/services/contents';
+import { selectedCollection } from '$lib/services/contents/collection';
 
 import {
   DEFAULT_SORT_KEYS,
@@ -9,8 +11,7 @@ import {
   getSortConfig,
   getSortKeyLabel,
   getSortKeyType,
-  isValidArray,
-  parseCustomSortableFields,
+  sortKeys,
   SPECIAL_SORT_KEY_TYPES,
   SPECIAL_SORT_KEYS,
 } from './sort-keys';
@@ -25,6 +26,14 @@ vi.mock('@sveltia/i18n', () => ({
 }));
 
 vi.mock('$lib/services/config');
+vi.mock('$lib/services/contents', () => ({ allEntries: { current: [] } }));
+vi.mock('$lib/services/contents/collection', () => ({
+  selectedCollection: { current: undefined },
+}));
+
+vi.mock('$lib/services/contents/collection/predicates', () => ({
+  isArrayFileCollection: vi.fn((collection) => !!collection?._file?.arrayFile),
+}));
 vi.mock('$lib/services/contents/entry/fields');
 
 describe('Test getSortConfig()', async () => {
@@ -98,11 +107,13 @@ describe('Test getSortConfig()', async () => {
   };
 
   // @ts-ignore
-  (await import('$lib/services/config')).cmsConfig = writable({
-    backend: { name: 'github' },
-    media_folder: 'static/uploads',
-    collections: [{ ...collectionBase }],
-  });
+  (await import('$lib/services/config')).cmsConfig = {
+    current: {
+      backend: { name: 'github' },
+      media_folder: 'static/uploads',
+      collections: [{ ...collectionBase }],
+    },
+  };
 
   test('sortable_fields not defined', () => {
     expect(
@@ -182,6 +193,23 @@ describe('Test getSortConfig()', async () => {
     });
   });
 
+  test('does not modify the configured sortable_fields', () => {
+    const simpleFields = ['title'];
+    const advancedFields = ['title'];
+
+    [{ sortable_fields: simpleFields }, { sortable_fields: { fields: advancedFields } }].forEach(
+      (options) => {
+        const collection = { ...collectionBase, ...options, summary: '{{title}}' };
+
+        getSortConfig({ collection, isCommitAuthorAvailable: true, isCommitDateAvailable: true });
+        getSortConfig({ collection, isCommitAuthorAvailable: true, isCommitDateAvailable: true });
+      },
+    );
+
+    expect(simpleFields).toEqual(['title']);
+    expect(advancedFields).toEqual(['title']);
+  });
+
   test('handles special sort keys', () => {
     expect(
       getSortConfig({
@@ -194,6 +222,52 @@ describe('Test getSortConfig()', async () => {
       }),
     ).toEqual({
       keys: ['title', 'slug', 'commit_author', 'commit_date'],
+      default: { key: 'title', order: 'ascending' },
+    });
+  });
+
+  test('handles the canonical slug key', () => {
+    const args = { isCommitAuthorAvailable: false, isCommitDateAvailable: false };
+    const i18n = { ...collectionBase._i18n, i18nEnabled: true, allLocales: ['en', 'fr'] };
+
+    // Part of the content when i18n is enabled, even though it’s not a field
+    expect(
+      getSortConfig({
+        ...args,
+        collection: {
+          ...collectionBase,
+          _i18n: i18n,
+          sortable_fields: ['title', 'translationKey'],
+        },
+      }),
+    ).toEqual({
+      keys: ['title', 'translationKey'],
+      default: { key: 'title', order: 'ascending' },
+    });
+
+    // A custom key
+    expect(
+      getSortConfig({
+        ...args,
+        collection: {
+          ...collectionBase,
+          _i18n: { ...i18n, canonicalSlug: { key: 'translation_id', value: '{{slug}}' } },
+          sortable_fields: ['title', 'translationKey', 'translation_id'],
+        },
+      }),
+    ).toEqual({
+      keys: ['title', 'translation_id'],
+      default: { key: 'title', order: 'ascending' },
+    });
+
+    // Not part of the content when i18n is disabled
+    expect(
+      getSortConfig({
+        ...args,
+        collection: { ...collectionBase, sortable_fields: ['title', 'translationKey'] },
+      }),
+    ).toEqual({
+      keys: ['title'],
       default: { key: 'title', order: 'ascending' },
     });
   });
@@ -214,6 +288,20 @@ describe('Test getSortConfig()', async () => {
     ).toEqual({
       keys: ['title', 'name', 'date', 'author', 'description'],
       default: { key: 'title', order: 'ascending' },
+    });
+  });
+
+  test('adds the commit date and author when the default `date` and `author` keys aren’t fields', () => {
+    // The `pages` collection has none of the default fields, which used to hide the commit options
+    expect(
+      getSortConfig({
+        collection: { ...collectionBase, name: 'pages' },
+        isCommitAuthorAvailable: true,
+        isCommitDateAvailable: true,
+      }),
+    ).toEqual({
+      keys: ['commit_author', 'commit_date'],
+      default: { key: 'commit_author', order: 'ascending' },
     });
   });
 
@@ -846,6 +934,39 @@ describe('Test getSortConfig()', async () => {
     });
   });
 
+  test('prepends the _manual key for a collection storing the entries in one file', () => {
+    expect(
+      getSortConfig({
+        collection: {
+          ...collectionBase,
+          file: 'data/posts.json',
+          _file: { ...collectionBase._file, arrayFile: true },
+        },
+        isCommitAuthorAvailable: false,
+        isCommitDateAvailable: false,
+      }),
+    ).toEqual({
+      keys: ['_manual', 'title', 'name', 'date', 'author', 'description'],
+      default: { key: '_manual', order: 'ascending' },
+    });
+  });
+
+  test('leaves out the commit keys for a collection storing the entries in one file', () => {
+    // Every entry carries the commit of the whole file, so it doesn’t tell them apart
+    expect(
+      getSortConfig({
+        collection: {
+          ...collectionBase,
+          file: 'data/posts.json',
+          sortable_fields: ['title', 'commit_author', 'commit_date'],
+          _file: { ...collectionBase._file, arrayFile: true },
+        },
+        isCommitAuthorAvailable: true,
+        isCommitDateAvailable: true,
+      }).keys,
+    ).toEqual(['_manual', 'title']);
+  });
+
   test('replaces the default order field key with _manual when listed in sortable_fields', () => {
     expect(
       getSortConfig({
@@ -925,111 +1046,6 @@ describe('Test exported constants and utilities', () => {
       '_manual',
     ]);
     expect(SPECIAL_SORT_KEYS).toEqual(Object.keys(SPECIAL_SORT_KEY_TYPES));
-  });
-});
-
-describe('Test isValidArray()', () => {
-  test('returns true for valid array of strings', () => {
-    expect(isValidArray(['title', 'date', 'author'])).toBe(true);
-    expect(isValidArray(['single'])).toBe(true);
-    expect(isValidArray([])).toBe(true);
-  });
-
-  test('returns false for array with non-string elements', () => {
-    expect(isValidArray(['title', 123, 'author'])).toBe(false);
-    expect(isValidArray([123, 456])).toBe(false);
-    expect(isValidArray(['title', null])).toBe(false);
-    expect(isValidArray(['title', undefined])).toBe(false);
-    expect(isValidArray(['title', {}])).toBe(false);
-  });
-
-  test('returns false for non-arrays', () => {
-    expect(isValidArray('not-array')).toBe(false);
-    expect(isValidArray(123)).toBe(false);
-    expect(isValidArray({})).toBe(false);
-    expect(isValidArray(null)).toBe(false);
-    expect(isValidArray(undefined)).toBe(false);
-  });
-});
-
-describe('Test parseCustomSortableFields()', () => {
-  test('parses simple array of strings', () => {
-    const result = parseCustomSortableFields(['title', 'date', 'author']);
-
-    expect(result).toEqual({
-      keys: ['title', 'date', 'author'],
-      defaultKey: undefined,
-      defaultOrder: undefined,
-    });
-  });
-
-  test('parses advanced object with fields array', () => {
-    const config = {
-      fields: ['title', 'date'],
-      default: { field: 'title', direction: /** @type {'descending'} */ ('descending') },
-    };
-
-    const result = parseCustomSortableFields(config);
-
-    expect(result).toEqual({
-      keys: ['title', 'date'],
-      defaultKey: 'title',
-      defaultOrder: 'descending',
-    });
-  });
-
-  test('handles advanced object with invalid fields', () => {
-    const config = /** @type {any} */ ({
-      fields: 'not-array',
-      default: { field: 'title' },
-    });
-
-    const result = parseCustomSortableFields(config);
-
-    expect(result).toEqual({ keys: [] });
-  });
-
-  test('handles descending direction variations', () => {
-    const configs = [
-      {
-        fields: ['title'],
-        default: { field: 'title', direction: /** @type {'descending'} */ ('descending') },
-      },
-      {
-        fields: ['title'],
-        default: { field: 'title', direction: /** @type {'Descending'} */ ('Descending') },
-      },
-    ];
-
-    configs.forEach((config) => {
-      const result = parseCustomSortableFields(config);
-
-      expect(result.defaultOrder).toBe('descending');
-    });
-  });
-
-  test('defaults to ascending for other directions', () => {
-    const configs = [
-      {
-        fields: ['title'],
-        default: { field: 'title', direction: /** @type {'ascending'} */ ('ascending') },
-      },
-      { fields: ['title'], default: { field: 'title', direction: /** @type {any} */ ('invalid') } },
-      { fields: ['title'], default: { field: 'title' } },
-    ];
-
-    configs.forEach((config) => {
-      const result = parseCustomSortableFields(config);
-
-      expect(result.defaultOrder).toBe('ascending');
-    });
-  });
-
-  test('handles invalid input types', () => {
-    expect(parseCustomSortableFields(/** @type {any} */ (null))).toEqual({ keys: [] });
-    expect(parseCustomSortableFields(/** @type {any} */ (undefined))).toEqual({ keys: [] });
-    expect(parseCustomSortableFields(/** @type {any} */ ('string'))).toEqual({ keys: [] });
-    expect(parseCustomSortableFields(/** @type {any} */ (123))).toEqual({ keys: [] });
   });
 });
 
@@ -1210,120 +1226,60 @@ describe('Test getSortKeyLabel()', () => {
   });
 });
 
-describe('Test sortKeys store', () => {
-  test('sortKeys derived store initializes correctly', async () => {
-    const { sortKeys } = await import('./sort-keys');
+describe('Test sortKeys state', () => {
+  test('is empty when no collection is selected', () => {
+    selectedCollection.current = undefined;
 
-    expect(sortKeys).toBeDefined();
-    expect(typeof sortKeys.subscribe).toBe('function');
-
-    // Subscribe to the store to verify it works
-    const unsubscribe = sortKeys.subscribe(() => {
-      // Store is subscribed successfully
-    });
-
-    unsubscribe();
+    expect(sortKeys.current).toEqual([]);
   });
 
-  test('sortKeys store sets empty array for file/singleton collections', async () => {
-    const { sortKeys } = await import('./sort-keys');
-    let result = /** @type {any} */ ([]);
-
-    const unsubscribe = sortKeys.subscribe((_value) => {
-      result = _value;
+  test('is empty for file/singleton collections', () => {
+    selectedCollection.current = /** @type {any} */ ({
+      name: 'settings',
+      _type: 'file',
+      files: [],
     });
 
-    // For file collections, sortKeys returns an empty array
-    expect(Array.isArray(result)).toBe(true);
-
-    unsubscribe();
+    expect(sortKeys.current).toEqual([]);
   });
 
-  test('sortKeys store returns sort key objects with label', async () => {
-    const { sortKeys } = await import('./sort-keys');
-    let sortKeysResult = /** @type {any} */ ([]);
+  test('lists the sort keys with labels for an entry collection', async () => {
+    const { getField } = await import('$lib/services/contents/entry/fields');
 
-    const unsubscribe = sortKeys.subscribe((_value) => {
-      sortKeysResult = _value;
-    });
-
-    // The sortKeys store should return an array of objects
-    expect(Array.isArray(sortKeysResult)).toBe(true);
-
-    // Each item should have key and label properties if not empty
-    if (sortKeysResult.length > 0) {
-      expect(sortKeysResult[0]).toHaveProperty('key');
-      expect(sortKeysResult[0]).toHaveProperty('label');
-    }
-
-    unsubscribe();
-  });
-
-  test('sortKeys store executes full callback when selectedCollection is a folder collection', async () => {
-    const { sortKeys } = await import('./sort-keys');
-    const { selectedCollection } = await import('$lib/services/contents/collection');
-    const { allEntries } = await import('$lib/services/contents');
-    const { currentView } = await import('$lib/services/contents/collection/view');
-    const { entryListSettings } = await import('$lib/services/contents/collection/view/settings');
+    vi.mocked(getField).mockImplementation(({ keyPath }) =>
+      keyPath === 'title' ? { name: 'title', widget: 'string' } : undefined,
+    );
 
     /** @type {any} */
     const folderCollection = {
       name: 'posts',
       _type: 'entry',
       folder: 'content/posts',
-      _i18n: {
-        i18nEnabled: false,
-        allLocales: ['_default'],
-        initialLocales: ['_default'],
-        defaultLocale: '_default',
-        structure: 'single_file',
-        structureMap: {
-          i18nSingleFile: false,
-          i18nSingleFileDefaultRoot: false,
-          i18nMultiFile: false,
-          i18nMultiFolder: false,
-          i18nMultiRootFolder: false,
-        },
-        canonicalSlug: { key: 'translationKey', value: '{{slug}}' },
-        omitDefaultLocaleFromFilePath: false,
-        omitDefaultLocaleFromPreviewPath: false,
-      },
-      _file: { extension: 'json', format: 'json' },
-      _thumbnailFieldNames: [],
       fields: [{ name: 'title', widget: 'string' }],
+      _i18n: { i18nEnabled: false },
     };
 
-    entryListSettings.set(undefined);
-    currentView.set({ type: 'list' });
+    allEntries.current = /** @type {any[]} */ ([
+      {
+        id: 'posts/post-1',
+        slug: 'post-1',
+        commitAuthor: 'user',
+        commitDate: new Date(),
+        locales: { _default: { path: 'content/posts/post-1.json', content: {} } },
+      },
+    ]);
+    selectedCollection.current = folderCollection;
 
-    allEntries.set(
-      /** @type {any[]} */ ([
-        {
-          id: 'posts/post-1',
-          slug: 'post-1',
-          commitAuthor: 'user',
-          commitDate: new Date(),
-          locales: { _default: { path: 'content/posts/post-1.json', content: {} } },
-        },
-      ]),
-    );
-
-    selectedCollection.set(folderCollection);
-
-    let sortKeysResult = /** @type {any} */ (null);
-
-    const unsubscribe = sortKeys.subscribe((_value) => {
-      sortKeysResult = _value;
-    });
-
-    // With a folder collection and entries, the full callback runs (covers lines 253-254:
-    // isCommitAuthorAvailable/isCommitDateAvailable, line 262: currentView.set)
-    expect(Array.isArray(sortKeysResult)).toBe(true);
-
-    unsubscribe();
+    // The default `author` and `date` keys are dropped because the collection has no such fields,
+    // so the commit author and date are offered instead
+    expect(sortKeys.current).toEqual([
+      { key: 'title', label: 'title' },
+      { key: 'commit_author', label: 'sort_keys.commit_author' },
+      { key: 'commit_date', label: 'sort_keys.commit_date' },
+    ]);
 
     // Clean up
-    selectedCollection.set(undefined);
-    allEntries.set([]);
+    selectedCollection.current = undefined;
+    allEntries.current = [];
   });
 });

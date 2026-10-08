@@ -1,53 +1,89 @@
 // @ts-nocheck
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { entryDraft } from '$lib/services/contents/draft';
-import { getField, isFieldMultiple, isFieldRequired } from '$lib/services/contents/entry/fields';
-import { getPairs } from '$lib/services/contents/fields/key-value/helper';
-
 import {
-  DEFAULT_VALIDITY,
+  validateFields as _validateFields,
+  revalidateField,
   validateAnyField,
   validateField,
-  validateFields,
   validateList,
-  validityProxyHandler,
-} from './fields';
+} from '$lib/services/contents/draft/validate/fields';
+import {
+  getField,
+  getFieldKind,
+  isFieldMultiple,
+  isFieldRequired,
+} from '$lib/services/contents/entry/fields';
+import {
+  getKeyValueField,
+  getPairsFromContent,
+} from '$lib/services/contents/fields/key-value/pairs';
 
 vi.mock('$lib/services/contents/entry/fields');
-vi.mock('$lib/services/contents/draft');
-vi.mock('$lib/services/contents/fields/key-value/helper');
-vi.mock('$lib/services/contents/fields/list/helper');
+vi.mock('$lib/services/contents/fields/key-value/pairs');
+vi.mock('$lib/services/contents/fields/list/helpers');
 vi.mock('$lib/services/contents/fields/rich-text');
 vi.mock('$lib/services/contents/fields/string/validate');
 vi.mock('$lib/services/contents/draft/validate/messages', () => ({
   getFieldValidationMessages: vi.fn(() => []),
 }));
+vi.mock('$lib/services/contents/draft/validate/required', () => ({
+  isRequiredEnforced: vi.fn(() => true),
+}));
 vi.mock('$lib/services/common/template');
 vi.mock('$lib/services/config');
 vi.mock('$lib/services/utils/regex');
-vi.mock('$lib/services/user/prefs.svelte', () => ({
-  prefs: { devModeEnabled: false },
-}));
-vi.mock('svelte/store', async () => {
-  const actual = await vi.importActual('svelte/store');
+vi.mock('$lib/components/contents/details/fields', () => {
+  const editors = {};
 
+  const supportedTypes = [
+    'string',
+    'text',
+    'number',
+    'datetime',
+    'list',
+    'object',
+    'keyvalue',
+    'code',
+    'image',
+    'file',
+  ];
+
+  supportedTypes.forEach((type) => {
+    Object.defineProperty(editors, type, {
+      value: true,
+      enumerable: true,
+      configurable: true,
+      writable: true,
+    });
+  });
+
+  return { editors };
+});
+vi.mock('$lib/services/api/registries', () => {
+  const registry = new Map();
+
+  // Add a custom registered type
+  registry.set('custom-registered', true);
   return {
-    ...actual,
-    get: vi.fn(() => ({ devModeEnabled: false })),
+    customFieldTypeRegistry: registry,
   };
 });
 
 describe('draft/validate/fields', () => {
   let mockEntryDraft;
-  let mockGet;
+
+  /**
+   * Validate the mock entry draft’s fields.
+   * @param {string} valueStoreKey Value store key.
+   * @param {object} [options] Options other than the draft.
+   * @returns {object} Validation results.
+   */
+  const validateFields = (valueStoreKey, options = {}) =>
+    _validateFields(valueStoreKey, { draft: mockEntryDraft, ...options });
 
   beforeEach(async () => {
     vi.clearAllMocks();
-
-    const { get } = await import('svelte/store');
-
-    mockGet = vi.mocked(get);
 
     mockEntryDraft = {
       collection: {
@@ -70,14 +106,6 @@ describe('draft/validate/fields', () => {
       slugEditor: { en: false },
     };
 
-    mockGet.mockImplementation((store) => {
-      if (store === entryDraft) {
-        return mockEntryDraft;
-      }
-
-      return undefined;
-    });
-
     vi.mocked(isFieldRequired).mockReturnValue(false);
     vi.mocked(isFieldMultiple).mockReturnValue(false);
 
@@ -91,7 +119,7 @@ describe('draft/validate/fields', () => {
     });
 
     // Mock getListFieldInfo
-    const { getListFieldInfo } = await import('$lib/services/contents/fields/list/helper');
+    const { getListFieldInfo } = await import('$lib/services/contents/fields/list/helpers');
     const getListFieldInfoMock = vi.mocked(getListFieldInfo);
 
     getListFieldInfoMock.mockReturnValue({
@@ -159,6 +187,47 @@ describe('draft/validate/fields', () => {
       });
       // valid is a computed property from the Proxy
       expect(result.validities.en.title.valid).toBe(false);
+    });
+
+    it('should skip validation for a DateTime field set automatically on save', () => {
+      mockEntryDraft.currentValues = { en: { updated: '' } };
+
+      vi.mocked(getField).mockReturnValue({
+        name: 'updated',
+        widget: 'datetime',
+        required: true,
+        auto_now: true,
+      });
+
+      vi.mocked(isFieldRequired).mockReturnValue(true);
+
+      const result = validateFields('currentValues');
+
+      expect(result.valid).toBe(true);
+      expect(result.validities.en.updated).toBeUndefined();
+    });
+
+    it('should validate a DateTime field with `auto_now` in a rich text editor component', () => {
+      vi.mocked(getField).mockReturnValue({
+        name: 'published',
+        widget: 'datetime',
+        required: true,
+        auto_now: true,
+      });
+      vi.mocked(isFieldRequired).mockReturnValue(true);
+
+      const result = validateAnyField({
+        draft: mockEntryDraft,
+        validities: { en: {} },
+        locale: 'en',
+        keyPath: '_component.published',
+        componentName: '_component',
+        valueMap: { '_component.published': '' },
+        value: '',
+      });
+
+      // The option is ignored there, so the field is validated like any other
+      expect(result?.valueMissing).toBe(true);
     });
 
     it('should skip validation for disabled locales', () => {
@@ -430,7 +499,7 @@ describe('draft/validate/fields', () => {
         fields: [{ name: 'title', widget: 'string' }],
       });
 
-      const listHelperModule = await import('$lib/services/contents/fields/list/helper');
+      const listHelperModule = await import('$lib/services/contents/fields/list/helpers');
       const { getListFieldInfo } = vi.mocked(listHelperModule);
 
       getListFieldInfo.mockReturnValue({ hasSubFields: true });
@@ -438,6 +507,33 @@ describe('draft/validate/fields', () => {
       const result = validateFields('currentValues');
 
       expect(result).toBeDefined();
+    });
+
+    it('should compute the list’s own messages with the list config, not the subfield config', async () => {
+      // A list with `field` stores its items as `tags.0`, whose config is the subfield, which has
+      // no `min`, so the list’s messages have to be computed with the list’s own config
+      mockEntryDraft.currentValues = { en: { 'tags.0': 'a' } };
+
+      const listConfig = { name: 'tags', widget: 'list', min: 3, field: { name: 'tag' } };
+      const subfieldConfig = { name: 'tag', widget: 'string' };
+
+      vi.mocked(getField).mockImplementation(({ keyPath }) =>
+        keyPath === 'tags' ? listConfig : subfieldConfig,
+      );
+
+      const { getFieldValidationMessages } =
+        await import('$lib/services/contents/draft/validate/messages');
+
+      validateFields('currentValues');
+
+      expect(getFieldValidationMessages).toHaveBeenCalledWith({
+        validity: expect.any(Object),
+        fieldConfig: listConfig,
+      });
+      expect(getFieldValidationMessages).toHaveBeenLastCalledWith({
+        validity: expect.any(Object),
+        fieldConfig: subfieldConfig,
+      });
     });
 
     it('should skip validationMessages for list parent when its validity is absent', () => {
@@ -461,74 +557,373 @@ describe('draft/validate/fields', () => {
       expect(result).toBeDefined();
       expect(result.validationMessages.en.tags).toBeUndefined();
     });
+
+    it('should process field types in editors (line 360 false branch: fieldType in editors)', () => {
+      // Test the false branch of line 360: when field type IS in editors
+      mockEntryDraft.currentValues = {
+        en: {
+          supported: 'test',
+        },
+      };
+
+      vi.mocked(getField).mockReturnValue({
+        name: 'supported',
+        widget: 'string',
+      });
+
+      vi.mocked(getFieldKind).mockReturnValue('builtin');
+
+      const result = validateFields('currentValues');
+
+      expect(result).toBeDefined();
+      // Field should be processed (not skipped) because 'string' is in editors
+      expect(result.validities.en.supported).toBeDefined();
+    });
+
+    it('should process field types in custom registry (line 360 false branch: registered in customFieldTypeRegistry)', () => {
+      // Test the false branch of line 360: when field type is registered in customFieldTypeRegistry
+      mockEntryDraft.currentValues = {
+        en: {
+          custom: 'test',
+        },
+      };
+
+      vi.mocked(getField).mockReturnValue({
+        name: 'custom',
+        widget: 'custom-registered',
+      });
+
+      vi.mocked(getFieldKind).mockReturnValue('custom');
+
+      const result = validateFields('currentValues');
+
+      expect(result).toBeDefined();
+      // Field should be processed (not skipped) because 'custom-registered' is in the registry
+      expect(result.validities.en.custom).toBeDefined();
+    });
+
+    it('should skip unsupported field types (line 360 true branch: not in editors and not in registry)', () => {
+      // When a field type is not in editors AND not registered in customFieldTypeRegistry, the
+      // field should be skipped entirely (line 360-366 early return). This covers the true branch
+      // of: !(fieldType in editors) && !customFieldTypeRegistry.has(fieldType)
+      mockEntryDraft.currentValues = {
+        en: {
+          unsupported: 'value',
+        },
+      };
+
+      vi.mocked(getField).mockReturnValue({
+        name: 'unsupported',
+        widget: 'completely-unknown-widget',
+      });
+
+      vi.mocked(getFieldKind).mockReturnValue('unknown');
+
+      const result = validateFields('currentValues');
+
+      expect(result).toBeDefined();
+      // Unsupported field should be skipped due to early return at line 360
+      // 'completely-unknown-widget' is not in editors and not in customFieldTypeRegistry
+      expect(result.validities.en.unsupported).toBeUndefined();
+      expect(result.validationMessages.en.unsupported).toBeUndefined();
+    });
+
+    it('should use default string widget type when widget is undefined (line 360 nullish coalesce branch)', () => {
+      // Line 360: const fieldType = fieldConfig.widget ?? 'string';
+      // When widget is undefined, fieldType defaults to 'string' which is in editors
+      mockEntryDraft.currentValues = {
+        en: {
+          noWidget: 'value',
+        },
+      };
+
+      vi.mocked(getField).mockReturnValue({
+        name: 'noWidget',
+        // widget is intentionally undefined - will use default 'string'
+      });
+
+      vi.mocked(getFieldKind).mockReturnValue('builtin');
+
+      const result = validateFields('currentValues');
+
+      expect(result).toBeDefined();
+      // Field should be processed because default widget type 'string' is in editors
+      expect(result.validities.en.noWidget).toBeDefined();
+      expect(result.validities.en.noWidget.valid).toBe(true);
+    });
+  });
+
+  describe('validateFields with KeyValue pairs', () => {
+    /** @type {any} */
+    const metadataField = { name: 'metadata', widget: 'keyvalue', max: 1 };
+
+    /**
+     * Mock the field lookups: a pair has no configuration of its own, but belongs to the field.
+     * @param {any} [keyValueField] KeyValue field configuration the pairs belong to.
+     */
+    const mockFields = (keyValueField = metadataField) => {
+      vi.mocked(getField).mockImplementation(({ keyPath }) =>
+        keyPath === 'metadata' ? metadataField : undefined,
+      );
+      vi.mocked(getKeyValueField).mockImplementation(({ keyPath }) =>
+        keyPath.startsWith('metadata.') ? keyValueField : undefined,
+      );
+    };
+
+    it('should validate the field through its pairs, recording the result for the field', async () => {
+      const { getFieldValidationMessages } =
+        await import('$lib/services/contents/draft/validate/messages');
+
+      vi.mocked(getFieldValidationMessages).mockReturnValue(['Too many pairs']);
+      mockEntryDraft.currentValues = { en: { 'metadata.a': '1', 'metadata.b': '2', other: 'x' } };
+      mockFields();
+      vi.mocked(getPairsFromContent).mockReturnValue([
+        ['a', '1'],
+        ['b', '2'],
+      ]);
+
+      const result = validateFields('currentValues');
+
+      expect(result.valid).toBe(false);
+      expect(result.validities.en.metadata.rangeOverflow).toBe(true);
+      expect(result.validities.en).not.toHaveProperty('metadata.a');
+      expect(result.validities.en).not.toHaveProperty('metadata.b');
+      expect(result.validationMessages.en.metadata).toEqual(['Too many pairs']);
+    });
+
+    it('should validate a field whose keys follow the default locale in another locale', () => {
+      // The values of a `duplicate_keys` field can be edited in any locale
+      mockEntryDraft.currentValues = {
+        en: { 'metadata.a': '1', 'metadata.b': '2' },
+        fr: { 'metadata.a': 'un', 'metadata.b': 'deux' },
+      };
+      mockEntryDraft.currentLocales = { en: true, fr: true };
+      mockFields({ ...metadataField, i18n: 'duplicate_keys' });
+      vi.mocked(getPairsFromContent).mockReturnValue([
+        ['a', 'un'],
+        ['b', 'deux'],
+      ]);
+
+      const result = validateFields('currentValues');
+
+      expect(result.validities.fr.metadata.rangeOverflow).toBe(true);
+    });
+
+    it('should skip a pair of a field that can’t be edited in the locale', () => {
+      mockEntryDraft.currentValues = { en: { 'metadata.a': '1' }, fr: { 'metadata.a': '1' } };
+      mockEntryDraft.currentLocales = { en: true, fr: true };
+      mockFields({ ...metadataField, i18n: false });
+      vi.mocked(getPairsFromContent).mockReturnValue([['a', '1']]);
+
+      const result = validateFields('currentValues');
+
+      expect(result.validities.fr).toEqual({});
+    });
+  });
+
+  describe('validateFields with Code fields', () => {
+    /** @type {any} */
+    const snippetField = { name: 'snippet', widget: 'code', required: true };
+
+    beforeEach(() => {
+      vi.mocked(isFieldRequired).mockReturnValue(true);
+    });
+
+    it('should validate a field holding an object through its code and language', async () => {
+      const { getFieldValidationMessages } =
+        await import('$lib/services/contents/draft/validate/messages');
+
+      // An existing entry has no `{}` placeholder at the field’s own key path
+      mockEntryDraft.currentValues = { en: { 'snippet.code': '', 'snippet.lang': 'js' } };
+      vi.mocked(getField).mockImplementation(({ keyPath }) =>
+        keyPath === 'snippet' ? snippetField : undefined,
+      );
+
+      const result = validateFields('currentValues');
+
+      expect(result.valid).toBe(false);
+      expect(Object.keys(result.validities.en)).toEqual(['snippet']);
+      expect(result.validities.en.snippet.valueMissing).toBe(true);
+      expect(Object.keys(result.validationMessages.en)).toEqual(['snippet']);
+      // Validated only once
+      expect(getFieldValidationMessages).toHaveBeenCalledOnce();
+
+      mockEntryDraft.currentValues = { en: { 'snippet.code': 'x', 'snippet.lang': 'js' } };
+      expect(validateFields('currentValues').validities.en.snippet.valueMissing).toBe(false);
+    });
+
+    it('should skip a field that can’t be edited in the locale', () => {
+      mockEntryDraft.currentValues = {
+        en: { 'snippet.code': 'x', 'snippet.lang': 'js' },
+        fr: { 'snippet.code': 'x', 'snippet.lang': 'js' },
+      };
+      mockEntryDraft.currentLocales = { en: true, fr: true };
+      vi.mocked(getField).mockImplementation(({ keyPath }) =>
+        keyPath === 'snippet' ? { ...snippetField, i18n: false } : undefined,
+      );
+
+      const result = validateFields('currentValues');
+
+      expect(result.validities.fr).toEqual({});
+      expect(result.validationMessages.fr).toEqual({});
+    });
+
+    it('should validate a field with a placeholder only once', () => {
+      // A new draft has a `{}` placeholder, which may come after the code and language
+      mockEntryDraft.currentValues = {
+        en: { 'snippet.code': '', 'snippet.lang': 'js', snippet: {} },
+      };
+      vi.mocked(getField).mockImplementation(({ keyPath }) =>
+        keyPath === 'snippet' ? snippetField : undefined,
+      );
+
+      const result = validateFields('currentValues');
+
+      expect(Object.keys(result.validities.en)).toEqual(['snippet']);
+      expect(result.validities.en.snippet.valueMissing).toBe(true);
+    });
+
+    it('should validate a field named `code` nested in an Object field at its own key path', () => {
+      // The Object field is validated first, which mustn’t be taken for the Code field
+      mockEntryDraft.currentValues = { en: { obj: {}, 'obj.code': '' } };
+      vi.mocked(getField).mockImplementation(
+        ({ keyPath }) =>
+          ({
+            obj: { name: 'obj', widget: 'object', fields: [] },
+            'obj.code': { name: 'code', widget: 'code', output_code_only: true },
+          })[keyPath],
+      );
+
+      const result = validateFields('currentValues');
+
+      expect(Object.keys(result.validities.en)).toEqual(['obj', 'obj.code']);
+      expect(result.validities.en['obj.code'].valueMissing).toBe(true);
+    });
+  });
+
+  describe('validateFields with `enforceRequired: false`', () => {
+    it('should leave an empty required field unmarked', () => {
+      mockEntryDraft.currentValues = { en: { title: '' } };
+
+      vi.mocked(getField).mockReturnValue({ name: 'title', widget: 'string', required: true });
+      vi.mocked(isFieldRequired).mockReturnValue(true);
+
+      const result = validateFields('currentValues', { enforceRequired: false });
+
+      expect(result.valid).toBe(true);
+      expect(result.validities.en.title.valueMissing).toBe(false);
+      expect(result.validities.en.title.valid).toBe(true);
+    });
+
+    it('should not report a pattern, length or type error on an empty required field', async () => {
+      const { validateStringField } = await import('$lib/services/contents/fields/string/validate');
+      const { getRegex } = await import('$lib/services/utils/regex');
+
+      // An empty value fails a `pattern` and falls short of a `minlength`, neither of which should
+      // stop a draft from being saved
+      vi.mocked(getRegex).mockReturnValue(/^\d+$/);
+      vi.mocked(validateStringField).mockReturnValue({
+        validity: { tooShort: true, tooLong: false, typeMismatch: false },
+      });
+
+      mockEntryDraft.currentValues = { en: { code: '' } };
+
+      vi.mocked(getField).mockReturnValue({
+        name: 'code',
+        widget: 'string',
+        required: true,
+        minlength: 3,
+        pattern: ['^\\d+$', 'Digits only'],
+      });
+
+      vi.mocked(isFieldRequired).mockReturnValue(true);
+
+      const result = validateFields('currentValues', { enforceRequired: false });
+
+      expect(result.valid).toBe(true);
+      expect(result.validities.en.code.valid).toBe(true);
+      expect(result.validities.en.code.patternMismatch).toBe(false);
+      expect(result.validities.en.code.tooShort).toBe(false);
+    });
+
+    it('should not report a pattern error on an empty optional field', async () => {
+      // An optional field left empty has no value for a pattern to describe, so it stays valid
+      // whether or not required fields are being enforced
+      const { getRegex } = await import('$lib/services/utils/regex');
+
+      vi.mocked(getRegex).mockReturnValue(/^\d+$/);
+
+      mockEntryDraft.currentValues = { en: { code: '' } };
+
+      vi.mocked(getField).mockReturnValue({
+        name: 'code',
+        widget: 'string',
+        pattern: ['^\\d+$', 'Digits only'],
+      });
+
+      vi.mocked(isFieldRequired).mockReturnValue(false);
+
+      expect(validateFields('currentValues').valid).toBe(true);
+      expect(validateFields('currentValues', { enforceRequired: false }).valid).toBe(true);
+    });
+
+    it('should not report an empty required list as being under its `min`', async () => {
+      const { getListFieldInfo } = await import('$lib/services/contents/fields/list/helpers');
+
+      vi.mocked(getListFieldInfo).mockReturnValue({ hasSubFields: false });
+
+      mockEntryDraft.currentValues = { en: { tags: [] } };
+
+      vi.mocked(getField).mockReturnValue({
+        name: 'tags',
+        widget: 'list',
+        required: true,
+        min: 1,
+      });
+
+      vi.mocked(isFieldRequired).mockReturnValue(true);
+
+      const result = validateFields('currentValues', { enforceRequired: false });
+
+      expect(result.valid).toBe(true);
+      expect(result.validities.en.tags.rangeUnderflow).toBe(false);
+    });
+
+    it('should still reject a field with any other error', async () => {
+      const { validateStringField } = await import('$lib/services/contents/fields/string/validate');
+
+      vi.mocked(validateStringField).mockReturnValue({
+        validity: { tooShort: true, tooLong: false, typeMismatch: false },
+      });
+
+      mockEntryDraft.currentValues = { en: { title: 'ab' } };
+
+      vi.mocked(getField).mockReturnValue({
+        name: 'title',
+        widget: 'string',
+        required: true,
+        minlength: 5,
+      });
+
+      vi.mocked(isFieldRequired).mockReturnValue(true);
+
+      const result = validateFields('currentValues', { enforceRequired: false });
+
+      expect(result.valid).toBe(false);
+    });
+
+    it('should keep a valid entry valid', () => {
+      mockEntryDraft.currentValues = { en: { title: 'Test Post' } };
+
+      vi.mocked(getField).mockReturnValue({ name: 'title', widget: 'string' });
+
+      const result = validateFields('currentValues', { enforceRequired: false });
+
+      expect(result.valid).toBe(true);
+    });
   });
 
   describe('Internal helpers (exported for testing)', () => {
-    describe('DEFAULT_VALIDITY', () => {
-      it('should have all validity flags set to false', () => {
-        expect(DEFAULT_VALIDITY).toEqual({
-          valueMissing: false,
-          tooShort: false,
-          tooLong: false,
-          rangeUnderflow: false,
-          rangeOverflow: false,
-          patternMismatch: false,
-          typeMismatch: false,
-        });
-      });
-
-      it('should be a new object each time (not mutated)', () => {
-        const copy1 = { ...DEFAULT_VALIDITY };
-        const copy2 = { ...DEFAULT_VALIDITY };
-
-        expect(copy1).toEqual(copy2);
-        copy1.valueMissing = true;
-        expect(copy2.valueMissing).toBe(false);
-      });
-    });
-
-    describe('validityProxyHandler', () => {
-      it('should add a valid property that reflects all other properties', () => {
-        const validity1 = new Proxy({ ...DEFAULT_VALIDITY }, validityProxyHandler);
-
-        expect(validity1.valid).toBe(true);
-
-        const validity2 = new Proxy(
-          { ...DEFAULT_VALIDITY, valueMissing: true },
-          validityProxyHandler,
-        );
-
-        expect(validity2.valid).toBe(false);
-      });
-
-      it('should return false if any validity flag is true', () => {
-        const validity = new Proxy(
-          {
-            valueMissing: false,
-            tooShort: false,
-            tooLong: true,
-            rangeUnderflow: false,
-            rangeOverflow: false,
-            patternMismatch: false,
-            typeMismatch: false,
-          },
-          validityProxyHandler,
-        );
-
-        expect(validity.valid).toBe(false);
-      });
-
-      it('should pass through other property accesses', () => {
-        const validity = new Proxy(
-          { ...DEFAULT_VALIDITY, valueMissing: true },
-          validityProxyHandler,
-        );
-
-        expect(validity.valueMissing).toBe(true);
-        expect(validity.tooShort).toBe(false);
-      });
-    });
-
     describe('validateField', () => {
       it('should validate field and update validities', () => {
         const validities = { en: {} };
@@ -573,6 +968,158 @@ describe('draft/validate/fields', () => {
       });
     });
 
+    describe('revalidateField', () => {
+      beforeEach(() => {
+        mockEntryDraft.validities = { en: {} };
+        mockEntryDraft.validationMessages = { en: {} };
+      });
+
+      it('should do nothing before the entry has been validated', () => {
+        vi.mocked(getField).mockReturnValue({ name: 'title', widget: 'string', required: true });
+        vi.mocked(isFieldRequired).mockReturnValue(true);
+
+        revalidateField({
+          draft: mockEntryDraft,
+          locale: 'en',
+          keyPath: 'title',
+          value: '',
+          valueMap: { title: '' },
+        });
+
+        expect(mockEntryDraft.validities.en.title).toBeUndefined();
+        expect(mockEntryDraft.validationMessages.en.title).toBeUndefined();
+      });
+
+      it('should update the validity and message once the field has been validated', async () => {
+        const { getFieldValidationMessages } =
+          await import('$lib/services/contents/draft/validate/messages');
+
+        vi.mocked(getFieldValidationMessages).mockReturnValue(['This field is required']);
+        vi.mocked(getField).mockReturnValue({ name: 'title', widget: 'string', required: true });
+        vi.mocked(isFieldRequired).mockReturnValue(true);
+
+        mockEntryDraft.validities.en.title = { valueMissing: false, valid: true };
+        mockEntryDraft.validationMessages.en.title = [];
+
+        revalidateField({
+          draft: mockEntryDraft,
+          locale: 'en',
+          keyPath: 'title',
+          value: '',
+          valueMap: { title: '' },
+        });
+
+        expect(mockEntryDraft.validities.en.title.valueMissing).toBe(true);
+        expect(mockEntryDraft.validities.en.title.valid).toBe(false);
+        expect(mockEntryDraft.validationMessages.en.title).toEqual(['This field is required']);
+      });
+
+      it('should update the state of the KeyValue field a pair belongs to', async () => {
+        const { getFieldValidationMessages } =
+          await import('$lib/services/contents/draft/validate/messages');
+
+        /** @type {any} */
+        const fieldConfig = { name: 'metadata', widget: 'keyvalue', required: true };
+
+        vi.mocked(getFieldValidationMessages).mockReturnValue([]);
+        // A pair has no configuration of its own, but belongs to the field
+        vi.mocked(getField).mockImplementation(({ keyPath }) =>
+          keyPath === 'metadata' ? fieldConfig : undefined,
+        );
+        vi.mocked(getKeyValueField).mockReturnValue(fieldConfig);
+        vi.mocked(isFieldRequired).mockReturnValue(true);
+        vi.mocked(getPairsFromContent).mockReturnValue([['size', 'L']]);
+
+        mockEntryDraft.validities.en.metadata = { valueMissing: true, valid: false };
+        mockEntryDraft.validationMessages.en.metadata = ['This field is required'];
+
+        // The key of the blank pair has just been filled in
+        revalidateField({
+          draft: mockEntryDraft,
+          locale: 'en',
+          keyPath: 'metadata.size',
+          value: 'L',
+          valueMap: { 'metadata.size': 'L' },
+        });
+
+        expect(mockEntryDraft.validities.en.metadata.valid).toBe(true);
+        expect(mockEntryDraft.validationMessages.en.metadata).toEqual([]);
+        expect(mockEntryDraft.validities.en).not.toHaveProperty('metadata.size');
+      });
+
+      it('should perform all the field validations, not just the required check', async () => {
+        const { getRegex } = await import('$lib/services/utils/regex');
+
+        const { validateStringField } =
+          await import('$lib/services/contents/fields/string/validate');
+
+        vi.mocked(getRegex).mockReturnValue(/^\d+$/);
+        vi.mocked(validateStringField).mockReturnValue({
+          validity: { tooShort: true, tooLong: false },
+        });
+
+        vi.mocked(getField).mockReturnValue({
+          name: 'code',
+          widget: 'string',
+          pattern: ['^\\d+$', 'Numbers only'],
+          minlength: 5,
+        });
+
+        mockEntryDraft.validities.en.code = { valid: true };
+
+        revalidateField({
+          draft: mockEntryDraft,
+          locale: 'en',
+          keyPath: 'code',
+          value: 'abc',
+          valueMap: { code: 'abc' },
+        });
+
+        expect(mockEntryDraft.validities.en.code).toMatchObject({
+          patternMismatch: true,
+          tooShort: true,
+        });
+      });
+
+      it('should revalidate a List field, which the full pass would skip', async () => {
+        const { getListFieldInfo } = await import('$lib/services/contents/fields/list/helpers');
+
+        getListFieldInfo.mockReturnValue({ hasSubFields: false });
+        vi.mocked(getField).mockReturnValue({ name: 'tags', widget: 'list', min: 2 });
+        vi.mocked(isFieldRequired).mockReturnValue(true);
+
+        // The existing state would make `validateListField` bail out if it were passed as is
+        mockEntryDraft.validities.en.tags = { valid: true };
+
+        revalidateField({
+          draft: mockEntryDraft,
+          locale: 'en',
+          keyPath: 'tags',
+          value: [],
+          valueMap: { 'tags.0': 'tag1' },
+        });
+
+        expect(mockEntryDraft.validities.en.tags.rangeUnderflow).toBe(true);
+      });
+
+      it('should keep the existing validity if the field is not validated', () => {
+        const validity = { valid: true };
+
+        vi.mocked(getField).mockReturnValue(undefined);
+        mockEntryDraft.validities.en.title = validity;
+
+        revalidateField({
+          draft: mockEntryDraft,
+          locale: 'en',
+          keyPath: 'title',
+          value: 'Title',
+          valueMap: { title: 'Title' },
+        });
+
+        expect(mockEntryDraft.validities.en.title).toBe(validity);
+      });
+    });
+
     describe('validateList', () => {
       it('should validate simple list without validating items', async () => {
         const validities = { en: {} };
@@ -588,7 +1135,7 @@ describe('draft/validate/fields', () => {
         };
 
         const { getListFieldInfo } = vi.mocked(
-          await import('$lib/services/contents/fields/list/helper'),
+          await import('$lib/services/contents/fields/list/helpers'),
         );
 
         getListFieldInfo.mockReturnValue({ hasSubFields: false });
@@ -619,7 +1166,7 @@ describe('draft/validate/fields', () => {
         };
 
         const { getListFieldInfo } = vi.mocked(
-          await import('$lib/services/contents/fields/list/helper'),
+          await import('$lib/services/contents/fields/list/helpers'),
         );
 
         getListFieldInfo.mockReturnValue({ hasSubFields: true });
@@ -790,7 +1337,52 @@ describe('draft/validate/fields', () => {
         const result = validateAnyField(args);
 
         expect(result).toBeDefined();
-        expect(result.typeMismatch).toBe(true);
+        // No number to be the wrong type: an empty required field is simply missing
+        expect(result.typeMismatch).toBe(false);
+        expect(result.valueMissing).toBe(true);
+        expect(result.valid).toBe(false);
+      });
+
+      it('should accept `null` and `false` on a required select field offering them', () => {
+        const options = [
+          { label: 'Yes', value: true },
+          { label: 'No', value: false },
+          { label: 'Not relevant', value: null },
+        ];
+
+        vi.mocked(getField).mockReturnValue({ name: 'fip', widget: 'select', options });
+        vi.mocked(isFieldRequired).mockReturnValue(true);
+
+        [true, false, null].forEach((value) => {
+          const result = validateAnyField({
+            draft: mockEntryDraft,
+            validities: { en: {} },
+            locale: 'en',
+            keyPath: 'fip',
+            valueMap: { fip: value },
+            value,
+          });
+
+          expect(result.valueMissing).toBe(false);
+          expect(result.valid).toBe(true);
+        });
+      });
+
+      it('should reject `null` on a required select field not offering it', () => {
+        vi.mocked(getField).mockReturnValue({ name: 'fip', widget: 'select', options: [1, 2] });
+        vi.mocked(isFieldRequired).mockReturnValue(true);
+
+        const result = validateAnyField({
+          draft: mockEntryDraft,
+          validities: { en: {} },
+          locale: 'en',
+          keyPath: 'fip',
+          valueMap: { fip: null },
+          value: null,
+        });
+
+        expect(result.valueMissing).toBe(true);
+        expect(result.valid).toBe(false);
       });
 
       it('should validate required number field (float) with null value', () => {
@@ -816,7 +1408,9 @@ describe('draft/validate/fields', () => {
         const result = validateAnyField(args);
 
         expect(result).toBeDefined();
-        expect(result.typeMismatch).toBe(true);
+        expect(result.typeMismatch).toBe(false);
+        expect(result.valueMissing).toBe(true);
+        expect(result.valid).toBe(false);
       });
 
       it('should validate number field with range overflow', () => {
@@ -1070,7 +1664,7 @@ describe('draft/validate/fields', () => {
 
       it('should validate keyvalue field with required validation', () => {
         const validities = { en: {} };
-        const pairs = [{ key: 'key1', value: 'value1' }];
+        const pairs = [['key1', 'value1']];
 
         mockEntryDraft.currentValues = { en: { metadata: { key1: 'value1' } } };
 
@@ -1091,7 +1685,7 @@ describe('draft/validate/fields', () => {
 
         vi.mocked(isFieldRequired).mockReturnValue(true);
 
-        vi.mocked(getPairs).mockReturnValue(pairs);
+        vi.mocked(getPairsFromContent).mockReturnValue(pairs);
 
         const result = validateAnyField(args);
 
@@ -1121,7 +1715,7 @@ describe('draft/validate/fields', () => {
 
         vi.mocked(isFieldRequired).mockReturnValue(true);
 
-        vi.mocked(getPairs).mockReturnValue([]);
+        vi.mocked(getPairsFromContent).mockReturnValue([]);
 
         const result = validateAnyField(args);
 
@@ -1154,7 +1748,7 @@ describe('draft/validate/fields', () => {
         vi.mocked(isFieldRequired).mockReturnValue(false);
 
         // Only 1 pair, but min is 3
-        vi.mocked(getPairs).mockReturnValue([{ key: 'key1', value: 'value1' }]);
+        vi.mocked(getPairsFromContent).mockReturnValue([['key1', 'value1']]);
 
         const result = validateAnyField(args);
 
@@ -1188,13 +1782,42 @@ describe('draft/validate/fields', () => {
         vi.mocked(isFieldRequired).mockReturnValue(false);
 
         // 3 pairs but max is 2
-        vi.mocked(getPairs).mockReturnValue([
-          { key: 'k1', value: 'v1' },
-          { key: 'k2', value: 'v2' },
-          { key: 'k3', value: 'v3' },
+        vi.mocked(getPairsFromContent).mockReturnValue([
+          ['k1', 'v1'],
+          ['k2', 'v2'],
+          ['k3', 'v3'],
         ]);
 
         const result = validateAnyField(args);
+
+        expect(result?.rangeOverflow).toBe(true);
+      });
+
+      it('should resolve a KeyValue pair that getField can’t through its KeyValue field', () => {
+        const validities = { en: {} };
+        /** @type {any} */
+        const fieldConfig = { name: 'metadata', widget: 'keyvalue', required: false, max: 2 };
+
+        // A pair is stored under an arbitrary key, which only the KeyValue field lookup resolves
+        vi.mocked(getField).mockImplementation(({ keyPath }) =>
+          keyPath === 'metadata' ? fieldConfig : undefined,
+        );
+        vi.mocked(getKeyValueField).mockReturnValue(fieldConfig);
+        vi.mocked(isFieldRequired).mockReturnValue(false);
+        vi.mocked(getPairsFromContent).mockReturnValue([
+          ['k1', 'v1'],
+          ['k2', 'v2'],
+          ['k3', 'v3'],
+        ]);
+
+        const result = validateAnyField({
+          draft: mockEntryDraft,
+          validities,
+          locale: 'en',
+          keyPath: 'metadata.k1',
+          valueMap: { 'metadata.k1': 'v1', 'metadata.k2': 'v2', 'metadata.k3': 'v3' },
+          value: 'v1',
+        });
 
         expect(result?.rangeOverflow).toBe(true);
       });
@@ -1270,7 +1893,7 @@ describe('draft/validate/fields', () => {
 
         vi.mocked(isFieldRequired).mockReturnValue(false);
 
-        vi.mocked(getPairs).mockReturnValue([]);
+        vi.mocked(getPairsFromContent).mockReturnValue([]);
 
         // This should skip early return when keyvalue path is already validated
         const result = validateAnyField(args);
@@ -1384,16 +2007,16 @@ describe('draft/validate/fields', () => {
         expect(result).toBeUndefined();
       });
 
-      it('should return undefined for code field when keyPath already in validities (line 210)', () => {
-        // Pre-populate with the parent keyPath so the early return in the code branch fires
+      it('should return undefined for code field when keyPath already in validities', () => {
+        // Pre-populate with the keyPath so the early return in the code branch fires
         const validities = { en: { snippet: {} } };
 
         const args = {
           draft: mockEntryDraft,
           validities,
           locale: 'en',
-          keyPath: 'snippet.code',
-          valueMap: { 'snippet.code': 'const x = 1;', 'snippet.lang': 'js' },
+          keyPath: 'snippet',
+          valueMap: { snippet: 'const x = 1;' },
           value: 'const x = 1;',
         };
 

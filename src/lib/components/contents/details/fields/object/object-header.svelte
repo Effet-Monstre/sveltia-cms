@@ -32,9 +32,10 @@
 </script>
 
 <div role="none" class="header">
-  <div role="none">
+  <div role="none" class="start">
     <Button
       size="small"
+      iconic={!label}
       aria-label={expanded ? _('collapse') : _('expand')}
       aria-expanded={expanded}
       aria-controls={controlId}
@@ -53,10 +54,10 @@
       {/if}
     </Button>
   </div>
-  <div role="none">
+  <div role="none" class="center">
     {@render centerContent?.()}
   </div>
-  <div role="none">
+  <div role="none" class="end">
     {@render endContent?.()}
   </div>
 </div>
@@ -66,32 +67,48 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    height: 24px;
+    height: 28px;
     background-color: var(--sui-secondary-border-color);
 
     & > div {
       display: flex;
       align-items: center;
-
-      &:first-child {
-        justify-content: flex-start;
-        width: 40%;
-      }
-
-      &:nth-child(2) {
-        width: 20%;
-        justify-content: center;
-      }
-
-      &:last-child {
-        width: 40%;
-        justify-content: flex-end;
-      }
     }
 
-    :global(button) {
-      padding: 0;
-      height: 16px;
+    .start {
+      justify-content: flex-start;
+      width: 40%;
+    }
+
+    .center {
+      justify-content: center;
+      width: 20%;
+    }
+
+    .end {
+      justify-content: flex-end;
+      width: 40%;
+    }
+
+    /* Make the expander button full-width when there is no other content */
+    &:has(.center:empty):has(.end:empty) {
+      .start {
+        width: 100%;
+
+        :global(button) {
+          justify-content: flex-start;
+          padding: var(--sui-button-small-padding);
+          width: -moz-available;
+          width: -webkit-fill-available;
+          width: stretch;
+          aspect-ratio: auto;
+        }
+      }
+
+      .center,
+      .end {
+        display: none;
+      }
     }
 
     .type {

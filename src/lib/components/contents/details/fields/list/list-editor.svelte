@@ -9,7 +9,7 @@
 
   import ListEditorComplex from '$lib/components/contents/details/fields/list/list-editor-complex.svelte';
   import ListEditorSimple from '$lib/components/contents/details/fields/list/list-editor-simple.svelte';
-  import { getListFieldInfo } from '$lib/services/contents/fields/list/helper';
+  import { getListFieldInfo } from '$lib/services/contents/fields/list/helpers';
 
   /**
    * @import { FieldEditorProps } from '$lib/types/private';
@@ -19,7 +19,7 @@
   /**
    * @typedef {object} Props
    * @property {ListField} fieldConfig Field configuration.
-   * @property {string[]} currentValue Field value.
+   * @property {any[]} currentValue Field value.
    */
 
   /** @type {FieldEditorProps & Props} */
@@ -31,11 +31,16 @@
   } = $props();
 
   const fieldId = $props.id();
+  const summaryId = `list-${fieldId}-summary`;
+  const { hasSubFields } = $derived(getListFieldInfo(config));
 </script>
 
-<Group aria-labelledby="list-{fieldId}-summary">
-  {#if getListFieldInfo(config).hasSubFields}
-    <ListEditorComplex {...{ ...rest, fieldConfig: /** @type {ComplexListField} */ (config) }} />
+<!-- Only a list with subfields shows the item count that labels it -->
+<Group aria-labelledby={hasSubFields ? summaryId : undefined}>
+  {#if hasSubFields}
+    <ListEditorComplex
+      {...{ ...rest, fieldConfig: /** @type {ComplexListField} */ (config), summaryId }}
+    />
   {:else}
     <ListEditorSimple {...{ ...rest, fieldConfig: /** @type {SimpleListField} */ (config) }} />
   {/if}

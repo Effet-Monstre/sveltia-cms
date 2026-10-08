@@ -6,13 +6,14 @@
 -->
 <script>
   import { TextArea } from '@sveltia/ui';
-  import { getContext, untrack } from 'svelte';
 
   import CharacterCounter from '$lib/components/contents/details/fields/string/character-counter.svelte';
+  import { setExtraHint } from '$lib/services/contents/editor/extra-hint.svelte';
   import { getCanonicalLocale, getDirection } from '$lib/services/contents/i18n';
+  import { syncValues } from '$lib/services/utils/state.svelte';
 
   /**
-   * @import { FieldEditorContext, FieldEditorProps } from '$lib/types/private';
+   * @import { FieldEditorProps } from '$lib/types/private';
    * @import { TextField } from '$lib/types/public';
    */
 
@@ -22,14 +23,12 @@
    * @property {string | undefined} currentValue Field value.
    */
 
-  /** @type {FieldEditorContext} */
-  const { extraHint } = getContext('field-editor') ?? {};
-
   /** @type {FieldEditorProps & Props} */
   let {
     /* eslint-disable prefer-const */
     locale,
     fieldId,
+    fieldConfig,
     currentValue = $bindable(),
     required = true,
     readonly = false,
@@ -39,49 +38,22 @@
 
   let inputValue = $state('');
 
-  /**
-   * Update {@link inputValue} based on {@link currentValue} while avoiding a cycle dependency.
-   */
-  const setInputValue = () => {
-    const newValue = typeof currentValue === 'string' ? currentValue : '';
+  const { use_emoji_autocomplete: useEmojiAutocomplete = true } = $derived(fieldConfig);
 
-    if (inputValue !== newValue) {
-      inputValue = newValue;
-    }
-  };
+  // Sync `inputValue` with `currentValue` in both directions
+  syncValues(
+    () => currentValue,
+    (value) => {
+      currentValue = value;
+    },
+    () => inputValue,
+    (input) => {
+      inputValue = input;
+    },
+    (value) => (typeof value === 'string' ? value : ''),
+  );
 
-  /**
-   * Update {@link currentValue} based on {@link inputValue} while avoiding a cycle dependency.
-   */
-  const setCurrentValue = () => {
-    const newValue = inputValue;
-
-    if (currentValue !== newValue) {
-      currentValue = newValue;
-    }
-  };
-
-  $effect(() => {
-    void [currentValue];
-
-    untrack(() => {
-      setInputValue();
-    });
-  });
-
-  $effect(() => {
-    void [inputValue];
-
-    untrack(() => {
-      setCurrentValue();
-    });
-  });
-
-  $effect(() => {
-    if (extraHint) {
-      $extraHint = CharacterCounter;
-    }
-  });
+  setExtraHint(CharacterCounter);
 </script>
 
 <TextArea
@@ -95,4 +67,5 @@
   aria-labelledby="{fieldId}-label"
   aria-errormessage="{fieldId}-error"
   autoResize={true}
+  {useEmojiAutocomplete}
 />

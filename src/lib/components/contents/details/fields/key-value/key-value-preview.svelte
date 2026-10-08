@@ -6,15 +6,13 @@
 -->
 <script>
   import { _ } from '@sveltia/i18n';
-  import equal from 'fast-deep-equal';
-  import { untrack } from 'svelte';
 
-  import { entryDraft } from '$lib/services/contents/draft';
-  import { getPairs } from '$lib/services/contents/fields/key-value/helper';
+  import { getEntryDraftContext } from '$lib/services/contents/draft/state.svelte';
+  import { getValueMapSnapshot } from '$lib/services/contents/draft/value-map.svelte';
+  import { getPairsFromContent } from '$lib/services/contents/fields/key-value/pairs';
 
   /**
-   * @import { Writable } from 'svelte/store';
-   * @import { EntryDraft, FieldPreviewProps } from '$lib/types/private';
+   * @import { FieldPreviewProps } from '$lib/types/private';
    * @import { KeyValueField } from '$lib/types/public';
    */
 
@@ -23,6 +21,8 @@
    * @property {KeyValueField} fieldConfig Field configuration.
    * @property {Record<string, string> | undefined} currentValue Field value.
    */
+
+  const entryDraft = getEntryDraftContext();
 
   /** @type {FieldPreviewProps & Props} */
   let {
@@ -41,30 +41,11 @@
   const keyLabel = $derived(_keyLabel || _('key_value.key'));
   const valueLabel = $derived(_valueLabel || _('key_value.value'));
 
-  /** @type {[string, string][]}  */
-  let pairs = $state([]);
-
-  /**
-   * Update the key-value {@link pairs} whenever the draft store is updated.
-   */
-  const updatePairs = () => {
-    const _entryDraft = /** @type {Writable<EntryDraft>} */ (entryDraft);
-    const updatedPairs = getPairs({ entryDraft: _entryDraft, keyPath, locale });
-
-    if (!equal(pairs, updatedPairs)) {
-      pairs = updatedPairs;
-    }
-  };
-
-  $effect(() => {
-    if ($entryDraft) {
-      void [$state.snapshot($entryDraft.currentValues[locale])];
-
-      untrack(() => {
-        updatePairs();
-      });
-    }
-  });
+  // The shared snapshot of the locale’s values is only taken once per change, and its key paths are
+  // indexed, so the pairs are looked up without going through all the values
+  const pairs = $derived(
+    getPairsFromContent(getValueMapSnapshot(entryDraft.current, locale), keyPath, { live: false }),
+  );
 </script>
 
 {#if pairs.length}

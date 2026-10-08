@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { hasMatch, normalize } from './util';
+import { getNormalizedValueCache, hasAllMatches, hasMatch, normalize, tokenize } from './util';
 
 describe('normalize', () => {
   it('should normalize basic strings', () => {
@@ -98,5 +98,78 @@ describe('hasMatch', () => {
 
     expect(hasMatch({ value: 'Café', terms: 'cached', normalizedValueCache })).toBe(true);
     expect(normalizedValueCache.get('Café')).toBe('cached-value');
+  });
+});
+
+describe('getNormalizedValueCache', () => {
+  it('should keep one cache per object across calls', () => {
+    const entry = { id: 'a' };
+    const cache = getNormalizedValueCache(entry);
+
+    expect(cache).toBeInstanceOf(Map);
+    expect(getNormalizedValueCache(entry)).toBe(cache);
+  });
+
+  it('should keep the caches of different objects apart', () => {
+    const a = getNormalizedValueCache({ id: 'a' });
+    const b = getNormalizedValueCache({ id: 'b' });
+
+    expect(a).not.toBe(b);
+  });
+
+  it('should retain normalized values for later searches', () => {
+    const entry = { id: 'a' };
+    const normalizedValueCache = getNormalizedValueCache(entry);
+
+    expect(hasMatch({ value: 'Café', terms: 'cafe', normalizedValueCache })).toBe(true);
+    // A later search on the same object finds the value already normalized
+    expect(getNormalizedValueCache(entry).get('Café')).toBe('cafe');
+  });
+});
+
+describe('tokenize', () => {
+  it('should split the terms on whitespace and normalize each token', () => {
+    expect(tokenize('Annual Report cover')).toEqual(['annual', 'report', 'cover']);
+    expect(tokenize('  Café \t naïve\n')).toEqual(['cafe', 'naive']);
+  });
+
+  it('should drop duplicate tokens', () => {
+    expect(tokenize('report Report annual')).toEqual(['report', 'annual']);
+  });
+
+  it('should return an empty array for blank terms', () => {
+    expect(tokenize('')).toEqual([]);
+    expect(tokenize('   ')).toEqual([]);
+  });
+
+  it('should keep hyphenated words as one token', () => {
+    expect(tokenize('annual-report cover')).toEqual(['annual-report', 'cover']);
+  });
+});
+
+describe('hasAllMatches', () => {
+  it('should require every token to be in the value, in any order', () => {
+    const tokens = tokenize('annual report cover');
+
+    expect(hasAllMatches({ value: 'annual-report-cover-photo.png', tokens })).toBe(true);
+    expect(hasAllMatches({ value: 'cover-annual-report.png', tokens })).toBe(true);
+    expect(hasAllMatches({ value: 'cover-photo.png', tokens })).toBe(false);
+    expect(hasAllMatches({ value: 'photo.png', tokens })).toBe(false);
+  });
+
+  it('should match case-insensitively and ignore diacritics', () => {
+    expect(hasAllMatches({ value: 'CAFÉ-Menu.pdf', tokens: tokenize('cafe menu') })).toBe(true);
+  });
+
+  it('should match any value when there are no tokens', () => {
+    expect(hasAllMatches({ value: 'photo.png', tokens: [] })).toBe(true);
+  });
+
+  it('should use the normalized value cache', () => {
+    const normalizedValueCache = new Map([['Café', 'cached-value']]);
+
+    expect(hasAllMatches({ value: 'Café', tokens: ['cached'], normalizedValueCache })).toBe(true);
+    expect(hasAllMatches({ value: 'Menu', tokens: ['menu'], normalizedValueCache })).toBe(true);
+    expect(normalizedValueCache.get('Menu')).toBe('menu');
   });
 });

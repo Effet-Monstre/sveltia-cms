@@ -1,22 +1,29 @@
 <script>
   import { _ } from '@sveltia/i18n';
+  import { VisibilityObserver } from '@sveltia/ui';
 
-  import VisibilityObserver from '$lib/components/common/visibility-observer.svelte';
   import EntryPreviewIframe from '$lib/components/contents/details/preview/entry-preview-iframe.svelte';
   import FieldPreview from '$lib/components/contents/details/preview/field-preview.svelte';
-  import { entryDraft } from '$lib/services/contents/draft';
-  import { customPreviewStyleRegistry } from '$lib/services/contents/editor';
-  import { customPreviewRenderers } from '$lib/services/contents/file/config';
-  import PreviewRenderer from './preview-renderer.svelte';
+  import PreviewRenderer from '$lib/components/contents/details/preview/preview-renderer.svelte';
+  import { immutableLoaded, loadImmutable } from '$lib/services/api/immutable';
+  import {
+    customPreviewRenderers,
+    customPreviewStyleRegistry,
+    customPreviewTemplateRegistry,
+  } from '$lib/services/api/registries';
+  import { getEntryDraftContext } from '$lib/services/contents/draft/state.svelte';
+  import { preparePreviewTemplateProps } from '$lib/services/contents/editor/preview-templates';
 
   /**
-   * @import { InternalLocaleCode } from '$lib/types/private';
+   * @import { EntryDraft, InternalLocaleCode } from '$lib/types/private';
    */
 
   /**
    * @typedef {object} Props
    * @property {InternalLocaleCode} locale Current pane’s locale.
    */
+
+  const entryDraft = getEntryDraftContext();
 
   /** @type {Props} */
   let {
@@ -25,9 +32,44 @@
     /* eslint-enable prefer-const */
   } = $props();
 
-  const fields = $derived($entryDraft?.fields ?? []);
+  const {
+    collectionName,
+    fileName,
+    fields = [],
+  } = $derived(/** @type {EntryDraft} */ (entryDraft.current ?? {}));
+  const styleURLs = $derived([...customPreviewStyleRegistry]);
+  // A renderer registered with `CMS.registerCustomPreviewRenderer()` replaces the built-in preview
+  // of its collection; see `docs/fork.md`
+  const customPreviewRenderer = $derived(customPreviewRenderers[collectionName]);
+  const reactComponent = $derived(customPreviewTemplateRegistry.get(fileName ?? collectionName));
+  // The template receives Immutable Maps, so the props can only be built once the library is loaded
+  const reactProps = $derived(
+    entryDraft.current && reactComponent && immutableLoaded.current
+      ? preparePreviewTemplateProps({
+          entryDraft,
+          // Only the values have to be detached from the draft. Snapshotting the whole draft on
+          // every keystroke would also copy the collection configuration, the original entry and
+          // values and the validation state, and re-render the template whenever any of them
+          // changed, e.g. when a list item is expanded
+          draft: {
+            ...entryDraft.current,
+            currentValues: $state.snapshot(entryDraft.current.currentValues),
+          },
+          locale,
+        })
+      : undefined,
+  );
 
-  const customPreviewRenderer = $derived(customPreviewRenderers[$entryDraft?.collectionName || '']);
+  $effect(() => {
+    if (reactComponent) {
+      // Normally already in flight, as `CMS.registerPreviewTemplate()` starts loading the library
+      /* v8 ignore next 4 -- the library is bundled with the tests, so loading can’t fail */
+      loadImmutable().catch((/** @type {Error} */ error) => {
+        // eslint-disable-next-line no-console
+        console.error(error);
+      });
+    }
+  });
 </script>
 
 {#snippet children()}
@@ -43,21 +85,19 @@
   {/each}
 {/snippet}
 
-{#if customPreviewRenderer}
-  <VisibilityObserver>
+<VisibilityObserver>
+  {#if customPreviewRenderer}
     <PreviewRenderer previewRenderer={customPreviewRenderer} {locale} />
-  </VisibilityObserver>
-{:else}
-  <VisibilityObserver>
-    {#if customPreviewStyleRegistry.size}
-      <EntryPreviewIframe {locale} styleURLs={[...customPreviewStyleRegistry]} {children} />
-    {:else}
-      <div role="document" aria-label={_('content_preview')}>
-        {@render children()}
-      </div>
-    {/if}
-  </VisibilityObserver>
-{/if}
+  {:else if reactComponent && reactProps}
+    <EntryPreviewIframe {locale} {styleURLs} {reactComponent} {reactProps} />
+  {:else if styleURLs.length}
+    <EntryPreviewIframe {locale} {styleURLs} {children} />
+  {:else}
+    <div role="document" aria-label={_('content_preview')}>
+      {@render children()}
+    </div>
+  {/if}
+</VisibilityObserver>
 
 <style>
   div {
@@ -65,5 +105,7 @@
     --entry-preview-padding-inline: 16px;
     padding-block: var(--entry-preview-padding-block);
     padding-inline: var(--entry-preview-padding-inline);
+    /* Keep the content written by other users within the preview, even if it’s positioned */
+    contain: paint;
   }
 </style>

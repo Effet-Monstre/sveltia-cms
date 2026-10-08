@@ -1,138 +1,91 @@
 <script>
-  import { _, locale as appLocale } from '@sveltia/i18n';
-  import { Alert, Toast } from '@sveltia/ui';
-  import { sleep } from '@sveltia/utils/misc';
-  import equal from 'fast-deep-equal';
-  import { onMount } from 'svelte';
+  import { _ } from '@sveltia/i18n';
+  import { onMount, untrack } from 'svelte';
 
-  import AssetDetailsOverlay from '$lib/components/assets/details/asset-details-overlay.svelte';
-  import EditAssetDialog from '$lib/components/assets/details/edit-asset-dialog.svelte';
-  import RenameAssetDialog from '$lib/components/assets/details/rename-asset-dialog.svelte';
-  import AssetList from '$lib/components/assets/list/asset-list.svelte';
+  import ExternalDetailsOverlay from '$lib/components/assets/list/external/details-overlay.svelte';
+  import ExternalMainArea from '$lib/components/assets/list/external/main-area.svelte';
+  import AssetList from '$lib/components/assets/list/internal/asset-list.svelte';
+  import DeleteFolderDialog from '$lib/components/assets/list/internal/delete-folder-dialog.svelte';
+  import AssetDetailsOverlay from '$lib/components/assets/list/internal/details-overlay.svelte';
+  import EditAssetDialog from '$lib/components/assets/list/internal/edit-asset-dialog.svelte';
+  import FolderInfoPanel from '$lib/components/assets/list/internal/folder-info-panel.svelte';
+  import InfoPanel from '$lib/components/assets/list/internal/info-panel.svelte';
+  import NewFolderDialog from '$lib/components/assets/list/internal/new-folder-dialog.svelte';
+  import PrimaryToolbar from '$lib/components/assets/list/internal/primary-toolbar.svelte';
+  import RenameAssetDialog from '$lib/components/assets/list/internal/rename-dialog.svelte';
+  import RenameFolderDialog from '$lib/components/assets/list/internal/rename-folder-dialog.svelte';
   import PrimarySidebar from '$lib/components/assets/list/primary-sidebar.svelte';
-  import PrimaryToolbar from '$lib/components/assets/list/primary-toolbar.svelte';
   import SecondarySidebar from '$lib/components/assets/list/secondary-sidebar.svelte';
   import SecondaryToolbar from '$lib/components/assets/list/secondary-toolbar.svelte';
   import PageContainerMainArea from '$lib/components/common/page-container-main-area.svelte';
   import PageContainer from '$lib/components/common/page-container.svelte';
+  import NotFound from '$lib/components/global/not-found.svelte';
   import SearchMainArea from '$lib/components/search/search-main-area.svelte';
+  import { updateContentFromHashChange } from '$lib/services/app/navigation';
+  import { hasAuthInfo, selectedCloudService } from '$lib/services/assets/external';
+  import { loadExternalAssets } from '$lib/services/assets/external/data';
+  import { LINKED_FILES_SERVICE_ID, linkedAssets } from '$lib/services/assets/external/linked';
   import {
-    announcedPageStatus,
-    goto,
-    parseLocation,
-    updateContentFromHashChange,
-  } from '$lib/services/app/navigation';
-  import { allAssets, overlaidAsset } from '$lib/services/assets';
-  import { assetUpdatesToast } from '$lib/services/assets/data';
-  import { allAssetFolders, selectedAssetFolder } from '$lib/services/assets/folders';
-  import {
-    getFolderLabelByCollection,
-    listedAssets,
-    showAssetOverlay,
-  } from '$lib/services/assets/view';
-  import { isSearchRoute } from '$lib/services/search/navigation';
+    ASSETS_ROUTE_REGEX,
+    discardAssetsNavigation,
+    getSelectedAssetFolderLabel,
+    resolveAssetsRoute,
+  } from '$lib/services/assets/navigation';
+  import { focusedAsset, selectedAssets } from '$lib/services/assets/state';
+  import { assetGroups, listedAssets, showAssetOverlay } from '$lib/services/assets/view';
+  import { sortKeys } from '$lib/services/assets/view/sort-keys';
   import { env } from '$lib/services/user/env.svelte';
 
-  const ROUTE_REGEX = /^\/assets(?:\/(?<folderPath>.+?)(?:\/(?<fileName>[^/]+\.[A-Za-z0-9]+))?)?$/;
+  /**
+   * @import { Asset } from '$lib/types/private';
+   */
 
   let isIndexPage = $state(false);
   let isSearchPage = $state(false);
+  let notFound = $state(false);
 
-  const selectedAssetFolderLabel = $derived(
-    // `appLocale.current` is a key, because `getFolderLabelByCollection` can return a localized
-    // label
-    appLocale.current && $selectedAssetFolder
-      ? getFolderLabelByCollection($selectedAssetFolder)
-      : '',
-  );
+  const selectedAssetFolderLabel = $derived(getSelectedAssetFolderLabel());
 
   /**
    * Navigate to the asset list or asset details page given the URL hash.
-   * @todo Show Not Found page.
    */
-  const navigate = async () => {
-    const { path } = parseLocation();
-    const match = path.match(ROUTE_REGEX);
+  const navigate = () => {
+    ({ isIndexPage, isSearchPage, notFound } = resolveAssetsRoute());
+  };
 
-    isIndexPage = false;
-    isSearchPage = false;
+  // Fetch the assets on the selected cloud storage service once the user has provided the
+  // credentials. This lives on the page rather than in the main area, because the main area isn’t
+  // rendered while the details overlay is shown, and a direct link to an asset’s details needs the
+  // list as well. The Cloudinary widget handles authentication and listing on its own
+  $effect(() => {
+    const service = selectedCloudService.current;
 
-    if (!match?.groups) {
-      $showAssetOverlay = false;
-      // Check if it’s the search page, which has a different URL pattern (`#/search/{query}`)
-      isSearchPage = isSearchRoute(path);
-
-      return; // Different page
-    }
-
-    const { folderPath, fileName } = match.groups;
-
-    if (!folderPath) {
-      if (env.isSmallScreen) {
-        // Show the asset folder list only
-        $selectedAssetFolder = undefined;
-        $showAssetOverlay = false;
-        $announcedPageStatus = _('viewing_asset_folder_list');
-        isIndexPage = true;
-      } else {
-        // Redirect to All Assets
-        goto('/assets/-/all');
+    if (service && service.authType !== 'widget' && hasAuthInfo(service)) {
+      // The linked files come from the entries, so reload the list whenever these change
+      if (service.serviceId === LINKED_FILES_SERVICE_ID) {
+        void linkedAssets.current;
       }
 
-      return;
-    }
-
-    const folder =
-      window.history.state?.folder ??
-      $allAssetFolders.find(({ internalPath, collectionName }) =>
-        folderPath === '-/all'
-          ? internalPath === undefined && collectionName === undefined
-          : internalPath === folderPath,
-      );
-
-    if (!folder) {
-      // Not found
-      $selectedAssetFolder = undefined;
-    } else if (!equal($selectedAssetFolder, folder)) {
-      $selectedAssetFolder = folder;
-    }
-
-    if (!fileName) {
-      // Wait for `selectedAssetFolderLabel` to be updated
-      await sleep(100);
-
-      $showAssetOverlay = false;
-      $announcedPageStatus = _('viewing_x_asset_folder', {
-        values: {
-          folder: selectedAssetFolderLabel,
-          count: $listedAssets.length,
-        },
+      untrack(() => {
+        loadExternalAssets(service);
       });
-
-      return;
     }
-
-    $overlaidAsset = fileName
-      ? $allAssets.find((asset) => asset.path === `${folderPath}/${fileName}`)
-      : undefined;
-    $announcedPageStatus = $overlaidAsset
-      ? _('viewing_x_asset_details', { values: { name: $overlaidAsset.name } })
-      : _('file_not_found');
-    $showAssetOverlay = true;
-  };
+  });
 
   onMount(() => {
     navigate();
 
     return () => {
-      $showAssetOverlay = false;
+      // Discard a navigation still in flight
+      discardAssetsNavigation();
+      showAssetOverlay.current = false;
     };
   });
 </script>
 
 <svelte:window
   onhashchange={(event) => {
-    updateContentFromHashChange(event, navigate, ROUTE_REGEX);
+    updateContentFromHashChange(event, navigate, ASSETS_ROUTE_REGEX);
   }}
 />
 
@@ -145,6 +98,14 @@
   {#snippet main()}
     {#if isSearchPage}
       <SearchMainArea />
+    {:else if notFound}
+      <PageContainerMainArea aria-label={_('asset_library')}>
+        {#snippet mainContent()}
+          <NotFound message={_('asset_folder_not_found')} backPath="/assets" />
+        {/snippet}
+      </PageContainerMainArea>
+    {:else if selectedCloudService.current}
+      <ExternalMainArea />
     {:else if !env.isSmallScreen || !isIndexPage}
       <PageContainerMainArea
         id="assets-container"
@@ -154,50 +115,43 @@
           <PrimaryToolbar />
         {/snippet}
         {#snippet secondaryToolbar()}
-          {#if $listedAssets.length}
-            <SecondaryToolbar />
+          {#if listedAssets.current.length}
+            <SecondaryToolbar
+              allItems={Object.values(assetGroups.current).flat(1)}
+              selectedItems={selectedAssets}
+              totalCount={listedAssets.current.length}
+              sortKeys={sortKeys.current}
+            />
           {/if}
         {/snippet}
         {#snippet mainContent()}
           <AssetList />
         {/snippet}
         {#snippet secondarySidebar()}
-          <SecondarySidebar />
+          <SecondarySidebar asset={focusedAsset.current}>
+            {#snippet children(/** @type {Asset} */ asset)}
+              <InfoPanel {asset} showPreview={true} />
+            {/snippet}
+            {#snippet fallback()}
+              <FolderInfoPanel />
+            {/snippet}
+          </SecondarySidebar>
         {/snippet}
       </PageContainerMainArea>
     {/if}
   {/snippet}
 </PageContainer>
 
-{#if $showAssetOverlay}
-  <AssetDetailsOverlay />
+{#if showAssetOverlay.current}
+  {#if selectedCloudService.current}
+    <ExternalDetailsOverlay />
+  {:else}
+    <AssetDetailsOverlay />
+  {/if}
 {/if}
 
 <EditAssetDialog />
 <RenameAssetDialog />
-
-<Toast bind:show={$assetUpdatesToast.saved}>
-  <Alert status="success">
-    {_($assetUpdatesToast.published ? 'assets_saved_and_published' : 'assets_saved', {
-      values: { count: $assetUpdatesToast.count },
-    })}
-  </Alert>
-</Toast>
-
-<Toast bind:show={$assetUpdatesToast.moved}>
-  <Alert status="success">
-    {_('assets_moved', { values: { count: $assetUpdatesToast.count } })}
-  </Alert>
-</Toast>
-
-<Toast bind:show={$assetUpdatesToast.renamed}>
-  <Alert status="success">
-    {_('assets_renamed', { values: { count: $assetUpdatesToast.count } })}
-  </Alert>
-</Toast>
-
-<Toast bind:show={$assetUpdatesToast.deleted}>
-  <Alert status="success">
-    {_('assets_deleted', { values: { count: $assetUpdatesToast.count } })}
-  </Alert>
-</Toast>
+<NewFolderDialog />
+<RenameFolderDialog />
+<DeleteFolderDialog />

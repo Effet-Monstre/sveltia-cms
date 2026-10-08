@@ -1,12 +1,9 @@
-import { entryDraft } from '$lib/services/contents/draft';
 import { getField } from '$lib/services/contents/entry/fields';
-import { getPairs } from '$lib/services/contents/fields/key-value/helper';
+import { getPairsFromContent } from '$lib/services/contents/fields/key-value/pairs';
 import { COMPONENT_NAME_PREFIX_REGEX } from '$lib/services/contents/fields/rich-text';
 
 /**
- * @import { Writable } from 'svelte/store';
  * @import {
- * EntryDraft,
  * EntryValidityState,
  * GetFieldArgs,
  * LocaleValidityMap,
@@ -26,7 +23,8 @@ const KEY_PATH_REGEX = /(.+?)(?:\.[^.]*)?$/;
  * @param {boolean} args.required Whether the field is required.
  * @param {string | number} args.min Minimum allowed pairs.
  * @param {string | number} args.max Maximum allowed pairs.
- * @returns {{ skip: boolean, keyPath: string }} Whether to skip, and the resolved key path.
+ * @returns {{ skip: boolean, keyPath: string, empty?: boolean }} Whether to skip, the resolved key
+ * path, and whether the field holds no pairs at all.
  */
 export const validateKeyValueField = ({
   keyPath,
@@ -38,22 +36,39 @@ export const validateKeyValueField = ({
   min,
   max,
 }) => {
+  /**
+   * Check whether the given key path points to a KeyValue field.
+   * @param {string} _keyPath Key path, which may have a component name prefix.
+   * @returns {boolean} Result.
+   */
+  const isKeyValueField = (_keyPath) =>
+    getField({
+      ...getFieldArgs,
+      keyPath: _keyPath.replace(COMPONENT_NAME_PREFIX_REGEX, ''), // Remove component name prefix
+    })?.widget === 'keyvalue';
+
   // Given that values for a KeyValue field are flatten into `field.key1`, `field.key2` ...
   // `field.keyN`, we should validate only once against all these values. The key can be
   // empty, so use `.*` in the regex instead of `.+`
-  const _keyPath = /** @type {string} */ (keyPath.match(KEY_PATH_REGEX)?.[1]);
+  let _keyPath = /** @type {string} */ (keyPath.match(KEY_PATH_REGEX)?.[1]);
+  let isKeyValue = isKeyValueField(_keyPath);
 
-  const parentFieldConfig = getField({
-    ...getFieldArgs,
-    keyPath: _keyPath.replace(COMPONENT_NAME_PREFIX_REGEX, ''), // Remove component name prefix
-  });
+  // The key path can also be the field’s own, e.g. `obj.meta` holding `null` once all the pairs of
+  // a KeyValue field nested in an Object field have been removed
+  if (!isKeyValue && isKeyValueField(keyPath)) {
+    _keyPath = keyPath;
+    isKeyValue = true;
+  }
 
-  if (_keyPath in validities[locale] || parentFieldConfig?.widget !== 'keyvalue') {
+  if (_keyPath in validities[locale] || !isKeyValue) {
     return { skip: true, keyPath };
   }
 
-  const _entryDraft = /** @type {Writable<EntryDraft>} */ (entryDraft);
-  const pairs = getPairs({ entryDraft: _entryDraft, keyPath: _keyPath, locale });
+  // A blank pair, like the one a required field gets as its default value, isn’t saved, so it
+  // doesn’t count. A pair with an empty key but a value, which a file can hold, still does
+  const pairs = getPairsFromContent(getFieldArgs.valueMap ?? {}, _keyPath).filter(
+    ([key, value]) => key.trim() || value,
+  );
 
   if (required && !pairs.length) {
     validity.valueMissing = true;
@@ -63,5 +78,5 @@ export const validateKeyValueField = ({
     validity.rangeOverflow = true;
   }
 
-  return { skip: false, keyPath: _keyPath };
+  return { skip: false, keyPath: _keyPath, empty: !pairs.length };
 };

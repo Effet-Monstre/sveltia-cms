@@ -1,9 +1,11 @@
 import { _ } from '@sveltia/i18n';
 import { isObject } from '@sveltia/utils/object';
 
-import { gitBackendServices, unsupportedBackends, validBackendNames } from '$lib/services/backends';
+import { unsupportedBackends, validBackendNames } from '$lib/services/backends';
+import { gitBackendServices } from '$lib/services/backends/git/services';
 import { warnDeprecation } from '$lib/services/config/deprecations';
 import { checkUnsupportedOptions } from '$lib/services/config/parser/utils/validator';
+import { makeLink } from '$lib/services/utils/string';
 
 /**
  * @import { CmsConfig, GitBackend } from '$lib/types/public';
@@ -17,9 +19,21 @@ import { checkUnsupportedOptions } from '$lib/services/config/parser/utils/valid
 const UNSUPPORTED_OPTIONS = [
   // Sveltia CMS always uses GraphQL for Git backends, so this option is not applicable.
   { type: 'warning', prop: 'use_graphql', strKey: 'unsupported_ignored_option' },
-  // @todo Remove this warning when Sveltia CMS adds support for open authoring.
-  { type: 'warning', prop: 'open_authoring', strKey: 'open_authoring_unsupported' },
 ];
+
+const UNSUPPORTED_BACKEND_DOC_URL =
+  'https://sveltiacms.app/en/docs/migration/netlify-decap-cms#features-not-to-be-implemented';
+
+const UNSUPPORTED_BACKEND_SUGGESTION_URL =
+  'https://sveltiacms.app/en/docs/backends#supported-backends';
+
+const AUTH_DOC_URL = 'https://sveltiacms.app/en/docs/backends/BACKEND_NAME#authentication';
+/**
+ * Backend names whose documentation page has a different slug.
+ * @type {Record<string, string>}
+ */
+const BACKEND_DOC_SLUGS = { gitea: 'gitea-forgejo' };
+const OPEN_AUTHORING_DOC_URL = 'https://sveltiacms.app/en/docs/workflows/open';
 
 /**
  * Parse and validate the backend configuration from the site config.
@@ -49,9 +63,18 @@ export const parseBackendConfig = (cmsConfig, collectors) => {
     const _backend = unsupportedBackends[name];
     const type = _backend ? (_backend.deprecated ? 'deprecated' : 'known') : 'custom';
     const label = _backend?.label;
-    const message = _(`config.error.unsupported_${type}_backend`, { values: { name: label } });
 
-    errors.add(`${message} ${_('config.error.unsupported_backend_suggestion')}`);
+    const message = makeLink(
+      _(`config.error.unsupported_${type}_backend`, { values: { name: label } }),
+      UNSUPPORTED_BACKEND_DOC_URL,
+    );
+
+    const suggestion = makeLink(
+      _('config.error.unsupported_backend_suggestion'),
+      UNSUPPORTED_BACKEND_SUGGESTION_URL,
+    );
+
+    errors.add(`${message} ${suggestion}`);
 
     return;
   }
@@ -65,6 +88,9 @@ export const parseBackendConfig = (cmsConfig, collectors) => {
       auth_type: authType,
       // @ts-ignore GitLab/Gitea only
       app_id: appId,
+      open_authoring: openAuthoring,
+      // @ts-ignore GitHub only
+      auth_scope: authScope,
     } = /** @type {GitBackend} */ (backend);
 
     if (Array.isArray(authMethods) && !authMethods.length) {
@@ -72,25 +98,53 @@ export const parseBackendConfig = (cmsConfig, collectors) => {
     }
 
     const allowTokenAuth = !authMethods || authMethods.includes('token');
+    const authDocURL = AUTH_DOC_URL.replace('BACKEND_NAME', BACKEND_DOC_SLUGS[name] ?? name);
 
     if (repo === undefined) {
       errors.add(_('config.error.missing_repository'));
-    }
-
-    if (typeof repo !== 'string' || !/^[^/:]+(?:\/[^/:]+)+$/.test(repo)) {
+    } else if (typeof repo !== 'string' || !/^[^/:]+(?:\/[^/:]+)+$/.test(repo)) {
+      // A configured but malformed repository is a separate problem from a missing one, and
+      // reporting both for the same option only reads as noise
       errors.add(_('config.error.invalid_repository'));
     }
 
     if (authType === 'implicit') {
-      errors.add(_('config.error.oauth_implicit_flow').replace('BACKEND_NAME', name));
+      errors.add(makeLink(_('config.error.oauth_implicit_flow'), authDocURL));
     }
 
     if (name === 'github' && authType === 'pkce') {
-      errors.add(_('config.error.github_pkce_unsupported'));
+      errors.add(makeLink(_('config.error.github_pkce_unsupported'), authDocURL));
     }
 
     if (name === 'gitlab' && authType === 'pkce' && !appId) {
       errors.add(_('config.error.oauth_no_app_id'));
+    }
+
+    if (openAuthoring) {
+      // Open Authoring turns each change into a pull request from the contributor’s fork, so it
+      // only makes sense on top of Editorial Workflow. The site-level option is what counts here: a
+      // collection can opt out with its own `publish_mode`, but that only affects maintainers, who
+      // write to the configured repository; a contributor’s fork always goes through pull requests
+      if (cmsConfig.publish_mode !== 'editorial_workflow') {
+        errors.add(makeLink(_('config.error.open_authoring_no_workflow'), OPEN_AUTHORING_DOC_URL));
+      }
+
+      // The default scope grants access to every repository the contributor owns, including their
+      // private ones. That’s a lot to ask of someone who just wants to fix a typo, and a public
+      // repository doesn’t need it. The visibility of the repository isn’t known until someone
+      // signs in, so this can’t be decided automatically. GitLab has no equivalent option: its
+      // single `api` scope covers everything the CMS does. Gitea/Forgejo scopes are already
+      // limited to what the CMS uses
+      if (name === 'github' && authScope === undefined) {
+        // Warnings are logged to the console for whoever set the CMS up, so this is plain English
+        // with a plain URL rather than a localized string with a link in it
+        warnings.add(
+          'The `open_authoring` option is enabled without `auth_scope`, so contributors are ' +
+            'asked for access to all their repositories, including private ones. Set ' +
+            '`auth_scope: public_repo` if your repository is public, or `auth_scope: repo` to ' +
+            `confirm the broader scope is needed. ${OPEN_AUTHORING_DOC_URL}`,
+        );
+      }
     }
 
     // Gitea requires an app ID for OAuth authentication, but also supports token-based sign-in,

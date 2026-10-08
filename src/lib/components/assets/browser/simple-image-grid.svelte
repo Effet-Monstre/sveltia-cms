@@ -11,8 +11,7 @@
    * @property {string} [viewType] View type.
    * @property {string} [gridId] The `id` attribute of the inner listbox.
    * @property {boolean} [multiple] Whether to allow selecting multiple assets.
-   * @property {boolean} [showTitle] Whether to show the file name or title under the image while in
-   * grid view.
+   * @property {string} [ariaLabel] Accessible name of the list. Defaults to “Available Images”.
    * @property {(detail: { value: string }) => void} [onChange] Custom `change` event handler.
    * @property {Snippet} [children] Slot content.
    */
@@ -23,19 +22,19 @@
     viewType = 'grid',
     gridId = undefined,
     multiple = false,
-    showTitle = false,
+    ariaLabel = undefined,
     onChange = undefined,
     children = undefined,
     /* eslint-enable prefer-const */
   } = $props();
 </script>
 
-<div role="none" class="wrapper" class:show-title={showTitle}>
+<div role="none" class="wrapper">
   <Listbox
     id={gridId}
     class={viewType}
     {multiple}
-    aria-label={_('assets_dialog.available_images')}
+    ariaLabel={ariaLabel ?? _('assets_dialog.available_images')}
     onChange={(event) => {
       onChange?.(event.detail);
     }}
@@ -52,7 +51,6 @@
       .listbox {
         gap: 4px;
         border-width: 0;
-        max-height: calc(100% - var(--sui-focus-ring-width) * 2);
 
         .option {
           button {
@@ -85,8 +83,6 @@
       .listbox.grid {
         display: grid;
         grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
-        height: auto;
-        max-height: none;
 
         .option {
           button {
@@ -118,11 +114,6 @@
           outline-style: solid;
           outline-color: var(--sui-primary-accent-color-light);
         }
-      }
-
-      &:not(.wrapper.show-title) .listbox.grid .option .name {
-        position: absolute;
-        inset-inline-start: -99999px;
       }
 
       .listbox.list {

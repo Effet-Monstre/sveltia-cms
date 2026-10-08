@@ -7,26 +7,26 @@
   @see https://github.com/JamesLMilner/terra-draw
 -->
 <script>
-  // cSpell:ignore Nominatim jsonv2
-
   import { _ } from '@sveltia/i18n';
   import { AlertDialog, Button, Icon, Listbox, Option, SearchBar } from '@sveltia/ui';
-  import { isObject } from '@sveltia/utils/object';
-  import { untrack } from 'svelte';
+  import { onDestroy } from 'svelte';
 
   import LeafletMap from '$lib/components/common/leaflet-map.svelte';
   import { loadModule } from '$lib/services/app/dependencies';
+  import { searchLocations } from '$lib/services/contents/fields/map/geocoding';
   import {
     getGeometryBounds,
     isValidGeoJSON,
+    parseGeoJSON,
     roundCoordinates,
-  } from '$lib/services/contents/fields/map/helper';
-  import { sendRequest } from '$lib/services/utils/networking';
+  } from '$lib/services/contents/fields/map/helpers';
   import { toFixed } from '$lib/services/utils/number';
+  import { watch } from '$lib/services/utils/state.svelte';
 
   /**
    * @import Leaflet from 'leaflet';
    * @import { GeoJSONStoreGeometries, TerraDraw } from 'terra-draw';
+   * @import { LocationSearchResult } from '$lib/services/contents/fields/map/geocoding';
    * @import { FieldEditorProps, GeoCoordinates } from '$lib/types/private';
    * @import { MapField } from '$lib/types/public';
    */
@@ -35,15 +35,6 @@
    * @typedef {object} Props
    * @property {MapField} fieldConfig Field configuration.
    * @property {string | undefined} currentValue Field value. Stringified GeoJSON geometry object.
-   */
-
-  /**
-   * @typedef {object} SearchResult
-   * @property {string} place_id Unique identifier of the search result.
-   * @property {string} display_name Display name of the search result.
-   * @property {string} lat Latitude of the search result.
-   * @property {string} lon Longitude of the search result.
-   * @see https://nominatim.org/release-docs/develop/api/Search/
    */
 
   /** @type {FieldEditorProps & Props} */
@@ -68,7 +59,7 @@
   let inputValue = $state('');
   /** @type {string} */
   let searchQuery = $state('');
-  /** @type {SearchResult[] | undefined} */
+  /** @type {LocationSearchResult[] | undefined} */
   let searchResults = $state(undefined);
   /** @type {boolean} */
   let searching = $state(false);
@@ -79,6 +70,8 @@
 
   /** @type {Leaflet.Map | undefined} */
   let map = undefined;
+  /** Whether the component has been destroyed, possibly before the drawing tools are loaded. */
+  let destroyed = false;
 
   /**
    * Load the Terra Draw libraries and initialize the draw instance once the Leaflet map is ready.
@@ -100,6 +93,11 @@
       'terra-draw-leaflet-adapter',
       'dist/terra-draw-leaflet-adapter.module.js?module',
     );
+
+    // The component may have been destroyed, and the map removed, while the libraries were loading
+    if (destroyed) {
+      return;
+    }
 
     /** @type {Record<string, any>} */
     const constructors = {
@@ -138,6 +136,7 @@
    * @param {string} changeType Type of change that occurred in the draw instance.
    */
   const onDrawChange = (changeType) => {
+    /* v8 ignore next 3 -- the listener is added to the draw instance itself */
     if (!draw) {
       return;
     }
@@ -192,25 +191,9 @@
       return;
     }
 
-    let newValue = currentValue ?? '';
-    /** @type {GeoJSONStoreGeometries | undefined} */
-    let geometry = undefined;
-
     // Validate the value
-    try {
-      geometry = JSON.parse(newValue);
-
-      if (
-        !isObject(geometry) ||
-        geometry.type !== geometryType ||
-        !Array.isArray(geometry.coordinates)
-      ) {
-        throw new Error('Invalid object');
-      }
-    } catch {
-      newValue = '';
-      geometry = undefined;
-    }
+    const geometry = parseGeoJSON(currentValue ?? '', geometryType);
+    const newValue = geometry ? /** @type {string} */ (currentValue) : '';
 
     if (inputValue === newValue) {
       return;
@@ -243,27 +226,15 @@
   };
 
   /**
-   * Search for locations using the Nominatim API.
-   * @see https://nominatim.org/release-docs/develop/api/Search/
+   * Search for locations matching the query.
    */
   const searchLocation = async () => {
-    const q = searchQuery.trim();
-
-    if (!q) {
+    if (!searchQuery.trim()) {
       return;
     }
 
     searching = true;
-
-    const params = new URLSearchParams({ q, format: 'jsonv2' });
-    const url = `https://nominatim.openstreetmap.org/search?${params}`;
-
-    try {
-      searchResults = /** @type {SearchResult[]} */ (await sendRequest(url));
-    } catch {
-      searchResults = [];
-    }
-
+    searchResults = await searchLocations(searchQuery);
     searching = false;
   };
 
@@ -272,6 +243,7 @@
    * @param {GeoCoordinates} coordinates GeoCoordinates of the location to set.
    */
   const setLocation = ({ latitude, longitude }) => {
+    /* v8 ignore next 3 -- the drawing tools are loaded right after the map, before any input */
     if (!draw) {
       return;
     }
@@ -296,7 +268,7 @@
   /**
    * Handle the selection of a search result. Move the map to the selected location and add a point
    * feature to the map.
-   * @param {SearchResult} result Selected search result.
+   * @param {LocationSearchResult} result Selected search result.
    */
   const onSearchResultSelect = ({ lat, lon }) => {
     setLocation({ latitude: parseFloat(lat), longitude: parseFloat(lon) });
@@ -338,35 +310,43 @@
     currentValue = '';
   };
 
-  $effect(() => {
-    void draw;
-    void currentValue;
+  onDestroy(() => {
+    destroyed = true;
+    draw?.stop();
+  });
 
-    untrack(() => {
+  watch(
+    () => [draw, currentValue],
+    () => {
       setInputValue();
-    });
-  });
+    },
+  );
 
-  $effect(() => {
-    void inputValue;
-
-    untrack(() => {
+  watch(
+    () => inputValue,
+    () => {
       setCurrentValue();
-    });
-  });
+    },
+  );
 
-  $effect(() => {
-    void searchQuery;
-
-    untrack(() => {
+  watch(
+    () => searchQuery,
+    () => {
       searchLocation();
-    });
-  });
+    },
+  );
 </script>
 
 <div role="none" class="toolbar">
   <!-- @todo Replace this with `<Combobox>` -->
-  <SearchBar bind:value={searchQuery} debounce {readonly} flex placeholder={_('find_place')} />
+  <SearchBar
+    bind:value={searchQuery}
+    debounce
+    {readonly}
+    flex
+    placeholder={_('find_place')}
+    aria-label={_('find_place')}
+  />
   <!-- @todo Replace `title` with a native tooltip -->
   <Button
     variant="tertiary"
@@ -397,7 +377,7 @@
 {:else if searchQuery}
   {#if searchResults}
     {#if searchResults.length}
-      <Listbox aria-label={_('search_results')}>
+      <Listbox ariaLabel={_('search_results')}>
         {#each searchResults as result (result.place_id)}
           <Option
             label={result.display_name}

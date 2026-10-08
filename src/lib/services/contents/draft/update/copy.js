@@ -1,18 +1,21 @@
 import { parse } from 'marked';
-import { get } from 'svelte/store';
-import TurndownService from 'turndown';
 
-import { entryDraft } from '$lib/services/contents/draft';
+import { loadModule } from '$lib/services/app/dependencies';
+import { getInheritedI18nOption } from '$lib/services/contents/draft/create/proxy.svelte';
 import { copyFromLocaleToast, translatorApiKeyDialogState } from '$lib/services/contents/editor';
 import { getField } from '$lib/services/contents/entry/fields';
-import { getListFieldInfo } from '$lib/services/contents/fields/list/helper';
+import { isKeyPathWithin } from '$lib/services/contents/entry/key-paths';
+import { RICH_TEXT_FIELD_TYPES, TEXT_FIELD_TYPES } from '$lib/services/contents/fields';
+import { getListFieldInfo } from '$lib/services/contents/fields/list/helpers';
+import { getValueFormat } from '$lib/services/contents/fields/rich-text';
+import { isFieldTranslatable } from '$lib/services/contents/i18n/fields';
 import { translator } from '$lib/services/integrations/translators';
 import { prefs } from '$lib/services/user/prefs.svelte';
+import { escapeHTML } from '$lib/services/utils/string';
 
 /**
- * @import { Writable } from 'svelte/store';
  * @import { EntryDraft, InternalLocaleCode, LocaleContentMap } from '$lib/types/private';
- * @import { FieldKeyPath, ListField } from '$lib/types/public';
+ * @import { Field, FieldKeyPath, ListField, RichTextField } from '$lib/types/public';
  */
 
 /**
@@ -26,26 +29,80 @@ import { prefs } from '$lib/services/user/prefs.svelte';
  */
 
 /**
- * @typedef {Record<FieldKeyPath, { value: string, isMarkdown: boolean }>} CopyingFieldMap
+ * @typedef {Record<FieldKeyPath, { value: string, format: 'plain' | 'markdown' | 'html' }>}
+ * CopyingFieldMap
  */
 
 /**
- * Initialize a Turndown service instance for converting HTML to Markdown.
- * @internal
+ * Turndown service instance, created on first use.
+ * @type {Promise<import('turndown')> | undefined}
+ */
+let turndownServicePromise;
+
+/**
+ * Get a Turndown service instance for converting HTML to Markdown. The library is only needed when
+ * a translator without Markdown support hands HTML back, so it’s loaded from the CDN on demand
+ * rather than shipped in the bundle.
+ * @returns {Promise<import('turndown')>} Service instance.
  * @see https://github.com/mixmark-io/turndown
  */
-export const turndownService = new TurndownService({
-  headingStyle: 'atx',
-  bulletListMarker: '-',
-  codeBlockStyle: 'fenced',
-});
+export const getTurndownService = async () => {
+  turndownServicePromise ??= (async () => {
+    /** @type {{ default: typeof import('turndown') }} */
+    let module;
 
-// @ts-ignore Silence a false type error
-turndownService.keep(['span', 'div']);
+    try {
+      module = await loadModule('turndown', 'lib/turndown.browser.es.js');
+    } catch (error) {
+      // Let a later call try again, e.g. once the network is back
+      turndownServicePromise = undefined;
+      throw error;
+    }
+
+    const { default: TurndownService } = module;
+
+    const service = new TurndownService({
+      headingStyle: 'atx',
+      bulletListMarker: '-',
+      codeBlockStyle: 'fenced',
+    });
+
+    // @ts-ignore Silence a false type error
+    service.keep(['span', 'div']);
+
+    return service;
+  })();
+
+  return turndownServicePromise;
+};
+
+/**
+ * Named HTML character references a translator may return, besides numeric ones.
+ * @type {Record<string, string>}
+ */
+const HTML_ENTITY_MAP = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" };
+
+/**
+ * Decode the HTML character references in text returned by a translator taking HTML, which
+ * escapes special characters such as `&` and `"` in its output. Each reference is decoded once,
+ * so text escaped with {@link escapeHTML} comes back as it was. An unknown named reference is left
+ * as is.
+ * @param {string} text Text with character references.
+ * @returns {string} Decoded text.
+ */
+const decodeHTMLEntities = (text) =>
+  text.replace(/&(?:#(\d+)|#x([\da-f]+)|(amp|lt|gt|quot|apos));/gi, (ref, dec, hex, name) => {
+    if (name) {
+      return HTML_ENTITY_MAP[name.toLowerCase()];
+    }
+
+    const codePoint = dec ? Number(dec) : Number.parseInt(hex, 16);
+
+    return codePoint <= 0x10ffff ? String.fromCodePoint(codePoint) : ref;
+  });
 
 /**
  * Get a list of fields to be copied or translated from the source locale to the target locale.
- * @internal
  * @param {object} args Arguments.
  * @param {EntryDraft} args.draft Entry draft.
  * @param {CopyOptions} args.options Copy options.
@@ -65,10 +122,20 @@ export const getCopyingFieldMap = ({ draft, options }) => {
         const fieldType = field?.widget ?? 'string';
 
         if (
-          (keyPath && !_keyPath.startsWith(keyPath)) ||
+          (keyPath && !isKeyPathWithin(_keyPath, keyPath)) ||
+          // Only a translatable field has a value of its own in each locale: a field that isn’t
+          // localized is only saved in the default locale, and a duplicated one can’t be edited
+          // in the other locales. An item of a List field without subfields has no configuration
+          // of its own, so it takes the option of the List field
+          !isFieldTranslatable(
+            getInheritedI18nOption({
+              fieldConfig: field ?? /** @type {Field} */ ({}),
+              getFieldArgs: { ...getFieldArgs, keyPath: _keyPath },
+            }),
+          ) ||
           typeof value !== 'string' ||
           !value ||
-          !['richtext', 'markdown', 'text', 'string', 'list'].includes(fieldType) ||
+          ![...TEXT_FIELD_TYPES, 'list'].includes(fieldType) ||
           // prettier-ignore
           (fieldType === 'list' &&
           getListFieldInfo(/** @type {ListField} */ (field)).hasSubFields) ||
@@ -79,9 +146,11 @@ export const getCopyingFieldMap = ({ draft, options }) => {
           return null;
         }
 
-        const isMarkdown = fieldType === 'richtext' || fieldType === 'markdown';
+        const format = RICH_TEXT_FIELD_TYPES.includes(fieldType)
+          ? getValueFormat(/** @type {RichTextField} */ (field))
+          : 'plain';
 
-        return [_keyPath, { value, isMarkdown }];
+        return [_keyPath, { value, format }];
       })
       .filter((entry) => !!entry),
   );
@@ -89,7 +158,6 @@ export const getCopyingFieldMap = ({ draft, options }) => {
 
 /**
  * Update the toast notification.
- * @internal
  * @param {'info' | 'success' | 'error'} status Status.
  * @param {string} message Message key.
  * @param {object} context Context.
@@ -97,12 +165,18 @@ export const getCopyingFieldMap = ({ draft, options }) => {
  * @param {InternalLocaleCode} context.sourceLanguage Source locale, e.g. `en`.
  */
 export const updateToast = (status, message, { count, sourceLanguage }) => {
-  copyFromLocaleToast.set({ id: Date.now(), show: true, status, message, count, sourceLanguage });
+  copyFromLocaleToast.current = {
+    id: Date.now(),
+    show: true,
+    status,
+    message,
+    count,
+    sourceLanguage,
+  };
 };
 
 /**
  * Translate the field value(s) from another locale.
- * @internal
  * @param {object} args Arguments.
  * @param {LocaleContentMap} args.currentValues Current values for the entry draft. This will be
  * updated with the translated values.
@@ -110,39 +184,64 @@ export const updateToast = (status, message, { count, sourceLanguage }) => {
  * @param {CopyingFieldMap} args.copingFieldMap Copied or translated field values.
  */
 export const translateFields = async ({ currentValues, options, copingFieldMap }) => {
-  const { serviceId, markdownSupported, translate } = get(translator);
+  const { serviceId } = translator.current;
   const { sourceLanguage, targetLanguage } = options;
   const count = Object.keys(copingFieldMap).length;
+  let apiKey = prefs.apiKeys?.[serviceId];
 
-  const apiKey =
-    prefs.apiKeys?.[serviceId] ||
-    (await new Promise((resolve) => {
-      // The promise will be resolved once the user enters an API key on the dialog
-      translatorApiKeyDialogState.set({ show: true, multiple: count > 1, resolve });
-    }));
+  if (!apiKey) {
+    const { promise, resolve } = Promise.withResolvers();
+
+    translatorApiKeyDialogState.current = { show: true, multiple: count > 1, resolve };
+
+    // The promise will be resolved once the user enters an API key on the dialog
+    apiKey = await promise;
+  }
 
   if (!apiKey) {
     return;
   }
 
+  // Get the translator service again in case the user has selected a different service in the API
+  // key dialog, which will update the `translator` store
+  const { markdownSupported, translate } = translator.current;
+
   updateToast('info', 'translation.started', { count, sourceLanguage });
 
   try {
+    // A translator without Markdown support takes HTML, e.g. Google Translate with the `html`
+    // format and DeepL with HTML tag handling. A Markdown value is converted to HTML for it, a
+    // plain text value is escaped, so that its special characters are read as text, and an HTML
+    // value is passed as is
     const translatedValues = await translate(
-      Object.entries(copingFieldMap).map(([, { value, isMarkdown }]) =>
-        // Convert the value from Markdown to HTML if needed
-        isMarkdown && !markdownSupported ? /** @type {string} */ (parse(value)) : value,
+      Object.entries(copingFieldMap).map(([, { value, format }]) =>
+        markdownSupported || format === 'html'
+          ? value
+          : format === 'markdown'
+            ? /** @type {string} */ (parse(value))
+            : escapeHTML(value),
       ),
       { apiKey, sourceLanguage, targetLanguage },
     );
 
-    Object.entries(copingFieldMap).forEach(([_keyPath, { isMarkdown }], index) => {
+    const needsTurndown =
+      !markdownSupported &&
+      Object.values(copingFieldMap).some(({ format }) => format === 'markdown');
+
+    const turndownService = needsTurndown ? await getTurndownService() : undefined;
+
+    Object.entries(copingFieldMap).forEach(([_keyPath, { format }], index) => {
       const value = translatedValues[index];
 
-      // Convert the value back to Markdown if needed
+      // Convert the value back to Markdown or plain text if needed. The HTML comes back with its
+      // special characters as entities, which Turndown decodes for a Markdown value
       currentValues[targetLanguage][_keyPath] =
-        // @ts-ignore Silence a false type error
-        isMarkdown && !markdownSupported ? turndownService.turndown(value) : value;
+        markdownSupported || format === 'html'
+          ? value
+          : format === 'markdown'
+            ? // @ts-ignore Silence a false type error
+              /** @type {import('turndown')} */ (turndownService).turndown(value)
+            : decodeHTMLEntities(value);
     });
 
     updateToast('success', 'translation.complete', { count, sourceLanguage });
@@ -156,7 +255,6 @@ export const translateFields = async ({ currentValues, options, copingFieldMap }
 
 /**
  * Copy the field value(s) from another locale.
- * @internal
  * @param {object} args Arguments.
  * @param {LocaleContentMap} args.currentValues Current values for the entry draft. This will be
  * updated with the copied values.
@@ -176,11 +274,12 @@ export const copyFields = ({ currentValues, options, copingFieldMap }) => {
 
 /**
  * Copy or translate field value(s) from another locale.
- * @param {CopyOptions} options Copy options.
+ * @param {object} args Arguments.
+ * @param {EntryDraft} args.draft Entry draft.
+ * @param {CopyOptions} args.options Copy options.
  */
-export const copyFromLocale = async (options) => {
+export const copyFromLocale = async ({ draft, options }) => {
   const { sourceLanguage, translate = false } = options;
-  const draft = /** @type {EntryDraft} */ (get(entryDraft));
   const { currentValues } = draft;
   const copingFieldMap = getCopyingFieldMap({ draft, options });
   const count = Object.keys(copingFieldMap).length;
@@ -196,9 +295,4 @@ export const copyFromLocale = async (options) => {
   } else {
     copyFields({ currentValues, options, copingFieldMap });
   }
-
-  /** @type {Writable<EntryDraft>} */ (entryDraft).update((_draft) => ({
-    ..._draft,
-    currentValues,
-  }));
 };

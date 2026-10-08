@@ -1,9 +1,8 @@
-import { writable } from 'svelte/store';
 import { beforeEach, describe, expect, test, vi } from 'vitest';
 
 import {
   extractDateTime,
-  getAssociatedCollections,
+  fillEntryPathTemplate,
   getEntryPreviewURL,
   getEntryRepoBlobURL,
 } from '$lib/services/contents/entry/index';
@@ -17,13 +16,16 @@ vi.mock('$lib/services/config');
 vi.mock('$lib/services/contents/collection/entries/index-file');
 vi.mock('$lib/services/common/template');
 vi.mock('$lib/services/contents');
+vi.mock('$lib/services/contents/folders');
 vi.mock('$lib/services/contents/collection');
 vi.mock('$lib/services/backends', () => ({
-  backend: writable({
-    repository: {
-      blobBaseURL: 'https://github.com/user/repo/blob/main',
+  backend: {
+    current: {
+      repository: {
+        blobBaseURL: 'https://github.com/user/repo/blob/main',
+      },
     },
-  }),
+  },
 }));
 
 describe('Test getEntryPreviewURL()', () => {
@@ -103,10 +105,12 @@ describe('Test getEntryPreviewURL()', () => {
 
   test('returns undefined when show_preview_links is false', async () => {
     // @ts-ignore
-    (await import('$lib/services/config')).cmsConfig = writable({
-      show_preview_links: false,
-      _baseURL: 'https://example.com',
-    });
+    (await import('$lib/services/config')).cmsConfig = {
+      current: {
+        show_preview_links: false,
+        _baseURL: 'https://example.com',
+      },
+    };
 
     const result = getEntryPreviewURL(mockEntry, 'en', mockCollection);
 
@@ -115,9 +119,11 @@ describe('Test getEntryPreviewURL()', () => {
 
   test('returns undefined when baseURL is missing', async () => {
     // @ts-ignore
-    (await import('$lib/services/config')).cmsConfig = writable({
-      show_preview_links: true,
-    });
+    (await import('$lib/services/config')).cmsConfig = {
+      current: {
+        show_preview_links: true,
+      },
+    };
 
     const result = getEntryPreviewURL(mockEntry, 'en', mockCollection);
 
@@ -126,10 +132,12 @@ describe('Test getEntryPreviewURL()', () => {
 
   test('returns undefined when entry locale does not exist', async () => {
     // @ts-ignore
-    (await import('$lib/services/config')).cmsConfig = writable({
-      show_preview_links: true,
-      _baseURL: 'https://example.com',
-    });
+    (await import('$lib/services/config')).cmsConfig = {
+      current: {
+        show_preview_links: true,
+        _baseURL: 'https://example.com',
+      },
+    };
 
     const result = getEntryPreviewURL(mockEntry, 'fr', mockCollection);
 
@@ -138,10 +146,12 @@ describe('Test getEntryPreviewURL()', () => {
 
   test('returns undefined when preview_path is missing', async () => {
     // @ts-ignore
-    (await import('$lib/services/config')).cmsConfig = writable({
-      show_preview_links: true,
-      _baseURL: 'https://example.com',
-    });
+    (await import('$lib/services/config')).cmsConfig = {
+      current: {
+        show_preview_links: true,
+        _baseURL: 'https://example.com',
+      },
+    };
 
     const collectionWithoutPreviewPath = { ...mockCollection };
 
@@ -154,10 +164,12 @@ describe('Test getEntryPreviewURL()', () => {
 
   test('generates basic preview URL with slug', async () => {
     // @ts-ignore
-    (await import('$lib/services/config')).cmsConfig = writable({
-      show_preview_links: true,
-      _baseURL: 'https://example.com',
-    });
+    (await import('$lib/services/config')).cmsConfig = {
+      current: {
+        show_preview_links: true,
+        _baseURL: 'https://example.com',
+      },
+    };
 
     // Mock index file functions
     const { isCollectionIndexFile } =
@@ -190,10 +202,12 @@ describe('Test getEntryPreviewURL()', () => {
 
   test('handles baseURL with trailing slash', async () => {
     // @ts-ignore
-    (await import('$lib/services/config')).cmsConfig = writable({
-      show_preview_links: true,
-      _baseURL: 'https://example.com/',
-    });
+    (await import('$lib/services/config')).cmsConfig = {
+      current: {
+        show_preview_links: true,
+        _baseURL: 'https://example.com/',
+      },
+    };
 
     // Mock index file functions
     const { isCollectionIndexFile } =
@@ -213,10 +227,12 @@ describe('Test getEntryPreviewURL()', () => {
 
   test('handles path with leading slash', async () => {
     // @ts-ignore
-    (await import('$lib/services/config')).cmsConfig = writable({
-      show_preview_links: true,
-      _baseURL: 'https://example.com',
-    });
+    (await import('$lib/services/config')).cmsConfig = {
+      current: {
+        show_preview_links: true,
+        _baseURL: 'https://example.com',
+      },
+    };
 
     // Mock index file functions
     const { isCollectionIndexFile } =
@@ -236,10 +252,12 @@ describe('Test getEntryPreviewURL()', () => {
 
   test('works with different locales', async () => {
     // @ts-ignore
-    (await import('$lib/services/config')).cmsConfig = writable({
-      show_preview_links: true,
-      _baseURL: 'https://example.com',
-    });
+    (await import('$lib/services/config')).cmsConfig = {
+      current: {
+        show_preview_links: true,
+        _baseURL: 'https://example.com',
+      },
+    };
 
     // Mock index file functions
     const { isCollectionIndexFile } =
@@ -267,10 +285,12 @@ describe('Test getEntryPreviewURL()', () => {
 
   test('handles datetime fields in preview path template', async () => {
     // @ts-ignore
-    (await import('$lib/services/config')).cmsConfig = writable({
-      show_preview_links: true,
-      _baseURL: 'https://example.com',
-    });
+    (await import('$lib/services/config')).cmsConfig = {
+      current: {
+        show_preview_links: true,
+        _baseURL: 'https://example.com',
+      },
+    };
 
     const collectionWithDatePath = {
       ...mockCollection,
@@ -305,10 +325,12 @@ describe('Test getEntryPreviewURL()', () => {
 
   test('handles specific datetime field in preview path', async () => {
     // @ts-ignore
-    (await import('$lib/services/config')).cmsConfig = writable({
-      show_preview_links: true,
-      _baseURL: 'https://example.com',
-    });
+    (await import('$lib/services/config')).cmsConfig = {
+      current: {
+        show_preview_links: true,
+        _baseURL: 'https://example.com',
+      },
+    };
 
     const entryWithCustomDate = {
       ...mockEntry,
@@ -364,10 +386,12 @@ describe('Test getEntryPreviewURL()', () => {
 
   test('returns undefined when datetime field is missing but required in template', async () => {
     // @ts-ignore
-    (await import('$lib/services/config')).cmsConfig = writable({
-      show_preview_links: true,
-      _baseURL: 'https://example.com',
-    });
+    (await import('$lib/services/config')).cmsConfig = {
+      current: {
+        show_preview_links: true,
+        _baseURL: 'https://example.com',
+      },
+    };
 
     const entryWithoutDate = {
       ...mockEntry,
@@ -394,10 +418,12 @@ describe('Test getEntryPreviewURL()', () => {
 
   test('handles UTC datetime fields', async () => {
     // @ts-ignore
-    (await import('$lib/services/config')).cmsConfig = writable({
-      show_preview_links: true,
-      _baseURL: 'https://example.com',
-    });
+    (await import('$lib/services/config')).cmsConfig = {
+      current: {
+        show_preview_links: true,
+        _baseURL: 'https://example.com',
+      },
+    };
 
     const collectionWithUTCDatePath = {
       ...mockCollection,
@@ -434,10 +460,12 @@ describe('Test getEntryPreviewURL()', () => {
 
   test('handles _index slug files correctly (omits _index from URL)', async () => {
     // @ts-ignore
-    (await import('$lib/services/config')).cmsConfig = writable({
-      show_preview_links: true,
-      _baseURL: 'https://example.com',
-    });
+    (await import('$lib/services/config')).cmsConfig = {
+      current: {
+        show_preview_links: true,
+        _baseURL: 'https://example.com',
+      },
+    };
 
     // Create an entry with _index slug
     const indexEntry = {
@@ -483,10 +511,12 @@ describe('Test getEntryPreviewURL()', () => {
 
   test('works with collection files', async () => {
     // @ts-ignore
-    (await import('$lib/services/config')).cmsConfig = writable({
-      show_preview_links: true,
-      _baseURL: 'https://example.com',
-    });
+    (await import('$lib/services/config')).cmsConfig = {
+      current: {
+        show_preview_links: true,
+        _baseURL: 'https://example.com',
+      },
+    };
 
     /** @type {InternalCollectionFile} */
     const mockCollectionFile = {
@@ -549,10 +579,12 @@ describe('Test getEntryPreviewURL()', () => {
 
   test('returns undefined when fillTemplate throws error', async () => {
     // @ts-ignore
-    (await import('$lib/services/config')).cmsConfig = writable({
-      show_preview_links: true,
-      _baseURL: 'https://example.com',
-    });
+    (await import('$lib/services/config')).cmsConfig = {
+      current: {
+        show_preview_links: true,
+        _baseURL: 'https://example.com',
+      },
+    };
 
     // Mock index file functions
     const { isCollectionIndexFile } =
@@ -574,10 +606,12 @@ describe('Test getEntryPreviewURL()', () => {
 
   test('handles empty content object', async () => {
     // @ts-ignore
-    (await import('$lib/services/config')).cmsConfig = writable({
-      show_preview_links: true,
-      _baseURL: 'https://example.com',
-    });
+    (await import('$lib/services/config')).cmsConfig = {
+      current: {
+        show_preview_links: true,
+        _baseURL: 'https://example.com',
+      },
+    };
 
     const entryWithEmptyContent = {
       ...mockEntry,
@@ -607,10 +641,12 @@ describe('Test getEntryPreviewURL()', () => {
 
   test('uses default show_preview_links when not explicitly set', async () => {
     // @ts-ignore
-    (await import('$lib/services/config')).cmsConfig = writable({
-      _baseURL: 'https://example.com',
-      // show_preview_links not set, should default to true
-    });
+    (await import('$lib/services/config')).cmsConfig = {
+      current: {
+        _baseURL: 'https://example.com',
+        // show_preview_links not set, should default to true
+      },
+    };
 
     // Mock index file functions
     const { isCollectionIndexFile } =
@@ -628,9 +664,187 @@ describe('Test getEntryPreviewURL()', () => {
     expect(result).toBe('https://example.com/posts/test-entry');
   });
 
+  test('uses the base URL override instead of the configured site URL', async () => {
+    // @ts-ignore
+    (await import('$lib/services/config')).cmsConfig = {
+      current: {
+        show_preview_links: true,
+        _baseURL: 'https://example.com',
+      },
+    };
+
+    const { isCollectionIndexFile } =
+      await import('$lib/services/contents/collection/entries/index-file');
+
+    vi.mocked(isCollectionIndexFile).mockReturnValue(false);
+
+    const { fillTemplate } = await import('$lib/services/common/template');
+
+    vi.mocked(fillTemplate).mockReturnValue('posts/test-entry');
+
+    const result = getEntryPreviewURL(mockEntry, 'en', mockCollection, undefined, {
+      baseURL: 'https://deploy-preview-1--example.netlify.app',
+    });
+
+    expect(result).toBe('https://deploy-preview-1--example.netlify.app/posts/test-entry');
+  });
+
+  test('uses the base URL override when site_url is not configured', async () => {
+    // @ts-ignore
+    (await import('$lib/services/config')).cmsConfig = { current: { show_preview_links: true } };
+
+    const { isCollectionIndexFile } =
+      await import('$lib/services/contents/collection/entries/index-file');
+
+    vi.mocked(isCollectionIndexFile).mockReturnValue(false);
+
+    const { fillTemplate } = await import('$lib/services/common/template');
+
+    vi.mocked(fillTemplate).mockReturnValue('posts/test-entry');
+
+    const result = getEntryPreviewURL(mockEntry, 'en', mockCollection, undefined, {
+      baseURL: 'https://preview.example.com',
+    });
+
+    expect(result).toBe('https://preview.example.com/posts/test-entry');
+  });
+
+  test('strips a trailing slash from the base URL override', async () => {
+    // @ts-ignore
+    (await import('$lib/services/config')).cmsConfig = { current: { show_preview_links: true } };
+
+    const { isCollectionIndexFile } =
+      await import('$lib/services/contents/collection/entries/index-file');
+
+    vi.mocked(isCollectionIndexFile).mockReturnValue(false);
+
+    const { fillTemplate } = await import('$lib/services/common/template');
+
+    vi.mocked(fillTemplate).mockReturnValue('/posts/test-entry');
+
+    const result = getEntryPreviewURL(mockEntry, 'en', mockCollection, undefined, {
+      baseURL: 'https://preview.example.com/',
+    });
+
+    expect(result).toBe('https://preview.example.com/posts/test-entry');
+  });
+
+  test('links to the root of the site without preview_path when asked to', async () => {
+    // @ts-ignore
+    (await import('$lib/services/config')).cmsConfig = { current: { show_preview_links: true } };
+
+    const collectionWithoutPreviewPath = { ...mockCollection };
+
+    delete collectionWithoutPreviewPath.preview_path;
+
+    const result = getEntryPreviewURL(mockEntry, 'en', collectionWithoutPreviewPath, undefined, {
+      baseURL: 'https://preview.example.com/',
+      fallbackToRoot: true,
+    });
+
+    expect(result).toBe('https://preview.example.com/');
+  });
+
+  test('links to the root of the site without preview_path on the collection file', async () => {
+    // @ts-ignore
+    (await import('$lib/services/config')).cmsConfig = { current: { show_preview_links: true } };
+
+    const collectionFile = /** @type {InternalCollectionFile} */ ({
+      name: 'about',
+      file: 'content/about.md',
+      fields: [],
+      _file: { extension: 'md', format: 'yaml-frontmatter' },
+      _i18n: mockCollection._i18n,
+    });
+
+    const result = getEntryPreviewURL(mockEntry, 'en', mockCollection, collectionFile, {
+      baseURL: 'https://preview.example.com',
+      fallbackToRoot: true,
+    });
+
+    // The collection’s own `preview_path` doesn’t apply to its files
+    expect(result).toBe('https://preview.example.com/');
+  });
+
+  test('uses preview_path rather than the root when both are possible', async () => {
+    // @ts-ignore
+    (await import('$lib/services/config')).cmsConfig = { current: { show_preview_links: true } };
+
+    const { isCollectionIndexFile } =
+      await import('$lib/services/contents/collection/entries/index-file');
+
+    vi.mocked(isCollectionIndexFile).mockReturnValue(false);
+
+    const { fillTemplate } = await import('$lib/services/common/template');
+
+    vi.mocked(fillTemplate).mockReturnValue('posts/test-entry');
+
+    const result = getEntryPreviewURL(mockEntry, 'en', mockCollection, undefined, {
+      baseURL: 'https://preview.example.com',
+      fallbackToRoot: true,
+    });
+
+    expect(result).toBe('https://preview.example.com/posts/test-entry');
+  });
+
+  test('gives no root link when preview_path cannot be filled in', async () => {
+    // @ts-ignore
+    (await import('$lib/services/config')).cmsConfig = { current: { show_preview_links: true } };
+
+    const { isCollectionIndexFile } =
+      await import('$lib/services/contents/collection/entries/index-file');
+
+    vi.mocked(isCollectionIndexFile).mockReturnValue(false);
+
+    const { fillTemplate } = await import('$lib/services/common/template');
+
+    vi.mocked(fillTemplate).mockImplementation(() => {
+      throw new Error('Unresolvable template tag');
+    });
+
+    const result = getEntryPreviewURL(mockEntry, 'en', mockCollection, undefined, {
+      baseURL: 'https://preview.example.com',
+      fallbackToRoot: true,
+    });
+
+    expect(result).toBeUndefined();
+  });
+
+  test('ignores fallbackToRoot when show_preview_links is false', async () => {
+    // @ts-ignore
+    (await import('$lib/services/config')).cmsConfig = { current: { show_preview_links: false } };
+
+    const collectionWithoutPreviewPath = { ...mockCollection };
+
+    delete collectionWithoutPreviewPath.preview_path;
+
+    const result = getEntryPreviewURL(mockEntry, 'en', collectionWithoutPreviewPath, undefined, {
+      baseURL: 'https://preview.example.com',
+      fallbackToRoot: true,
+    });
+
+    expect(result).toBeUndefined();
+  });
+
+  test('ignores the base URL override when show_preview_links is false', async () => {
+    // @ts-ignore
+    (await import('$lib/services/config')).cmsConfig = {
+      current: {
+        show_preview_links: false,
+        _baseURL: 'https://example.com',
+      },
+    };
+
+    const result = getEntryPreviewURL(mockEntry, 'en', mockCollection, undefined, {
+      baseURL: 'https://preview.example.com',
+    });
+
+    expect(result).toBeUndefined();
+  });
+
   test('handles null cmsConfig by using empty object fallback (line 84)', async () => {
     // @ts-ignore - Set cmsConfig to null to test the ?? {} fallback
-    (await import('$lib/services/config')).cmsConfig = writable(null);
+    (await import('$lib/services/config')).cmsConfig = { current: null };
 
     // Mock index file functions
     const { isCollectionIndexFile } =
@@ -647,10 +861,12 @@ describe('Test getEntryPreviewURL()', () => {
 
   test('omits locale from preview path when omitDefaultLocaleFromPreviewPath is true and locale is default', async () => {
     // @ts-ignore
-    (await import('$lib/services/config')).cmsConfig = writable({
-      show_preview_links: true,
-      _baseURL: 'https://example.com',
-    });
+    (await import('$lib/services/config')).cmsConfig = {
+      current: {
+        show_preview_links: true,
+        _baseURL: 'https://example.com',
+      },
+    };
 
     const collectionWithLocaleInPath = {
       ...mockCollection,
@@ -688,10 +904,12 @@ describe('Test getEntryPreviewURL()', () => {
 
   test('removes locale segment with dot separator from preview path', async () => {
     // @ts-ignore
-    (await import('$lib/services/config')).cmsConfig = writable({
-      show_preview_links: true,
-      _baseURL: 'https://example.com',
-    });
+    (await import('$lib/services/config')).cmsConfig = {
+      current: {
+        show_preview_links: true,
+        _baseURL: 'https://example.com',
+      },
+    };
 
     const collectionWithDotLocaleInPath = {
       ...mockCollection,
@@ -728,10 +946,12 @@ describe('Test getEntryPreviewURL()', () => {
 
   test('preserves locale in preview path for non-default locales even when omitDefaultLocaleFromPreviewPath is true', async () => {
     // @ts-ignore
-    (await import('$lib/services/config')).cmsConfig = writable({
-      show_preview_links: true,
-      _baseURL: 'https://example.com',
-    });
+    (await import('$lib/services/config')).cmsConfig = {
+      current: {
+        show_preview_links: true,
+        _baseURL: 'https://example.com',
+      },
+    };
 
     const collectionWithLocaleInPath = {
       ...mockCollection,
@@ -769,10 +989,12 @@ describe('Test getEntryPreviewURL()', () => {
 
   test('does not remove locale from preview path when omitDefaultLocaleFromPreviewPath is false', async () => {
     // @ts-ignore
-    (await import('$lib/services/config')).cmsConfig = writable({
-      show_preview_links: true,
-      _baseURL: 'https://example.com',
-    });
+    (await import('$lib/services/config')).cmsConfig = {
+      current: {
+        show_preview_links: true,
+        _baseURL: 'https://example.com',
+      },
+    };
 
     const collectionWithLocaleInPath = {
       ...mockCollection,
@@ -805,100 +1027,6 @@ describe('Test getEntryPreviewURL()', () => {
       }),
     );
     expect(result).toBe('https://example.com/en/posts/test-entry');
-  });
-});
-
-describe('Test getAssociatedCollections()', () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-  });
-
-  test('should return collections for entry path', async () => {
-    const mockEntry = {
-      id: 'test-entry',
-      slug: 'test-entry',
-      subPath: 'test-entry',
-      locales: {
-        en: {
-          slug: 'test-entry',
-          path: 'content/posts/test-entry.md',
-          content: { title: 'Test Entry' },
-        },
-      },
-    };
-
-    // Mock the dependencies
-    const { getEntryFoldersByPath } = await import('$lib/services/contents');
-    const { getCollection } = await import('$lib/services/contents/collection');
-
-    vi.mocked(getEntryFoldersByPath).mockReturnValue([
-      { collectionName: 'posts' },
-      { collectionName: 'blog' },
-    ]);
-
-    /** @type {import('$lib/types/private').InternalCollection} */
-    const mockCollection = {
-      name: 'posts',
-      _type: /** @type {'entry'} */ ('entry'),
-      folder: 'content/posts',
-      fields: [],
-      _file: {
-        extension: 'md',
-        format: 'yaml-frontmatter',
-        basePath: 'content/posts',
-      },
-      _i18n: {
-        i18nEnabled: false,
-        saveAllLocales: false,
-        allLocales: ['en'],
-        initialLocales: ['en'],
-        defaultLocale: 'en',
-        structure: 'single_file',
-        structureMap: {
-          i18nSingleFile: true,
-          i18nSingleFileDefaultRoot: false,
-          i18nMultiFile: false,
-          i18nMultiFolder: false,
-          i18nMultiRootFolder: false,
-        },
-        canonicalSlug: { key: 'translationKey', value: '{{slug}}' },
-        omitDefaultLocaleFromFilePath: false,
-        omitDefaultLocaleFromPreviewPath: false,
-      },
-      _thumbnailFieldNames: [],
-    };
-
-    // blog collection doesn't exist
-    vi.mocked(getCollection).mockReturnValueOnce(mockCollection).mockReturnValueOnce(undefined);
-
-    const result = getAssociatedCollections(mockEntry);
-
-    expect(result).toHaveLength(1);
-    expect(result[0]).toBe(mockCollection);
-    expect(getEntryFoldersByPath).toHaveBeenCalledWith('content/posts/test-entry.md');
-  });
-
-  test('should return empty array when no collections found', async () => {
-    const mockEntry = {
-      id: 'test-entry',
-      slug: 'test-entry',
-      subPath: 'test-entry',
-      locales: {
-        en: {
-          slug: 'test-entry',
-          path: 'content/posts/test-entry.md',
-          content: { title: 'Test Entry' },
-        },
-      },
-    };
-
-    const { getEntryFoldersByPath } = await import('$lib/services/contents');
-
-    vi.mocked(getEntryFoldersByPath).mockReturnValue([]);
-
-    const result = getAssociatedCollections(mockEntry);
-
-    expect(result).toEqual([]);
   });
 });
 
@@ -1094,6 +1222,91 @@ describe('Test extractDateTime()', () => {
         second: '00',
       }),
     );
+  });
+});
+
+describe('Test fillEntryPathTemplate()', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  const collection = /** @type {InternalCollection} */ (
+    /** @type {unknown} */ ({ name: 'posts', _type: 'entry' })
+  );
+
+  const args = {
+    collection,
+    fields: /** @type {any[]} */ ([
+      { name: 'date', widget: 'datetime', format: 'YYYY-MM-DD' },
+      { name: 'published', widget: 'datetime', format: 'YYYY-MM-DD' },
+    ]),
+    locale: 'en',
+    slug: 'hello',
+    entryFilePath: 'content/posts/hello.md',
+    content: { date: '2024-01-15', published: '2025-06-30' },
+  };
+
+  test('fills in a template without date and time tags', async () => {
+    const { fillTemplate } = await import('$lib/services/common/template');
+
+    vi.mocked(fillTemplate).mockReturnValue('/images/hello.webp');
+
+    expect(fillEntryPathTemplate({ ...args, pathTemplate: '/images/{{slug}}.webp' })).toBe(
+      '/images/hello.webp',
+    );
+    expect(fillTemplate).toHaveBeenCalledWith('/images/{{slug}}.webp', {
+      type: 'preview_path',
+      collection,
+      content: args.content,
+      locale: 'en',
+      currentSlug: 'hello',
+      entryFilePath: 'content/posts/hello.md',
+      dateTimeParts: undefined,
+      isIndexFile: false,
+    });
+  });
+
+  test('fills in date and time tags from the given date field', async () => {
+    const { fillTemplate } = await import('$lib/services/common/template');
+
+    vi.mocked(fillTemplate).mockReturnValue('/images/2025/hello.webp');
+
+    expect(
+      fillEntryPathTemplate({
+        ...args,
+        pathTemplate: '/images/{{year}}/{{slug}}.webp',
+        dateFieldName: 'published',
+        isIndexFile: true,
+      }),
+    ).toBe('/images/2025/hello.webp');
+    expect(fillTemplate).toHaveBeenCalledWith(
+      '/images/{{year}}/{{slug}}.webp',
+      expect.objectContaining({
+        dateTimeParts: expect.objectContaining({ year: '2025' }),
+        isIndexFile: true,
+      }),
+    );
+  });
+
+  test('returns undefined without a date to fill in date and time tags', async () => {
+    const { fillTemplate } = await import('$lib/services/common/template');
+
+    expect(
+      fillEntryPathTemplate({ ...args, content: {}, pathTemplate: '/images/{{year}}.webp' }),
+    ).toBeUndefined();
+    expect(fillTemplate).not.toHaveBeenCalled();
+  });
+
+  test('returns undefined when a tag cannot be resolved', async () => {
+    const { fillTemplate } = await import('$lib/services/common/template');
+
+    vi.mocked(fillTemplate).mockImplementation(() => {
+      throw new Error('Unresolvable template tag');
+    });
+
+    expect(
+      fillEntryPathTemplate({ ...args, pathTemplate: '/images/{{fields.missing}}.webp' }),
+    ).toBeUndefined();
   });
 });
 

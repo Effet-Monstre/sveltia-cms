@@ -1,23 +1,22 @@
-/* eslint-disable no-await-in-loop */
-/* eslint-disable no-continue */
-/* eslint-disable no-restricted-syntax */
-
 import { getPathInfo, readAsText } from '@sveltia/utils/file';
 import { stripSlashes } from '@sveltia/utils/string';
 
-import { allAssets } from '$lib/services/assets';
-import { GIT_CONFIG_FILE_REGEX, gitConfigFiles } from '$lib/services/backends/git/shared/config';
+import { getAssetKind } from '$lib/services/assets/kinds';
+import { allAssets } from '$lib/services/assets/state';
+import { getDirectoryHandle } from '$lib/services/backends/fs/shared/handles';
+import { deleteEmptyParentDirs, moveFile } from '$lib/services/backends/fs/shared/save';
+import { gitConfigFiles } from '$lib/services/backends/git/shared/config';
 import { createFileList } from '$lib/services/backends/process';
 import { allEntries, dataLoaded, entryParseErrors } from '$lib/services/contents';
 import { prepareEntries } from '$lib/services/contents/file/process';
-import { createPathRegEx, getBlob, getGitHash } from '$lib/services/utils/file';
-import { getAssetKind } from '$lib/services/assets/kinds';
+import { getBlob, getGitHash } from '$lib/services/utils/file';
 
 /**
  * @import {
-Asset,
-BaseAssetListItem,
- * BaseFileListItem,
+ * Asset,
+ * BaseAssetListItem,
+ * BaseConfigListItem,
+ * BaseEntryListItem,
  * BaseFileListItemProps,
  * CommitResults,
  * FileChange,
@@ -25,276 +24,93 @@ BaseAssetListItem,
  */
 
 /**
- * @typedef {{ file: File, path: string }} FileListItem
+ * Entry or asset as the host application reports it from `GET /admin/entries`.
+ * @typedef {object} ApiListItem
+ * @property {string} handle Path of the file within the repository.
+ * @property {any} [content] Parsed content of an entry file. An asset has none; its bytes are
+ * fetched on demand with the `file_url` the host returns for it.
  */
 
 /**
- * Get a file or directory handle at the given path.
- * @param {FileSystemDirectoryHandle} rootDirHandle Root directory handle.
- * @param {string} path Path to the file/directory.
- * @param {'file' | 'directory'} [type] Type of the handle to retrieve.
- * @returns {Promise<FileSystemFileHandle | FileSystemDirectoryHandle>} Handle.
- * @throws {Error} If the path is empty and the type is `file`.
- * @see https://developer.mozilla.org/en-US/docs/Web/API/FileSystemDirectoryHandle/getFileHandle
- * @see https://developer.mozilla.org/en-US/docs/Web/API/FileSystemDirectoryHandle/getDirectoryHandle
+ * File read from the host application, before it’s normalized into a file list item.
+ * @typedef {object} ApiFileListItem
+ * @property {File} [file] File content, for an entry. An asset has none.
+ * @property {string} path Path of the file within the repository.
  */
-const getHandleByPath = async (rootDirHandle, path, type = 'file') => {
-  const normalizedPath = stripSlashes(path ?? '');
-  /** @type {FileSystemFileHandle | FileSystemDirectoryHandle} */
-  let handle = rootDirHandle;
-
-  if (!normalizedPath) {
-    if (type === 'directory') {
-      return handle;
-    }
-
-    throw new Error('Path is required for file handle retrieval');
-  }
-
-  const pathParts = normalizedPath.split('/');
-  const lastIndex = pathParts.length - 1;
-  const create = true;
-
-  for await (const [index, name] of pathParts.entries()) {
-    // If the part is the last one and the type is `file`, we need to ensure that we get a file
-    // handle. Otherwise, we can get a directory handle.
-    handle = await (index === lastIndex && type === 'file'
-      ? /** @type {FileSystemDirectoryHandle} */ (handle).getFileHandle(name, { create })
-      : /** @type {FileSystemDirectoryHandle} */ (handle).getDirectoryHandle(name, { create }));
-  }
-
-  return handle;
-};
 
 /**
- * Get a file handle at the given path. This function is used to retrieve a file handle for reading
- * or writing a file. If the file does not exist, it will be created.
- * @param {FileSystemDirectoryHandle} rootDirHandle Root directory handle.
- * @param {string} path Path to the file.
- * @returns {Promise<FileSystemFileHandle>} Handle.
- * @throws {Error} If the path is empty.
+ * Get the CSRF token of the host application, which every request to it has to carry.
+ * @returns {string} Token, or an empty string if the page has no `csrf-token` meta tag.
  */
-export const getFileHandle = (rootDirHandle, path) =>
-  /** @type {Promise<FileSystemFileHandle>} */ (getHandleByPath(rootDirHandle, path, 'file'));
-
-/**
- * Get a directory handle at the given path. This function is used to retrieve a directory handle
- * for reading or writing files within a directory. If the directory does not exist, it will be
- * created.
- * @param {FileSystemDirectoryHandle} rootDirHandle Root directory handle.
- * @param {string} path Path to the directory.
- * @returns {Promise<FileSystemDirectoryHandle>} Handle.
- */
-export const getDirectoryHandle = (rootDirHandle, path) =>
-  /** @type {Promise<FileSystemDirectoryHandle>} */ (
-    getHandleByPath(rootDirHandle, path, 'directory')
-  );
-
-/**
- * Create a regular expression that matches the given path, taking template tags into account.
- * @param {string} path Path.
- * @returns {RegExp} RegEx.
- */
-const getPathRegex = (path) =>
-  createPathRegEx(path, (segment) => segment.replace(/{{.+?}}/, '.+?'));
-
-/**
- * Retrieve all the files under the given directory recursively.
- * @param {FileSystemDirectoryHandle | any} dirHandle Directory handle.
- * @param {object} context Context object.
- * @param {FileSystemDirectoryHandle} context.rootDirHandle Root directory handle.
- * @param {string[]} context.scanningPaths Scanning paths.
- * @param {RegExp[]} context.scanningPathsRegEx Regular expressions for scanning paths.
- * @param {FileListItem[]} context.fileList List of available files.
- */
-const scanDir = async (dirHandle, context) => {
-  const { rootDirHandle, scanningPaths, scanningPathsRegEx, fileList } = context;
-
-  for await (const [name, handle] of dirHandle.entries()) {
-    // Skip hidden files and directories, except for Git configuration files
-    if (name.startsWith('.') && !GIT_CONFIG_FILE_REGEX.test(name)) {
-      continue;
-    }
-
-    const path = (await rootDirHandle.resolve(handle))?.join('/') ?? '';
-    const hasMatchingPath = scanningPathsRegEx.some((regex) => regex.test(path));
-
-    if (handle.kind === 'file') {
-      if (!hasMatchingPath) {
-        continue;
-      }
-
-      try {
-        /** @type {File} */
-        let file = await handle.getFile();
-        const { type, lastModified } = file;
-
-        // Clone the file immediately to avoid potential permission problems
-        file = new File([file], file.name, { type, lastModified });
-
-        fileList.push({ file, path });
-      } catch (ex) {
-        // eslint-disable-next-line no-console
-        console.error(ex);
-      }
-    }
-
-    if (handle.kind === 'directory') {
-      const regex = getPathRegex(path);
-
-      if (!hasMatchingPath && !scanningPaths.some((p) => regex.test(p))) {
-        continue;
-      }
-
-      await scanDir(handle, context);
-    }
-  }
-};
+const getCsrfToken = () =>
+  /** @type {HTMLMetaElement | null} */ (document.querySelector('meta[name=csrf-token]'))
+    ?.content ?? '';
 
 /**
  * Normalize a file list item to ensure it has the required properties. This function also computes
  * the SHA-1 hash of the file. The file path and name must be normalized, as certain non-ASCII
  * characters (e.g. Japanese) can be problematic particularly on macOS.
- * @param {FileListItem} fileListItem File list item.
+ * @param {ApiFileListItem} fileListItem File list item.
  * @returns {Promise<BaseFileListItemProps>} Normalized file list item.
  */
 const normalizeFileListItem = async ({ file, path }) => {
-  const pathChunks = path.split('/');
-  const fileName = pathChunks[pathChunks.length - 1];
+  const name = getPathInfo(path).basename;
 
   return file
     ? {
+        // @ts-ignore `file` isn’t part of the upstream type, but it’s passed through to the entry
+        // and asset list items, where this backend reads the text from it
         file,
         path: path.normalize(),
         name: file.name.normalize(),
         size: file.size,
         sha: await getGitHash(file),
       }
-    : { path: path.normalize(), sha: 'sha', name: fileName, size: 10 };
+    : { path: path.normalize(), sha: 'sha', name, size: 10 };
 };
 
 /**
- * Parse asset file info to create a complete asset object.
- * @internal
+ * Parse asset file info to create a complete asset object. An asset served by the host application
+ * has no content here, so it’s listed without a size or hash, and its bytes are fetched when the
+ * asset is shown.
  * @param {BaseAssetListItem} fileInfo Asset file info.
  * @returns {Promise<Asset>} Asset object.
  */
-export const parseAssetFileInfo = async (fileInfo) => {
-  const { name, handle } = fileInfo;
-  const kind = getAssetKind(name);
-
-  try {
-    const file = await /** @type {FileSystemFileHandle} */ (handle).getFile();
-    const { size } = file;
-    const sha = await getGitHash(file);
-
-    return { ...fileInfo, kind, size, sha };
-  } catch (ex) {
-    // eslint-disable-next-line no-console
-    console.error(ex);
-
-    return { ...fileInfo, kind };
-  }
-};
-
+const parseAssetFileInfo = async (fileInfo) => ({ ...fileInfo, kind: getAssetKind(fileInfo.name) });
 
 /**
- * Read text content from a file and store it in the entry file object.
- * @param {BaseFileListItem} entryFile Entry file object to read text from.
+ * Read the text content of an entry or config file.
+ * @param {BaseEntryListItem | BaseConfigListItem} fileInfo Entry or config file info.
+ * @returns {Promise<BaseEntryListItem | BaseConfigListItem>} File info with the text content. The
+ * text is left out if the file can’t be read, rather than made empty, so the file isn’t loaded as
+ * an empty entry that would wipe its content when saved.
  */
-const readTextFile = async (entryFile) => {
-  const { name, file } = entryFile;
+const parseTextFileInfo = async (fileInfo) => {
+  const { name } = fileInfo;
+  const { file } = /** @type {{ file?: File }} */ (fileInfo);
 
   // Skip `.gitkeep` file, as we don’t need to read its content
-  if (name === '.gitkeep') {
-    return;
+  if (name === '.gitkeep' || !file) {
+    return fileInfo;
   }
 
   try {
-    entryFile.text = await readAsText(/** @type {File} */ (file));
+    return { ...fileInfo, text: await readAsText(file) };
   } catch (ex) {
-    entryFile.text = '';
     // eslint-disable-next-line no-console
     console.error(ex);
+
+    return fileInfo;
   }
-};
-
-export const loadFiles = async (rootDirHandle) => {
-  //const files = await getAllFiles(rootDirHandle);
-  const allFiles = await apiAll();
-
-  const files = await Promise.all(
-    allFiles
-      .map(({ handle, content, file }) => {
-        if (content) {
-          return {
-            file: new File([JSON.stringify(content)], handle),
-            path: handle,
-          };
-        }
-        // const binaryString = atob(data.blob);
-
-        // return {
-        //   file: new File([binaryString], handle),
-        //   path: handle,
-        // };
-
-        return {
-          //file: new File([dataURLToBlob(data.blob)], handle),
-          //blobURL: file,
-          path: handle,
-        };
-      })
-      .map(normalizeFileListItem),
-  );
-
-  const { entryFiles, assetFiles, configFiles } = createFileList(files);
-
-  await Promise.all([...entryFiles, ...configFiles].map(readTextFile));
-
-  const { entries, errors } = await prepareEntries(entryFiles);
-
-  const assets = [];
-
-  for (const fileInfo of assetFiles) {
-    assets.push(await parseAssetFileInfo(fileInfo));
-  }
-
-  allEntries.set(entries);
-  allAssets.set(assets);
-  gitConfigFiles.set(configFiles);
-  entryParseErrors.set(errors);
-  dataLoaded.set(true);
 };
 
 /**
- * Move a file from a previous path to a new path within the file system.
+ * Write a file to the host application. An entry is sent as text, an asset as a file.
+ * @param {string} path Path of the file within the repository.
  * @param {object} args Arguments.
- * @param {FileSystemDirectoryHandle} args.rootDirHandle Root directory handle.
- * @param {string} args.previousPath The current path of the file to move.
- * @param {string} args.path The new path where the file should be moved.
- * @returns {Promise<FileSystemFileHandle>} Moved file handle.
+ * @param {File | Blob} [args.file] Asset content.
+ * @param {string} [args.content] Entry content.
  */
-const moveFile = async ({ rootDirHandle, previousPath, path }) => {
-  const { dirname, basename } = getPathInfo(path);
-  const fileHandle = await getFileHandle(rootDirHandle, previousPath);
-
-  if (dirname && dirname !== getPathInfo(previousPath).dirname) {
-    await fileHandle.move(await getDirectoryHandle(rootDirHandle, dirname), basename);
-  } else {
-    await fileHandle.move(basename);
-  }
-
-  return fileHandle;
-};
-
-/**
-
- * @param {string} path
- * @param {object} data
-
- */
-
 const apiWrite = async (path, { file, content }) => {
   const formData = new FormData();
 
@@ -304,126 +120,148 @@ const apiWrite = async (path, { file, content }) => {
     formData.append('entry[file]', file);
   }
 
-  if (content) {
+  if (content !== undefined) {
     formData.append('entry[content]', content);
   }
 
   await fetch('/admin/entries', {
     method: 'POST',
     body: formData,
-    headers: {
-      'X-CSRF-Token': document.querySelector('meta[name=csrf-token]').content,
-    },
+    headers: { 'X-CSRF-Token': getCsrfToken() },
   });
 };
 
+/**
+ * Delete a file from the host application.
+ * @param {string} path Path of the file within the repository.
+ */
 const apiDelete = async (path) => {
   await fetch('/admin/entries', {
     method: 'DELETE',
-    body: JSON.stringify({
-      handle: path,
-    }),
+    body: JSON.stringify({ handle: path }),
     headers: {
       'Content-Type': 'application/json',
-      'X-CSRF-Token': document.querySelector('meta[name=csrf-token]').content,
+      'X-CSRF-Token': getCsrfToken(),
     },
   });
 };
 
+/**
+ * List every entry and asset the host application holds.
+ * @returns {Promise<ApiListItem[]>} File list.
+ */
 const apiAll = async () => {
   const response = await fetch('/admin/entries', {
-    headers: {
-      'X-CSRF-Token': document.querySelector('meta[name=csrf-token]').content,
-    },
+    headers: { 'X-CSRF-Token': getCsrfToken() },
   });
 
-  const data = await response.json();
+  const { entries } = await response.json();
 
-  return data.entries;
+  return entries ?? [];
 };
 
+/**
+ * Load the file list and all the entry files from the host application, then cache them in the
+ * stores, the way the file system backends do with a local directory.
+ * @returns {Promise<void>} Nothing.
+ */
+export const loadFiles = async () => {
+  const files = await Promise.all(
+    (await apiAll()).map(({ handle, content }) =>
+      normalizeFileListItem(
+        content === undefined || content === null
+          ? { path: handle }
+          : { file: new File([JSON.stringify(content)], handle), path: handle },
+      ),
+    ),
+  );
 
+  const { entryFiles, assetFiles, configFiles } = createFileList(files);
 
-const writeFile = async ({ rootDirHandle, fileHandle, path, data }) => {
+  const entryFileItems = /** @type {BaseEntryListItem[]} */ (
+    await Promise.all(entryFiles.map(parseTextFileInfo))
+  );
+
+  const configFileItems = /** @type {BaseConfigListItem[]} */ (
+    await Promise.all(configFiles.map(parseTextFileInfo))
+  );
+
+  const { entries, errors } = await prepareEntries(entryFileItems);
+  const assets = await Promise.all(assetFiles.map(parseAssetFileInfo));
+
+  allEntries.current = entries;
+  allAssets.current = assets;
+  gitConfigFiles.current = configFileItems;
+  entryParseErrors.current = errors;
+  dataLoaded.current = true;
+};
+
+/**
+ * Write a file to the host application, and return it as the saved file.
+ * @param {object} args Arguments.
+ * @param {string} args.path Path of the file within the repository.
+ * @param {string | File} args.data Content to write.
+ * @returns {Promise<File>} Written file.
+ */
+const writeFile = async ({ path, data }) => {
   try {
-    if (typeof data == 'string') {
+    if (typeof data === 'string') {
       await apiWrite(path, { content: data });
     } else {
       await apiWrite(path, { file: data });
     }
-  } catch {}
+  } catch (ex) {
+    // eslint-disable-next-line no-console
+    console.error(ex);
+  }
+
   return new File([data], path);
 };
 
 /**
- * Recursively delete empty parent directories.
- * @param {FileSystemDirectoryHandle} rootDirHandle Root directory handle.
- * @param {string[]} pathSegments Array of directory path segments.
- */
-const deleteEmptyParentDirs = async (rootDirHandle, pathSegments) => {
-  let dirHandle = await getDirectoryHandle(rootDirHandle, pathSegments.join('/'));
-
-  for (;;) {
-    /** @type {string[]} */
-    const keys = [];
-
-    for await (const key of dirHandle.keys()) {
-      keys.push(key);
-    }
-
-    if (keys.length > 1 || !pathSegments.length) {
-      break;
-    }
-
-    const dirName = /** @type {string} */ (pathSegments.pop());
-
-    // Get the parent directory handle
-    dirHandle = await getDirectoryHandle(rootDirHandle, pathSegments.join('/'));
-
-    await dirHandle.removeEntry(dirName);
-  }
-};
-
-/**
- * Delete a file at the specified path within the file system.
+ * Delete a file from the host application, and from the local copy in the origin private file
+ * system if there is one.
  * @param {object} args Arguments.
  * @param {FileSystemDirectoryHandle} args.rootDirHandle Root directory handle.
- * @param {string} args.path The path to the file to be deleted.
+ * @param {string} args.path Path of the file within the repository.
  */
 const deleteFile = async ({ rootDirHandle, path }) => {
   const { dirname: dirPath = '', basename: fileName } = getPathInfo(stripSlashes(path));
 
   await apiDelete(path);
 
-  const dirHandle = await getDirectoryHandle(rootDirHandle, dirPath);
+  try {
+    const dirHandle = await getDirectoryHandle(rootDirHandle, dirPath);
 
-  await dirHandle.removeEntry(fileName);
+    await dirHandle.removeEntry(fileName);
 
-  if (dirPath) {
-    await deleteEmptyParentDirs(rootDirHandle, dirPath.split('/'));
+    if (dirPath) {
+      await deleteEmptyParentDirs(rootDirHandle, dirPath.split('/'));
+    }
+  } catch {
+    // The file only lives in the host application, so there may be nothing to remove here
   }
 };
 
 /**
- * Save a file to the file system based on the provided change options.
+ * Save a file to the host application based on the provided change options.
  * @param {FileSystemDirectoryHandle} rootDirHandle Root directory handle.
  * @param {FileChange} change File change options.
  * @returns {Promise<?File>} Created or updated file, if available.
  * @throws {Error} If an error occurs while saving the file.
  */
 const saveChange = async (rootDirHandle, { action, path, previousPath, data }) => {
-  /** @type {FileSystemFileHandle | undefined} */
-  let fileHandle;
-
   if (action === 'move' && previousPath) {
-    fileHandle = await moveFile({ rootDirHandle, previousPath, path });
+    try {
+      await moveFile({ rootDirHandle, previousPath, path });
+    } catch {
+      // The file only lives in the host application, so there may be nothing to move here
+    }
   }
 
-  if (['create', 'update', 'move'].includes(action) && data) {
-    // We don’t need to write the file is it’s just been renamed with no change, but the `data` is
-    // always provided for the compatibility with Git backends, so we cannot distinguish between the
-    // two cases
-    return writeFile({ rootDirHandle, fileHandle, path, data });
+  // An empty string is still written, as an emptied file mustn’t keep its old content
+  if (['create', 'update', 'move'].includes(action) && data !== undefined) {
+    return writeFile({ path, data });
   }
 
   if (action === 'delete') {
@@ -434,7 +272,7 @@ const saveChange = async (rootDirHandle, { action, path, previousPath, data }) =
 };
 
 /**
- * Save entries or assets in the file system.
+ * Save entries or assets in the host application.
  * @param {FileSystemDirectoryHandle | undefined} rootDirHandle Root directory handle. This can be
  * `undefined` if the directory handle could not be acquired earlier for security reasons. If the
  * handle is not available, the changes will not be saved, but the user can still continue using the
@@ -442,8 +280,6 @@ const saveChange = async (rootDirHandle, { action, path, previousPath, data }) =
  * @param {FileChange[]} changes File changes to be saved.
  * @returns {Promise<CommitResults>} Commit results, including a pseudo commit SHA, saved files, and
  * their blob SHAs.
- * @see https://developer.mozilla.org/en-US/docs/Web/API/FileSystemWritableFileStream/write
- * @see https://developer.mozilla.org/en-US/docs/Web/API/FileSystemDirectoryHandle/removeEntry
  */
 export const saveChanges = async (rootDirHandle, changes) => {
   const entries = await Promise.all(
@@ -462,14 +298,17 @@ export const saveChanges = async (rootDirHandle, changes) => {
       }
 
       if (!file) {
-        if (data !== undefined) {
-          file = getBlob(data);
-        } else {
+        if (data === undefined) {
           return null;
         }
+
+        file = getBlob(data);
       }
 
-      return [path, { file, sha: await getGitHash(file) }];
+      return /** @type {[string, { file: Blob, sha: string }]} */ ([
+        path,
+        { file, sha: await getGitHash(file) },
+      ]);
     }),
   );
 

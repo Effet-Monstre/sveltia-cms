@@ -2,7 +2,7 @@ import {
   ALLOWED_FRONTMATTER_EXTENSIONS,
   MARKDOWN_EXTENSIONS,
   TEMPLATE_ENGINE_EXTENSIONS,
-} from '$lib/services/contents/file';
+} from '$lib/services/contents/file/constants';
 
 /**
  * @import { Field, FileExtension, FileFormat } from '$lib/types/public';
@@ -26,7 +26,7 @@ const KNOWN_FORMATS = ['yaml', 'toml', 'json'];
  * @param {Field[]} [fields] Fields.
  * @returns {boolean} Whether there is a mismatch between the file extension and format.
  * @see https://decapcms.org/docs/configuration-options/#extension-and-format
- * @see https://sveltiacms.app/en/docs/collections/entries#file-format-and-extension
+ * @see https://sveltiacms.app/en/docs/collections/entries/formats
  */
 export const isFormatMismatch = (extension, format, fields = []) => {
   // If either is undefined, there’s no mismatch
@@ -67,7 +67,7 @@ export const isFormatMismatch = (extension, format, fields = []) => {
     // Front-matter format: yaml-frontmatter, toml-frontmatter, json-frontmatter
     const fmFormatType = normalizedFormat.replace('-frontmatter', '');
 
-    // Template engines (njk, astro) work with any front-matter format
+    // Template engines (njk) work with any front-matter format
     if (TEMPLATE_ENGINE_EXTENSIONS.includes(normalizedExtension)) {
       return false;
     }

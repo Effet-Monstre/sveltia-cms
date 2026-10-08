@@ -16,6 +16,12 @@
    * @property {Snippet} [children] Slot content.
    */
 
+  /**
+   * Options for {@link sanitize}. Attributes are dropped, so a file name like
+   * `<wbr style="position: fixed; inset: 0">.png` cannot restyle the app.
+   */
+  const SANITIZE_OPTIONS = { ALLOWED_TAGS: ['wbr'], ALLOWED_ATTR: [] };
+
   /** @type {Props} */
   let {
     /* eslint-disable prefer-const */
@@ -26,19 +32,18 @@
   } = $props();
 
   const segments = $derived(path ? stripSlashes(path).split('/') : caption ? [caption] : []);
-  const sanitizeOptions = { ALLOWED_TAGS: ['wbr'] };
 
   /**
    * Get a label with `<wbr>` tags for line breaking after hyphens, underscores, and dots.
    * @param {string} str The string to process.
    * @returns {string} The processed string with `<wbr>` tags for line breaking.
    */
-  const getLabel = (str) => sanitize(str.replace(/([-_.])/g, '$1<wbr>'), sanitizeOptions);
+  const getLabel = (str) => sanitize(str.replace(/([-_.])/g, '$1<wbr>'), SANITIZE_OPTIONS);
 </script>
 
 {#if segments.length}
   <!-- Hide the asset path from screen readers because the image comes with alt text -->
-  <span class="name" aria-hidden="true">
+  <span class="name" dir="ltr" aria-hidden="true">
     <TruncatedText lines={2}>
       {#each segments as segment, index (`${segment}-${index}`)}
         {#if index === segments.length - 1}

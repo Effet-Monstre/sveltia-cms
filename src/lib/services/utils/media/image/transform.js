@@ -1,10 +1,25 @@
 import { loadModule } from '$lib/services/app/dependencies';
 import { exportCanvasAsBlob } from '$lib/services/utils/media/image/encode';
+import { decodeHEIC } from '$lib/services/utils/media/image/heic';
 import { resizeCanvas } from '$lib/services/utils/media/image/resize';
+import { sniffRasterImageFormat } from '$lib/services/utils/media/image/sniff';
 
 /**
  * @import { InternalImageTransformationOptions } from '$lib/types/private';
  */
+
+/**
+ * Options for transforming an image to a thumbnail, which is a WebP image with a maximum width and
+ * height of 512 pixels, and a quality of 85.
+ * @type {InternalImageTransformationOptions}
+ */
+export const THUMBNAIL_TRANSFORM_OPTIONS = {
+  format: 'webp',
+  quality: 85,
+  width: 512,
+  height: 512,
+  fit: 'contain',
+};
 
 /**
  * Create an image source from a Blob URL. This function creates an `<img>` element, waits for it to
@@ -13,12 +28,13 @@ import { resizeCanvas } from '$lib/services/utils/media/image/resize';
  * @param {File | Blob} args.blob File or blob to be converted to an image source.
  * @returns {Promise<{ source: CanvasImageSource, naturalWidth: number, naturalHeight: number }>}
  * Image element and its natural dimensions.
+ * @throws {Error} If the browser cannot decode the image.
  */
 export const createImageSource = async ({ blob }) => {
   const blobURL = URL.createObjectURL(blob);
   const image = new Image();
 
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     image.addEventListener(
       'load',
       () => {
@@ -32,6 +48,18 @@ export const createImageSource = async ({ blob }) => {
       },
       { once: true },
     );
+
+    // Files the browser can’t decode, such as a HEIC image saved with a `.jpg` extension, fire
+    // `error` instead of `load`
+    image.addEventListener(
+      'error',
+      () => {
+        URL.revokeObjectURL(blobURL);
+        reject(new Error('Failed to decode image'));
+      },
+      { once: true },
+    );
+
     image.src = blobURL;
   });
 };
@@ -43,12 +71,13 @@ export const createImageSource = async ({ blob }) => {
  * @param {File | Blob} args.blob File or blob to be converted to an video source.
  * @returns {Promise<{ source: CanvasImageSource, naturalWidth: number, naturalHeight: number }>}
  * Video element and its natural dimensions.
+ * @throws {Error} If the browser cannot decode the video.
  */
 export const createVideoSource = async ({ blob }) => {
   const blobURL = URL.createObjectURL(blob);
   const video = document.createElement('video');
 
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     video.addEventListener(
       'canplay',
       () => {
@@ -65,15 +94,29 @@ export const createVideoSource = async ({ blob }) => {
       { once: true },
     );
 
+    // Files the browser can’t decode fire `error` instead of `canplay`. The element is removed here
+    // because the caller only cleans it up on the success path.
+    video.addEventListener(
+      'error',
+      () => {
+        document.body.removeChild(video);
+        URL.revokeObjectURL(blobURL);
+        reject(new Error('Failed to decode video'));
+      },
+      { once: true },
+    );
+
     video.muted = true;
     video.autoplay = true;
     video.playsInline = true;
-    video.src = blobURL;
 
     // Add `<video>` to DOM or it won’t be rendered on canvas
     video.style.opacity = '0';
     video.style.pointerEvents = 'none';
     document.body.appendChild(video);
+
+    // Assign the source last, so the element is already in the DOM when `error` fires
+    video.src = blobURL;
   });
 };
 
@@ -93,6 +136,24 @@ export const createSource = async (blob) => {
 };
 
 /**
+ * Create an image bitmap from a Blob the browser can’t decode natively, by decoding it with a
+ * library if it’s a HEIC image, which only Safari decodes natively.
+ * @param {File | Blob} blob File or blob.
+ * @returns {Promise<ImageBitmap | undefined>} Bitmap, or `undefined` if the blob isn’t a HEIC
+ * image.
+ * @throws {Error} If the HEIC image can’t be decoded.
+ */
+const createFallbackImageBitmap = async (blob) => {
+  // Sniff the content rather than trust the type: a HEIC photo is often saved with a `.jpg`
+  // extension, and the `.heic` type isn’t set by every platform
+  if ((await sniffRasterImageFormat(blob)) !== 'heic') {
+    return undefined;
+  }
+
+  return createImageBitmap(await decodeHEIC(blob));
+};
+
+/**
  * Convert the given image file to another format.
  * @param {File | Blob} blob Source file.
  * @param {InternalImageTransformationOptions} [options] Options.
@@ -105,7 +166,7 @@ export const transformImage = async (
   blob,
   { format = 'png', quality = 85, width = undefined, height = undefined, fit = 'scale-down' } = {},
 ) => {
-  /** @type {CanvasImageSource} */
+  /** @type {CanvasImageSource | undefined} */
   let source;
   /** @type {number} */
   let naturalWidth = 0;
@@ -114,9 +175,15 @@ export const transformImage = async (
 
   try {
     source = await createImageBitmap(blob);
-    ({ width: naturalWidth, height: naturalHeight } = source);
   } catch {
-    // Fall back to `<img>` or `<video>` when thrown; this includes SVG
+    // Not a format the browser decodes natively, or a video, or SVG
+    source = await createFallbackImageBitmap(blob);
+  }
+
+  if (source) {
+    ({ width: naturalWidth, height: naturalHeight } = source);
+  } else {
+    // Fall back to `<img>` or `<video>`; this includes SVG
     ({ source, naturalWidth, naturalHeight } = await createSource(blob));
   }
 
@@ -132,6 +199,10 @@ export const transformImage = async (
   // Clean up
   if (source instanceof HTMLVideoElement) {
     document.body.removeChild(source);
+  } else if ('close' in source) {
+    // An `ImageBitmap` holds the decoded pixels until it’s closed, and a batch of thumbnails would
+    // otherwise keep a full-size copy of every image around until the garbage collector gets to it
+    source.close();
   }
 
   return exportCanvasAsBlob(canvas, { format, quality });

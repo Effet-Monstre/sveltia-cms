@@ -1,15 +1,28 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
+  buildObjectApiUrl,
   buildObjectUrl,
+  createS3Folder,
+  deleteS3Folder,
+  encodeKey,
   generateAwsSignature,
-  listS3Objects,
+  isS3ObjectUrl,
+  moveS3Object,
   parseS3Results,
-  parseXml,
-  searchS3Objects,
+  s3Operations,
   signedRequest,
-  uploadToS3,
 } from './core';
+
+const {
+  list: listS3Objects,
+  browse: browseS3Objects,
+  search: searchS3Objects,
+  upload: uploadToS3,
+  delete: deleteS3Objects,
+  rename: renameS3Object,
+  replace: replaceS3Object,
+} = s3Operations;
 
 /* eslint-disable jsdoc/require-jsdoc */
 /* eslint-disable no-cond-assign */
@@ -114,38 +127,6 @@ describe('integrations/media-libraries/cloud/s3/shared utilities', () => {
     vi.restoreAllMocks();
   });
 
-  describe('parseXml', () => {
-    it('should parse simple XML to object', () => {
-      const xml = '<Root><Name>test</Name><Size>123</Size></Root>';
-      const result = parseXml(xml);
-
-      expect(result).toEqual({
-        Name: 'test',
-        Size: '123',
-      });
-    });
-
-    it('should handle array elements', () => {
-      const xml = '<Root><Item>first</Item><Item>second</Item><Item>third</Item></Root>';
-      const result = parseXml(xml);
-
-      expect(result).toEqual({
-        Item: ['first', 'second', 'third'],
-      });
-    });
-
-    it('should handle nested elements', () => {
-      const xml = '<Root><Parent><Child>value</Child></Parent></Root>';
-      const result = parseXml(xml);
-
-      expect(result).toEqual({
-        Parent: {
-          Child: 'value',
-        },
-      });
-    });
-  });
-
   describe('buildObjectUrl', () => {
     it('should build virtual-hosted-style URL for Amazon S3', () => {
       const url = buildObjectUrl({
@@ -190,6 +171,23 @@ describe('integrations/media-libraries/cloud/s3/shared utilities', () => {
 
       expect(url).toBe('https://pub-abc123.r2.dev/path/to/file.jpg');
     });
+
+    it('should strip trailing slashes from publicUrl and endpoint', () => {
+      expect(
+        buildObjectUrl({
+          bucket: 'my-bucket',
+          key: 'file.jpg',
+          publicUrl: 'https://cdn.example.com/',
+        }),
+      ).toBe('https://cdn.example.com/file.jpg');
+      expect(
+        buildObjectUrl({
+          bucket: 'my-bucket',
+          key: 'file.jpg',
+          endpoint: 'https://custom.endpoint.com//',
+        }),
+      ).toBe('https://custom.endpoint.com/my-bucket/file.jpg');
+    });
   });
 
   describe('parseS3Results', () => {
@@ -232,6 +230,24 @@ describe('integrations/media-libraries/cloud/s3/shared utilities', () => {
         size: 2048,
         kind: 'video',
       });
+    });
+
+    it('should percent-encode the object key in asset URLs', () => {
+      const [result] = parseS3Results(
+        [
+          {
+            Key: 'images/photo #1?(a).jpg',
+            LastModified: '2025-01-01T00:00:00.000Z',
+            Size: 1,
+            ETag: '"abc"',
+          },
+        ],
+        { ...mockConfig, public_url: 'https://cdn.example.com/' },
+      );
+
+      expect(result.previewURL).toBe('https://cdn.example.com/images/photo%20%231%3F%28a%29.jpg');
+      expect(result.downloadURL).toBe(result.previewURL);
+      expect(result.fileName).toBe('photo #1?(a).jpg');
     });
 
     it('should strip prefix from description', () => {
@@ -423,8 +439,53 @@ describe('integrations/media-libraries/cloud/s3/shared utilities', () => {
       expect(signature).toContain('AWS4-HMAC-SHA256');
       expect(signature).toContain('Signature=');
     });
-  });
 
+    it('should RFC 3986-encode the canonical query string', async () => {
+      const { createHash, createHmac } = await import('node:crypto');
+      const host = 'my-bucket.s3.us-east-1.amazonaws.com';
+      const payloadHash = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
+      const secretAccessKey = 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY';
+      const headers = { Host: host, 'x-amz-date': '20250101T000000Z' };
+
+      const signature = await generateAwsSignature({
+        method: 'GET',
+        url: `https://${host}/?prefix=media%20(old)!/`,
+        headers,
+        payloadHash,
+        accessKeyId: 'AKIAIOSFODNN7EXAMPLE',
+        secretAccessKey,
+        region: 'us-east-1',
+        service: 's3',
+        date: new Date('2025-01-01T00:00:00.000Z'),
+      });
+
+      const canonicalRequest = [
+        'GET',
+        '/',
+        'prefix=media%20%28old%29%21%2F',
+        `host:${host}\nx-amz-date:20250101T000000Z\n`,
+        'host;x-amz-date',
+        payloadHash,
+      ].join('\n');
+
+      const stringToSign = [
+        'AWS4-HMAC-SHA256',
+        '20250101T000000Z',
+        '20250101/us-east-1/s3/aws4_request',
+        createHash('sha256').update(canonicalRequest).digest('hex'),
+      ].join('\n');
+
+      const signingKey = ['20250101', 'us-east-1', 's3', 'aws4_request'].reduce(
+        (/** @type {string | Buffer} */ key, data) =>
+          createHmac('sha256', key).update(data).digest(),
+        `AWS4${secretAccessKey}`,
+      );
+
+      const expected = createHmac('sha256', signingKey).update(stringToSign).digest('hex');
+
+      expect(signature).toContain(`Signature=${expected}`);
+    });
+  });
   describe('signedRequest', () => {
     it('should make a signed request', async () => {
       vi.mocked(fetch).mockResolvedValue(new Response('success', { status: 200 }));
@@ -454,6 +515,19 @@ describe('integrations/media-libraries/cloud/s3/shared utilities', () => {
           }),
         }),
       );
+    });
+
+    it('should throw if the access key ID is missing', async () => {
+      await expect(
+        signedRequest({
+          method: 'GET',
+          url: 'https://test-bucket.s3.us-east-1.amazonaws.com/',
+          config: { bucket: 'test-bucket', region: 'us-east-1' },
+          secretAccessKey: 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY',
+        }),
+      ).rejects.toThrow('S3 access key ID is required');
+
+      expect(fetch).not.toHaveBeenCalled();
     });
 
     it('should use default region if not provided', async () => {
@@ -666,6 +740,22 @@ describe('integrations/media-libraries/cloud/s3/shared utilities', () => {
       );
     });
 
+    it('should strip trailing slashes from the custom endpoint in list URL', async () => {
+      const xmlResponse = '<ListBucketResult><IsTruncated>false</IsTruncated></ListBucketResult>';
+
+      vi.mocked(fetch).mockResolvedValue(new Response(xmlResponse, { status: 200 }));
+
+      await listS3Objects(
+        { ...mockConfig, endpoint: 'http://localhost:3900//' },
+        { kind: undefined, apiKey: 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY' },
+      );
+
+      expect(fetch).toHaveBeenCalledWith(
+        expect.stringMatching(/^http:\/\/localhost:3900\/test-bucket\?/),
+        expect.anything(),
+      );
+    });
+
     it('should handle single Contents item (non-array) response', async () => {
       const xmlResponse =
         '<ListBucketResult>' +
@@ -744,6 +834,197 @@ describe('integrations/media-libraries/cloud/s3/shared utilities', () => {
       });
 
       expect(results).toHaveLength(1);
+    });
+  });
+
+  describe('browseS3Objects', () => {
+    const mockConfig = {
+      access_key_id: 'AKIAIOSFODNN7EXAMPLE',
+      bucket: 'test-bucket',
+      region: 'us-east-1',
+      prefix: 'uploads/',
+    };
+
+    const options = { apiKey: 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY' };
+
+    const xmlResponse = `<?xml version="1.0" encoding="UTF-8"?>
+<ListBucketResult>
+  <Contents>
+    <Key>uploads/</Key>
+    <LastModified>2025-01-01T00:00:00.000Z</LastModified>
+    <Size>0</Size>
+  </Contents>
+  <Contents>
+    <Key>uploads/2024/photo.jpg</Key>
+    <LastModified>2025-01-01T00:00:00.000Z</LastModified>
+    <Size>1024</Size>
+  </Contents>
+  <Contents>
+    <Key>uploads/2024/empty/</Key>
+    <LastModified>2025-01-02T00:00:00.000Z</LastModified>
+    <Size>0</Size>
+  </Contents>
+  <Contents>
+    <Key>uploads/notes.txt</Key>
+    <LastModified>2025-01-02T00:00:00.000Z</LastModified>
+    <Size>10</Size>
+  </Contents>
+  <IsTruncated>false</IsTruncated>
+</ListBucketResult>`;
+
+    it('should list the files and the empty folders, relative to the prefix', async () => {
+      vi.mocked(fetch).mockResolvedValue(new Response(xmlResponse, { status: 200 }));
+
+      const { assets, folders } = await browseS3Objects(mockConfig, options);
+
+      expect(assets.map(({ description }) => description)).toEqual(['2024/photo.jpg', 'notes.txt']);
+      // The placeholder of the prefix itself isn’t a folder below it
+      expect(folders).toEqual(['2024/empty']);
+    });
+
+    it('should filter the files by kind', async () => {
+      vi.mocked(fetch).mockResolvedValue(new Response(xmlResponse, { status: 200 }));
+
+      const { assets, folders } = await browseS3Objects(mockConfig, { ...options, kind: 'image' });
+
+      expect(assets.map(({ description }) => description)).toEqual(['2024/photo.jpg']);
+      expect(folders).toEqual(['2024/empty']);
+    });
+
+    it('should require the secret access key', async () => {
+      await expect(browseS3Objects(mockConfig, { apiKey: '' })).rejects.toThrow(
+        'S3 secret access key is required',
+      );
+    });
+
+    it('should put right a prefix that lacks the trailing slash', async () => {
+      const config = { ...mockConfig, prefix: 'uploads' };
+
+      vi.mocked(fetch).mockResolvedValue(new Response(xmlResponse, { status: 200 }));
+
+      const { assets, folders } = await browseS3Objects(config, options);
+
+      expect(fetch).toHaveBeenCalledWith(
+        expect.stringContaining('prefix=uploads%2F'),
+        expect.anything(),
+      );
+      expect(assets.map(({ description }) => description)).toEqual(['2024/photo.jpg', 'notes.txt']);
+      expect(folders).toEqual(['2024/empty']);
+
+      vi.mocked(fetch).mockResolvedValue(new Response('', { status: 200 }));
+      await createS3Folder('2025', config, options);
+      expect(fetch).toHaveBeenLastCalledWith(
+        'https://test-bucket.s3.us-east-1.amazonaws.com/uploads/2025/',
+        expect.anything(),
+      );
+    });
+  });
+
+  describe('folders', () => {
+    const mockConfig = {
+      access_key_id: 'AKIAIOSFODNN7EXAMPLE',
+      bucket: 'test-bucket',
+      region: 'us-east-1',
+      prefix: 'uploads/',
+    };
+
+    const options = { apiKey: 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY' };
+
+    it('should create a folder by putting a placeholder object with the service’s ACL', async () => {
+      vi.mocked(fetch).mockResolvedValue(new Response('', { status: 200 }));
+
+      await createS3Folder('2024/summer', { ...mockConfig, acl: 'public-read' }, options);
+
+      expect(fetch).toHaveBeenCalledExactlyOnceWith(
+        'https://test-bucket.s3.us-east-1.amazonaws.com/uploads/2024/summer/',
+        expect.objectContaining({
+          method: 'PUT',
+          headers: expect.objectContaining({
+            'Content-Type': 'application/x-directory',
+            'x-amz-acl': 'public-read',
+          }),
+        }),
+      );
+    });
+
+    it('should report a failure to create a folder', async () => {
+      vi.mocked(fetch).mockResolvedValue(new Response('Access Denied', { status: 403 }));
+
+      await expect(createS3Folder('2024', mockConfig, options)).rejects.toThrow(
+        'Failed to create folder uploads/2024/: Access Denied',
+      );
+      await expect(createS3Folder('2024', mockConfig, { apiKey: '' })).rejects.toThrow(
+        'S3 secret access key is required',
+      );
+    });
+
+    it('should delete the placeholder object of a folder', async () => {
+      vi.mocked(fetch).mockResolvedValue(new Response(null, { status: 204 }));
+
+      await deleteS3Folder('2024/summer', mockConfig, options);
+
+      expect(fetch).toHaveBeenCalledExactlyOnceWith(
+        'https://test-bucket.s3.us-east-1.amazonaws.com/uploads/2024/summer/',
+        expect.objectContaining({ method: 'DELETE' }),
+      );
+    });
+
+    it('should move an object to another path below the prefix', async () => {
+      vi.mocked(fetch).mockResolvedValue(new Response('', { status: 200 }));
+
+      const result = await moveS3Object(
+        /** @type {any} */ ({ id: 'uploads/2024/photo.jpg', fileName: 'photo.jpg', size: 12 }),
+        '2025/photo.jpg',
+        mockConfig,
+        options,
+      );
+
+      expect(fetch).toHaveBeenNthCalledWith(
+        1,
+        'https://test-bucket.s3.us-east-1.amazonaws.com/uploads/2025/photo.jpg',
+        expect.objectContaining({
+          method: 'PUT',
+          headers: expect.objectContaining({
+            'x-amz-copy-source': '/test-bucket/uploads/2024/photo.jpg',
+          }),
+        }),
+      );
+      expect(fetch).toHaveBeenNthCalledWith(
+        2,
+        'https://test-bucket.s3.us-east-1.amazonaws.com/uploads/2024/photo.jpg',
+        expect.objectContaining({ method: 'DELETE' }),
+      );
+      expect(result).toEqual(
+        expect.objectContaining({ id: 'uploads/2025/photo.jpg', description: '2025/photo.jpg' }),
+      );
+    });
+
+    it('should rename an object below the prefix within its folder', async () => {
+      vi.mocked(fetch).mockResolvedValue(new Response('', { status: 200 }));
+
+      const result = await renameS3Object(
+        /** @type {any} */ ({ id: 'uploads/2024/photo.jpg', fileName: 'photo.jpg', size: 12 }),
+        'renamed.jpg',
+        mockConfig,
+        options,
+      );
+
+      expect(result.id).toBe('uploads/2024/renamed.jpg');
+    });
+
+    it('should upload files to the given folder', async () => {
+      vi.mocked(fetch).mockResolvedValue(new Response('', { status: 200 }));
+
+      const results = await uploadToS3([new File(['x'], 'photo.jpg')], mockConfig, {
+        ...options,
+        dirPath: '2024/summer',
+      });
+
+      expect(fetch).toHaveBeenCalledExactlyOnceWith(
+        'https://test-bucket.s3.us-east-1.amazonaws.com/uploads/2024/summer/photo.jpg',
+        expect.objectContaining({ method: 'PUT' }),
+      );
+      expect(results[0].description).toBe('2024/summer/photo.jpg');
     });
   });
 
@@ -885,9 +1166,13 @@ describe('integrations/media-libraries/cloud/s3/shared utilities', () => {
 
       vi.mocked(fetch).mockResolvedValue(new Response('', { status: 200 }));
 
-      await uploadToS3([mockFile], mockConfig, {
-        apiKey: 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY',
-      });
+      await uploadToS3(
+        [mockFile],
+        { ...mockConfig, acl: 'public-read' },
+        {
+          apiKey: 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY',
+        },
+      );
 
       expect(fetch).toHaveBeenCalledWith(
         expect.anything(),
@@ -900,18 +1185,14 @@ describe('integrations/media-libraries/cloud/s3/shared utilities', () => {
       );
     });
 
-    it('should omit x-amz-acl header when acl is false', async () => {
+    it('should omit x-amz-acl header when the service sets no ACL', async () => {
       const mockFile = new File(['content'], 'test.jpg', { type: 'image/jpeg' });
 
       vi.mocked(fetch).mockResolvedValue(new Response('', { status: 200 }));
 
-      await uploadToS3(
-        [mockFile],
-        { ...mockConfig, acl: false },
-        {
-          apiKey: 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY',
-        },
-      );
+      await uploadToS3([mockFile], mockConfig, {
+        apiKey: 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY',
+      });
 
       expect(fetch).toHaveBeenCalledWith(
         expect.anything(),
@@ -933,6 +1214,278 @@ describe('integrations/media-libraries/cloud/s3/shared utilities', () => {
       });
 
       expect(results[0].fileName).toBe('/');
+    });
+  });
+
+  describe('encodeKey', () => {
+    it('should encode each segment, including the characters SigV4 requires', () => {
+      expect(encodeKey("images/my photo (1)!'*.jpg")).toBe(
+        'images/my%20photo%20%281%29%21%27%2A.jpg',
+      );
+      expect(encodeKey('a#b?c+d/e.jpg')).toBe('a%23b%3Fc%2Bd/e.jpg');
+    });
+  });
+
+  describe('buildObjectApiUrl', () => {
+    it('should percent-encode the key so a `#` is not treated as a fragment', () => {
+      const url = buildObjectApiUrl(
+        { access_key_id: 'AKIA', bucket: 'my-bucket', region: 'us-east-1' },
+        'images/a#1.jpg',
+      );
+
+      expect(url).toBe('https://my-bucket.s3.us-east-1.amazonaws.com/images/a%231.jpg');
+      expect(new URL(url).pathname).toBe('/images/a%231.jpg');
+    });
+
+    it('should ignore public_url and use the endpoint', () => {
+      const url = buildObjectApiUrl(
+        {
+          access_key_id: 'AKIA',
+          bucket: 'my-bucket',
+          region: 'auto',
+          endpoint: 'https://account.r2.cloudflarestorage.com',
+          public_url: 'https://cdn.example.com',
+        },
+        'images/photo.jpg',
+      );
+
+      expect(url).toBe('https://account.r2.cloudflarestorage.com/my-bucket/images/photo.jpg');
+    });
+
+    it('should build a virtual-hosted-style URL without an endpoint', () => {
+      const url = buildObjectApiUrl(
+        { access_key_id: 'AKIA', bucket: 'my-bucket', region: 'us-east-1' },
+        'photo.jpg',
+      );
+
+      expect(url).toBe('https://my-bucket.s3.us-east-1.amazonaws.com/photo.jpg');
+    });
+  });
+
+  describe('isS3ObjectUrl', () => {
+    it('should match the public URL and the API endpoint of the bucket', () => {
+      const config = {
+        access_key_id: 'AKIA',
+        bucket: 'my-bucket',
+        region: 'us-east-1',
+        public_url: 'https://cdn.example.com',
+      };
+
+      expect(isS3ObjectUrl(config, 'https://cdn.example.com/images/a.jpg')).toBe(true);
+      expect(isS3ObjectUrl(config, 'https://my-bucket.s3.us-east-1.amazonaws.com/a.jpg')).toBe(
+        true,
+      );
+      expect(isS3ObjectUrl(config, 'https://other-bucket.s3.us-east-1.amazonaws.com/a.jpg')).toBe(
+        false,
+      );
+      expect(isS3ObjectUrl(config, 'https://example.com/a.jpg')).toBe(false);
+    });
+  });
+
+  describe('deleteS3Objects', () => {
+    const mockConfig = {
+      access_key_id: 'AKIAIOSFODNN7EXAMPLE',
+      bucket: 'test-bucket',
+      region: 'us-east-1',
+    };
+
+    const options = { apiKey: 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY' };
+    /** @type {any} */
+    const asset = { id: 'images/photo.jpg', fileName: 'photo.jpg' };
+
+    it('should send a DELETE request for each object', async () => {
+      vi.mocked(fetch).mockResolvedValue(new Response(null, { status: 204 }));
+
+      await deleteS3Objects([asset, { ...asset, id: 'images/other.jpg' }], mockConfig, options);
+
+      expect(fetch).toHaveBeenCalledTimes(2);
+      expect(fetch).toHaveBeenNthCalledWith(
+        1,
+        'https://test-bucket.s3.us-east-1.amazonaws.com/images/photo.jpg',
+        expect.objectContaining({ method: 'DELETE' }),
+      );
+      expect(fetch).toHaveBeenNthCalledWith(
+        2,
+        'https://test-bucket.s3.us-east-1.amazonaws.com/images/other.jpg',
+        expect.objectContaining({ method: 'DELETE' }),
+      );
+    });
+
+    it('should not sleep for a single object', async () => {
+      vi.mocked(fetch).mockResolvedValue(new Response(null, { status: 204 }));
+
+      await deleteS3Objects([asset], mockConfig, options);
+
+      expect(fetch).toHaveBeenCalledTimes(1);
+    });
+
+    it('should reject when apiKey is missing', async () => {
+      await expect(
+        deleteS3Objects([asset], mockConfig, { apiKey: /** @type {any} */ (undefined) }),
+      ).rejects.toThrow('S3 secret access key is required');
+      expect(fetch).not.toHaveBeenCalled();
+    });
+
+    it('should throw when the request fails', async () => {
+      vi.mocked(fetch).mockResolvedValue(new Response('Access Denied', { status: 403 }));
+
+      await expect(deleteS3Objects([asset], mockConfig, options)).rejects.toThrow(
+        'Failed to delete object images/photo.jpg: Access Denied',
+      );
+    });
+  });
+
+  describe('renameS3Object', () => {
+    const mockConfig = {
+      access_key_id: 'AKIAIOSFODNN7EXAMPLE',
+      bucket: 'test-bucket',
+      region: 'us-east-1',
+    };
+
+    const options = { apiKey: 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY' };
+    /** @type {any} */
+    const asset = { id: 'images/my photo.jpg', fileName: 'my photo.jpg', size: 1234 };
+
+    it('should copy the object to the new key and delete the original', async () => {
+      vi.mocked(fetch).mockResolvedValue(new Response('', { status: 200 }));
+
+      const result = await renameS3Object(
+        asset,
+        'renamed.jpg',
+        { ...mockConfig, acl: 'public-read' },
+        options,
+      );
+
+      expect(fetch).toHaveBeenCalledTimes(2);
+      expect(fetch).toHaveBeenNthCalledWith(
+        1,
+        'https://test-bucket.s3.us-east-1.amazonaws.com/images/renamed.jpg',
+        expect.objectContaining({
+          method: 'PUT',
+          headers: expect.objectContaining({
+            'x-amz-copy-source': '/test-bucket/images/my%20photo.jpg',
+            'x-amz-metadata-directive': 'COPY',
+            'x-amz-acl': 'public-read',
+          }),
+        }),
+      );
+      expect(fetch).toHaveBeenNthCalledWith(
+        2,
+        'https://test-bucket.s3.us-east-1.amazonaws.com/images/my%20photo.jpg',
+        expect.objectContaining({ method: 'DELETE' }),
+      );
+      expect(result).toEqual(
+        expect.objectContaining({
+          id: 'images/renamed.jpg',
+          fileName: 'renamed.jpg',
+          size: 1234,
+          kind: 'image',
+        }),
+      );
+    });
+
+    it('should rename an object at the bucket root', async () => {
+      vi.mocked(fetch).mockResolvedValue(new Response('', { status: 200 }));
+
+      const result = await renameS3Object(
+        { ...asset, id: 'photo.jpg' },
+        'renamed.jpg',
+        mockConfig,
+        options,
+      );
+
+      expect(fetch).toHaveBeenNthCalledWith(
+        1,
+        'https://test-bucket.s3.us-east-1.amazonaws.com/renamed.jpg',
+        expect.anything(),
+      );
+      expect(result.id).toBe('renamed.jpg');
+    });
+
+    it('should default the size to 0 and omit the ACL when the service sets none', async () => {
+      vi.mocked(fetch).mockResolvedValue(new Response('', { status: 200 }));
+
+      const result = await renameS3Object(
+        { ...asset, size: undefined },
+        'renamed.jpg',
+        mockConfig,
+        options,
+      );
+
+      expect(fetch).toHaveBeenNthCalledWith(
+        1,
+        expect.anything(),
+        expect.objectContaining({
+          headers: expect.not.objectContaining({ 'x-amz-acl': expect.anything() }),
+        }),
+      );
+      expect(result.size).toBe(0);
+    });
+
+    it('should reject when apiKey is missing', async () => {
+      await expect(
+        renameS3Object(asset, 'renamed.jpg', mockConfig, {
+          apiKey: /** @type {any} */ (undefined),
+        }),
+      ).rejects.toThrow('S3 secret access key is required');
+    });
+
+    it('should throw and keep the original when the copy fails', async () => {
+      vi.mocked(fetch).mockResolvedValue(new Response('Access Denied', { status: 403 }));
+
+      await expect(renameS3Object(asset, 'renamed.jpg', mockConfig, options)).rejects.toThrow(
+        'Failed to copy object images/my photo.jpg: Access Denied',
+      );
+      expect(fetch).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('replaceS3Object', () => {
+    const mockConfig = {
+      access_key_id: 'AKIAIOSFODNN7EXAMPLE',
+      bucket: 'test-bucket',
+      region: 'us-east-1',
+    };
+
+    const options = { apiKey: 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY' };
+    /** @type {any} */
+    const asset = { id: 'images/photo.jpg', fileName: 'photo.jpg', size: 10 };
+
+    it('should overwrite the object under the same key', async () => {
+      const file = new File(['new content'], 'whatever.jpg', { type: 'image/jpeg' });
+
+      vi.mocked(fetch).mockResolvedValue(new Response('', { status: 200 }));
+
+      const result = await replaceS3Object(asset, file, mockConfig, options);
+
+      expect(fetch).toHaveBeenCalledWith(
+        'https://test-bucket.s3.us-east-1.amazonaws.com/images/photo.jpg',
+        expect.objectContaining({
+          method: 'PUT',
+          headers: expect.objectContaining({ 'Content-Type': 'image/jpeg' }),
+        }),
+      );
+      expect(result).toEqual(
+        expect.objectContaining({ id: 'images/photo.jpg', fileName: 'photo.jpg', size: 11 }),
+      );
+    });
+
+    it('should reject when apiKey is missing', async () => {
+      const file = new File(['new content'], 'photo.jpg', { type: 'image/jpeg' });
+
+      await expect(
+        replaceS3Object(asset, file, mockConfig, { apiKey: /** @type {any} */ (undefined) }),
+      ).rejects.toThrow('S3 secret access key is required');
+    });
+
+    it('should throw when the upload fails', async () => {
+      const file = new File(['new content'], 'photo.jpg', { type: 'image/jpeg' });
+
+      vi.mocked(fetch).mockResolvedValue(new Response('Denied', { status: 403 }));
+
+      await expect(replaceS3Object(asset, file, mockConfig, options)).rejects.toThrow(
+        'Failed to upload file photo.jpg: Denied',
+      );
     });
   });
 });

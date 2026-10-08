@@ -1,16 +1,29 @@
 import { sortItemsByKey } from '$lib/services/common/view';
-import { getIndexFile } from '$lib/services/contents/collection/entries/index-file';
-import { getOrderFieldKey } from '$lib/services/contents/collection/entries/reorder';
+import { isCollectionIndexFile } from '$lib/services/contents/collection/entries/index-file';
+import { getOrderFieldKey } from '$lib/services/contents/collection/entries/reorder/config';
+import { sortEntriesByOrderField } from '$lib/services/contents/collection/entries/reorder/sort';
 import { getSortKeyType } from '$lib/services/contents/collection/view/sort-keys';
-import { getField, getPropertyValue } from '$lib/services/contents/entry/fields';
+import { getField } from '$lib/services/contents/entry/fields';
 import { getEntrySummary } from '$lib/services/contents/entry/summary';
-import { getDate } from '$lib/services/contents/fields/date-time/helper';
+import { getPropertyValue } from '$lib/services/contents/entry/values';
+import { RICH_TEXT_FIELD_TYPES } from '$lib/services/contents/fields';
+import { getDate } from '$lib/services/contents/fields/date-time/parse';
 import { removeMarkdownSyntax } from '$lib/services/utils/markdown';
 
 /**
- * @import { Entry, InternalCollection, SortingConditions } from '$lib/types/private';
+ * @import {
+ * Entry,
+ * InternalCollection,
+ * InternalEntryCollection,
+ * SortingConditions,
+ * } from '$lib/types/private';
  * @import { DateTimeField } from '$lib/types/public';
  */
+
+/**
+ * Maximum length of a Markdown value used as a sort key, before its syntax is removed.
+ */
+const MARKDOWN_SORT_KEY_LENGTH = 1000;
 
 /**
  * List of fields that may contain Markdown syntax and should be stripped before sorting. This
@@ -63,7 +76,9 @@ export const getSortKeyGetter = ({
       const raw = getPropertyValue({ entry, locale, collectionName, key });
       const str = raw ? String(raw) : '';
 
-      return isMarkdownField ? removeMarkdownSyntax(str) : str;
+      // Only the beginning of a long Markdown value tells entries apart, and stripping the syntax
+      // takes time that grows faster than the length on a value crafted to be nested deeply
+      return isMarkdownField ? removeMarkdownSyntax(str.slice(0, MARKDOWN_SORT_KEY_LENGTH)) : str;
     };
   }
 
@@ -75,13 +90,31 @@ export const getSortKeyGetter = ({
 };
 
 /**
+ * Move the collection’s index file to the top of the sorted entries, where it should always be.
+ * It’s told by its path rather than by its slug, because another collection’s index file within
+ * this collection’s folder carries the same slug.
+ * @param {Entry[]} entries Sorted entries, which are modified in place.
+ * @param {InternalCollection} collection Collection that the entries belong to.
+ * @returns {Entry[]} The given entries.
+ */
+const moveIndexFileToTop = (entries, collection) => {
+  const index = entries.findIndex((entry) => isCollectionIndexFile(collection, entry));
+
+  if (index > -1) {
+    entries.unshift(entries.splice(index, 1)[0]);
+  }
+
+  return entries;
+};
+
+/**
  * Sort the given entries.
  * @param {Entry[]} entries Entry list.
  * @param {InternalCollection} collection Collection that the entries belong to.
  * @param {SortingConditions} [conditions] Sorting conditions.
  * @returns {Entry[]} Sorted entry list.
  * @see https://decapcms.org/docs/configuration-options/#sortable_fields
- * @see https://sveltiacms.app/en/docs/collections/entries#sorting
+ * @see https://sveltiacms.app/en/docs/collections/entries/views#sorting
  */
 export const sortEntries = (entries, collection, { key, order } = {}) => {
   const _entries = [...entries];
@@ -95,15 +128,26 @@ export const sortEntries = (entries, collection, { key, order } = {}) => {
     _i18n: { defaultLocale: locale },
   } = collection;
 
-  // The `_manual` special key sorts by the collection’s reorder field. Resolve it to the actual
-  // field key so value lookup works for entries.
-  const orderFieldKey = getOrderFieldKey(collection);
-  const resolvedKey = key === '_manual' ? (orderFieldKey ?? key) : key;
-  const fieldConfig = getField({ collectionName, keyPath: resolvedKey });
-  // The reorder field stores numeric values but may not be defined under the collection’s `fields`,
-  // so it would default to a string sort. Force a numeric sort for it.
-  const isOrderKey = key === '_manual' || resolvedKey === orderFieldKey;
-  const type = isOrderKey ? Number : getSortKeyType({ key, fieldConfig });
+  // The `_manual` special key sorts by the collection’s reorder field, or by the position in the
+  // array. Either way, the entries are sorted the same as in the reorder UI and when they are
+  // renumbered: an entry without a valid number goes last, keeping its place among the others. The
+  // field may not be defined under the collection’s `fields`, so it would otherwise default to a
+  // string sort, and a missing value would come first
+  if (key === '_manual' || key === getOrderFieldKey(collection)) {
+    const sorted = sortEntriesByOrderField(
+      entries,
+      /** @type {InternalEntryCollection} */ (collection),
+    );
+
+    if (order === 'descending') {
+      sorted.reverse();
+    }
+
+    return moveIndexFileToTop(sorted, collection);
+  }
+
+  const fieldConfig = getField({ collectionName, keyPath: key });
+  const type = getSortKeyType({ key, fieldConfig });
 
   const dateFieldConfig =
     fieldConfig?.widget === 'datetime' ? /** @type {DateTimeField} */ (fieldConfig) : undefined;
@@ -111,12 +155,10 @@ export const sortEntries = (entries, collection, { key, order } = {}) => {
   // Check if the field is a Markdown-enabled field: we use both the field config and a hardcoded
   // key list to determine this, as some fields may be text fields that contain Markdown syntax.
   const isMarkdownField =
-    fieldConfig?.widget === 'richtext' ||
-    fieldConfig?.widget === 'markdown' ||
-    MARKDOWN_FIELD_KEYS.includes(key);
+    RICH_TEXT_FIELD_TYPES.includes(fieldConfig?.widget ?? '') || MARKDOWN_FIELD_KEYS.includes(key);
 
   const getSortKey = getSortKeyGetter({
-    key: resolvedKey,
+    key,
     type,
     collection,
     locale,
@@ -125,20 +167,8 @@ export const sortEntries = (entries, collection, { key, order } = {}) => {
     isMarkdownField,
   });
 
-  const sortKeyMap = Object.fromEntries(_entries.map((entry) => [entry.slug, getSortKey(entry)]));
+  // `sortItemsByKey()` computes the key once per entry, so there’s no need for a lookup table here
+  sortItemsByKey(_entries, getSortKey, !dateFieldConfig && type === String, order);
 
-  sortItemsByKey(_entries, (e) => sortKeyMap[e.slug], !dateFieldConfig && type === String, order);
-
-  const indexFileName = getIndexFile(collection)?.name;
-
-  // Index file should always be at the top
-  if (indexFileName) {
-    const index = _entries.findIndex((entry) => entry.slug === indexFileName);
-
-    if (index > -1) {
-      _entries.unshift(_entries.splice(index, 1)[0]);
-    }
-  }
-
-  return _entries;
+  return moveIndexFileToTop(_entries, collection);
 };

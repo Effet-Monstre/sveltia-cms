@@ -1,10 +1,11 @@
 import { getDateTimeParts } from '@sveltia/utils/datetime';
-import { writable } from 'svelte/store';
 import { describe, expect, test, vi } from 'vitest';
 
 import { DEFAULT_I18N_CONFIG } from '$lib/services/contents/i18n/config';
 
-import { fillTemplate, hasTemplateTags } from '.';
+import { processNestedTemplates } from './nested';
+
+import { fillTemplate } from '.';
 
 /**
  * @import { InternalEntryCollection, InternalFileCollection } from '$lib/types/private';
@@ -26,6 +27,12 @@ vi.mock('$lib/services/contents/entry/summary', () => ({
 }));
 vi.mock('$lib/services/utils/file', () => ({
   renameIfNeeded: vi.fn((slug) => slug),
+  sanitizePath: vi.fn((path) =>
+    path
+      .split('/')
+      .filter((/** @type {string} */ segment) => segment !== '.' && segment !== '..')
+      .join('/'),
+  ),
 }));
 
 describe('fillTemplate()', async () => {
@@ -50,18 +57,20 @@ describe('fillTemplate()', async () => {
    */
   const setupCmsConfig = async () => {
     // @ts-ignore
-    (await import('$lib/services/config')).cmsConfig = writable({
-      backend: { name: 'github' },
-      media_folder: 'static/images/uploads',
-      collections: [collection],
-      _siteURL: '',
-      _baseURL: '',
-      slug: {
-        encoding: 'unicode',
-        clean_accents: false,
-        sanitize_replacement: '-',
+    (await import('$lib/services/config')).cmsConfig = {
+      current: {
+        backend: { name: 'github' },
+        media_folder: 'static/images/uploads',
+        collections: [collection],
+        _siteURL: '',
+        _baseURL: '',
+        slug: {
+          encoding: 'unicode',
+          clean_accents: false,
+          sanitize_replacement: '-',
+        },
       },
-    });
+    };
   };
 
   test('short slug', async () => {
@@ -100,19 +109,21 @@ describe('fillTemplate()', async () => {
 
   test('date/time with explicit utc timezone config', async () => {
     // @ts-ignore
-    (await import('$lib/services/config')).cmsConfig = writable({
-      backend: { name: 'github' },
-      media_folder: 'static/images/uploads',
-      collections: [collection],
-      _siteURL: '',
-      _baseURL: '',
-      slug: {
-        encoding: 'unicode',
-        clean_accents: false,
-        sanitize_replacement: '-',
-        timezone: 'utc',
+    (await import('$lib/services/config')).cmsConfig = {
+      current: {
+        backend: { name: 'github' },
+        media_folder: 'static/images/uploads',
+        collections: [collection],
+        _siteURL: '',
+        _baseURL: '',
+        slug: {
+          encoding: 'unicode',
+          clean_accents: false,
+          sanitize_replacement: '-',
+          timezone: 'utc',
+        },
       },
-    });
+    };
 
     const template = '{{year}}-{{month}}-{{day}}-{{hour}}-{{minute}}-{{second}}';
     const dateTimeParts = getDateTimeParts({ timeZone: 'UTC' });
@@ -125,19 +136,21 @@ describe('fillTemplate()', async () => {
 
   test('date/time with local timezone config', async () => {
     // @ts-ignore
-    (await import('$lib/services/config')).cmsConfig = writable({
-      backend: { name: 'github' },
-      media_folder: 'static/images/uploads',
-      collections: [collection],
-      _siteURL: '',
-      _baseURL: '',
-      slug: {
-        encoding: 'unicode',
-        clean_accents: false,
-        sanitize_replacement: '-',
-        timezone: 'local',
+    (await import('$lib/services/config')).cmsConfig = {
+      current: {
+        backend: { name: 'github' },
+        media_folder: 'static/images/uploads',
+        collections: [collection],
+        _siteURL: '',
+        _baseURL: '',
+        slug: {
+          encoding: 'unicode',
+          clean_accents: false,
+          sanitize_replacement: '-',
+          timezone: 'local',
+        },
       },
-    });
+    };
 
     const template = '{{year}}-{{month}}-{{day}}-{{hour}}-{{minute}}-{{second}}';
     // Should produce a valid date/time format using the local timezone
@@ -165,6 +178,24 @@ describe('fillTemplate()', async () => {
 
     expect(fillTemplate('{{title}}', { collection, content: {} })).toMatch(/[0-9a-f]{12}/);
     expect(fillTemplate('{{name}}', { collection, content: {} })).toMatch(/[0-9a-f]{12}/);
+  });
+
+  test('look up the field config of a `fields.`-prefixed tag for a filter', async () => {
+    await setupCmsConfig();
+
+    const { getField } = await import('$lib/services/contents/entry/fields');
+
+    vi.mocked(getField).mockClear();
+
+    expect(
+      fillTemplate("{{fields.published | date('YYYY-MM-DD')}}", {
+        collection,
+        content: { published: '2024-01-23' },
+      }),
+    ).toEqual('2024-01-23');
+
+    // The prefix must be stripped, or the field’s options such as `picker_utc` would be lost
+    expect(getField).toHaveBeenCalledWith(expect.objectContaining({ keyPath: 'published' }));
   });
 
   test('apply filter', async () => {
@@ -232,6 +263,37 @@ describe('fillTemplate()', async () => {
     expect(fillTemplate('{{uuid_shorter}}', { collection, content: {} })).toMatch(/[0-9a-f]{8}/);
   });
 
+  test('reuse the random values given with the options', async () => {
+    await setupCmsConfig();
+
+    const randomValues = new Map();
+    const options = { collection, content: {}, locale: 'en', randomValues };
+    // Short enough not to be truncated with the `slug.maxlength` option
+    const template = "{{uuid_shorter}}_{{title}}_{{name | default('{{a}}-{{b}}')}}";
+    const first = fillTemplate(template, options);
+
+    expect(first).toMatch(/^[0-9a-f]{8}_[0-9a-f]{12}_[0-9a-f]{12}-[0-9a-f]{12}$/);
+    expect(fillTemplate(template, options)).toBe(first);
+    expect([...randomValues.keys()]).toEqual([
+      'en:uuid_shorter',
+      'en:fallback:title',
+      "en:fallback:name | default('{{a}}-{{b}}')",
+    ]);
+
+    // So is the random ID for a value that leaves nothing once slugified, e.g. an empty field
+    const emptyOptions = { collection, content: { title: '' }, locale: 'en', randomValues };
+    const emptyFirst = fillTemplate('{{title}}', emptyOptions);
+
+    expect(emptyFirst).toMatch(/^[0-9a-f]{12}$/);
+    expect(fillTemplate('{{title}}', emptyOptions)).toBe(emptyFirst);
+    // Another locale gets values of its own
+    expect(fillTemplate(template, { ...options, locale: 'fr' })).not.toBe(first);
+    // Without the cache, new values are generated every time
+    expect(fillTemplate('{{uuid}}', { collection, content: {} })).not.toBe(
+      fillTemplate('{{uuid}}', { collection, content: {} }),
+    );
+  });
+
   test('fields prefix', async () => {
     await setupCmsConfig();
 
@@ -297,7 +359,7 @@ describe('fillTemplate()', async () => {
       entryFilePath: 'content/posts/2024/my-article.md',
     };
 
-    expect(fillTemplate('{{dirname}}', options)).toEqual('/2024');
+    expect(fillTemplate('{{dirname}}', options)).toEqual('2024');
     expect(fillTemplate('{{filename}}', options)).toEqual('my-article');
     expect(fillTemplate('{{extension}}', options)).toEqual('md');
 
@@ -332,7 +394,7 @@ describe('fillTemplate()', async () => {
       entryFilePath: 'content/posts/2024/my-article.md',
     };
 
-    expect(fillTemplate('{{dirname}}', options)).toEqual('/2024');
+    expect(fillTemplate('{{dirname}}', options)).toEqual('2024');
     expect(fillTemplate('{{filename}}', options)).toEqual('my-article');
     expect(fillTemplate('{{extension}}', options)).toEqual('md');
 
@@ -354,12 +416,12 @@ describe('fillTemplate()', async () => {
       {
         entryFilePath: 'content/posts/2024/article.md',
         basePath: 'content/posts',
-        expected: '/2024',
+        expected: '2024',
       },
       {
         entryFilePath: 'content/posts/2024/tech/article.md',
         basePath: 'content/posts',
-        expected: '/2024/tech',
+        expected: '2024/tech',
       },
       {
         entryFilePath: 'article.md',
@@ -392,7 +454,7 @@ describe('fillTemplate()', async () => {
       { entryFilePath: 'article.md', expected: 'md' },
       { entryFilePath: 'article.html.erb', expected: 'erb' },
       { entryFilePath: 'article.backup.json', expected: 'json' },
-      { entryFilePath: 'article', expected: 'article' },
+      { entryFilePath: 'article', expected: '' },
       { entryFilePath: 'path/to/article.txt', expected: 'txt' },
     ];
 
@@ -413,8 +475,8 @@ describe('fillTemplate()', async () => {
 
     const testCases = [
       { entryFilePath: 'article.md', expected: 'article' },
-      { entryFilePath: 'article.html.erb', expected: 'article' },
-      { entryFilePath: 'my-long-filename.backup.json', expected: 'my-long-filename' },
+      { entryFilePath: 'article.html.erb', expected: 'article.html' },
+      { entryFilePath: 'my-long-filename.backup.json', expected: 'my-long-filename.backup' },
       { entryFilePath: 'path/to/article.txt', expected: 'article' },
       { entryFilePath: 'path/to/no-extension', expected: 'no-extension' },
     ];
@@ -429,6 +491,28 @@ describe('fillTemplate()', async () => {
 
       expect(result).toEqual(expected);
     });
+  });
+
+  test('filename extraction with the `multiple_files` i18n structure', async () => {
+    await setupCmsConfig();
+
+    const multiFileCollection = {
+      ...collection,
+      _i18n: {
+        ...DEFAULT_I18N_CONFIG,
+        allLocales: ['en', 'fr'],
+        structureMap: { ...DEFAULT_I18N_CONFIG.structureMap, i18nMultiFile: true },
+      },
+    };
+
+    const result = fillTemplate('{{filename}}.{{extension}}', {
+      collection: multiFileCollection,
+      content: {},
+      type: 'preview_path',
+      entryFilePath: 'content/posts/my.post.fr.md',
+    });
+
+    expect(result).toEqual('my.post.md');
   });
 
   test('custom identifier field', async () => {
@@ -545,19 +629,21 @@ describe('fillTemplate()', async () => {
 
   test('slug max length from new maxlength config option', async () => {
     // @ts-ignore
-    (await import('$lib/services/config')).cmsConfig = writable({
-      backend: { name: 'github' },
-      media_folder: 'static/images/uploads',
-      collections: [collection],
-      _siteURL: '',
-      _baseURL: '',
-      slug: {
-        encoding: 'unicode',
-        clean_accents: false,
-        sanitize_replacement: '-',
-        maxlength: 30,
+    (await import('$lib/services/config')).cmsConfig = {
+      current: {
+        backend: { name: 'github' },
+        media_folder: 'static/images/uploads',
+        collections: [collection],
+        _siteURL: '',
+        _baseURL: '',
+        slug: {
+          encoding: 'unicode',
+          clean_accents: false,
+          sanitize_replacement: '-',
+          maxlength: 30,
+        },
       },
-    });
+    };
 
     const longContent = {
       title:
@@ -578,21 +664,117 @@ describe('fillTemplate()', async () => {
     expect(result).not.toMatch(/-$/);
   });
 
+  test('remove a custom sanitize replacement left at the end by truncation', async () => {
+    // @ts-ignore
+    (await import('$lib/services/config')).cmsConfig = {
+      current: {
+        backend: { name: 'github' },
+        media_folder: 'static/images/uploads',
+        collections: [collection],
+        _siteURL: '',
+        _baseURL: '',
+        slug: {
+          encoding: 'unicode',
+          clean_accents: false,
+          sanitize_replacement: '_',
+          maxlength: 6,
+        },
+      },
+    };
+
+    expect(
+      fillTemplate('{{title}}', {
+        collection: { ...collection, slug_length: undefined },
+        content: { title: 'Hello World' },
+      }),
+    ).toBe('hello');
+  });
+
+  test('remove a trailing hyphen after truncation without the slug options', async () => {
+    // @ts-ignore
+    (await import('$lib/services/config')).cmsConfig = {
+      current: { backend: { name: 'github' }, collections: [collection] },
+    };
+
+    expect(
+      fillTemplate('{{title}}', {
+        collection: { ...collection, slug_length: 6 },
+        content: { title: 'Hello World' },
+      }),
+    ).toBe('hello');
+  });
+
+  test('keep the end of a truncated slug with an empty sanitize replacement', async () => {
+    // @ts-ignore
+    (await import('$lib/services/config')).cmsConfig = {
+      current: {
+        backend: { name: 'github' },
+        collections: [collection],
+        slug: { sanitize_replacement: '', maxlength: 6 },
+      },
+    };
+
+    expect(
+      fillTemplate('{{title}}-{{title}}', {
+        collection: { ...collection, slug_length: undefined },
+        content: { title: 'Hello' },
+      }),
+    ).toBe('hello-');
+  });
+
+  test('keep the replacement at the end of a slug that is not truncated', async () => {
+    // @ts-ignore
+    (await import('$lib/services/config')).cmsConfig = {
+      current: {
+        backend: { name: 'github' },
+        collections: [collection],
+        slug: { trim: false, maxlength: 50 },
+      },
+    };
+
+    expect(
+      fillTemplate('{{title}}', {
+        collection: { ...collection, slug_length: undefined },
+        content: { title: '--Hello World--' },
+      }),
+    ).toBe('-hello-world-');
+  });
+
+  test('keep the replacement left at the end by truncation with `trim: false`', async () => {
+    // @ts-ignore
+    (await import('$lib/services/config')).cmsConfig = {
+      current: {
+        backend: { name: 'github' },
+        collections: [collection],
+        slug: { trim: false, maxlength: 6 },
+      },
+    };
+
+    expect(
+      fillTemplate('{{title}}', {
+        collection: { ...collection, slug_length: undefined },
+        content: { title: 'Hello World' },
+      }),
+    ).toBe('hello-');
+  });
+
   test('legacy slug_length overrides config maxlength option', async () => {
     // @ts-ignore
-    (await import('$lib/services/config')).cmsConfig = writable({
-      backend: { name: 'github' },
-      media_folder: 'static/images/uploads',
-      collections: [collection],
-      _siteURL: '',
-      _baseURL: '',
-      slug: {
-        encoding: 'unicode',
-        clean_accents: false,
-        sanitize_replacement: '-',
-        maxlength: 50,
+    (await import('$lib/services/config')).cmsConfig = {
+      current: {
+        backend: { name: 'github' },
+        media_folder: 'static/images/uploads',
+        collections: [collection],
+        _siteURL: '',
+        _baseURL: '',
+        slug: {
+          encoding: 'unicode',
+          clean_accents: false,
+          sanitize_replacement: '-',
+          maxlength: 50,
+        },
       },
-    });
+    };
 
     vi.clearAllMocks();
 
@@ -634,19 +816,21 @@ describe('fillTemplate()', async () => {
 
   test('path template with currentSlug is not truncated by maxlength', async () => {
     // @ts-ignore
-    (await import('$lib/services/config')).cmsConfig = writable({
-      backend: { name: 'github' },
-      media_folder: 'static/images/uploads',
-      collections: [collection],
-      _siteURL: '',
-      _baseURL: '',
-      slug: {
-        encoding: 'unicode',
-        clean_accents: false,
-        sanitize_replacement: '-',
-        maxlength: 64,
+    (await import('$lib/services/config')).cmsConfig = {
+      current: {
+        backend: { name: 'github' },
+        media_folder: 'static/images/uploads',
+        collections: [collection],
+        _siteURL: '',
+        _baseURL: '',
+        slug: {
+          encoding: 'unicode',
+          clean_accents: false,
+          sanitize_replacement: '-',
+          maxlength: 64,
+        },
       },
-    });
+    };
 
     const longSlug = 'a'.repeat(64);
     const content = { title: 'Some Title' };
@@ -703,6 +887,20 @@ describe('fillTemplate()', async () => {
       'fallback',
     );
     expect(fillTemplate('{{title | upper}}', { collection, content })).toMatch(/[0-9a-f]{12}/);
+  });
+
+  test('processNestedTemplates preserves malformed nested template values', () => {
+    const transformations = [{ method: 'default', args: { defaultValue: '{{title' } }];
+
+    expect(processNestedTemplates(transformations, () => 'resolved')).toEqual(transformations);
+  });
+
+  test('processNestedTemplates resolves nested template values', () => {
+    const transformations = [{ method: 'default', args: { defaultValue: '{{fallbackField}}' } }];
+
+    expect(processNestedTemplates(transformations, (tag) => `${tag}-resolved`)).toEqual([
+      { method: 'default', args: { defaultValue: 'fallbackField-resolved' } },
+    ]);
   });
 
   test('preview path empty slug handling', async () => {
@@ -823,7 +1021,7 @@ describe('fillTemplate()', async () => {
       entryFilePath: 'content/posts/2024/_index.md',
     };
 
-    expect(fillTemplate('{{dirname}}', nestedOptions)).toEqual('/2024');
+    expect(fillTemplate('{{dirname}}', nestedOptions)).toEqual('2024');
     expect(
       fillTemplate('{{slug}}', {
         ...nestedOptions,
@@ -836,14 +1034,14 @@ describe('fillTemplate()', async () => {
         ...nestedOptions,
         currentSlug: '_index',
       }),
-    ).toEqual('/2024/');
+    ).toEqual('2024/');
 
     expect(
       fillTemplate('{{dirname}}/{{slug}}', {
         ...nestedOptions,
         currentSlug: 'custom-slug',
       }),
-    ).toEqual('/2024/');
+    ).toEqual('2024/');
   });
 
   test('default transformation with nested template tag', async () => {
@@ -905,7 +1103,7 @@ describe('fillTemplate()', async () => {
     expect(uuidShorterResult).toMatch(/^[0-9a-f]{8}$/);
   });
 
-  test('getFieldValue handles fields.* pattern', async () => {
+  test('fillTemplate resolves fields.* tags from content', async () => {
     await setupCmsConfig();
 
     expect(fillTemplate('{{fields.title}}', { collection, content: { title: 'My Title' } })).toBe(
@@ -914,6 +1112,19 @@ describe('fillTemplate()', async () => {
     expect(fillTemplate('{{fields.author}}', { collection, content: { author: 'John Doe' } })).toBe(
       'john-doe',
     );
+  });
+
+  test('fillTemplate resolves fields.* tags for preview paths', async () => {
+    await setupCmsConfig();
+
+    const result = fillTemplate('{{fields.title}}', {
+      collection,
+      content: { title: 'My Title' },
+      type: 'preview_path',
+      entryFilePath: 'content/posts/2024/my-post.md',
+    });
+
+    expect(result).toBe('My Title');
   });
 
   test('getFieldValue handles slug tag specially', async () => {
@@ -1097,10 +1308,10 @@ describe('fillTemplate()', async () => {
       entryFilePath: 'content/posts/2024/my-post.md',
     });
 
-    expect(result).toBe('/2024/uploads');
+    expect(result).toBe('2024/uploads');
   });
 
-  test('fillTemplate falls through to field value when tag is not a file path tag in preview_path with entryFilePath', async () => {
+  test('fillTemplate resolves bare field name tags in preview_path templates', async () => {
     await setupCmsConfig();
 
     const result = fillTemplate('{{title}}', {
@@ -1113,7 +1324,42 @@ describe('fillTemplate()', async () => {
     expect(result).toBe('My Post Title');
   });
 
-  test('fillTemplate falls through to field value for media_folder with non-filepath tag and entryFilePath', async () => {
+  // A random fallback would change the preview URL on every render and spin the entry editor
+  // @see https://github.com/sveltia/sveltia-cms/issues/943
+  test('fillTemplate throws for preview_path tags with no matching field', async () => {
+    await setupCmsConfig();
+
+    expect(() =>
+      fillTemplate('{{nonexistent}}', {
+        collection,
+        content: { title: 'My Post Title' },
+        type: 'preview_path',
+        entryFilePath: 'content/posts/2024/my-post.md',
+      }),
+    ).toThrow('Unresolvable template tag in preview path: nonexistent');
+  });
+
+  test('fillTemplate is stable for preview_path tags with no matching field', async () => {
+    await setupCmsConfig();
+
+    const options = /** @type {any} */ ({
+      collection,
+      content: { title: 'My Post Title' },
+      type: 'preview_path',
+      entryFilePath: 'content/posts/2024/my-post.md',
+    });
+
+    // The `default` transformation suppresses the fallback, so the result has to be identical
+    // across evaluations rather than merely defined
+    const results = [1, 2, 3].map(() =>
+      fillTemplate("{{fields.slug | default('missing')}}", options),
+    );
+
+    expect(new Set(results).size).toBe(1);
+    expect(results[0]).toBe('missing');
+  });
+
+  test('fillTemplate falls back to a generated ID for media_folder tags that are not file path tags', async () => {
     await setupCmsConfig();
 
     const result = fillTemplate('{{category}}', {
@@ -1123,7 +1369,7 @@ describe('fillTemplate()', async () => {
       entryFilePath: 'content/posts/2024/my-post.md',
     });
 
-    expect(result).toBe('photography');
+    expect(result).toMatch(/^[0-9a-f]{12}$/);
   });
 
   test('processTransformations uses empty string when inner default tag resolves to undefined', async () => {
@@ -1156,157 +1402,169 @@ describe('fillTemplate()', async () => {
       entryFilePath: 'content/posts/2024/my-post.md',
     });
 
-    expect(result2).toBe('/2024/article');
+    expect(result2).toBe('2024/article');
+  });
+
+  test('fillTemplate does not resolve field values in media_folder path templates', async () => {
+    await setupCmsConfig();
+
+    const resultNormal = fillTemplate('{{folder}}', {
+      collection,
+      content: { folder: 'normal-folder' },
+      type: 'media_folder',
+      entryFilePath: 'content/posts/my-post.md',
+    });
+
+    expect(resultNormal).toMatch(/^[0-9a-f]{12}$/);
+
+    const result1 = fillTemplate('{{folder}}', {
+      collection,
+      content: { folder: '../secret' },
+      type: 'media_folder',
+      entryFilePath: 'content/posts/my-post.md',
+    });
+
+    expect(result1).toMatch(/^[0-9a-f]{12}$/);
+
+    const result2 = fillTemplate('{{folder}}', {
+      collection,
+      content: { folder: '../../../../.github/workflows' },
+      type: 'media_folder',
+      entryFilePath: 'content/posts/my-post.md',
+    });
+
+    expect(result2).toMatch(/^[0-9a-f]{12}$/);
+  });
+
+  test('fillTemplate sanitizes path traversal attempts in preview_path field values', async () => {
+    await setupCmsConfig();
+
+    const result1 = fillTemplate('{{category}}', {
+      collection,
+      content: { category: '../admin' },
+      type: 'preview_path',
+      entryFilePath: 'content/posts/my-post.md',
+    });
+
+    expect(result1).toBe('admin');
+
+    const result2 = fillTemplate('{{path}}', {
+      collection,
+      content: { path: '../../config/secrets' },
+      type: 'preview_path',
+      entryFilePath: 'content/posts/my-post.md',
+    });
+
+    expect(result2).toBe('config/secrets');
+  });
+
+  test('fillTemplate preserves date-time parts while falling back for unsupported field values in media_folder', async () => {
+    await setupCmsConfig();
+
+    const result = fillTemplate('{{year}}/{{month}}/{{category}}', {
+      collection,
+      content: { category: 'photography/nature' },
+      type: 'media_folder',
+      entryFilePath: 'content/posts/my-post.md',
+      dateTimeParts: { year: '2024', month: '07' },
+    });
+
+    expect(result).toMatch(/^2024\/07\/[0-9a-f]{12}$/);
+  });
+
+  test('fillTemplate sanitizes path traversal in slugs', async () => {
+    await setupCmsConfig();
+
+    const result = fillTemplate('{{title}}', {
+      collection,
+      content: { title: '../foo' },
+    });
+
+    // Path traversal should be removed, then slugified
+    expect(result).toBe('foo');
+  });
+
+  test('fillTemplate sanitizes multiple path traversal segments in slugs', async () => {
+    await setupCmsConfig();
+
+    const result = fillTemplate('{{title}}', {
+      collection,
+      content: { title: '../../../secret' },
+    });
+
+    expect(result).toBe('secret');
+  });
+
+  test('fillTemplate sanitizes current directory references in slugs', async () => {
+    await setupCmsConfig();
+
+    const result = fillTemplate('{{title}}', {
+      collection,
+      content: { title: './hidden' },
+    });
+
+    expect(result).toBe('hidden');
+  });
+
+  test('fillTemplate sanitizes mixed path segments in slugs', async () => {
+    await setupCmsConfig();
+
+    const result = fillTemplate('{{title}}', {
+      collection,
+      content: { title: '../../config/../admin' },
+    });
+
+    expect(result).toBe('config-admin');
   });
 });
 
-describe('hasTemplateTags()', () => {
-  test('should return true for simple template tag', () => {
-    expect(hasTemplateTags('{{title}}')).toBe(true);
-    expect(hasTemplateTags('{{slug}}')).toBe(true);
-    expect(hasTemplateTags('{{year}}')).toBe(true);
+describe('fillTemplate() for a nested collection', () => {
+  /** @type {any} */
+  const collection = {
+    name: 'pages',
+    folder: 'content/pages',
+    fields: [],
+    _type: 'entry',
+    _file: { basePath: 'content/pages' },
+    nested: { depth: 100 },
+    meta: { path: { widget: 'string', index_file: '_index' } },
+  };
+
+  test('leaves the index file name out of the preview path', () => {
+    // @see https://github.com/decaporg/decap-cms/issues/4963
+    expect(
+      fillTemplate('html/{{slug}}', {
+        type: 'preview_path',
+        collection,
+        content: {},
+        currentSlug: 'conversion-api/xhtml-converter/_index',
+        entryFilePath: 'content/pages/conversion-api/xhtml-converter/_index.md',
+      }),
+    ).toBe('html/conversion-api/xhtml-converter');
   });
 
-  test('should return true for template tag with content prefix', () => {
-    expect(hasTemplateTags('prefix-{{title}}')).toBe(true);
-    expect(hasTemplateTags('blog-{{slug}}')).toBe(true);
-    expect(hasTemplateTags('Hello {{name}}')).toBe(true);
+  test('keeps the index file name in the entry file path', () => {
+    expect(
+      fillTemplate('{{slug}}', {
+        type: 'media_folder',
+        collection,
+        content: {},
+        currentSlug: 'conversion-api/xhtml-converter/_index',
+        entryFilePath: 'content/pages/conversion-api/xhtml-converter/_index.md',
+      }),
+    ).toBe('conversion-api/xhtml-converter/_index');
   });
 
-  test('should return true for template tag with content suffix', () => {
-    expect(hasTemplateTags('{{title}}-suffix')).toBe(true);
-    expect(hasTemplateTags('{{slug}}/index')).toBe(true);
-    expect(hasTemplateTags('{{year}}-post')).toBe(true);
-  });
-
-  test('should return true for multiple template tags', () => {
-    expect(hasTemplateTags('{{year}}-{{month}}-{{day}}')).toBe(true);
-    expect(hasTemplateTags('{{category}}/{{slug}}')).toBe(true);
-    expect(hasTemplateTags('{{fields.title}}-{{uuid}}')).toBe(true);
-  });
-
-  test('should return true for template tag with nested content', () => {
-    expect(hasTemplateTags('{{fields.title}}')).toBe(true);
-    expect(hasTemplateTags('{{fields.author | default("fallback")}}')).toBe(true);
-    expect(hasTemplateTags("{{title | date('YYYY-MM-DD')}}")).toBe(true);
-  });
-
-  test('should return false for string without template tags', () => {
-    expect(hasTemplateTags('just a plain string')).toBe(false);
-    expect(hasTemplateTags('no-templates-here')).toBe(false);
-    expect(hasTemplateTags('Hello World')).toBe(false);
-  });
-
-  test('should return false for empty string', () => {
-    expect(hasTemplateTags('')).toBe(false);
-  });
-
-  test('should return false for whitespace only', () => {
-    expect(hasTemplateTags('   ')).toBe(false);
-    expect(hasTemplateTags('\t')).toBe(false);
-    expect(hasTemplateTags('\n')).toBe(false);
-  });
-
-  test('should return false for incomplete template tags', () => {
-    expect(hasTemplateTags('{{title')).toBe(false);
-    expect(hasTemplateTags('title}}')).toBe(false);
-    expect(hasTemplateTags('{title}')).toBe(false);
-  });
-
-  test('should return false for empty braces', () => {
-    expect(hasTemplateTags('{{}}')).toBe(false);
-    expect(hasTemplateTags('prefix-{{}}')).toBe(false);
-  });
-
-  test('should handle the negative lookahead case correctly', () => {
-    expect(hasTemplateTags("{{fields.slug | default('{{fields.title}}')}}")).toBe(true);
-    expect(hasTemplateTags("test')")).toBe(false);
-  });
-
-  test('should handle special characters in template tags', () => {
-    expect(hasTemplateTags('{{slug-with-dash}}')).toBe(true);
-    expect(hasTemplateTags('{{slug_with_underscore}}')).toBe(true);
-    expect(hasTemplateTags('{{slug.with.dots}}')).toBe(true);
-  });
-
-  test('should handle spaces inside template tags', () => {
-    expect(hasTemplateTags('{{ title }}')).toBe(true);
-    expect(hasTemplateTags('{{  slug  }}')).toBe(true);
-    expect(hasTemplateTags('{{ fields.author }}')).toBe(true);
-  });
-
-  test('should return true for paths with template tags', () => {
-    expect(hasTemplateTags('content/{{year}}/{{month}}/post.md')).toBe(true);
-    expect(hasTemplateTags('{{dirname}}/{{filename}}.{{extension}}')).toBe(true);
-  });
-
-  test('should return true for template tags with transformations', () => {
-    expect(hasTemplateTags('{{title | upper}}')).toBe(true);
-    expect(hasTemplateTags("{{published | date('MMM D, YYYY')}}")).toBe(true);
-    expect(hasTemplateTags('{{name | truncate(20)}}')).toBe(true);
-    expect(hasTemplateTags("{{author | default('Unknown')}}")).toBe(true);
-  });
-
-  test('should return false for single braces', () => {
-    expect(hasTemplateTags('{title}')).toBe(false);
-    expect(hasTemplateTags('{slug}')).toBe(false);
-  });
-
-  test('should return false for mismatched braces', () => {
-    expect(hasTemplateTags('{{title}')).toBe(false);
-    expect(hasTemplateTags('{slug}}')).toBe(false);
-  });
-
-  test('should handle mixed content with and without tags', () => {
-    expect(hasTemplateTags('static-{{dynamic}}-static')).toBe(true);
-    expect(hasTemplateTags('2024-{{month}}-{{day}}')).toBe(true);
-  });
-
-  test('should return true for UUID tags', () => {
-    expect(hasTemplateTags('{{uuid}}')).toBe(true);
-    expect(hasTemplateTags('{{uuid_short}}')).toBe(true);
-    expect(hasTemplateTags('{{uuid_shorter}}')).toBe(true);
-  });
-
-  test('should return true for datetime tags', () => {
-    expect(hasTemplateTags('{{year}}')).toBe(true);
-    expect(hasTemplateTags('{{month}}')).toBe(true);
-    expect(hasTemplateTags('{{day}}')).toBe(true);
-    expect(hasTemplateTags('{{hour}}')).toBe(true);
-    expect(hasTemplateTags('{{minute}}')).toBe(true);
-    expect(hasTemplateTags('{{second}}')).toBe(true);
-  });
-
-  test('should return true for file path tags', () => {
-    expect(hasTemplateTags('{{dirname}}')).toBe(true);
-    expect(hasTemplateTags('{{filename}}')).toBe(true);
-    expect(hasTemplateTags('{{extension}}')).toBe(true);
-  });
-
-  test('should return true for locale tag', () => {
-    expect(hasTemplateTags('{{locale}}')).toBe(true);
-  });
-
-  test('should return false for literal brace patterns', () => {
-    expect(hasTemplateTags('{{{')).toBe(false);
-    expect(hasTemplateTags('}}}')).toBe(false);
-    expect(hasTemplateTags('{{}}')).toBe(false);
-  });
-
-  test('should handle very long template tags', () => {
-    const longTag = `{{${'a'.repeat(1000)}}}`;
-
-    expect(hasTemplateTags(longTag)).toBe(true);
-  });
-
-  test('should handle regex special characters in surrounding text', () => {
-    expect(hasTemplateTags('file.name-{{slug}}.txt')).toBe(true);
-    expect(hasTemplateTags('path/to/{{title}}/index')).toBe(true);
-    expect(hasTemplateTags('[{{slug}}]')).toBe(true);
-  });
-
-  test('should work with newlines and special whitespace', () => {
-    expect(hasTemplateTags('line1\n{{title}}\nline2')).toBe(true);
-    expect(hasTemplateTags('tab\t{{slug}}\ttab')).toBe(true);
+  test('resolves the dirname of a nested entry for a media folder', () => {
+    // @see https://github.com/decaporg/decap-cms/issues/7752
+    expect(
+      fillTemplate('/src/dokument/{{dirname}}', {
+        type: 'media_folder',
+        collection,
+        content: {},
+        currentSlug: 'nested/deeper/_index',
+        entryFilePath: 'content/pages/nested/deeper/_index.md',
+      }),
+    ).toBe('/src/dokument/nested/deeper');
   });
 });

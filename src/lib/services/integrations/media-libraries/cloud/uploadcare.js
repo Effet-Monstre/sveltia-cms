@@ -1,10 +1,15 @@
 /* eslint-disable no-await-in-loop */
 
 import { sleep } from '@sveltia/utils/misc';
-import { get } from 'svelte/store';
 
-import { cmsConfig } from '$lib/services/config';
-import { formatFileName } from '$lib/services/utils/file';
+import { formatFileName } from '$lib/services/assets/file-name';
+import { cmsConfig } from '$lib/services/config/state';
+import {
+  findLibraryOptions,
+  resolveLibraryOptions,
+} from '$lib/services/integrations/media-libraries/options';
+import { fetchPages } from '$lib/services/integrations/media-libraries/paging';
+import { hmacSha256, toHex } from '$lib/services/utils/crypto';
 
 /**
  * @import {
@@ -39,25 +44,20 @@ import { formatFileName } from '$lib/services/utils/file';
 
 /**
  * Get Uploadcare library options from site config.
- * @internal
  * @param {CmsConfig | MediaField} [config] CMS configuration or field configuration.
  * @returns {UploadcareMediaLibrary | false | undefined} Configuration object, or `false` if
  * explicitly disabled.
  */
-export const getLibraryOptions = (config = get(cmsConfig)) =>
-  config?.media_libraries?.uploadcare ??
-  (config?.media_library?.name === 'uploadcare'
-    ? /** @type {UploadcareMediaLibrary} */ (config?.media_library)
-    : undefined);
+export const getLibraryOptions = (config = cmsConfig.current) =>
+  findLibraryOptions('uploadcare', config);
 
 /**
  * Get Uploadcare public key from library options.
- * @internal
  * @param {MediaField} [fieldConfig] Field configuration.
  * @returns {string | undefined} Public key.
  */
 export const getPublicKey = (fieldConfig) => {
-  const options = getLibraryOptions(fieldConfig) ?? getLibraryOptions();
+  const options = resolveLibraryOptions('uploadcare', fieldConfig);
 
   return options ? options.config?.publicKey : undefined;
 };
@@ -70,7 +70,6 @@ export const isEnabled = (fieldConfig) => !!getPublicKey(fieldConfig);
 
 /**
  * Parse API results into ExternalAsset format.
- * @internal
  * @param {UploadcareResource[]} results API results.
  * @param {object} [options] Additional options.
  * @param {MediaField} [options.fieldConfig] Field configuration for custom handling.
@@ -79,7 +78,7 @@ export const isEnabled = (fieldConfig) => !!getPublicKey(fieldConfig);
  * @see https://sveltiacms.app/en/docs/media/uploadcare
  */
 export const parseResults = (results, { fieldConfig } = {}) => {
-  const libOptions = getLibraryOptions(fieldConfig) ?? getLibraryOptions();
+  const libOptions = resolveLibraryOptions('uploadcare', fieldConfig);
 
   const {
     settings: { autoFilename = false, defaultOperations = undefined } = {},
@@ -116,8 +115,41 @@ export const parseResults = (results, { fieldConfig } = {}) => {
 };
 
 /**
+ * Get the Uploadcare API keys for a request.
+ * @param {MediaLibraryFetchOptions} options Options containing the secret key (apiKey).
+ * @param {object} [args] Arguments.
+ * @param {boolean} [args.secretKeyRequired] Whether to require the secret key.
+ * @returns {{ publicKey: string, secretKey: string }} Public key and secret key.
+ * @throws {Error} When the public key is not configured, or the required secret key is not
+ * provided.
+ */
+const getKeys = ({ fieldConfig, apiKey: secretKey }, { secretKeyRequired = true } = {}) => {
+  const publicKey = getPublicKey(fieldConfig);
+
+  if (!publicKey) {
+    throw new Error('Uploadcare public key is not configured');
+  }
+
+  if (secretKeyRequired && !secretKey) {
+    throw new Error('Uploadcare secret key is not provided');
+  }
+
+  return { publicKey, secretKey };
+};
+
+/**
+ * Get the headers for a REST API request.
+ * @param {{ publicKey: string, secretKey: string }} keys Public key and secret key.
+ * @returns {Record<string, string>} Headers.
+ * @see https://uploadcare.com/api-refs/rest-api/v0.7.0/#section/Authentication
+ */
+const getRESTHeaders = ({ publicKey, secretKey }) => ({
+  Accept: 'application/vnd.uploadcare-v0.7+json',
+  Authorization: `Uploadcare.Simple ${publicKey}:${secretKey}`,
+});
+
+/**
  * Fetch files from Uploadcare API with pagination.
- * @internal
  * @param {MediaLibraryFetchOptions} options Options containing the secret key (apiKey) and kind.
  * @param {object} [config] Additional configuration.
  * @param {number} [config.maxPages] Maximum number of pages to fetch. Default: 10.
@@ -126,17 +158,8 @@ export const parseResults = (results, { fieldConfig } = {}) => {
  * @see https://uploadcare.com/api-refs/rest-api/v0.7.0/#tag/File/operation/filesList
  */
 export const fetchFiles = async (options, { maxPages = 10, filter } = {}) => {
-  const { kind, fieldConfig, apiKey: secretKey } = options;
-  const publicKey = getPublicKey(fieldConfig);
-
-  if (!publicKey) {
-    return Promise.reject(new Error('Uploadcare public key is not configured'));
-  }
-
-  const headers = {
-    Accept: 'application/vnd.uploadcare-v0.7+json',
-    Authorization: `Uploadcare.Simple ${publicKey}:${secretKey}`,
-  };
+  const { kind, fieldConfig } = options;
+  const headers = getRESTHeaders(getKeys(options, { secretKeyRequired: false }));
 
   const params = new URLSearchParams({
     limit: '100',
@@ -144,42 +167,33 @@ export const fetchFiles = async (options, { maxPages = 10, filter } = {}) => {
     stored: 'true',
   });
 
-  /** @type {UploadcareResource[]} */
-  const allResults = [];
-  /** @type {string | null} */
-  let nextUrl = `https://api.uploadcare.com/files/?${params}`;
+  const allResults = await fetchPages(
+    async (/** @type {string | undefined} */ nextUrl) => {
+      const response = await fetch(nextUrl ?? `https://api.uploadcare.com/files/?${params}`, {
+        headers,
+      });
 
-  // Fetch up to maxPages pages
-  for (let page = 0; page < maxPages && nextUrl; page += 1) {
-    const response = await fetch(nextUrl, { headers });
+      if (!response.ok) {
+        throw new Error(`Failed to fetch files: ${response.statusText}`);
+      }
 
-    if (!response.ok) {
-      return Promise.reject(new Error(`Failed to fetch files: ${response.statusText}`));
-    }
+      /** @type {UploadcareListResponse} */
+      const data = await response.json();
+      // Apply filters: first kind filter if specified, then custom filter if provided
+      let { results } = data;
 
-    /** @type {UploadcareListResponse} */
-    const data = await response.json();
-    // Apply filters: first kind filter if specified, then custom filter if provided
-    let { results } = data;
+      if (kind === 'image') {
+        results = results.filter((file) => file.is_image);
+      }
 
-    if (kind === 'image') {
-      results = results.filter((file) => file.is_image);
-    }
+      if (filter) {
+        results = results.filter(filter);
+      }
 
-    if (filter) {
-      results = results.filter(filter);
-    }
-
-    allResults.push(...results);
-    nextUrl = data.next;
-
-    if (!nextUrl) {
-      break;
-    }
-
-    // Wait for a bit before requesting the next page
-    await sleep(50);
-  }
+      return { results, next: data.next };
+    },
+    { maxPages },
+  );
 
   return parseResults(allResults, { fieldConfig });
 };
@@ -212,30 +226,13 @@ export const search = async (query, options) => {
 
 /**
  * Generate a secure signature for Uploadcare upload.
- * @internal
  * @param {string} secretKey Secret key.
  * @param {number} expire Expiration timestamp.
  * @returns {Promise<string>} Signature.
  * @see https://uploadcare.com/docs/security/secure-uploads/
  */
-export const generateSignature = async (secretKey, expire) => {
-  const encoder = new TextEncoder();
-  const data = encoder.encode(String(expire));
-  const key = encoder.encode(secretKey);
-
-  const cryptoKey = await crypto.subtle.importKey(
-    'raw',
-    key,
-    { name: 'HMAC', hash: 'SHA-256' },
-    false,
-    ['sign'],
-  );
-
-  const signature = await crypto.subtle.sign('HMAC', cryptoKey, data);
-  const hashArray = Array.from(new Uint8Array(signature));
-
-  return hashArray.map((b) => b.toString(16).padStart(2, '0')).join('');
-};
+export const generateSignature = async (secretKey, expire) =>
+  toHex(await hmacSha256(secretKey, String(expire)));
 
 /**
  * Upload files to Uploadcare.
@@ -250,17 +247,8 @@ export const upload = async (files, options) => {
     return [];
   }
 
-  const { fieldConfig, apiKey: secretKey } = options;
-  const publicKey = getPublicKey(fieldConfig);
-
-  if (!publicKey) {
-    return Promise.reject(new Error('Uploadcare public key is not configured'));
-  }
-
-  if (!secretKey) {
-    return Promise.reject(new Error('Uploadcare secret key is not provided'));
-  }
-
+  const { fieldConfig } = options;
+  const { publicKey, secretKey } = getKeys(options);
   // Generate signature for secure upload (expires in 30 minutes)
   const expire = Math.floor(Date.now() / 1000) + 1800;
   const signature = await generateSignature(secretKey, expire);
@@ -272,9 +260,21 @@ export const upload = async (files, options) => {
   formData.append('signature', signature);
   formData.append('expire', String(expire));
 
+  /**
+   * Files keyed by the form field name they are uploaded under, which is also the key of the
+   * response. The name is formatted, so it can differ from the original file name, and a file
+   * whose name is taken by an earlier file is renamed, otherwise the response would have one key
+   * for both.
+   * @type {Map<string, File>}
+   */
+  const fileMap = new Map();
+
   // Add all files to the same FormData
   files.forEach((file) => {
-    formData.append(formatFileName(file.name), file);
+    const fileName = formatFileName(file.name, { assetNamesInSameFolder: [...fileMap.keys()] });
+
+    fileMap.set(fileName, file);
+    formData.append(fileName, file);
   });
 
   const response = await fetch('https://upload.uploadcare.com/base/', {
@@ -292,7 +292,7 @@ export const upload = async (files, options) => {
   const uploadedFiles = Object.entries(data)
     .filter(([key]) => !key.startsWith('UPLOADCARE_'))
     .map(([fileName, uuid]) => {
-      const file = files.find((f) => f.name === fileName);
+      const file = fileMap.get(fileName);
       const mimeType = file?.type || 'application/octet-stream';
       const isImage = mimeType.startsWith('image/');
 
@@ -315,6 +315,63 @@ export const upload = async (files, options) => {
 };
 
 /**
+ * Delete files from Uploadcare. The files are removed from storage in batches, as the REST API
+ * accepts up to 100 UUIDs per request.
+ * @param {ExternalAsset[]} assets Assets to delete. The `id` of each asset is the file UUID.
+ * @param {MediaLibraryFetchOptions} options Options containing the secret key (apiKey).
+ * @returns {Promise<void>}
+ * @see https://uploadcare.com/api-refs/rest-api/v0.7.0/#tag/File/operation/filesDelete
+ */
+export const deleteFiles = async (assets, options) => {
+  const headers = { ...getRESTHeaders(getKeys(options)), 'Content-Type': 'application/json' };
+  const uuids = assets.map(({ id }) => id);
+
+  for (let index = 0; index < uuids.length; index += 100) {
+    const response = await fetch('https://api.uploadcare.com/files/storage/', {
+      method: 'DELETE',
+      headers,
+      body: JSON.stringify(uuids.slice(index, index + 100)),
+    });
+
+    if (!response.ok) {
+      throw new Error(`Failed to delete files: ${response.statusText}`);
+    }
+
+    // Wait for a bit before sending the next batch
+    if (index + 100 < uuids.length) {
+      await sleep(50);
+    }
+  }
+
+  return undefined;
+};
+
+/**
+ * Whether the given URL points to a file on the configured Uploadcare CDN.
+ * @param {string} url URL.
+ * @returns {boolean} Result.
+ */
+export const isAssetURL = (url) => {
+  const options = getLibraryOptions();
+
+  if (!options) {
+    return false;
+  }
+
+  try {
+    const { origin } = new URL(options.config?.cdnBase ?? 'https://ucarecdn.com/');
+
+    return url.startsWith(`${origin}/`);
+  } catch {
+    // A malformed `cdnBase` can’t be matched
+    return false;
+  }
+};
+
+/**
+ * Uploadcare media library service integration. Files can’t be renamed through the REST API, and a
+ * re-uploaded file gets a new UUID (and therefore a new URL), so neither `rename` nor `replace` is
+ * provided.
  * @type {MediaLibraryService}
  */
 export default {
@@ -329,7 +386,9 @@ export default {
   apiKeyURL: 'https://app.uploadcare.com/projects/-/api-keys/',
   apiKeyPattern: /^[a-f0-9]{20}$/,
   isEnabled,
+  isAssetURL,
   list,
   search,
   upload,
+  delete: deleteFiles,
 };

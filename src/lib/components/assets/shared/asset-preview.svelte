@@ -1,11 +1,18 @@
 <script>
   import { _ } from '@sveltia/i18n';
   import { Icon } from '@sveltia/ui';
-  import { waitForVisibility } from '@sveltia/utils/element';
-  import { flushSync } from 'svelte';
+  import { removeVisibilityResolver, waitForVisibility } from '@sveltia/utils/element';
+  import { onMount, untrack } from 'svelte';
 
-  import { getAssetBlobURL, getAssetThumbnailURL } from '$lib/services/assets/info';
-  import { THUMBNAIL_KINDS } from '$lib/services/assets/kinds';
+  import {
+    getAssetBlobURL,
+    getAssetThumbnailURL,
+    revokeAssetBlobURLIfNeeded,
+    revokeBlobURLIfNeeded,
+  } from '$lib/services/assets/info';
+  import { hasPDFThumbnail, THUMBNAIL_KINDS } from '$lib/services/assets/kinds';
+  import { requestFlushSync } from '$lib/services/utils/render';
+  import { watchAsync } from '$lib/services/utils/state.svelte';
 
   /**
    * @import { Asset, AssetKind } from '$lib/types/private';
@@ -28,6 +35,9 @@
    * @property {string} [alt] Alt text for the image.
    * @property {boolean} [controls] Whether to show controls for audio/video. If this is `false` and
    * {@link kind} is `audio`, an icon will be displayed instead.
+   * @property {() => void} [onError] Function called once the preview falls back to an icon because
+   * the media can’t be loaded, either as its URL lookup has failed or as the element has failed to
+   * load it.
    */
 
   /** @type {Props & Record<string, any>} */
@@ -36,7 +46,7 @@
     kind,
     loading = 'lazy',
     asset = undefined,
-    src = $bindable(undefined),
+    src = undefined,
     variant = undefined,
     blurBackground = false,
     cover = false,
@@ -44,6 +54,7 @@
     dissolve = true,
     alt = '',
     controls = false,
+    onError = () => undefined,
     ...rest
     /* eslint-enable prefer-const */
   } = $props();
@@ -55,10 +66,16 @@
   /** @type {string | undefined} */
   let blurImageURL = $state();
   /**
-   * The actual `src` applied to the media element. For the `asset`-based flow this mirrors `src`
-   * (which is set after a visibility check inside {@link updateSrc}). For an externally-provided
-   * `src` with `loading === 'lazy'`, it is deferred via {@link waitForVisibility} so that the
-   * browser does not eagerly fetch off-screen images in grid layouts.
+   * The source URL: the `src` property, or for the `asset`-based flow, the URL looked up in
+   * {@link updateSrc}. A change of the property replaces the looked-up URL.
+   */
+  let resolvedSrc = $derived(src);
+  /**
+   * The actual `src` applied to the media element. For the `asset`-based flow this mirrors
+   * {@link resolvedSrc} (which is set after a visibility check inside {@link updateSrc}). For an
+   * externally-provided `src` with `loading === 'lazy'`, it is deferred via
+   * {@link waitForVisibility} so that the browser does not eagerly fetch off-screen images in grid
+   * layouts.
    * @type {string | undefined}
    */
   let mediaSrc = $state();
@@ -66,16 +83,67 @@
   const isThumbnail = $derived(!!asset && !!variant && !controls);
   const isImage = $derived(
     kind === 'image' ||
-      asset?.name.endsWith('.pdf') ||
+      (!!asset && hasPDFThumbnail(asset.name)) ||
       (isThumbnail && THUMBNAIL_KINDS.includes(kind)),
   );
 
   let updatingSrc = false;
+  /**
+   * Object URLs created by this preview. Every `getAssetThumbnailURL()` call returns a URL of its
+   * own, so these have to be released here — `revokeAssetBlobURLIfNeeded()` only knows about the
+   * one URL shared on the asset itself. Kept outside the reactive graph so the cleanup below can
+   * read it after the component is destroyed.
+   * @type {string[]}
+   */
+  const ownedURLs = [];
+  /**
+   * The asset this preview last rendered, kept outside the reactive graph like {@link ownedURLs}.
+   *
+   * The cleanup below runs while the component is being destroyed, and reading the `asset` prop
+   * there would read whatever the parent passes it from — a `$derived` holding the thumbnail of a
+   * collapsed Object field or List item. Svelte answers a read made while an effect is being torn
+   * down by walking that derived’s dependency graph to see whether it has to be recomputed, and
+   * that walk doesn’t memoize: in a deeply nested entry editor, where every level multiplies the
+   * number of paths to the same derived, expanding one field froze the browser for tens of seconds.
+   * The cleanup reads this copy instead, so it touches nothing reactive.
+   * @type {Asset | undefined}
+   * @see https://github.com/sveltia/sveltia-cms/issues/1006
+   */
+  let currentAsset = undefined;
+  /**
+   * Whether the component has been destroyed. A URL lookup that finishes afterwards releases what
+   * it created, as the cleanup below has already run, and reads nothing reactive.
+   */
+  let destroyed = false;
 
   /**
-   * Update the {@link src} property.
+   * Remember an object URL this preview created, so that it can be released later.
+   * @param {string | undefined} url Object URL.
+   */
+  const ownURL = (url) => {
+    if (url && !ownedURLs.includes(url)) {
+      ownedURLs.push(url);
+    }
+  };
+
+  /**
+   * Release an object URL this preview created, once no element is displaying it any more.
+   * @param {string | undefined} url Object URL.
+   */
+  const releaseOwnedURL = (url) => {
+    const index = url ? ownedURLs.indexOf(url) : -1;
+
+    if (index > -1) {
+      ownedURLs.splice(index, 1);
+      revokeBlobURLIfNeeded(url);
+    }
+  };
+
+  /**
+   * Update the {@link resolvedSrc} value.
    */
   const updateSrc = async () => {
+    /* v8 ignore next 3 -- the effect below only calls this for a mounted asset, one at a time */
     if (!asset || !mediaElement || updatingSrc) {
       return;
     }
@@ -87,46 +155,92 @@
       await waitForVisibility(mediaElement);
     }
 
+    // Read up front, as a derived can’t be read once the component has been destroyed
+    const previousSrc = resolvedSrc;
+    const thumbnail = isThumbnail;
+    let nextSrc = previousSrc;
+
     try {
-      src = isThumbnail ? await getAssetThumbnailURL(asset) : await getAssetBlobURL(asset);
+      const url = thumbnail ? await getAssetThumbnailURL(asset) : await getAssetBlobURL(asset);
+
+      // The preview was removed while the URL was being looked up. Release it as the cleanup does,
+      // which skips a URL another element is displaying
+      if (destroyed) {
+        revokeBlobURLIfNeeded(url);
+
+        return;
+      }
+
+      nextSrc = url;
+      resolvedSrc = url;
     } catch {
       hasError = true;
     }
 
-    if (blurBackground && !blurImageURL && src) {
-      blurImageURL = src;
+    if (thumbnail) {
+      ownURL(nextSrc);
+    }
+
+    if (previousSrc !== nextSrc) {
+      releaseOwnedURL(previousSrc);
+    }
+
+    if (blurBackground && !blurImageURL && nextSrc) {
+      blurImageURL = nextSrc;
     }
 
     updatingSrc = false;
 
     // For some reason this is required to update the `$effect` calling `checkLoaded()`, otherwise
-    // navigating from `/assets` to `/assets/<collection>` on small screen leaves the preview empty
-    flushSync();
+    // navigating from `/assets` to `/assets/<collection>` on small screen leaves the preview empty.
+    // Queued rather than immediate, so a grid full of previews settling at once costs one flush
+    // instead of one per preview.
+    requestFlushSync();
   };
 
   /**
    * Update the {@link loaded} state when the media is loaded.
    */
   const checkLoaded = async () => {
+    /* v8 ignore next 3 -- the effect below only calls this once the media has a source */
     if (!mediaElement || !mediaSrc) {
       return;
     }
 
-    if (
-      isImage
-        ? !(/** @type {HTMLImageElement} */ (mediaElement).complete)
-        : !(/** @type {HTMLMediaElement} */ (mediaElement).readyState)
-    ) {
+    // The element’s own readiness only means anything once the DOM actually reflects `mediaSrc`.
+    // An `<img>` whose `src` attribute hasn’t been written yet reports `complete === true`, which
+    // would otherwise mark the preview loaded — and, back when that signal also revoked the blob
+    // URL, kill the image just as the real `src` was applied. @see
+    // https://github.com/sveltia/sveltia-cms/issues/944
+    const isSrcApplied = mediaElement.getAttribute('src') === mediaSrc;
+
+    const isReady =
+      isSrcApplied &&
+      (isImage
+        ? /** @type {HTMLImageElement} */ (mediaElement).complete
+        : !!(/** @type {HTMLMediaElement} */ (mediaElement).readyState));
+
+    if (!isReady) {
       // Not loaded yet; wait until it’s ready
-      await new Promise((resolve) => {
-        mediaElement?.addEventListener(
-          isImage ? 'load' : 'loadedmetadata',
-          () => {
-            resolve(undefined);
-          },
-          { once: true },
-        );
+      const failed = await new Promise((resolve) => {
+        mediaElement?.addEventListener(isImage ? 'load' : 'loadedmetadata', () => resolve(false), {
+          once: true,
+        });
+        mediaElement?.addEventListener('error', () => resolve(true), { once: true });
       });
+
+      if (failed) {
+        // Show the fallback icon rather than an empty tile that never finishes its transition
+        hasError = true;
+
+        return;
+      }
+    }
+
+    // The preview may have been removed while the media was loading
+    /* v8 ignore next 3 */
+    if (!mediaElement) {
+      return;
     }
 
     // Enable a dissolve transition
@@ -135,18 +249,45 @@
     }
 
     loaded = true;
-
-    // Revoke the thumbnail blob URL
-    if (asset && isThumbnail && src?.startsWith('blob:')) {
-      URL.revokeObjectURL(src);
-    }
   };
 
   $effect(() => {
-    if (asset && !blurImageURL) {
+    // `blurImageURL` is only rendered when `blurBackground` is enabled, so don’t look up — and
+    // create an object URL for — a thumbnail that nothing will display. Every thumbnail in an asset
+    // grid would otherwise pay for a blurred backdrop it never shows.
+    if (blurBackground && asset && !blurImageURL) {
       (async () => {
-        blurImageURL = await getAssetThumbnailURL(asset, { cacheOnly: true });
+        const url = await getAssetThumbnailURL(asset, { cacheOnly: true });
+
+        // The preview was removed while the thumbnail was being looked up
+        if (destroyed) {
+          revokeBlobURLIfNeeded(url);
+
+          return;
+        }
+
+        blurImageURL = url;
+        ownURL(blurImageURL);
       })();
+    }
+  });
+
+  $effect(() => {
+    // An asset on an external location comes as a plain URL rather than an `Asset`, and has no
+    // cached thumbnail, so the image itself doubles as the blurred backdrop
+    if (blurBackground && !asset && kind === 'image' && resolvedSrc) {
+      blurImageURL = resolvedSrc;
+    }
+  });
+
+  $effect(() => {
+    currentAsset = asset;
+  });
+
+  // Notify the parent of a failure, whether the URL lookup or the media element has failed
+  $effect(() => {
+    if (hasError) {
+      untrack(() => onError());
     }
   });
 
@@ -156,30 +297,63 @@
     }
   });
 
-  $effect(() => {
-    if (asset) {
-      // For the asset-based flow, `src` is set by `updateSrc` after a visibility check
-      mediaSrc = src;
-    } else if (src && mediaElement && loading === 'lazy') {
+  // The source can change or go away before the element becomes visible, which `watchAsync` takes
+  // care of
+  watchAsync(
+    () => {
+      // For the asset-based flow, `resolvedSrc` is set by `updateSrc` after a visibility check
+      if (asset || !resolvedSrc || !mediaElement || loading !== 'lazy') {
+        mediaSrc = resolvedSrc;
+
+        return undefined;
+      }
+
       // For externally-provided `src`, use Intersection Observer instead of relying on the native
       // `loading="lazy"` attribute, which browsers may ignore in grid/flex layouts
       mediaSrc = undefined;
 
-      const currentSrc = src;
+      const currentSrc = resolvedSrc;
+      const element = mediaElement;
 
-      (async () => {
-        await waitForVisibility(mediaElement);
-        mediaSrc = currentSrc;
+      return (async () => {
+        await waitForVisibility(element);
+
+        return currentSrc;
       })();
-    } else {
-      mediaSrc = src;
-    }
-  });
+    },
+    (currentSrc) => {
+      mediaSrc = currentSrc;
+    },
+  );
 
   $effect(() => {
     if (mediaElement && mediaSrc) {
       checkLoaded();
     }
+  });
+
+  // eslint-disable-next-line arrow-body-style
+  onMount(() => {
+    // Clean up
+    return () => {
+      destroyed = true;
+
+      if (currentAsset) {
+        revokeAssetBlobURLIfNeeded(currentAsset);
+      }
+
+      // The revocation is batched into the next frame and skips any URL an element is still
+      // displaying, which is what keeps an image that hasn’t finished decoding — or one that
+      // outlives this component — from losing its source. @see
+      // https://github.com/sveltia/sveltia-cms/issues/944
+      ownedURLs.splice(0).forEach((url) => {
+        revokeBlobURLIfNeeded(url);
+      });
+
+      if (mediaElement) {
+        removeVisibilityResolver(mediaElement);
+      }
+    };
   });
 </script>
 

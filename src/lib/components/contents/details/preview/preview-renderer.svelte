@@ -1,193 +1,253 @@
+<!--
+  @component
+  Render the entry preview with a renderer registered through `CMS.registerCustomPreviewRenderer()`
+  instead of the built-in preview. The renderer is a factory that returns a function turning the
+  entry values into an HTML string, which is shown in an iframe. This is an Effet Monstre fork
+  addition; see `docs/fork.md`.
+-->
 <script>
-  import { _ } from '@sveltia/i18n';
-  import { entryDraft } from '$lib/services/contents/draft';
   import { onMount } from 'svelte';
 
-  let { previewRenderer, locale } = $props();
+  import { getEntryDraftContext } from '$lib/services/contents/draft/state.svelte';
+  import { getValueMapSnapshot } from '$lib/services/contents/draft/value-map.svelte';
 
-  let mainRef;
-  let iFrameRef;
+  /**
+   * @import {
+   * CustomPreviewRenderer,
+   * CustomPreviewRenderFunction,
+   * InternalLocaleCode,
+   * } from '$lib/types/private';
+   */
 
-  let out = null;
+  /**
+   * @typedef {object} Props
+   * @property {CustomPreviewRenderer} previewRenderer Renderer registered for the collection.
+   * @property {InternalLocaleCode} locale Current pane’s locale.
+   */
 
-  let htmlContent = $state(null);
+  const entryDraft = getEntryDraftContext();
 
-  let frames = $state([]);
+  /** @type {Props} */
+  let {
+    /* eslint-disable prefer-const */
+    previewRenderer,
+    locale,
+    /* eslint-enable prefer-const */
+  } = $props();
 
-  let refs = $state({});
-  let idx = 0;
+  /**
+   * Element the renderer is given, so it can set itself up against the preview pane.
+   * @type {HTMLElement | undefined}
+   */
+  let wrapper = $state();
+  /**
+   * The two iframes the renders alternate between: the result is loaded into the hidden one and
+   * only shown once it’s ready, so the preview doesn’t flash while the user types.
+   * @type {(HTMLIFrameElement | undefined)[]}
+   */
+  const frames = $state([undefined, undefined]);
+  /** Index of the iframe the user is looking at, or `-1` before the first render. */
+  let shownIndex = $state(-1);
+  /** @type {CustomPreviewRenderFunction | undefined} */
+  let render;
+  /** Scroll position of the preview, kept across renders. */
+  let scrollTop = 0;
+  /** Whether a render is in flight. */
+  let rendering = false;
+  /** Whether the values changed while a render was in flight. */
+  let stale = false;
 
-  let scrollY = $state(0);
+  const valueMap = $derived(getValueMapSnapshot(entryDraft.current, locale));
 
-  const convertToNestedObject = (flatObj) => {
+  /**
+   * Turn a map of dot-notated key paths into the nested object a renderer expects, with a numeric
+   * key making an array, as in the entry file the CMS writes.
+   * @param {Record<string, any>} flattened Flattened entry values.
+   * @returns {Record<string, any>} Nested values.
+   */
+  const unflattenValues = (flattened) => {
+    /** @type {Record<string, any>} */
     const result = {};
 
-    for (const [key, value] of Object.entries(flatObj)) {
-      // Split the key by dots to get the path
-      const keys = key.split('.');
+    Object.entries(flattened).forEach(([keyPath, value]) => {
+      const keys = keyPath.split('.');
       let current = result;
 
-      // Navigate/create the nested structure
-      for (let i = 0; i < keys.length - 1; i++) {
-        const currentKey = keys[i];
-
-        // Check if the next key is a number (array index)
-        const nextKey = keys[i + 1];
-        const isNextKeyArrayIndex = /^\d+$/.test(nextKey);
-
-        // If current key doesn't exist, create it
-        if (!(currentKey in current)) {
-          current[currentKey] = isNextKeyArrayIndex ? [] : {};
+      keys.slice(0, -1).forEach((key, index) => {
+        if (!(key in current)) {
+          current[key] = /^\d+$/.test(keys[index + 1]) ? [] : {};
         }
 
-        current = current[currentKey];
-      }
+        current = current[key];
+      });
 
-      // Set the final value
-      const finalKey = keys[keys.length - 1];
-      current[finalKey] = value;
-    }
+      current[keys[keys.length - 1]] = value;
+    });
 
     return result;
   };
 
-  async function objectUrlToDataURI(objectUrl) {
-    const response = await fetch(objectUrl);
-    const blob = await response.blob();
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onloadend = () => resolve(reader.result);
-      reader.onerror = reject;
-      reader.readAsDataURL(blob);
-    });
-  }
-
   /**
-   * Recursively replaces any 'blob:' URLs in an object or array
-   * with their equivalent Data URIs.
+   * Read an object URL as a data URI, so an image the user has just uploaded is shown in the
+   * preview iframe, which has an origin of its own and can’t read a blob URL of this page.
+   * @param {string} objectURL Object URL.
+   * @returns {Promise<string>} Data URI.
    */
-  async function replaceBlobUrlsWithDataUris(obj) {
-    if (Array.isArray(obj)) {
-      // Recurse into array items
-      return Promise.all(obj.map((item) => replaceBlobUrlsWithDataUris(item)));
-    } else if (obj && typeof obj === 'object') {
-      // Recurse into object keys
-      const entries = await Promise.all(
-        Object.entries(obj).map(async ([key, value]) => {
-          return [key, await replaceBlobUrlsWithDataUris(value)];
-        }),
-      );
-      return Object.fromEntries(entries);
-    } else if (typeof obj === 'string' && obj.startsWith('blob:')) {
-      // Found a blob URL — convert to Data URI
-      try {
-        return await objectUrlToDataURI(obj);
-      } catch (err) {
-        console.warn('Failed to convert blob URL:', obj, err);
-        return obj; // fallback to original
-      }
-    }
+  const objectURLToDataURI = async (objectURL) => {
+    const blob = await (await fetch(objectURL)).blob();
+    const { promise, resolve, reject } = Promise.withResolvers();
+    const reader = new FileReader();
 
-    // Base case — return as-is
-    return obj;
-  }
+    reader.addEventListener('loadend', () => resolve(reader.result));
+    reader.addEventListener('error', () => reject(reader.error));
+    reader.readAsDataURL(blob);
 
-  const getCurrentValue = async () => {
-    const currentValue = $entryDraft?.currentValues[locale] || {};
-
-    let obj = convertToNestedObject(currentValue);
-
-    obj = await replaceBlobUrlsWithDataUris(obj);
-
-    return { value: obj, locale };
+    return /** @type {Promise<string>} */ (promise);
   };
 
-  onMount(async () => {
-    out = previewRenderer(mainRef);
-
-    const currentValue = await getCurrentValue();
-
-    if (currentValue) {
-      frames.push({ frameRef: undefined, id: idx++, content: await out(currentValue) });
+  /**
+   * Replace every object URL within the given value, however deeply nested, with a data URI.
+   * @param {any} value Value to walk.
+   * @returns {Promise<any>} Value with every object URL replaced.
+   */
+  const replaceObjectURLs = async (value) => {
+    if (Array.isArray(value)) {
+      return Promise.all(value.map(replaceObjectURLs));
     }
+
+    if (value && typeof value === 'object') {
+      return Object.fromEntries(
+        await Promise.all(
+          Object.entries(value).map(async ([key, item]) => [key, await replaceObjectURLs(item)]),
+        ),
+      );
+    }
+
+    if (typeof value === 'string' && value.startsWith('blob:')) {
+      try {
+        return await objectURLToDataURI(value);
+      } catch (ex) {
+        // eslint-disable-next-line no-console
+        console.warn('Failed to convert blob URL:', value, ex);
+
+        return value;
+      }
+    }
+
+    return value;
+  };
+
+  /**
+   * Show the given HTML in the hidden iframe, and show that iframe once it has loaded, keeping the
+   * scroll position so the preview doesn’t jump while the user types.
+   * @param {string} html HTML returned by the renderer.
+   * @returns {Promise<void>} Promise resolved once the iframe has loaded.
+   */
+  const showHTML = (html) =>
+    new Promise((resolve) => {
+      const index = shownIndex === 0 ? 1 : 0;
+      const frame = frames[index];
+
+      /* v8 ignore next 5 -- the iframes are bound as soon as the component is mounted */
+      if (!frame) {
+        resolve();
+
+        return;
+      }
+
+      frame.addEventListener(
+        'load',
+        () => {
+          const doc = frame.contentDocument;
+
+          if (doc) {
+            doc.documentElement.style.scrollBehavior = 'auto';
+            doc.documentElement.scrollTop = scrollTop;
+            doc.addEventListener('scroll', () => {
+              scrollTop = doc.documentElement.scrollTop;
+            });
+          }
+
+          shownIndex = index;
+          resolve();
+        },
+        { once: true },
+      );
+
+      frame.srcdoc = html;
+    });
+
+  /**
+   * Render the current values and show the result, one render at a time. A change made while a
+   * render is in flight is picked up as soon as it finishes, so the preview ends up showing the
+   * latest values without queueing up a render per keystroke.
+   */
+  const renderPreview = async () => {
+    if (!render || rendering) {
+      stale = !!render;
+
+      return;
+    }
+
+    rendering = true;
+
+    try {
+      do {
+        stale = false;
+
+        // eslint-disable-next-line no-await-in-loop
+        const value = await replaceObjectURLs(unflattenValues(valueMap));
+        // eslint-disable-next-line no-await-in-loop
+        const html = await render({ value, locale });
+
+        // eslint-disable-next-line no-await-in-loop
+        await showHTML(html ?? '');
+      } while (stale);
+    } catch (ex) {
+      // eslint-disable-next-line no-console
+      console.error(ex);
+    } finally {
+      rendering = false;
+    }
+  };
+
+  onMount(() => {
+    render = previewRenderer(wrapper);
   });
 
   $effect(() => {
-    (async () => {
-      const currentValue = await getCurrentValue();
-
-      if (currentValue && out) {
-        frames.push({
-          id: idx++,
-          content: await out(currentValue),
-          loading: false,
-          loaded: false,
-          hidden: false,
-        });
-      }
-    })();
-  });
-
-  $effect(() => {
-    const notLoadingIds = frames.filter((x) => !x.loading).map((x) => x.id.toString());
-
-    for (const [key, value] of Object.entries(refs)) {
-      if (notLoadingIds.indexOf(key.toString()) >= 0 && value) {
-        const frame = frames.find((x) => x.id == key);
-
-        if (!frame) {
-          continue;
-        }
-
-        value.srcdoc = frame.content;
-
-        value.addEventListener('load', () => {
-          const iframeDoc = value.contentDocument || value.contentWindow.document;
-          iframeDoc.documentElement.style.scrollBehavior = 'auto';
-
-          iframeDoc.addEventListener('scroll', () => {
-            scrollY = iframeDoc.documentElement.scrollTop;
-          });
-
-          const frame = frames.find((x) => x.id == key);
-
-          if (!frame) {
-            return;
-          }
-
-          for (const frame of frames) {
-            if (+frame.id < +key) {
-              frame.hidden = true;
-            }
-          }
-
-          frame.loaded = true;
-
-          iframeDoc.documentElement.scrollTop = +scrollY || 0;
-        });
-
-        frame.loading = true;
-      }
-    }
+    // Read the values so the preview is rendered again whenever they change
+    void valueMap;
+    renderPreview();
   });
 </script>
 
-<div bind:this={mainRef} style="width:100%; height:100%; position:relative;">
-  {#each frames as frame (frame.id)}
-    {#if !frame.hidden}
-      <iframe
-        bind:this={refs[frame.id]}
-        width="100%"
-        height="100%"
-        style="width: 100%; height:100%; position:absolute; top:0;left:0; right:0; transition: opacity 0ms ease-in-out; bottom:0; opacity: {frame.loaded
-          ? 1
-          : 0}"
-      >
-      </iframe>
-    {/if}
+<div bind:this={wrapper} role="document" class="wrapper">
+  {#each [0, 1] as index (index)}
+    <iframe bind:this={frames[index]} title="" class="frame" class:shown={shownIndex === index}
+    ></iframe>
   {/each}
-
-  {#if false && htmlContent}
-    {@html htmlContent}
-  {/if}
 </div>
+
+<style>
+  .wrapper {
+    position: relative;
+    width: 100%;
+    height: 100%;
+  }
+
+  .frame {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    border: 0;
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  .frame.shown {
+    opacity: 1;
+    pointer-events: auto;
+  }
+</style>

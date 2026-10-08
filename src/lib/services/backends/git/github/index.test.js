@@ -1,4 +1,3 @@
-import { get } from 'svelte/store';
 import { beforeEach, describe, expect, test, vi } from 'vitest';
 
 import githubBackend, { init } from '$lib/services/backends/git/github';
@@ -14,17 +13,13 @@ import {
 } from '$lib/services/backends/git/github/constants';
 import { repository } from '$lib/services/backends/git/github/repository';
 import { apiConfig, graphqlVars } from '$lib/services/backends/git/shared/api';
+import { cmsConfig } from '$lib/services/config';
 
 const mockPrefs = vi.hoisted(() => ({ devModeEnabled: false }));
 
 // Mock dependencies
-vi.mock('svelte/store', () => ({
-  get: vi.fn(),
-  writable: vi.fn(() => ({ subscribe: vi.fn(), set: vi.fn(), update: vi.fn() })),
-  derived: vi.fn(() => ({ subscribe: vi.fn() })),
-}));
 vi.mock('$lib/services/config', () => ({
-  cmsConfig: { subscribe: vi.fn() },
+  cmsConfig: { current: undefined },
 }));
 vi.mock('$lib/services/user/prefs.svelte', () => ({
   prefs: mockPrefs,
@@ -40,9 +35,12 @@ vi.mock('$lib/services/backends/git/github/auth', () => ({
 vi.mock('$lib/services/backends/git/github/commits', () => ({
   commitChanges: vi.fn(),
   fetchFileCommits: vi.fn(),
+  fetchLastCommit: vi.fn(),
 }));
 vi.mock('$lib/services/backends/git/github/deployment', () => ({
   triggerDeployment: vi.fn(),
+  fetchBranchHeadSHA: vi.fn(),
+  fetchDeployments: vi.fn(),
 }));
 vi.mock('$lib/services/backends/git/github/files', () => ({
   fetchFiles: vi.fn(),
@@ -71,7 +69,7 @@ describe('GitHub backend service', () => {
       'https://github.com/settings/personal-access-tokens/new?name=Sveltia+CMS&contents=write',
     );
     mockPrefs.devModeEnabled = false;
-    vi.mocked(get).mockReset();
+    cmsConfig.current = undefined;
   });
 
   test('exports correct service structure', () => {
@@ -86,24 +84,45 @@ describe('GitHub backend service', () => {
       signIn: expect.any(Function),
       signOut: expect.any(Function),
       fetchFiles: expect.any(Function),
+      fetchLastCommit: expect.any(Function),
       fetchBlob: expect.any(Function),
       commitChanges: expect.any(Function),
       fetchFileCommits: expect.any(Function),
       triggerDeployment: expect.any(Function),
+      fetchBranchHeadSHA: expect.any(Function),
+      fetchDeployments: expect.any(Function),
+      workflow: expect.any(Object),
     });
   });
 
   describe('init', () => {
     test('returns undefined when cmsConfig is undefined', () => {
-      vi.mocked(get).mockReturnValue(undefined);
-
       const result = init();
 
       expect(result).toBeUndefined();
     });
 
+    test('narrows the OAuth scope when configured', () => {
+      cmsConfig.current = /** @type {any} */ ({
+        backend: {
+          name: BACKEND_NAME,
+          repo: 'owner/repo',
+          branch: 'main',
+          open_authoring: true,
+          auth_scope: 'public_repo',
+        },
+      });
+
+      init();
+
+      expect(Object.assign).toHaveBeenCalledWith(
+        apiConfig,
+        expect.objectContaining({ authScope: 'public_repo,user' }),
+      );
+    });
+
     test('returns undefined when backend is not GitHub', () => {
-      vi.mocked(get).mockReturnValue({ backend: { name: 'other' } });
+      cmsConfig.current = /** @type {any} */ ({ backend: { name: 'other' } });
 
       const result = init();
 
@@ -119,7 +138,7 @@ describe('GitHub backend service', () => {
         },
       };
 
-      vi.mocked(get).mockReturnValueOnce(mockCmsConfig);
+      cmsConfig.current = /** @type {any} */ (mockCmsConfig);
 
       const result = init();
 
@@ -144,6 +163,7 @@ describe('GitHub backend service', () => {
         apiConfig,
         expect.objectContaining({
           clientId: '',
+          authScope: 'repo,user',
           authURL: `${DEFAULT_AUTH_ROOT}/${DEFAULT_AUTH_PATH}`,
           tokenURL: `${DEFAULT_AUTH_ROOT}/${DEFAULT_AUTH_PATH}`,
           restBaseURL: DEFAULT_API_ROOT,
@@ -178,7 +198,7 @@ describe('GitHub backend service', () => {
         },
       };
 
-      vi.mocked(get).mockReturnValueOnce(mockCmsConfig);
+      cmsConfig.current = /** @type {any} */ (mockCmsConfig);
 
       const result = init();
 
@@ -223,7 +243,7 @@ describe('GitHub backend service', () => {
         },
       };
 
-      vi.mocked(get).mockReturnValueOnce(mockCmsConfig);
+      cmsConfig.current = /** @type {any} */ (mockCmsConfig);
 
       const result = init();
       const expectedAuthURL = `${DEFAULT_PKCE_AUTH_ROOT}/${DEFAULT_PKCE_AUTH_PATH}`;
@@ -252,7 +272,7 @@ describe('GitHub backend service', () => {
         },
       };
 
-      vi.mocked(get).mockReturnValueOnce(mockCmsConfig);
+      cmsConfig.current = /** @type {any} */ (mockCmsConfig);
 
       const result = init();
       const expectedAuthURL = `${DEFAULT_AUTH_ROOT}/${DEFAULT_AUTH_PATH}`;
@@ -283,7 +303,7 @@ describe('GitHub backend service', () => {
       };
 
       mockPrefs.devModeEnabled = true;
-      vi.mocked(get).mockReturnValueOnce(mockCmsConfig);
+      cmsConfig.current = /** @type {any} */ (mockCmsConfig);
 
       init();
 
@@ -301,7 +321,7 @@ describe('GitHub backend service', () => {
         },
       };
 
-      vi.mocked(get).mockReturnValueOnce(mockCmsConfig);
+      cmsConfig.current = /** @type {any} */ (mockCmsConfig);
 
       init();
 

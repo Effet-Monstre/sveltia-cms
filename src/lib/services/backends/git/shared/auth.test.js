@@ -1,6 +1,5 @@
 // @ts-nocheck
 import { LocalStorage } from '@sveltia/utils/storage';
-import { get } from 'svelte/store';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { cmsConfig } from '$lib/services/config';
@@ -17,6 +16,8 @@ import {
   initServerSideAuth,
   openPopup,
   sendMessage,
+  signInToBackend,
+  signOut,
 } from './auth';
 
 vi.mock('@sveltia/utils/crypto', () => ({
@@ -29,16 +30,12 @@ vi.mock('@sveltia/utils/storage');
 
 vi.mock('$lib/services/config', () => ({
   cmsConfig: {
-    subscribe: vi.fn((fn) => {
-      fn({
-        backend: {
-          name: 'github',
-          site_domain: 'example.com',
-        },
-      });
-
-      return () => {};
-    }),
+    current: {
+      backend: {
+        name: 'github',
+        site_domain: 'example.com',
+      },
+    },
   },
 }));
 
@@ -72,6 +69,10 @@ describe('git/shared/auth', () => {
       closed: false,
       close: vi.fn(),
       postMessage: vi.fn(),
+      location: {
+        href: '',
+        replace: vi.fn(),
+      },
     };
 
     // @ts-ignore - Mock window for testing
@@ -90,7 +91,7 @@ describe('git/shared/auth', () => {
 
   describe('inAuthPopup store', () => {
     it('should be a writable store with initial value false', () => {
-      expect(get(inAuthPopup)).toBe(false);
+      expect(inAuthPopup.current).toBe(false);
     });
   });
 
@@ -151,7 +152,11 @@ describe('git/shared/auth', () => {
       )?.[1];
 
       if (handler) {
-        handler({ data: 'authorizing:github', origin: 'https://localhost:3000' });
+        handler({
+          data: 'authorizing:github',
+          origin: 'https://localhost:3000',
+          source: mockWindow.opener,
+        });
       }
 
       expect(mockWindow.opener.postMessage).toHaveBeenCalledWith(
@@ -178,7 +183,11 @@ describe('git/shared/auth', () => {
       )?.[1];
 
       if (handler) {
-        handler({ data: 'authorizing:github', origin: 'https://localhost:3000' });
+        handler({
+          data: 'authorizing:github',
+          origin: 'https://localhost:3000',
+          source: mockWindow.opener,
+        });
       }
 
       expect(mockWindow.opener.postMessage).toHaveBeenCalledWith(
@@ -243,12 +252,13 @@ describe('git/shared/auth', () => {
       // Simulate receiving the authorization message
       messageHandler({
         data: 'authorizing:github',
-        origin: 'https://example.com',
+        origin: 'https://localhost:3000',
+        source: mockWindow.opener,
       });
 
       expect(mockWindow.opener.postMessage).toHaveBeenCalledWith(
         'authorization:github:success:{"provider":"github","token":"test-token"}',
-        'https://example.com',
+        'https://localhost:3000',
       );
     });
   });
@@ -270,12 +280,14 @@ describe('git/shared/auth', () => {
       messageHandler({
         data: 'authorizing:github',
         origin: 'https://github.com',
+        source: mockPopup,
       });
 
       // Simulate the second message with success
       messageHandler({
         data: `authorization:github:success:${JSON.stringify({ token: 'test-token' })}`,
         origin: 'https://github.com',
+        source: mockPopup,
       });
 
       const result = await authPromise;
@@ -298,11 +310,13 @@ describe('git/shared/auth', () => {
       messageHandler({
         data: 'authorizing:github',
         origin: 'https://github.com',
+        source: mockPopup,
       });
 
       messageHandler({
         data: `authorization:github:error:${JSON.stringify({ error: 'Auth failed' })}`,
         origin: 'https://github.com',
+        source: mockPopup,
       });
 
       await expect(authPromise).rejects.toThrow('Authentication failed');
@@ -349,11 +363,13 @@ describe('git/shared/auth', () => {
       messageHandler({
         data: 'authorizing:github',
         origin: 'https://github.com',
+        source: mockPopup,
       });
 
       messageHandler({
         data: `authorization:github:success:${JSON.stringify({ token: 'test-token' })}`,
         origin: 'https://github.com',
+        source: mockPopup,
       });
 
       const result = await authPromise;
@@ -377,11 +393,13 @@ describe('git/shared/auth', () => {
       messageHandler({
         data: 'authorizing:github',
         origin: 'https://github.com',
+        source: mockPopup,
       });
 
       messageHandler({
         data: 'authorization:github:success:invalid-json',
         origin: 'https://github.com',
+        source: mockPopup,
       });
 
       await expect(authPromise).rejects.toThrow('Authentication failed');
@@ -401,11 +419,13 @@ describe('git/shared/auth', () => {
       messageHandler({
         data: 'authorizing:gitlab',
         origin: 'https://gitlab.com',
+        source: mockPopup,
       });
 
       messageHandler({
         data: `authorization:gitlab:success:${JSON.stringify({ token: 'gitlab-token' })}`,
         origin: 'https://gitlab.com',
+        source: mockPopup,
       });
 
       const result = await authPromise;
@@ -428,12 +448,14 @@ describe('git/shared/auth', () => {
       messageHandler({
         data: 'authorizing:github',
         origin: 'https://github.com',
+        source: mockPopup,
       });
 
       // Send a message that won't match the regex pattern
       messageHandler({
         data: 'authorization:github:invalid-format',
         origin: 'https://github.com',
+        source: mockPopup,
       });
 
       await expect(authPromise).rejects.toThrow('Authentication failed');
@@ -456,12 +478,14 @@ describe('git/shared/auth', () => {
       messageHandler({
         data: { token: 'test' },
         origin: 'https://github.com',
+        source: mockPopup,
       });
 
       // Then send valid data
       messageHandler({
         data: `authorization:github:success:${JSON.stringify({ token: 'test-token' })}`,
         origin: 'https://github.com',
+        source: mockPopup,
       });
 
       const result = await authPromise;
@@ -488,12 +512,14 @@ describe('git/shared/auth', () => {
       messageHandler({
         data: 'authorizing:github',
         origin: 'https://evil.com',
+        source: mockPopup,
       });
 
       // Then send valid message from correct origin
       messageHandler({
         data: `authorization:github:success:${JSON.stringify({ token: 'test-token' })}`,
         origin: 'https://github.com',
+        source: mockPopup,
       });
 
       const result = await authPromise;
@@ -517,12 +543,14 @@ describe('git/shared/auth', () => {
       messageHandler({
         data: 'authorizing:github',
         origin: 'https://github.com',
+        source: mockPopup,
       });
 
       // Send a message with valid JSON that is not an object (e.g., array or primitive)
       messageHandler({
         data: `authorization:github:success:${JSON.stringify(['token'])}`,
         origin: 'https://github.com',
+        source: mockPopup,
       });
 
       await expect(authPromise).rejects.toThrow('Authentication failed');
@@ -542,40 +570,16 @@ describe('git/shared/auth', () => {
       messageHandler({
         data: 'authorizing:github',
         origin: 'https://github.com',
+        source: mockPopup,
       });
 
       messageHandler({
         data: `authorization:github:error:${JSON.stringify({ error: 'User denied', errorCode: 'access_denied' })}`,
         origin: 'https://github.com',
+        source: mockPopup,
       });
 
       await expect(authPromise).rejects.toThrow();
-    });
-
-    it('should handle popup being null', async () => {
-      mockWindow.open.mockReturnValue(null);
-
-      const authURL = 'https://github.com/login/oauth/authorize';
-      const backendName = 'github';
-      const authPromise = authorize({ backendName, authURL });
-
-      const messageHandler = mockWindow.addEventListener.mock.calls.find(
-        ([event]) => event === 'message',
-      )?.[1];
-
-      messageHandler({
-        data: 'authorizing:github',
-        origin: 'https://github.com',
-      });
-
-      messageHandler({
-        data: `authorization:github:success:${JSON.stringify({ token: 'test-token' })}`,
-        origin: 'https://github.com',
-      });
-
-      const result = await authPromise;
-
-      expect(result).toEqual({ token: 'test-token' });
     });
   });
 
@@ -599,11 +603,13 @@ describe('git/shared/auth', () => {
       messageHandler({
         data: 'authorizing:github',
         origin: 'https://api.netlify.com',
+        source: mockPopup,
       });
 
       messageHandler({
         data: `authorization:github:success:${JSON.stringify({ token: 'test-token' })}`,
         origin: 'https://api.netlify.com',
+        source: mockPopup,
       });
 
       const result = await authPromise;
@@ -630,11 +636,13 @@ describe('git/shared/auth', () => {
       messageHandler({
         data: 'authorizing:github',
         origin: 'https://api.netlify.com',
+        source: mockPopup,
       });
 
       messageHandler({
         data: `authorization:github:success:${JSON.stringify({ token: 'test-token' })}`,
         origin: 'https://api.netlify.com',
+        source: mockPopup,
       });
 
       await authPromise;
@@ -662,11 +670,13 @@ describe('git/shared/auth', () => {
       messageHandler({
         data: 'authorizing:github',
         origin: 'https://api.netlify.com',
+        source: mockPopup,
       });
 
       messageHandler({
         data: `authorization:github:success:${JSON.stringify({ token: 'test-token' })}`,
         origin: 'https://api.netlify.com',
+        source: mockPopup,
       });
 
       await authPromise;
@@ -691,11 +701,13 @@ describe('git/shared/auth', () => {
       messageHandler({
         data: 'authorizing:github',
         origin: 'https://github.com',
+        source: mockPopup,
       });
 
       messageHandler({
         data: `authorization:github:success:${JSON.stringify({ token: 'test-token' })}`,
         origin: 'https://github.com',
+        source: mockPopup,
       });
 
       const result = await authPromise;
@@ -719,11 +731,16 @@ describe('git/shared/auth', () => {
       // Don't await immediately since LocalStorage.set is called internally
       const authPromise = initClientSideAuth(args);
 
-      // Wait a bit for the async LocalStorage.set calls to complete
+      // Wait for the async operations and authorize call to complete
       await new Promise((resolve) => {
-        setTimeout(resolve, 10);
+        setTimeout(resolve, 50);
       });
 
+      expect(mockWindow.open).toHaveBeenCalledWith(
+        'https://localhost:3000/',
+        'auth',
+        expect.any(String),
+      );
       expect(LocalStorage.set).toHaveBeenCalledWith('sveltia-cms.auth', expect.any(Object));
       expect(LocalStorage.set).toHaveBeenCalledWith('sveltia-cms.user', { backendName: 'gitlab' });
 
@@ -731,17 +748,64 @@ describe('git/shared/auth', () => {
         ([event]) => event === 'message',
       )?.[1];
 
+      expect(messageHandler).toBeDefined();
+
       messageHandler({
         data: 'authorizing:gitlab',
         origin: 'https://localhost:3000',
+        source: mockPopup,
       });
 
       messageHandler({
         data: `authorization:gitlab:success:${JSON.stringify({ token: 'test-token' })}`,
         origin: 'https://localhost:3000',
+        source: mockPopup,
       });
 
       await authPromise;
+    });
+
+    it('should throw AbortError when popup cannot be opened', async () => {
+      mockWindow.open.mockReturnValue(null);
+
+      const args = {
+        backendName: 'gitlab',
+        clientId: 'test-client-id',
+        authURL: 'https://gitlab.com/oauth/authorize',
+        scope: 'api',
+      };
+
+      await expect(initClientSideAuth(args)).rejects.toMatchObject({
+        message: 'Authentication aborted',
+        name: 'AbortError',
+      });
+    });
+
+    it('should throw AbortError when popup is closed during async operations', async () => {
+      // Create a mock popup that appears closed
+      const closedPopup = {
+        closed: true,
+        close: vi.fn(),
+        postMessage: vi.fn(),
+        location: {
+          href: '',
+          replace: vi.fn(),
+        },
+      };
+
+      mockWindow.open.mockReturnValue(closedPopup);
+
+      const args = {
+        backendName: 'gitlab',
+        clientId: 'test-client-id',
+        authURL: 'https://gitlab.com/oauth/authorize',
+        scope: 'api',
+      };
+
+      await expect(initClientSideAuth(args)).rejects.toMatchObject({
+        message: 'Authentication aborted',
+        name: 'AbortError',
+      });
     });
   });
 
@@ -930,7 +994,7 @@ describe('git/shared/auth', () => {
         apiConfig: { clientId: 'test-client', tokenURL: 'https://gitlab.com/oauth/token' },
       });
 
-      expect(get(inAuthPopup)).toBe(true);
+      expect(inAuthPopup.current).toBe(true);
     });
 
     it('should redirect to auth URL when no code is present', async () => {
@@ -959,7 +1023,7 @@ describe('git/shared/auth', () => {
         apiConfig: { clientId: 'test-client', tokenURL: 'https://gitlab.com/oauth/token' },
       });
 
-      expect(get(inAuthPopup)).toBe(true);
+      expect(inAuthPopup.current).toBe(true);
     });
 
     it('should pass includeCredentials through to finishClientSideAuth', async () => {
@@ -1000,15 +1064,11 @@ describe('git/shared/auth', () => {
 
     it('should handle GitHub server-side auth flow', async () => {
       mockWindow.open.mockReturnValue(mockPopup);
-      vi.mocked(cmsConfig.subscribe).mockImplementation((fn) => {
-        fn({
-          backend: {
-            name: 'github',
-            site_domain: 'example.com',
-          },
-        });
-
-        return () => {};
+      cmsConfig.current = /** @type {any} */ ({
+        backend: {
+          name: 'github',
+          site_domain: 'example.com',
+        },
       });
 
       const apiConfig = {
@@ -1027,6 +1087,7 @@ describe('git/shared/auth', () => {
       messageHandler({
         data: 'authorizing:github',
         origin: 'https://github.com',
+        source: mockPopup,
       });
 
       messageHandler({
@@ -1035,6 +1096,7 @@ describe('git/shared/auth', () => {
           refreshToken: 'github-refresh-token',
         })}`,
         origin: 'https://github.com',
+        source: mockPopup,
       });
 
       const result = await authPromise;
@@ -1047,16 +1109,12 @@ describe('git/shared/auth', () => {
 
     it('should handle GitLab PKCE auth flow', async () => {
       mockWindow.open.mockReturnValue(mockPopup);
-      vi.mocked(cmsConfig.subscribe).mockImplementation((fn) => {
-        fn({
-          backend: {
-            name: 'gitlab',
-            site_domain: 'example.com',
-            auth_type: 'pkce',
-          },
-        });
-
-        return () => {};
+      cmsConfig.current = /** @type {any} */ ({
+        backend: {
+          name: 'gitlab',
+          site_domain: 'example.com',
+          auth_type: 'pkce',
+        },
       });
 
       const apiConfig = {
@@ -1068,11 +1126,16 @@ describe('git/shared/auth', () => {
 
       const authPromise = handleAuthFlow({ auto: false, apiConfig });
 
-      // Wait for LocalStorage operations
+      // Wait for async operations and authorize call to complete
       await new Promise((resolve) => {
-        setTimeout(resolve, 10);
+        setTimeout(resolve, 50);
       });
 
+      expect(mockWindow.open).toHaveBeenCalledWith(
+        'https://localhost:3000/',
+        'auth',
+        expect.any(String),
+      );
       expect(LocalStorage.set).toHaveBeenCalledWith('sveltia-cms.auth', expect.any(Object));
       expect(LocalStorage.set).toHaveBeenCalledWith('sveltia-cms.user', { backendName: 'gitlab' });
 
@@ -1080,9 +1143,12 @@ describe('git/shared/auth', () => {
         ([event]) => event === 'message',
       )?.[1];
 
+      expect(messageHandler).toBeDefined();
+
       messageHandler({
         data: 'authorizing:gitlab',
         origin: 'https://localhost:3000',
+        source: mockPopup,
       });
 
       messageHandler({
@@ -1091,6 +1157,7 @@ describe('git/shared/auth', () => {
           refreshToken: 'gitlab-refresh-token',
         })}`,
         origin: 'https://localhost:3000',
+        source: mockPopup,
       });
 
       const result = await authPromise;
@@ -1103,15 +1170,11 @@ describe('git/shared/auth', () => {
 
     it('should handle Gitea PKCE auth flow', async () => {
       mockWindow.open.mockReturnValue(mockPopup);
-      vi.mocked(cmsConfig.subscribe).mockImplementation((_fn) => {
-        _fn({
-          backend: {
-            name: 'gitea',
-            site_domain: 'gitea.example.com',
-          },
-        });
-
-        return () => {};
+      cmsConfig.current = /** @type {any} */ ({
+        backend: {
+          name: 'gitea',
+          site_domain: 'gitea.example.com',
+        },
       });
 
       const apiConfig = {
@@ -1123,20 +1186,28 @@ describe('git/shared/auth', () => {
 
       const authPromise = handleAuthFlow({ auto: false, apiConfig });
 
-      // Wait for LocalStorage operations
+      // Wait for async operations and authorize call to complete
       await new Promise((resolve) => {
-        setTimeout(resolve, 10);
+        setTimeout(resolve, 50);
       });
 
+      expect(mockWindow.open).toHaveBeenCalledWith(
+        'https://localhost:3000/',
+        'auth',
+        expect.any(String),
+      );
       expect(LocalStorage.set).toHaveBeenCalledWith('sveltia-cms.auth', expect.any(Object));
 
       const messageHandler = mockWindow.addEventListener.mock.calls.find(
         ([event]) => event === 'message',
       )?.[1];
 
+      expect(messageHandler).toBeDefined();
+
       messageHandler({
         data: 'authorizing:gitea',
         origin: 'https://localhost:3000',
+        source: mockPopup,
       });
 
       messageHandler({
@@ -1145,6 +1216,7 @@ describe('git/shared/auth', () => {
           refreshToken: 'gitea-refresh-token',
         })}`,
         origin: 'https://localhost:3000',
+        source: mockPopup,
       });
 
       const result = await authPromise;
@@ -1156,15 +1228,11 @@ describe('git/shared/auth', () => {
     });
 
     it('should return undefined for automatic sign-in with Gitea PKCE', async () => {
-      vi.mocked(cmsConfig.subscribe).mockImplementation((fn) => {
-        fn({
-          backend: {
-            name: 'gitea',
-            site_domain: 'gitea.example.com',
-          },
-        });
-
-        return () => {};
+      cmsConfig.current = /** @type {any} */ ({
+        backend: {
+          name: 'gitea',
+          site_domain: 'gitea.example.com',
+        },
       });
 
       const apiConfig = {
@@ -1180,15 +1248,11 @@ describe('git/shared/auth', () => {
     });
 
     it('should return undefined for automatic sign-in with GitHub', async () => {
-      vi.mocked(cmsConfig.subscribe).mockImplementation((fn) => {
-        fn({
-          backend: {
-            name: 'github',
-            site_domain: 'example.com',
-          },
-        });
-
-        return () => {};
+      cmsConfig.current = /** @type {any} */ ({
+        backend: {
+          name: 'github',
+          site_domain: 'example.com',
+        },
       });
 
       const apiConfig = {
@@ -1210,15 +1274,11 @@ describe('git/shared/auth', () => {
       };
       mockWindow.name = 'auth';
 
-      vi.mocked(cmsConfig.subscribe).mockImplementation((fn) => {
-        fn({
-          backend: {
-            name: 'gitea',
-            site_domain: 'gitea.example.com',
-          },
-        });
-
-        return () => {};
+      cmsConfig.current = /** @type {any} */ ({
+        backend: {
+          name: 'gitea',
+          site_domain: 'gitea.example.com',
+        },
       });
 
       vi.mocked(LocalStorage.get).mockResolvedValue({
@@ -1282,15 +1342,11 @@ describe('git/shared/auth', () => {
     });
 
     it('should call handleAuthFlow and return tokens when token is not provided', async () => {
-      vi.mocked(cmsConfig.subscribe).mockImplementation((fn) => {
-        fn({
-          backend: {
-            name: 'github',
-            site_domain: 'example.com',
-          },
-        });
-
-        return () => {};
+      cmsConfig.current = /** @type {any} */ ({
+        backend: {
+          name: 'github',
+          site_domain: 'example.com',
+        },
       });
 
       const apiConfig = {
@@ -1315,6 +1371,7 @@ describe('git/shared/auth', () => {
       messageHandler({
         data: 'authorizing:github',
         origin: 'https://github.com',
+        source: mockPopup,
       });
 
       messageHandler({
@@ -1323,6 +1380,7 @@ describe('git/shared/auth', () => {
           refreshToken: 'new-refresh-token',
         })}`,
         origin: 'https://github.com',
+        source: mockPopup,
       });
 
       const result = await authPromise;
@@ -1334,15 +1392,11 @@ describe('git/shared/auth', () => {
     });
 
     it('should return undefined for automatic sign-in without token', async () => {
-      vi.mocked(cmsConfig.subscribe).mockImplementation((fn) => {
-        fn({
-          backend: {
-            name: 'github',
-            site_domain: 'example.com',
-          },
-        });
-
-        return () => {};
+      cmsConfig.current = /** @type {any} */ ({
+        backend: {
+          name: 'github',
+          site_domain: 'example.com',
+        },
       });
 
       const apiConfig = {
@@ -1364,15 +1418,11 @@ describe('git/shared/auth', () => {
     });
 
     it('should handle handleAuthFlow returning undefined', async () => {
-      vi.mocked(cmsConfig.subscribe).mockImplementation((fn) => {
-        fn({
-          backend: {
-            name: 'gitea',
-            site_domain: 'gitea.example.com',
-          },
-        });
-
-        return () => {};
+      cmsConfig.current = /** @type {any} */ ({
+        backend: {
+          name: 'gitea',
+          site_domain: 'gitea.example.com',
+        },
       });
 
       mockWindow.opener = {
@@ -1439,6 +1489,46 @@ describe('git/shared/auth', () => {
     });
   });
 
+  describe('signInToBackend', () => {
+    it('should fetch the user profile with existing tokens', async () => {
+      const user = { id: 1, login: 'user', backendName: 'github' };
+      const getUserProfile = vi.fn().mockResolvedValue(user);
+
+      const result = await signInToBackend({
+        options: { token: 'existing-token', refreshToken: 'existing-refresh-token', auto: false },
+        getUserProfile,
+      });
+
+      expect(getUserProfile).toHaveBeenCalledWith({
+        token: 'existing-token',
+        refreshToken: 'existing-refresh-token',
+      });
+      expect(result).toEqual(user);
+    });
+
+    it('should return undefined without fetching the profile when no token is obtained', async () => {
+      cmsConfig.current = /** @type {any} */ ({
+        backend: { name: 'github', site_domain: 'example.com' },
+      });
+
+      const getUserProfile = vi.fn();
+
+      const result = await signInToBackend({
+        options: { token: undefined, refreshToken: undefined, auto: true },
+        getUserProfile,
+      });
+
+      expect(result).toBeUndefined();
+      expect(getUserProfile).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('signOut', () => {
+    it('should resolve to undefined', async () => {
+      await expect(signOut()).resolves.toBeUndefined();
+    });
+  });
+
   describe('authorize — popup-open timer tick (L60 false)', () => {
     it('should not reject when timer fires and popup is still open', async () => {
       vi.useFakeTimers();
@@ -1459,16 +1549,129 @@ describe('git/shared/auth', () => {
       vi.advanceTimersByTime(1000);
 
       // Complete auth normally so the promise resolves rather than hanging.
-      messageHandler({ data: 'authorizing:github', origin: 'https://github.com' });
+      messageHandler({
+        data: 'authorizing:github',
+        origin: 'https://github.com',
+        source: mockPopup,
+      });
       messageHandler({
         data: `authorization:github:success:${JSON.stringify({ token: 'ok' })}`,
         origin: 'https://github.com',
+        source: mockPopup,
       });
 
       const result = await authPromise;
 
       expect(result).toEqual({ token: 'ok' });
       vi.useRealTimers();
+    });
+  });
+
+  describe('sendMessage — sender validation', () => {
+    /** @type {any} */
+    let capturedHandler;
+
+    beforeEach(() => {
+      mockWindow.addEventListener = vi.fn((event, handler) => {
+        if (event === 'message') capturedHandler = handler;
+      });
+    });
+
+    it('should not send the token to a window other than the opener', () => {
+      sendMessage({ provider: 'gitlab', token: 'secret-token' });
+
+      capturedHandler({
+        data: 'authorizing:gitlab',
+        origin: 'https://localhost:3000',
+        source: { postMessage: vi.fn() },
+      });
+
+      expect(mockWindow.opener.postMessage).not.toHaveBeenCalledWith(
+        expect.stringContaining('secret-token'),
+        expect.any(String),
+      );
+      expect(mockWindow.removeEventListener).not.toHaveBeenCalled();
+    });
+
+    it('should not send the token to the opener when the message comes from another origin', () => {
+      sendMessage({ provider: 'gitlab', token: 'secret-token' });
+
+      capturedHandler({
+        data: 'authorizing:gitlab',
+        origin: 'https://evil.example',
+        source: mockWindow.opener,
+      });
+
+      expect(mockWindow.opener.postMessage).not.toHaveBeenCalledWith(
+        expect.stringContaining('secret-token'),
+        expect.any(String),
+      );
+    });
+
+    it('should send the token once the opener asks from the same origin', () => {
+      sendMessage({ provider: 'gitlab', token: 'secret-token' });
+
+      capturedHandler({
+        data: 'authorizing:gitlab',
+        origin: 'https://localhost:3000',
+        source: mockWindow.opener,
+      });
+
+      expect(mockWindow.opener.postMessage).toHaveBeenCalledWith(
+        'authorization:gitlab:success:{"provider":"gitlab","token":"secret-token"}',
+        'https://localhost:3000',
+      );
+      expect(mockWindow.removeEventListener).toHaveBeenCalledWith('message', capturedHandler);
+    });
+  });
+
+  describe('authorize — sender validation', () => {
+    it('should ignore messages that do not come from the popup', async () => {
+      mockWindow.open.mockReturnValue(mockPopup);
+
+      const authPromise = authorize({
+        backendName: 'gitlab',
+        authURL: 'https://localhost:3000/',
+      });
+
+      const messageHandler = mockWindow.addEventListener.mock.calls.find(
+        ([event]) => event === 'message',
+      )?.[1];
+
+      const otherWindow = { postMessage: vi.fn() };
+
+      // A same-origin window other than the popup can neither start the handshake nor inject a
+      // token
+      messageHandler({
+        data: 'authorizing:gitlab',
+        origin: 'https://localhost:3000',
+        source: otherWindow,
+      });
+      messageHandler({
+        data: `authorization:gitlab:success:${JSON.stringify({ token: 'forged-token' })}`,
+        origin: 'https://localhost:3000',
+        source: otherWindow,
+      });
+
+      expect(mockPopup.postMessage).not.toHaveBeenCalled();
+      expect(mockPopup.close).not.toHaveBeenCalled();
+
+      messageHandler({
+        data: `authorization:gitlab:success:${JSON.stringify({ token: 'real-token' })}`,
+        origin: 'https://localhost:3000',
+        source: mockPopup,
+      });
+
+      await expect(authPromise).resolves.toEqual({ token: 'real-token' });
+    });
+
+    it('should reject with an AbortError when there is no popup', async () => {
+      mockWindow.open.mockReturnValue(null);
+
+      await expect(
+        authorize({ backendName: 'github', authURL: 'https://api.netlify.com/auth' }),
+      ).rejects.toMatchObject({ name: 'AbortError' });
+      expect(mockWindow.addEventListener).not.toHaveBeenCalled();
     });
   });
 

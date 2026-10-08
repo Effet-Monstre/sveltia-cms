@@ -1,7 +1,6 @@
-import { getPathInfo } from '@sveltia/utils/file';
+import { decodeFilePath, getPathInfo } from '@sveltia/utils/file';
 import { escapeRegExp, stripSlashes } from '@sveltia/utils/string';
 import { flatten } from 'flat';
-import { derived, get, writable } from 'svelte/store';
 
 import {
   allAssetFolders,
@@ -9,62 +8,43 @@ import {
   globalAssetFolder,
   selectedAssetFolder,
 } from '$lib/services/assets/folders';
-import { processFile } from '$lib/services/assets/process';
-import { fillTemplate } from '$lib/services/common/template';
+import { allAssets, focusedAsset } from '$lib/services/assets/state';
 import {
-  ESCAPED_PLACEHOLDER_REGEX,
-  TEMPLATE_TAG_REGEX,
-} from '$lib/services/common/template/constants';
+  focusedSubfolder,
+  getDirName,
+  selectedSubfolderPath,
+} from '$lib/services/assets/subfolders';
+import { fillTemplate } from '$lib/services/common/template';
+import { ESCAPED_PLACEHOLDER_REGEX } from '$lib/services/common/template/constants';
+import { hasTemplateTags } from '$lib/services/common/template/tags';
 import { getCollection } from '$lib/services/contents/collection';
 import { isCollectionIndexFile } from '$lib/services/contents/collection/entries/index-file';
 import { getCollectionFilesByEntry } from '$lib/services/contents/collection/files';
-import { getAssociatedCollections } from '$lib/services/contents/entry';
-import { getDefaultMediaLibraryOptions } from '$lib/services/integrations/media-libraries/default';
-import { createPath, decodeFilePath, resolvePath } from '$lib/services/utils/file';
+import { getAssociatedCollections } from '$lib/services/contents/entry/collections';
+import { getOrCreate, memoizeOnSource } from '$lib/services/utils/cache';
+import { createPath, resolvePath, stripPathPrefix } from '$lib/services/utils/file';
+import { createRootEffect } from '$lib/services/utils/state.svelte';
 
 /**
- * @import { Readable, Writable } from 'svelte/store';
  * @import {
  * Asset,
  * AssetFolderInfo,
  * Entry,
  * InternalCollection,
  * InternalCollectionFile,
- * ProcessedAssets,
  * TypedFieldKeyPath,
- * UploadingAssets,
  * } from '$lib/types/private';
  */
 
-const ENTRY_FOLDER_REGEX = /^(?<entryFolder>.+?)(?:\/[^/]+)?$/;
-
 /**
- * List of all assets.
- * @type {Writable<Asset[]>}
+ * Get a Map from asset path to Asset, used for O(1) path lookups. Rebuilt only when `allAssets` is
+ * replaced.
+ * @type {() => Map<string, Asset>}
  */
-export const allAssets = writable([]);
-
-/**
- * Lazily-rebuilt Map from asset path to Asset, used for O(1) path lookups. Rebuilt only when
- * `allAssets` changes reference.
- * @type {{ source: Asset[] | undefined, map: Map<string, Asset> }}
- */
-const assetPathCache = { source: undefined, map: new Map() };
-
-/**
- * Get a Map from asset path to Asset, rebuilt only when `allAssets` changes.
- * @returns {Map<string, Asset>} Map.
- */
-const getAssetPathMap = () => {
-  const _allAssets = get(allAssets);
-
-  if (_allAssets !== assetPathCache.source) {
-    assetPathCache.source = _allAssets;
-    assetPathCache.map = new Map(_allAssets.map((asset) => [asset.path, asset]));
-  }
-
-  return assetPathCache.map;
-};
+const getAssetPathMap = memoizeOnSource(
+  () => allAssets.current,
+  (_allAssets) => new Map(_allAssets.map((asset) => [asset.path, asset])),
+);
 
 /**
  * Get an asset by its internal repository path.
@@ -74,84 +54,59 @@ const getAssetPathMap = () => {
 export const getAssetByInternalPath = (path) => getAssetPathMap().get(path);
 
 /**
- * Selected assets.
- * @type {Writable<Asset[]>}
+ * Get a stable, unique key for the given asset, to be used as its identity in a list. An unsaved
+ * asset is keyed by its blob URL, because it can temporarily share a path with the saved asset it’s
+ * going to overwrite, and two pending files can share one as well. A saved asset is keyed by its
+ * path, which is unique within the repository, and unlike its blob URL — only generated when the
+ * file is fetched — never changes while the asset is listed.
+ * @param {Asset} asset Asset.
+ * @returns {string} Key.
  */
-export const selectedAssets = writable([]);
+export const getAssetKey = ({ unsaved, blobURL, path }) => (unsaved && blobURL ? blobURL : path);
 
 /**
- * Set of selected asset paths, for O(1) membership checks in list items.
- * @type {import('svelte/store').Readable<Set<string>>}
+ * Resolve template tags in an asset folder’s `internalPath`, such as `/assets/images/{{slug}}`,
+ * using the given entry’s content.
+ * @param {object} args Arguments.
+ * @param {string} args.internalPath Internal path that may contain template tags.
+ * @param {string} [args.collectionName] Collection name associated with the asset folder. It’s
+ * `undefined` for the global asset folder as well as field-level asset folders in custom editor
+ * components.
+ * @param {Entry} [args.entry] Associated entry. Can be `undefined` when editing a new draft.
+ * @returns {string | undefined} Resolved path, which is the given `internalPath` itself if it has
+ * no template tags, or `undefined` if the tags cannot be resolved, typically because the entry has
+ * not been saved yet.
  */
-export const selectedAssetPathSet = derived(
-  selectedAssets,
-  ($selectedAssets) => new Set($selectedAssets.map((asset) => asset.path)),
-);
+export const fillInternalPathTemplate = ({ internalPath, collectionName, entry }) => {
+  if (!hasTemplateTags(internalPath)) {
+    return internalPath;
+  }
 
-/**
- * Asset currently focused in the UI.
- * @type {Writable<Asset | undefined>}
- */
-export const focusedAsset = writable();
+  const collection = collectionName
+    ? getCollection(collectionName)
+    : entry
+      ? getAssociatedCollections(entry)[0]
+      : undefined;
 
-/**
- * Asset to be displayed in `<AssetDetailsOverlay>`.
- * @type {Writable<Asset | undefined>}
- */
-export const overlaidAsset = writable();
+  if (!entry || !collection) {
+    // Cannot resolve the path
+    return undefined;
+  }
 
-/**
- * Assets currently being uploaded.
- * @type {Writable<UploadingAssets>}
- */
-export const uploadingAssets = writable({ folder: undefined, files: [] });
+  const { slug, locales } = entry;
+  const { defaultLocale } = collection._i18n;
+  const locale = defaultLocale in locales ? defaultLocale : Object.keys(locales)[0];
+  const { content, path: entryFilePath } = locales[locale];
 
-/**
- * Asset currently being edited.
- * @type {Writable<Asset | undefined>}
- */
-export const editingAsset = writable();
-
-/**
- * Asset currently being renamed.
- * @type {Writable<Asset | undefined>}
- */
-export const renamingAsset = writable();
-
-/**
- * Asset currently being processed.
- * @type {Readable<ProcessedAssets>}
- */
-export const processedAssets = derived([uploadingAssets], ([_uploadingAssets], set, update) => {
-  set({
-    processing: false,
-    undersizedFiles: [],
-    oversizedFiles: [],
-    transformedFileMap: new WeakMap(),
+  return fillTemplate(internalPath, {
+    type: 'media_folder',
+    collection,
+    content: flatten(content),
+    currentSlug: slug,
+    entryFilePath,
+    isIndexFile: isCollectionIndexFile(collection, entry),
   });
-
-  const originalFiles = _uploadingAssets.files;
-  const { config } = getDefaultMediaLibraryOptions();
-
-  (async () => {
-    if (originalFiles.length && config.transformations) {
-      update((state) => ({ ...state, processing: true }));
-    }
-
-    const results = await Promise.all(originalFiles.map((file) => processFile(file, config)));
-
-    update(() => ({
-      processing: false,
-      undersizedFiles: results.filter(({ oversized }) => !oversized).map(({ file }) => file),
-      oversizedFiles: results.filter(({ oversized }) => oversized).map(({ file }) => file),
-      transformedFileMap: new WeakMap(
-        results
-          .filter(({ originalFile }) => originalFile !== undefined)
-          .map(({ file, originalFile }) => [file, /** @type {File} */ (originalFile)]),
-      ),
-    }));
-  })();
-});
+};
 
 /**
  * Find an asset by a relative path, using the associated entry and collection to help locate it.
@@ -161,6 +116,8 @@ export const processedAssets = derived([uploadingAssets], ([_uploadingAssets], s
  * path. Can be `undefined` when editing a new draft.
  * @param {InternalCollection} context.collection Associated collection.
  * @param {InternalCollectionFile} [context.file] Associated collection file.
+ * @param {string} [context.componentName] Custom editor component name for a field-level asset
+ * folder.
  * @param {TypedFieldKeyPath} [context.typedKeyPath] Field key path for field-level media folders.
  * @returns {Asset | undefined} Found asset.
  */
@@ -169,6 +126,7 @@ export const getAssetByRelativePathAndCollection = ({
   entry,
   collection,
   file,
+  componentName,
   typedKeyPath,
 }) => {
   const { locales } = entry;
@@ -181,12 +139,26 @@ export const getAssetByRelativePathAndCollection = ({
   // use the correct `media_folder` (e.g. a field with `media_folder: images1` instead of the
   // collection-level `/src/assets/images/blog`).
   const fieldFolder = typedKeyPath
-    ? getAssetFolder({ collectionName: collection.name, fileName: file?.name, typedKeyPath })
+    ? getAssetFolder({
+        collectionName: collection.name,
+        fileName: file?.name,
+        componentName,
+        typedKeyPath,
+      })
     : undefined;
 
-  const mediaFolder = fieldFolder?.entryRelative
-    ? (fieldFolder.internalSubPath ?? '')
+  // A field-level folder that isn’t entry-relative is an absolute one, e.g. `/src/assets/authors`,
+  // which has to be used along with its own `public_folder` rather than the collection’s
+  // `media_folder`
+  let mediaFolder = fieldFolder
+    ? fieldFolder.entryRelative
+      ? (fieldFolder.internalSubPath ?? '')
+      : `/${fieldFolder.internalPath}`
     : /** @type {string | undefined} */ ((file ?? collection).media_folder);
+
+  const publicFolder = fieldFolder?.publicPath
+    ? fieldFolder.publicPath
+    : /** @type {string | undefined} */ ((file ?? collection).public_folder);
 
   const locale = defaultLocale in locales ? defaultLocale : Object.keys(locales)[0];
   const { path: entryFilePath, content: entryContent } = locales[locale];
@@ -195,24 +167,54 @@ export const getAssetByRelativePathAndCollection = ({
     return undefined;
   }
 
-  // The regex matches any non-empty string (`entryFilePath` is guaranteed non-empty above). Named
-  // capture groups always produce a `groups` object, so no optional chaining needed.
-  const { entryFolder } = /** @type {{ entryFolder: string }} */ (
-    /** @type {RegExpMatchArray} */ (entryFilePath.match(ENTRY_FOLDER_REGEX)).groups
-  );
+  // Resolve template tags like `{{filename}}` or `{{slug}}` in an entry-relative `media_folder`
+  // (e.g. Hexo’s Post Asset Folder convention) so the asset can be located correctly.
+  // @see https://github.com/sveltia/sveltia-cms/issues/853
+  if (mediaFolder && hasTemplateTags(mediaFolder)) {
+    mediaFolder = fillTemplate(mediaFolder, {
+      type: 'media_folder',
+      collection,
+      content: entryContent,
+      currentSlug: entry.slug,
+      entryFilePath,
+      isIndexFile: isCollectionIndexFile(collection, entry),
+    });
+  }
 
+  // Directory of the entry file, which is an empty string for an entry file at the repository root
+  const entryFolder = getDirName(entryFilePath);
   // Strip the `media_folder` prefix from the stored path before joining with `mediaFolder`, to
   // avoid duplication when the stored value already includes the media folder (e.g.
   // `images/photo.jpg`). Also normalize `./` prefix since `./images/photo.jpg` and
   // `images/photo.jpg` are equivalent relative paths.
+  // `media_folder` is normalized the same way, since `./images` and `images/` are equivalent to
+  // `images`.
   const normalizedPath = path.replace(/^\.\//, '');
+  const normalizedMediaFolder = mediaFolder?.replace(/^\.\//, '').replace(/\/$/, '');
+  let localPath = stripPathPrefix(normalizedPath, normalizedMediaFolder);
+  let resolvedPath;
 
-  const localPath =
-    mediaFolder && normalizedPath.startsWith(`${mediaFolder}/`)
-      ? normalizedPath.slice(mediaFolder.length + 1)
-      : normalizedPath;
+  // When `media_folder` is absolute (starts with `/`) and `public_folder` is entry-relative (e.g.
+  // starts with `.` or `..`), we need special handling for the Astro content collections pattern
+  // where images are stored in a shared folder but referenced with relative paths from each entry.
+  // Strip the `public_folder` prefix from the stored value and resolve directly against the
+  // absolute `media_folder`, bypassing `entryFolder` concatenation.
+  if (mediaFolder?.startsWith('/') && publicFolder) {
+    // Normalize `public_folder` by removing leading `./`
+    const normalizedPublicFolder = publicFolder.replace(/^\.\//, '');
 
-  const resolvedPath = resolvePath(createPath([entryFolder, mediaFolder, localPath]));
+    // Check if the stored path starts with the public folder
+    if (normalizedPath.startsWith(`${normalizedPublicFolder}/`)) {
+      // Strip the public folder prefix to get just the filename/subpath
+      localPath = normalizedPath.slice(normalizedPublicFolder.length + 1);
+    }
+
+    // Resolve against the absolute media_folder (strip leading `/` to make it repo-relative)
+    resolvedPath = resolvePath(createPath([mediaFolder.slice(1), localPath]));
+  } else {
+    // Original logic: concatenate entryFolder + mediaFolder + localPath for entry-relative folders
+    resolvedPath = resolvePath(createPath([entryFolder, mediaFolder, localPath]));
+  }
 
   return getAssetPathMap().get(resolvedPath);
 };
@@ -225,69 +227,89 @@ export const getAssetByRelativePathAndCollection = ({
  * path. Can be `undefined` when editing a new draft.
  * @param {string} [args.collectionName] Collection name, used when no entry is available.
  * @param {string} [args.fileName] Collection file name. File/singleton collection only.
+ * @param {string} [args.componentName] Custom editor component name for a field-level asset folder.
  * @param {TypedFieldKeyPath} [args.typedKeyPath] Field key path for field-level media folders.
  * @returns {Asset | undefined} Corresponding asset.
  */
-export const getAssetByRelativePath = ({ path, entry, collectionName, fileName, typedKeyPath }) => {
+export const getAssetByRelativePath = ({
+  path,
+  entry,
+  collectionName,
+  fileName,
+  componentName,
+  typedKeyPath,
+}) => {
   if (!entry) {
     // Without an entry we use collectionName/fileName to scan configured folders. For
     // entry-relative folders, internalPath + internalSubPath is used as a best-effort path.
     const scanningFolders = /** @type {AssetFolderInfo[]} */ (
       [
+        componentName ? getAssetFolder({ componentName, typedKeyPath }) : undefined,
         collectionName && typedKeyPath
           ? getAssetFolder({ collectionName, fileName, typedKeyPath })
           : undefined,
         collectionName ? getAssetFolder({ collectionName, fileName }) : undefined,
         collectionName ? getAssetFolder({ collectionName }) : undefined,
-        get(globalAssetFolder),
+        globalAssetFolder.current,
       ].filter((folder) => !!folder && !folder.hasTemplateTags)
     );
 
-    /** @type {Asset | undefined} */
-    let foundAsset;
+    const foundAsset = scanningFolders
+      .values()
+      .map((folder) => {
+        // Strip the publicPath prefix from the stored path to get the bare filename/subpath, so
+        // that e.g. `uploads/photo.jpg` with publicPath `/uploads` resolves to `uploads/photo.jpg`
+        // internally rather than `uploads/uploads/photo.jpg`.
+        const localPath = stripPathPrefix(path, folder.publicPath?.replace(/^\//, ''));
 
-    scanningFolders.find((folder) => {
-      // Strip the publicPath prefix from the stored path to get the bare filename/subpath, so
-      // that e.g. `uploads/photo.jpg` with publicPath `/uploads` resolves to `uploads/photo.jpg`
-      // internally rather than `uploads/uploads/photo.jpg`.
-      const publicPathBase = folder.publicPath?.replace(/^\//, '') ?? '';
-
-      const localPath =
-        publicPathBase && path.startsWith(`${publicPathBase}/`)
-          ? path.slice(publicPathBase.length + 1)
-          : path;
-
-      const found = getAssetPathMap().get(
-        createPath([folder.internalPath, folder.internalSubPath ?? '', localPath]),
-      );
-
-      if (found) {
-        foundAsset = found;
-      }
-
-      return !!found;
-    });
+        return getAssetPathMap().get(
+          createPath([folder.internalPath, folder.internalSubPath ?? '', localPath]),
+        );
+      })
+      .find(Boolean);
 
     return foundAsset ?? getAssetPathMap().get(path);
   }
 
-  const assets = getAssociatedCollections(entry).flatMap((collection) => {
-    const collectionFiles = getCollectionFilesByEntry(collection, entry);
-    const args = { path, entry, collection, typedKeyPath };
+  // Stop at the first collection or collection file that has the asset
+  const foundAsset = getAssociatedCollections(entry)
+    .values()
+    .flatMap((collection) => {
+      const collectionFiles = getCollectionFilesByEntry(collection, entry);
+      const args = { path, entry, collection, componentName, typedKeyPath };
+      /** @type {(InternalCollectionFile | undefined)[]} */
+      const files = collectionFiles.length ? collectionFiles : [undefined];
 
-    if (collectionFiles.length) {
-      return collectionFiles.map((file) => getAssetByRelativePathAndCollection({ ...args, file }));
-    }
-
-    return getAssetByRelativePathAndCollection({ ...args });
-  });
+      return files.values().map((file) => getAssetByRelativePathAndCollection({ ...args, file }));
+    })
+    .find(Boolean);
 
   return (
-    assets.filter(Boolean)[0] ??
+    foundAsset ??
     // Fall back to exact match at the root folder
     getAssetPathMap().get(path)
   );
 };
+
+/**
+ * Cache of {@link getPublicPathRegex} results, keyed by the asset folder.
+ * @type {WeakMap<AssetFolderInfo, RegExp>}
+ */
+const publicPathRegexCache = new WeakMap();
+
+/**
+ * Get a regular expression matching a directory at or below the given folder’s public path, with
+ * any template tag in the path matching a segment.
+ * @param {AssetFolderInfo} folder Asset folder.
+ * @returns {RegExp} Regular expression.
+ */
+const getPublicPathRegex = (folder) =>
+  getOrCreate(publicPathRegexCache, folder, () => {
+    const publicPath = folder.publicPath ?? '';
+    const normalizedPath = escapeRegExp(publicPath).replace(ESCAPED_PLACEHOLDER_REGEX, '.+?');
+
+    return new RegExp(`^${normalizedPath}${publicPath ? '(?=\\/|$)' : '$'}`);
+  });
 
 /**
  * Get an asset by an absolute public path typically stored as an image field value.
@@ -297,10 +319,18 @@ export const getAssetByRelativePath = ({ path, entry, collectionName, fileName, 
  * path. Can be `undefined` when editing a new draft.
  * @param {string} args.collectionName Collection name.
  * @param {string} [args.fileName] Collection file name. File/singleton collection only.
+ * @param {string} [args.componentName] Custom editor component name for a field-level asset folder.
  * @param {TypedFieldKeyPath} [args.typedKeyPath] Field key path for field-level media folders.
  * @returns {Asset | undefined} Corresponding asset.
  */
-export const getAssetByAbsolutePath = ({ path, entry, collectionName, fileName, typedKeyPath }) => {
+export const getAssetByAbsolutePath = ({
+  path,
+  entry,
+  collectionName,
+  fileName,
+  componentName,
+  typedKeyPath,
+}) => {
   const exactMatch = getAssetPathMap().get(stripSlashes(path));
 
   if (exactMatch) {
@@ -308,50 +338,28 @@ export const getAssetByAbsolutePath = ({ path, entry, collectionName, fileName, 
   }
 
   const { dirname: dirName = '', basename: baseName } = getPathInfo(path);
-  /** @type {Asset | undefined} */
-  let foundAsset = undefined;
 
-  const scanningFolders = [
-    typedKeyPath ? getAssetFolder({ collectionName, fileName, typedKeyPath }) : undefined,
-    getAssetFolder({ collectionName, fileName }),
-    getAssetFolder({ collectionName }),
-    get(globalAssetFolder),
-    get(allAssetFolders).findLast((folder) => {
-      const publicPath = folder.publicPath ?? '';
-      const normalizedPath = escapeRegExp(publicPath).replace(ESCAPED_PLACEHOLDER_REGEX, '.+?');
-
-      return dirName.match(`^${normalizedPath}${publicPath ? '(?=\\/|$)' : '$'}`);
-    }),
-  ].filter((folder) => !!folder);
-
-  // Use `find` to stop scanning folders as soon as the asset is found
-  scanningFolders.find((folder) => {
+  /**
+   * Look for the asset in the given folder.
+   * @param {AssetFolderInfo} folder Asset folder.
+   * @returns {Asset | undefined} Asset, if found.
+   */
+  const findInFolder = (folder) => {
     const { publicPath, collectionName: _collectionName } = folder;
     let { internalPath } = folder;
 
-    // Deal with template tags like `/assets/images/{{slug}}`
-    if (internalPath !== undefined && TEMPLATE_TAG_REGEX.test(internalPath)) {
-      const collection = _collectionName
-        ? getCollection(_collectionName)
-        : entry
-          ? getAssociatedCollections(entry)?.[0]
-          : undefined;
-
-      if (!(entry && collection)) {
-        // Cannot resolve the path
-        return false;
-      }
-
-      const { content, path: entryFilePath } = entry.locales[collection._i18n.defaultLocale];
-
-      internalPath = fillTemplate(internalPath, {
-        type: 'media_folder',
-        collection,
-        content: flatten(content),
-        currentSlug: entry.slug,
-        entryFilePath,
-        isIndexFile: isCollectionIndexFile(collection, entry),
+    if (internalPath !== undefined) {
+      // Deal with template tags like `/assets/images/{{slug}}`
+      internalPath = fillInternalPathTemplate({
+        internalPath,
+        collectionName: _collectionName,
+        entry,
       });
+
+      if (internalPath === undefined) {
+        // Cannot resolve the path
+        return undefined;
+      }
     }
 
     // Handle assets stored in a subfolder of the internal path
@@ -363,17 +371,40 @@ export const getAssetByAbsolutePath = ({ path, entry, collectionName, fileName, 
       }
     }
 
-    const fullPath = createPath([internalPath, baseName]);
-    const found = getAssetPathMap().get(fullPath);
+    return getAssetPathMap().get(createPath([internalPath, baseName]));
+  };
 
-    if (found) {
-      foundAsset = found;
-    }
+  const scanningFolders = /** @type {AssetFolderInfo[]} */ (
+    [
+      componentName ? getAssetFolder({ componentName, typedKeyPath }) : undefined,
+      typedKeyPath ? getAssetFolder({ collectionName, fileName, typedKeyPath }) : undefined,
+      getAssetFolder({ collectionName, fileName }),
+      getAssetFolder({ collectionName }),
+      globalAssetFolder.current,
+    ].filter((folder) => !!folder)
+  );
 
-    return !!found;
+  /** @type {Asset | undefined} */
+  let foundAsset = undefined;
+
+  // Use `some` to stop scanning folders as soon as the asset is found
+  scanningFolders.some((folder) => {
+    foundAsset = findInFolder(folder);
+
+    return !!foundAsset;
   });
 
-  return foundAsset;
+  if (foundAsset) {
+    return foundAsset;
+  }
+
+  // Fall back to the last folder whose public path matches the directory. This is only worked out
+  // once the likely folders above have missed, as it tests the path against every asset folder
+  const matchingFolder = allAssetFolders.current.findLast((folder) =>
+    getPublicPathRegex(folder).test(dirName),
+  );
+
+  return matchingFolder ? findInFolder(matchingFolder) : undefined;
 };
 
 /**
@@ -392,19 +423,20 @@ export const isRelativePath = (path) => !/^[/@]/.test(path);
  * path. Can be `undefined` when editing a new draft.
  * @param {string} args.collectionName Collection name.
  * @param {string} [args.fileName] Collection file name. File/singleton collection only.
+ * @param {string} [args.componentName] Custom editor component name for a field-level asset folder.
  * @param {TypedFieldKeyPath} [args.typedKeyPath] Field key path for field-level media folders.
  * @returns {Asset | undefined} Corresponding asset.
  */
-export const getAssetByPath = ({ value, entry, collectionName, fileName, typedKeyPath }) => {
+export const getAssetByPath = ({ value, ...rest }) => {
   // Remove potential fragment before decoding
   const path = decodeFilePath(value.split('#')[0]);
 
   // Handle a relative path
   if (isRelativePath(path)) {
-    return getAssetByRelativePath({ path, entry, collectionName, fileName, typedKeyPath });
+    return getAssetByRelativePath({ path, ...rest });
   }
 
-  return getAssetByAbsolutePath({ path, entry, collectionName, fileName, typedKeyPath });
+  return getAssetByAbsolutePath({ path, ...rest });
 };
 
 /**
@@ -431,19 +463,24 @@ export const isAssetInFolder = ({ folder: assetFolder }, folder) =>
  * @returns {Asset[]} Assets.
  */
 export const getAssetsByFolder = (folder) =>
-  get(allAssets).filter((asset) => isAssetInFolder(asset, folder));
+  allAssets.current.filter((asset) => isAssetInFolder(asset, folder));
 
 /**
  * Get a list of assets stored in the given internal directory.
- * @param {string} dirname Directory path.
+ * @param {string} dirname Directory path. An empty string for the repository root.
  * @returns {Asset[]} Assets.
  */
 export const getAssetsByDirName = (dirname) =>
-  get(allAssets).filter((a) => getPathInfo(a.path).dirname === dirname);
+  // `getPathInfo()` has no directory for a file at the root
+  allAssets.current.filter((a) => (getPathInfo(a.path).dirname ?? '') === dirname);
 
-// Reset the asset selection when a different folder is selected
-selectedAssetFolder.subscribe(() => {
-  focusedAsset.set(undefined);
+// Reset the asset selection when a different folder or subfolder is selected
+createRootEffect(() => {
+  // Read the folder and subfolder so that the effect re-runs whenever either changes
+  void selectedAssetFolder.current;
+  void selectedSubfolderPath.current;
+  focusedAsset.current = undefined;
+  focusedSubfolder.current = undefined;
 });
 
 /**

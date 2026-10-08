@@ -1,72 +1,56 @@
 <script>
   import { _ } from '@sveltia/i18n';
-  import { Button, Icon, PromptDialog, Spacer } from '@sveltia/ui';
+  import { Button, ConfirmationDialog, Icon, PromptDialog, Spacer } from '@sveltia/ui';
   import { onMount } from 'svelte';
 
   import { allBackendServices } from '$lib/services/backends';
   import { cmsConfig } from '$lib/services/config';
   import { auth, signInAutomatically, signInManually } from '$lib/services/user/auth.svelte';
   import { env } from '$lib/services/user/env.svelte';
+  import { getSignInOptions } from '$lib/services/user/sign-in-options';
   import { makeLink } from '$lib/services/utils/string';
+  import { isWorkflowConfigured } from '$lib/services/workflow/config';
 
   /**
-   * @import { Backend, GitBackend, GiteaBackend } from '$lib/types/public';
+   * @import { Backend, GitBackend } from '$lib/types/public';
    */
 
   let showTokenDialog = $state(false);
   let token = $state('');
 
-  const configuredBackend = $derived(/** @type {Backend} */ ($cmsConfig?.backend));
+  const configuredBackend = $derived(/** @type {Backend} */ (cmsConfig.current?.backend));
   const backendName = $derived(/** @type {string} */ (configuredBackend.name));
-  const backend = $derived(backendName ? allBackendServices[backendName] : null);
+  const backend = $derived(allBackendServices[backendName]);
   const isTestRepo = $derived(backendName === 'test-repo');
+  // The test repository has no `repo` option, and the name only goes with the local option
   const repositoryName = $derived(
-    isTestRepo ? undefined : /** @type {GitBackend} */ (configuredBackend)?.repo?.split('/').pop(),
+    /** @type {GitBackend} */ (configuredBackend).repo?.split('/').pop(),
   );
   const showLocalBackendOption = $derived(env.isLocalHost && !isTestRepo);
-  const tokenAuthDisabled = $derived(
-    !isTestRepo &&
-      /** @type {GitBackend} */ (configuredBackend).auth_methods?.includes('token') === false,
+  const trimmedToken = $derived(token.trim());
+  /**
+   * Whether to tell the user that the token also needs pull request access. Only a GitHub
+   * fine-grained token has that permission separate from the content one; a GitLab token with the
+   * `api` scope covers merge requests already.
+   */
+  const showWorkflowNote = $derived(
+    backendName === 'github' && isWorkflowConfigured(cmsConfig.current),
   );
 
+  const { serviceLabel, tokenOptionHidden, oauthOptionHidden, oauthOptionDisabled } = $derived(
+    getSignInOptions(configuredBackend, backend?.label),
+  );
+
+  /* v8 ignore start -- the name is only read while the dialog is open, when the account is set */
   /**
-   * The label to use for the Sign In button, which is usually the backend’s label but can be
-   * overridden for specific backends (e.g. Forgejo on Codeberg) to provide a better UX.
+   * Account name to show when the user is asked whether to sign in with a magic link.
    */
-  const signInServiceLabel = $derived.by(() => {
-    if (
-      backendName === 'gitea' &&
-      /** @type {GiteaBackend} */ (configuredBackend).base_url === 'https://codeberg.org'
-    ) {
-      return 'Codeberg';
-    }
+  const magicLinkAccountName = $derived.by(() => {
+    const { login, name } = auth.magicLinkConfirmation?.account ?? {};
 
-    return backend?.label;
+    return login || name || '';
   });
-
-  /**
-   * Whether the Sign In button should be disabled if the configuration is missing or if the
-   * administrator has explicitly disabled the authentication method.
-   * @see https://github.com/sveltia/sveltia-cms/issues/721
-   */
-  const signInDisabled = $derived.by(() => {
-    // If OAuth authentication is explicitly disabled, the button should be disabled
-    if (
-      !isTestRepo &&
-      /** @type {GitBackend} */ (configuredBackend).auth_methods?.includes('oauth') === false
-    ) {
-      return true;
-    }
-
-    // Gitea with PKCE authentication requires an app ID. If it’s not provided, the button should be
-    // disabled. We can’t check this during config validation because token authentication doesn’t
-    // require an app ID, so we check it here instead.
-    if (backendName === 'gitea' && !(/** @type {GiteaBackend} */ (configuredBackend).app_id)) {
-      return true;
-    }
-
-    return false;
-  });
+  /* v8 ignore stop */
 
   onMount(() => {
     // Skip automatic sign-in if there’s already an error (e.g. repository access denied), so the
@@ -112,21 +96,22 @@
       {/if}
       <Spacer />
     {/if}
-    <Button
-      variant={showLocalBackendOption ? 'secondary' : 'primary'}
-      label={isTestRepo
-        ? _('work_with_test_repo')
-        : _('sign_in_with_x', { values: { service: signInServiceLabel } })}
-      disabled={signInDisabled}
-      onclick={async () => {
-        await signInManually(backendName);
-      }}
-    />
-    {#if !isTestRepo}
+    {#if !oauthOptionHidden}
+      <Button
+        variant={showLocalBackendOption ? 'secondary' : 'primary'}
+        label={isTestRepo
+          ? _('work_with_test_repo')
+          : _('sign_in_with_x', { values: { service: serviceLabel } })}
+        disabled={oauthOptionDisabled}
+        onclick={async () => {
+          await signInManually(backendName);
+        }}
+      />
+    {/if}
+    {#if !isTestRepo && !tokenOptionHidden}
       <Button
         variant="secondary"
-        label={_('sign_in_using_access_token', { values: { service: signInServiceLabel } })}
-        disabled={tokenAuthDisabled}
+        label={_('sign_in_using_access_token', { values: { service: serviceLabel } })}
         onclick={() => {
           showTokenDialog = true;
         }}
@@ -145,21 +130,49 @@
   bind:open={showTokenDialog}
   bind:value={token}
   title={_('sign_in_using_access_token')}
-  textboxAttrs={{ spellcheck: false, 'aria-label': _('personal_access_token') }}
+  textboxAttrs={{ spellcheck: false, ariaLabel: _('personal_access_token') }}
   okLabel={_('sign_in')}
-  okDisabled={!token.trim()}
-  onOk={async () => {
-    await signInManually(backendName, token.trim());
+  okDisabled={!trimmedToken}
+  onOk={() => {
+    signInManually(backendName, trimmedToken);
+  }}
+  onkeydown={(event) => {
+    if (!event.isComposing && event.key === 'Enter' && trimmedToken) {
+      event.preventDefault();
+      showTokenDialog = false;
+      signInManually(backendName, trimmedToken);
+    }
   }}
 >
   {_('sign_in_using_access_token_description')}
+  {#if showWorkflowNote}
+    {_('sign_in_using_access_token_workflow_note')}
+  {/if}
   {#if backend?.repository?.tokenPageURL}
     {@html makeLink(
-      _('sign_in_using_access_token_link', { values: { service: signInServiceLabel } }),
+      _('sign_in_using_access_token_link', { values: { service: serviceLabel } }),
       backend.repository.tokenPageURL,
     )}
   {/if}
 </PromptDialog>
+
+<ConfirmationDialog
+  open={!!auth.magicLinkConfirmation}
+  title={_('sign_in_with_link')}
+  okLabel={_('sign_in')}
+  onOk={() => {
+    auth.magicLinkConfirmation?.resolve(true);
+  }}
+  onClose={() => {
+    // Covers the Cancel button, the Escape key and any other way out. Signing in has already
+    // settled the prompt, so this leaves it alone
+    auth.magicLinkConfirmation?.resolve(false);
+  }}
+>
+  {_('sign_in_with_link_confirmation', {
+    values: { account: magicLinkAccountName, service: serviceLabel },
+  })}
+</ConfirmationDialog>
 
 <style>
   .buttons {

@@ -7,13 +7,8 @@ import { getUserProfile } from './user.js';
  */
 
 // Mock dependencies with vi.hoisted to ensure proper hoisting
-const getMock = vi.hoisted(() => vi.fn());
 const fetchAPIMock = vi.hoisted(() => vi.fn());
 const mockUserState = vi.hoisted(() => ({ account: /** @type {any} */ (null) }));
-
-vi.mock('svelte/store', () => ({
-  get: getMock,
-}));
 
 vi.mock('$lib/services/backends/git/gitea/constants', () => ({
   BACKEND_NAME: 'gitea',
@@ -72,6 +67,7 @@ describe('Gitea User Service', () => {
         email: 'john.doe@example.com',
         avatarURL: 'https://gitea.example.com/avatars/johndoe.jpg',
         profileURL: 'https://gitea.example.com/johndoe',
+        bot: false,
         token: 'test-access-token',
         refreshToken: 'test-refresh-token',
       });
@@ -116,6 +112,7 @@ describe('Gitea User Service', () => {
         email: 'jane.smith@example.com',
         avatarURL: 'https://gitea.example.com/avatars/janesmith.jpg',
         profileURL: 'https://gitea.example.com/janesmith',
+        bot: false,
         token: 'new-access-token',
         refreshToken: 'new-refresh-token',
       });
@@ -177,6 +174,7 @@ describe('Gitea User Service', () => {
         email: '',
         avatarURL: '',
         profileURL: 'https://gitea.example.com/minimal_user',
+        bot: false,
         token: 'test-token',
         refreshToken: 'test-refresh',
       });

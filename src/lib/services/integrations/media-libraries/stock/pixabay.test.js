@@ -247,7 +247,7 @@ describe('integrations/media-libraries/stock/pixabay', () => {
         }),
       );
 
-      await expect(list({ apiKey: mockApiKey })).rejects.toBeUndefined();
+      await expect(list({ apiKey: mockApiKey })).rejects.toThrow();
     });
 
     it('should use supported locale in list parameters', async () => {
@@ -388,7 +388,7 @@ describe('integrations/media-libraries/stock/pixabay', () => {
         }),
       );
 
-      await expect(search('test', { apiKey: mockApiKey })).rejects.toBeUndefined();
+      await expect(search('test', { apiKey: mockApiKey })).rejects.toThrow();
     });
 
     it('should use supported locale in search parameters', async () => {
@@ -505,7 +505,7 @@ describe('integrations/media-libraries/stock/pixabay', () => {
       const results = await search('test', { apiKey: mockApiKey });
 
       expect(results[0].credit).toBe(
-        '<a href="https://pixabay.com/photos/sunset-mountains-landscape-12345/">Photo by johndoe on Pixabay',
+        '<a href="https://pixabay.com/photos/sunset-mountains-landscape-12345/">Photo by johndoe on Pixabay</a>',
       );
     });
 

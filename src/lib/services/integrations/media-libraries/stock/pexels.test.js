@@ -73,7 +73,7 @@ describe('integrations/media-libraries/stock/pexels', () => {
         expect(getLocale()).toBe('es-ES');
 
         mockLocale.current = 'zh';
-        expect(getLocale()).toBe('zh-TW'); // First match in the list
+        expect(getLocale()).toBe('zh-CN'); // Simplified Chinese, the script `zh` is written in
 
         mockLocale.current = 'fr';
         expect(getLocale()).toBe('fr-FR');
@@ -300,7 +300,7 @@ describe('integrations/media-libraries/stock/pexels', () => {
           }),
         );
 
-        await expect(list({ apiKey: mockApiKey })).rejects.toBeUndefined();
+        await expect(list({ apiKey: mockApiKey })).rejects.toThrow();
       });
 
       it('should include required list parameters', async () => {
@@ -542,7 +542,7 @@ describe('integrations/media-libraries/stock/pexels', () => {
           }),
         );
 
-        await expect(search('test', { apiKey: mockApiKey })).rejects.toBeUndefined();
+        await expect(search('test', { apiKey: mockApiKey })).rejects.toThrow();
       });
 
       it('should use supported locale in search parameters', async () => {

@@ -1,15 +1,62 @@
-import { _ } from '@sveltia/i18n';
-
+import { recordBranchAccess } from '$lib/services/backends/branch-access';
 import { fetchAPI, fetchGraphQL, graphqlVars } from '$lib/services/backends/git/shared/api';
-import { REPOSITORY_INFO_PLACEHOLDER } from '$lib/services/backends/git/shared/repository';
-import { user } from '$lib/services/user/account.svelte';
+import {
+  createLocalizedError,
+  NOT_COLLABORATOR_ERROR_MESSAGE,
+} from '$lib/services/backends/git/shared/errors';
+import {
+  applyDefaultBranch,
+  REPOSITORY_INFO_PLACEHOLDER,
+} from '$lib/services/backends/git/shared/repository';
 
 /**
- * @import { RepositoryBaseURLs, RepositoryInfo } from '$lib/types/private';
+ * @import { RepositoryBaseURLs, RepositoryInfo, RepositoryPath } from '$lib/types/private';
  */
+
+/**
+ * Regular expression to split a GitLab project path into a namespace and a project name. In GitLab
+ * terminology, an owner is called a namespace, and a repository is called a project. A namespace
+ * can contain a group and a subgroup concatenated with a `/` so we cannot simply use `split('/')`
+ * here. A project name should not contain a `/`.
+ * @see https://docs.gitlab.com/user/namespace/
+ * @see https://gitlab.com/gitlab-org/gitlab/-/merge_requests/80055
+ */
+const REPO_PATH_REGEX = /(?<owner>.+)\/(?<repo>[^/]+)$/;
 
 /** @type {RepositoryInfo} */
 export const repository = { ...REPOSITORY_INFO_PLACEHOLDER };
+
+/**
+ * Split a full project path, such as `group/subgroup/project`, into a namespace and a project name.
+ * @param {string} path Full project path.
+ * @returns {RepositoryPath} Namespace and project name. Both are `undefined` if the path doesn’t
+ * contain a slash.
+ */
+export const parseProjectPath = (path) =>
+  /** @type {RepositoryPath} */ (path.match(REPO_PATH_REGEX)?.groups ?? {});
+
+/**
+ * Get the URL-encoded project identifier used in the REST API paths, e.g. the `group/project` path
+ * with the slash percent-encoded.
+ * @param {RepositoryPath} [repoPath] Project to address. Default: the configured project. With Open
+ * Authoring the contributor’s fork is passed here, as that’s where their branches live.
+ * @returns {string} Project ID.
+ */
+export const getProjectId = (repoPath) => {
+  const { owner, repo } = repoPath ?? repository;
+
+  return encodeURIComponent(`${owner}/${repo}`);
+};
+
+/**
+ * Get the REST API path of the given branch.
+ * @param {string} branch Branch name.
+ * @param {RepositoryPath} [repoPath] Project holding the branch. Default: the configured project.
+ * @returns {string} Path.
+ * @see https://docs.gitlab.com/api/branches/
+ */
+export const getBranchPath = (branch, repoPath) =>
+  `/projects/${getProjectId(repoPath)}/repository/branches/${encodeURIComponent(branch)}`;
 
 /**
  * Generate base URLs for accessing the repository’s resources.
@@ -25,27 +72,63 @@ export const getBaseURLs = (repoURL, branch) => ({
   commitBaseURL: `${repoURL}/-/commit`,
 });
 
-/**
- * Check if the user has access to the current repository.
- * @throws {Error} If the user is not a collaborator of the repository.
- * @see https://docs.gitlab.com/api/members.html#get-a-member-of-a-group-or-project-including-inherited-and-invited-members
- */
-export const checkRepositoryAccess = async () => {
-  const { owner, repo } = repository;
-  const userId = /** @type {number} */ (user.account?.id);
+const FETCH_USER_PERMISSIONS_QUERY = `
+  query($fullPath: ID!) {
+    project(fullPath: $fullPath) {
+      userPermissions {
+        pushCode
+      }
+    }
+  }
+`;
 
-  const { ok } = /** @type {Response} */ (
-    await fetchAPI(`/projects/${encodeURIComponent(`${owner}/${repo}`)}/members/all/${userId}`, {
-      headers: { Accept: 'application/json' },
-      responseType: 'raw',
-    })
+/**
+ * Ask what the signed-in user may do with the configured project: whether they can see it at all,
+ * and whether they can push to it, which takes the Developer role or higher, like Netlify/Decap CMS
+ * requires. The permission reflects the user’s effective role, however it’s granted: direct
+ * membership, a parent group, or a group invited to the project or to a parent group. It also works
+ * for service accounts, which the members API doesn’t return.
+ * @returns {Promise<{ found: boolean, canPush: boolean }>} Whether the project is visible to the
+ * user, and whether they can push to it. Open Authoring tells the two apart — a contributor can
+ * read the project but not push to it — while the regular access check needs both.
+ * @see https://docs.gitlab.com/api/graphql/reference/#projectpermissions
+ * @see https://docs.gitlab.com/user/permissions/
+ */
+export const fetchProjectPermissions = async () => {
+  const result = /** @type {{ project: { userPermissions: { pushCode: boolean } } | null }} */ (
+    await fetchGraphQL(FETCH_USER_PERMISSIONS_QUERY)
   );
 
-  if (!ok) {
-    throw new Error('Not a collaborator of the repository', {
-      cause: new Error(_('repository_no_access', { values: { repo } })),
-    });
+  return { found: !!result.project, canPush: !!result.project?.userPermissions.pushCode };
+};
+
+/**
+ * Check if the user has write access to the current repository.
+ * @throws {Error} If the user can’t push to the repository.
+ */
+export const checkRepositoryAccess = async () => {
+  const { repo } = repository;
+
+  if (!(await fetchProjectPermissions()).canPush) {
+    throw createLocalizedError(NOT_COLLABORATOR_ERROR_MESSAGE, 'repository_no_access', { repo });
   }
+};
+
+/**
+ * Check if the user can push to the configured branch, and record it in {@link lockedBranch}. The
+ * Developer role is enough to sign in, but a protected branch may only allow Maintainers to push,
+ * in which case everything that commits to the branch directly is made read-only up front, rather
+ * than failing when the user saves. A failed request leaves the branch writable, as GitLab still
+ * refuses a push the user isn’t allowed to make.
+ * @see https://docs.gitlab.com/api/branches/#get-single-repository-branch
+ * @see https://docs.gitlab.com/user/project/repository/branches/protected/
+ */
+export const checkBranchAccess = async () => {
+  await recordBranchAccess(repository.branch, async (branch) => {
+    const result = /** @type {{ can_push?: boolean }} */ (await fetchAPI(getBranchPath(branch)));
+
+    return { canPush: result.can_push };
+  });
 };
 
 const FETCH_DEFAULT_BRANCH_NAME_QUERY = `
@@ -65,27 +148,16 @@ const FETCH_DEFAULT_BRANCH_NAME_QUERY = `
  * @see https://docs.gitlab.com/api/graphql/reference/#repository
  */
 export const fetchDefaultBranchName = async () => {
-  const { repo, repoURL = '' } = repository;
-
   const result = /** @type {{ project: { repository?: { rootRef: string } } }} */ (
     await fetchGraphQL(FETCH_DEFAULT_BRANCH_NAME_QUERY)
   );
 
-  if (!result.project) {
-    throw new Error('Failed to retrieve the default branch name.', {
-      cause: new Error(_('repository_not_found', { values: { repo } })),
-    });
-  }
+  const branch = applyDefaultBranch(repository, {
+    found: !!result.project,
+    branch: result.project?.repository?.rootRef,
+    getBaseURLs,
+  });
 
-  const { rootRef: branch } = result.project.repository ?? {};
-
-  if (!branch) {
-    throw new Error('Failed to retrieve the default branch name.', {
-      cause: new Error(_('repository_empty', { values: { repo } })),
-    });
-  }
-
-  Object.assign(repository, { branch }, getBaseURLs(repoURL, branch));
   Object.assign(graphqlVars, { branch });
 
   return branch;

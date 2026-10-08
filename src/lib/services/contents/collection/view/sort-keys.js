@@ -1,22 +1,18 @@
 import { _ } from '@sveltia/i18n';
 import { unique } from '@sveltia/utils/array';
-import { isObject } from '@sveltia/utils/object';
-import equal from 'fast-deep-equal';
-import { derived, get } from 'svelte/store';
 
-import { appLocaleStore } from '$lib/services/app/i18n';
 import { allEntries } from '$lib/services/contents';
 import { selectedCollection } from '$lib/services/contents/collection';
-import { getOrderFieldKey } from '$lib/services/contents/collection/entries/reorder';
-import { currentView } from '$lib/services/contents/collection/view';
-import { entryListSettings } from '$lib/services/contents/collection/view/settings';
+import { getOrderFieldKey } from '$lib/services/contents/collection/entries/reorder/config';
+import { isArrayFileCollection } from '$lib/services/contents/collection/predicates';
+import { parseCustomSortableFields } from '$lib/services/contents/collection/view/options';
 import { getField } from '$lib/services/contents/entry/fields';
 import { isNumeric } from '$lib/services/utils/number';
+import { createDerivedState } from '$lib/services/utils/state.svelte';
 
 /**
- * @import { Readable } from 'svelte/store';
  * @import { InternalEntryCollection, SortingConditions, SortOrder } from '$lib/types/private';
- * @import { Field, FieldKeyPath, NumberField, SortableFields } from '$lib/types/public';
+ * @import { Field, FieldKeyPath, NumberField } from '$lib/types/public';
  */
 
 /**
@@ -24,7 +20,7 @@ import { isNumeric } from '$lib/services/utils/number';
  * `description` fields supported by Netlify/Decap CMS, it also includes `name` for the entry name
  * field, which is used by Sveltia CMS to infer the entry title.
  * @see https://decapcms.org/docs/configuration-options/#sortable_fields
- * @see https://sveltiacms.app/en/docs/collections/entries#sorting
+ * @see https://sveltiacms.app/en/docs/collections/entries/views#sorting
  */
 export const DEFAULT_SORT_KEYS = ['title', 'name', 'date', 'author', 'description'];
 
@@ -57,55 +53,6 @@ export const SPECIAL_SORT_KEY_TYPES = {
  * @type {string[]}
  */
 export const SPECIAL_SORT_KEYS = Object.keys(SPECIAL_SORT_KEY_TYPES);
-
-/**
- * Check if the given value is a valid array of strings.
- * @param {unknown} arr Value to check.
- * @returns {arr is string[]} Whether the value is a valid array of strings.
- */
-export const isValidArray = (arr) =>
-  Array.isArray(arr) && arr.every((item) => typeof item === 'string');
-
-/**
- * Parse custom sortable fields configuration.
- * @param {string[] | SortableFields} customSortableFields Custom sortable fields configuration.
- * @returns {{ keys: string[], defaultKey?: string, defaultOrder?: SortOrder }} Parsed sortable
- * fields configuration.
- */
-export const parseCustomSortableFields = (customSortableFields) => {
-  // Netlify/Decap CMS compatibility: if `sortable_fields` is an array, it should be treated as a
-  // list of field keys
-  if (isValidArray(customSortableFields)) {
-    return { keys: customSortableFields };
-  }
-
-  // Static CMS compatibility: if `sortable_fields` is an object, it should be treated as a
-  // definition object with `fields` and `default` properties
-  if (isObject(customSortableFields)) {
-    const { fields: keys, default: settings } = customSortableFields;
-
-    if (!isValidArray(keys)) {
-      return { keys: [] };
-    }
-
-    if (!isObject(settings)) {
-      return { keys };
-    }
-
-    return {
-      keys,
-      defaultKey: settings.field,
-      defaultOrder:
-        // Allow title case for Static CMS compatibility
-        ['descending', 'Descending'].includes(settings.direction ?? '')
-          ? 'descending'
-          : 'ascending',
-    };
-  }
-
-  // Invalid configuration
-  return { keys: [] };
-};
 
 /**
  * Get default sort keys for the entry collection.
@@ -144,11 +91,16 @@ export const getSortConfig = ({ collection, isCommitAuthorAvailable, isCommitDat
     identifier_field: customIdField,
     sortable_fields: customSortableFields,
     summary: summaryTemplate,
+    _i18n: { i18nEnabled, canonicalSlug },
   } = collection;
 
-  let { keys, defaultKey, defaultOrder } = customSortableFields
+  const parsed = customSortableFields
     ? parseCustomSortableFields(customSortableFields)
     : getDefaultSortKeys(customIdField);
+
+  // Copy the keys, which can be the configured `sortable_fields` array itself, before adding any
+  let keys = [...parsed.keys];
+  let { defaultKey, defaultOrder } = parsed;
 
   // Special handling for summary field: if the collection has a summary template defined, we add
   // `_summary` as a special sort key, which uses the generated summary value
@@ -156,10 +108,24 @@ export const getSortConfig = ({ collection, isCommitAuthorAvailable, isCommitDat
     keys.unshift('_summary');
   }
 
+  // Make sure the keys are valid field keys or special keys. The canonical slug key,
+  // `translationKey` by default, is part of the content of each localized entry without being a
+  // field, so it can be used as a sort key when i18n is enabled. This has to come first: the
+  // default `date` and `author` keys only stand in for the commit date and author when the
+  // collection has such fields
+  const specialKeys = i18nEnabled ? [...SPECIAL_SORT_KEYS, canonicalSlug.key] : SPECIAL_SORT_KEYS;
+
+  keys = unique(keys).filter(
+    (key) => !!key && (specialKeys.includes(key) || !!getField({ collectionName, keyPath: key })),
+  );
+
   const hasCommitAuthorKey = keys.includes('commit_author');
   const hasCommitDateKey = keys.includes('commit_date');
+  // An entry stored in a file with the other entries of the collection carries the file’s last
+  // commit, which is about whichever entry was changed last, so it doesn’t tell the entries apart
+  const isArrayFile = isArrayFileCollection(collection);
 
-  if (isCommitAuthorAvailable) {
+  if (isCommitAuthorAvailable && !isArrayFile) {
     if (!keys.includes('author') && !hasCommitAuthorKey) {
       keys.push('commit_author');
     }
@@ -167,7 +133,7 @@ export const getSortConfig = ({ collection, isCommitAuthorAvailable, isCommitDat
     keys = keys.filter((key) => key !== 'commit_author');
   }
 
-  if (isCommitDateAvailable) {
+  if (isCommitDateAvailable && !isArrayFile) {
     if (!keys.includes('date') && !hasCommitDateKey) {
       keys.push('commit_date');
     }
@@ -175,18 +141,14 @@ export const getSortConfig = ({ collection, isCommitAuthorAvailable, isCommitDat
     keys = keys.filter((key) => key !== 'commit_date');
   }
 
-  // Make sure the keys are valid field keys or special keys
-  keys = unique(keys).filter(
-    (key) =>
-      !!key && (SPECIAL_SORT_KEYS.includes(key) || !!getField({ collectionName, keyPath: key })),
-  );
-
   // If the collection allows reordering, expose a single special `_manual` sort key that maps to
   // the order field. We hide the raw order field key from the dropdown — even if the user listed it
   // in `sortable_fields` — to avoid showing two equivalent options.
   const orderKey = getOrderFieldKey(collection);
 
-  if (orderKey) {
+  // An entry collection storing all the entries in one file keeps them in the order of the array,
+  // so the manual order is always available there
+  if (orderKey || isArrayFileCollection(collection)) {
     keys = keys.filter((key) => key !== orderKey);
 
     if (!keys.includes('_manual')) {
@@ -272,35 +234,26 @@ export const getSortKeyLabel = ({ collection, key }) => {
 };
 
 /**
- * List of available sort keys for the selected entry collection.
- * @type {Readable<{ key: string, label: string }[]>}
+ * List of available sort keys for the selected entry collection. `getSortKeyLabel()` may return a
+ * localized label, and it reads the current app locale, so the list is also recomputed when the
+ * locale changes.
+ * @type {{ readonly current: { key: string, label: string }[] }}
  */
-export const sortKeys = derived(
-  // Include `appLocale.current` as a dependency because `getSortKeyLabel()` may return a localized
-  // label
-  [selectedCollection, allEntries, appLocaleStore],
-  ([collection, _allEntries], set) => {
-    // Disable sorting for file/singleton collection
-    if (!collection || !('folder' in collection)) {
-      set([]);
+export const sortKeys = createDerivedState(() => {
+  const collection = selectedCollection.current;
 
-      return;
-    }
+  // Disable sorting for file/singleton collection
+  if (collection?._type !== 'entry') {
+    return [];
+  }
 
-    const view = get(entryListSettings)?.[collection.name] ?? { type: 'list' };
+  const { current: _allEntries } = allEntries;
 
-    const { keys, default: defaultSort } = getSortConfig({
-      collection,
-      isCommitAuthorAvailable: _allEntries.some((entry) => !!entry.commitAuthor),
-      isCommitDateAvailable: _allEntries.some((entry) => !!entry.commitDate),
-    });
+  const { keys } = getSortConfig({
+    collection,
+    isCommitAuthorAvailable: _allEntries.some((entry) => !!entry.commitAuthor),
+    isCommitDateAvailable: _allEntries.some((entry) => !!entry.commitDate),
+  });
 
-    view.sort ??= defaultSort;
-
-    set(keys.map((key) => ({ key, label: getSortKeyLabel({ collection, key }) })));
-
-    if (!equal(view, get(currentView))) {
-      currentView.set(view);
-    }
-  },
-);
+  return keys.map((key) => ({ key, label: getSortKeyLabel({ collection, key }) }));
+});

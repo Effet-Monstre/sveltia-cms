@@ -3,11 +3,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   ASSET_KINDS,
+  canCreateThumbnail,
   canEditAsset,
   canPreviewAsset,
   DOC_EXTENSION_REGEX,
   getAssetKind,
   getMediaKind,
+  getMediaKindFromPath,
+  getMediaKindFromType,
+  hasPDFThumbnail,
   isMediaKind,
   MEDIA_KINDS,
 } from './kinds';
@@ -50,6 +54,50 @@ describe('assets/kinds', () => {
       expect(DOC_EXTENSION_REGEX.test('.xlsx')).toBe(true);
       expect(DOC_EXTENSION_REGEX.test('.txt')).toBe(false);
       expect(DOC_EXTENSION_REGEX.test('.jpg')).toBe(false);
+    });
+  });
+
+  describe('canCreateThumbnail', () => {
+    afterEach(() => {
+      vi.unstubAllEnvs();
+    });
+
+    it('should create a thumbnail for an image, a video or a PDF document', () => {
+      expect(canCreateThumbnail(/** @type {any} */ ({ name: 'a.jpg', kind: 'image' }))).toBe(true);
+      expect(canCreateThumbnail(/** @type {any} */ ({ name: 'a.mp4', kind: 'video' }))).toBe(true);
+      expect(canCreateThumbnail(/** @type {any} */ ({ name: 'a.pdf', kind: 'document' }))).toBe(
+        true,
+      );
+    });
+
+    it('should not for any other file, or a PDF document in the npm build', () => {
+      expect(canCreateThumbnail(/** @type {any} */ ({ name: 'a.mp3', kind: 'audio' }))).toBe(false);
+      expect(canCreateThumbnail(/** @type {any} */ ({ name: 'a.docx', kind: 'document' }))).toBe(
+        false,
+      );
+
+      vi.stubEnv('NPM_BUILD', 'true');
+
+      expect(canCreateThumbnail(/** @type {any} */ ({ name: 'a.pdf', kind: 'document' }))).toBe(
+        false,
+      );
+    });
+  });
+
+  describe('hasPDFThumbnail', () => {
+    afterEach(() => {
+      vi.unstubAllEnvs();
+    });
+
+    it('should generate a thumbnail for a PDF document', () => {
+      expect(hasPDFThumbnail('files/brochure.pdf')).toBe(true);
+      expect(hasPDFThumbnail('files/brochure.docx')).toBe(false);
+    });
+
+    it('should not in the npm build, which doesn’t include PDF.js', () => {
+      vi.stubEnv('NPM_BUILD', 'true');
+
+      expect(hasPDFThumbnail('files/brochure.pdf')).toBe(false);
     });
   });
 
@@ -266,6 +314,41 @@ describe('assets/kinds', () => {
       const result = await getMediaKind({} /* invalid source type */);
 
       expect(result).toBe(undefined);
+    });
+  });
+
+  describe('getMediaKindFromType', () => {
+    it('should map a MIME type to a media kind', () => {
+      expect(getMediaKindFromType('image/png')).toBe('image');
+      expect(getMediaKindFromType('video/mp4')).toBe('video');
+      expect(getMediaKindFromType('audio/mpeg')).toBe('audio');
+      expect(getMediaKindFromType('application/pdf')).toBe(undefined);
+      expect(getMediaKindFromType('image/x-custom')).toBe(undefined);
+      expect(getMediaKindFromType('')).toBe(undefined);
+    });
+
+    it('should not throw on a malformed MIME type without a subtype', () => {
+      expect(getMediaKindFromType('image')).toBe(undefined);
+      expect(getMediaKindFromType('image/')).toBe(undefined);
+      expect(getMediaKindFromPath('data:image;base64,iVBORw0KGgo=')).toBe(undefined);
+    });
+  });
+
+  describe('getMediaKindFromPath', () => {
+    it('should read the MIME type of a data URL', () => {
+      expect(getMediaKindFromPath('data:image/png;base64,iVBORw0KGgo=')).toBe('image');
+      expect(getMediaKindFromPath('data:application/pdf;base64,JVBERi0=')).toBe(undefined);
+      expect(mime.getType).not.toHaveBeenCalled();
+    });
+
+    it('should use the extension of a path or URL', () => {
+      vi.mocked(mime.getType).mockReturnValue('image/jpeg');
+
+      expect(getMediaKindFromPath('https://example.com/photos/a.jpg?w=1')).toBe('image');
+      expect(mime.getType).toHaveBeenCalledWith('/photos/a.jpg');
+      expect(getMediaKindFromPath('a.jpg')).toBe('image');
+      expect(mime.getType).toHaveBeenCalledWith('a.jpg');
+      expect(getMediaKindFromPath('https://images.example.com/a')).toBe('image');
     });
   });
 

@@ -10,24 +10,79 @@ import {
   applyTransformations,
   applyTruncateTransformation,
   applyUpperCaseTransformation,
+  parseTransformations,
   ternaryTransformation,
 } from '$lib/services/common/transformations';
 
 dayjs.extend(dayjsTimeZone);
 dayjs.tz.setDefault('America/New_York');
 
+describe('Test parseTransformations()', () => {
+  test('splits a tag and transformations and parses each transformation', () => {
+    expect(parseTransformations('fields.title | upper | lower | truncate(10)')).toEqual({
+      value: 'fields.title',
+      transformations: [
+        { method: 'upper', args: {} },
+        { method: 'lower', args: {} },
+        { method: 'truncate', args: { max: '10' } },
+      ],
+    });
+  });
+
+  test('returns an empty transformation list for a plain value', () => {
+    expect(parseTransformations('slugify')).toEqual({ value: 'slugify', transformations: [] });
+  });
+
+  test('parses transformation arguments for date and default transforms', () => {
+    expect(
+      parseTransformations("publish_date | date('YYYY-MM-DD', 'utc') | default('Untitled')"),
+    ).toEqual({
+      value: 'publish_date',
+      transformations: [
+        { method: 'date', args: { format: 'YYYY-MM-DD', timeZone: 'utc' } },
+        { method: 'default', args: { defaultValue: 'Untitled' } },
+      ],
+    });
+  });
+
+  test('does not split at a pipe within a quoted argument', () => {
+    expect(
+      parseTransformations(
+        "title | default('Untitled | Draft') | ternary('A | B', 'C|D') | truncate(5, '|')",
+      ),
+    ).toEqual({
+      value: 'title',
+      transformations: [
+        { method: 'default', args: { defaultValue: 'Untitled | Draft' } },
+        { method: 'ternary', args: { truthyValue: 'A | B', falsyValue: 'C|D' } },
+        { method: 'truncate', args: { max: '5', ellipsis: '|' } },
+      ],
+    });
+  });
+
+  test('does not treat an apostrophe within an argument as a closing quote', () => {
+    expect(parseTransformations("title | default('Don't | Stop') | upper")).toEqual({
+      value: 'title',
+      transformations: [
+        { method: 'default', args: { defaultValue: "Don't | Stop" } },
+        { method: 'upper', args: {} },
+      ],
+    });
+  });
+});
+
 describe('Test applyTransformation()', () => {
   test('upper/lower', () => {
     expect(
       applyTransformation({
         value: 'Hello',
-        transformation: 'upper',
+        transformation: { method: 'upper', args: {} },
       }),
     ).toBe('HELLO');
     expect(
       applyTransformation({
         value: 'Hello',
-        transformation: 'lower',
+        transformation: { method: 'lower', args: {} },
       }),
     ).toBe('hello');
   });
@@ -36,13 +91,13 @@ describe('Test applyTransformation()', () => {
     expect(
       applyTransformation({
         value: '',
-        transformation: "default('Undefined')",
+        transformation: { method: 'default', args: { defaultValue: 'Undefined' } },
       }),
     ).toBe('Undefined');
     expect(
       applyTransformation({
         value: 'Description',
-        transformation: "default('Undefined')",
+        transformation: { method: 'default', args: { defaultValue: 'Undefined' } },
       }),
     ).toBe('Description');
   });
@@ -51,25 +106,31 @@ describe('Test applyTransformation()', () => {
     expect(
       applyTransformation({
         value: true,
-        transformation: "ternary('Published', 'Draft')",
+        transformation: {
+          method: 'ternary',
+          args: { truthyValue: 'Published', falsyValue: 'Draft' },
+        },
       }),
     ).toBe('Published');
     expect(
       applyTransformation({
         value: false,
-        transformation: "ternary('Published', 'Draft')",
+        transformation: {
+          method: 'ternary',
+          args: { truthyValue: 'Published', falsyValue: 'Draft' },
+        },
       }),
     ).toBe('Draft');
     expect(
       applyTransformation({
         value: true,
-        transformation: "ternary('', 'Draft')",
+        transformation: { method: 'ternary', args: { truthyValue: '', falsyValue: 'Draft' } },
       }),
     ).toBe('');
     expect(
       applyTransformation({
         value: false,
-        transformation: "ternary('Published', '')",
+        transformation: { method: 'ternary', args: { truthyValue: 'Published', falsyValue: '' } },
       }),
     ).toBe('');
   });
@@ -81,60 +142,54 @@ describe('Test applyTransformation()', () => {
     expect(
       applyTransformation({
         value: title,
-        transformation: 'truncate(40)',
+        transformation: { method: 'truncate', args: { max: '40' } },
       }),
     ).toBe('Lorem ipsum dolor sit amet, consectetur…');
     expect(
       applyTransformation({
         value: title,
-        transformation: "truncate(50, '***')",
+        transformation: { method: 'truncate', args: { max: '50', ellipsis: '***' } },
       }),
     ).toBe('Lorem ipsum dolor sit amet, consectetur adipiscing***');
-    expect(
-      applyTransformation({
-        value: title,
-        transformation: 'truncate(-10)',
-      }),
-    ).toBe(title);
   });
 
   test('date', () => {
     expect(
       applyTransformation({
         value: '2024-01-23',
-        transformation: "date('LL')",
+        transformation: { method: 'date', args: { format: 'LL' } },
       }),
     ).toBe('January 23, 2024');
     expect(
       applyTransformation({
         value: '2024-01-23T01:23:45',
-        transformation: "date('LLL')",
+        transformation: { method: 'date', args: { format: 'LLL' } },
       }),
     ).toBe('January 23, 2024 1:23 AM');
     // Test basic date formatting without timezone complications
     expect(
       applyTransformation({
         value: '2024-01-23T06:23:45',
-        transformation: "date('YYYY-MM-DD-HH-mm')",
+        transformation: { method: 'date', args: { format: 'YYYY-MM-DD-HH-mm' } },
       }),
     ).toBe('2024-01-23-06-23');
     expect(
       applyTransformation({
         value: '2024-01-23T01:23:45-05:00',
-        transformation: "date('YYYY-MM-DD-HH-mm', 'utc')",
+        transformation: { method: 'date', args: { format: 'YYYY-MM-DD-HH-mm', timeZone: 'utc' } },
       }),
     ).toBe('2024-01-23-06-23');
     expect(
       applyTransformation({
         value: '2024-01-23T01:23:45Z',
-        transformation: "date('YYYY-MM-DD-HH-mm')",
+        transformation: { method: 'date', args: { format: 'YYYY-MM-DD-HH-mm' } },
         fieldConfig: { name: 'date', widget: 'datetime', picker_utc: true },
       }),
     ).toBe('2024-01-23-01-23');
     expect(
       applyTransformation({
         value: '2024-01-23',
-        transformation: "date('LLL')",
+        transformation: { method: 'date', args: { format: 'LLL' } },
         fieldConfig: { name: 'date', widget: 'datetime', time_format: false },
       }),
     ).toBe('January 23, 2024 12:00 AM');
@@ -142,7 +197,7 @@ describe('Test applyTransformation()', () => {
     expect(
       applyTransformation({
         value: '',
-        transformation: "date('LL')",
+        transformation: { method: 'date', args: { format: 'LL' } },
       }),
     ).toBe('');
   });
@@ -151,42 +206,58 @@ describe('Test applyTransformation()', () => {
     expect(
       applyTransformation({
         value: 'Hello World',
-        transformation: 'slugify',
+        transformation: { method: 'slugify', args: {} },
       }),
     ).toBe('hello-world');
     expect(
       applyTransformation({
         value: 'My Post Title! 2024',
-        transformation: 'slugify',
+        transformation: { method: 'slugify', args: {} },
       }),
     ).toBe('my-post-title-2024');
     expect(
       applyTransformation({
         value: 'already-slugified',
-        transformation: 'slugify',
+        transformation: { method: 'slugify', args: {} },
       }),
     ).toBe('already-slugified');
     // locale is forwarded to slugify (no visible effect here since clean_accents defaults to false)
     expect(
       applyTransformation({
         value: 'Hello World',
-        transformation: 'slugify',
+        transformation: { method: 'slugify', args: {} },
         locale: 'de',
       }),
     ).toBe('hello-world');
+  });
+
+  test('slugify returns an empty string instead of a random UUID for an empty value', () => {
+    // A random fallback would make a Compute field recompute forever
+    // @see https://github.com/sveltia/sveltia-cms/issues/946
+    /**
+     * Apply the `slugify` transformation to the given value.
+     * @param {string} value Original value.
+     * @returns {string} Transformed value.
+     */
+    const slugifyValue = (value) =>
+      applyTransformation({ value, transformation: { method: 'slugify', args: {} } });
+
+    expect(['', '  ', '!!!'].map(slugifyValue)).toEqual(['', '', '']);
+    // The result must be stable across calls
+    expect(slugifyValue('')).toBe(slugifyValue(''));
   });
 
   test('unknown transformation returns string value', () => {
     expect(
       applyTransformation({
         value: 42,
-        transformation: 'nonexistent',
+        transformation: { method: 'nonexistent', args: {} },
       }),
     ).toBe('42');
     expect(
       applyTransformation({
         value: 'unchanged',
-        transformation: 'unknown_transform',
+        transformation: { method: 'unknown_transform', args: {} },
       }),
     ).toBe('unchanged');
   });
@@ -197,22 +268,28 @@ describe('Test applyTransformations()', () => {
     expect(
       applyTransformations({
         value: 'Hello World',
-        transformations: ['lower', 'slugify'],
+        transformations: [
+          { method: 'lower', args: {} },
+          { method: 'slugify', args: {} },
+        ],
       }),
     ).toBe('hello-world');
     expect(
       applyTransformations({
         value: '  Long title that needs truncating  ',
-        transformations: ['lower', 'truncate(10)'],
+        transformations: [
+          { method: 'lower', args: {} },
+          { method: 'truncate', args: { max: '10' } },
+        ],
       }),
-    ).toBe('long tit…');
+    ).toBe('long title…');
   });
 
   test('applies a single transformation', () => {
     expect(
       applyTransformations({
         value: 'hello',
-        transformations: ['upper'],
+        transformations: [{ method: 'upper', args: {} }],
       }),
     ).toBe('HELLO');
   });
@@ -230,7 +307,7 @@ describe('Test applyTransformations()', () => {
     expect(
       applyTransformations({
         value: '2024-01-23T01:23:45Z',
-        transformations: ["date('YYYY-MM-DD-HH-mm')"],
+        transformations: [{ method: 'date', args: { format: 'YYYY-MM-DD-HH-mm' } }],
         fieldConfig: { name: 'date', widget: 'datetime', picker_utc: true },
       }),
     ).toBe('2024-01-23-01-23');
@@ -241,7 +318,7 @@ describe('Test applyTransformations()', () => {
     expect(
       applyTransformations({
         value: 'Hello World',
-        transformations: ['slugify'],
+        transformations: [{ method: 'slugify', args: {} }],
         locale: 'de',
       }),
     ).toBe('hello-world');

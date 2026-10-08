@@ -40,11 +40,6 @@ vi.mock('@sveltia/i18n', () => ({
 }));
 
 const mockGetStore = vi.fn();
-
-vi.mock('svelte/store', () => ({
-  get: mockGetStore,
-}));
-
 const mockAddMessage = vi.fn();
 const mockCheckName = vi.fn();
 const mockCheckUnsupportedOptions = vi.fn();
@@ -52,6 +47,7 @@ const mockCheckUnsupportedOptions = vi.fn();
 vi.mock('$lib/services/config/parser/utils/validator', () => ({
   addMessage: mockAddMessage,
   checkName: mockCheckName,
+  checkRegex: vi.fn(),
   checkUnsupportedOptions: mockCheckUnsupportedOptions,
 }));
 
@@ -122,6 +118,166 @@ describe('Collections Parser', () => {
       expect(mockParseFields).toHaveBeenCalled();
     });
 
+    it('should warn when preview_path needs a date but no DateTime field is defined', async () => {
+      const { parseEntryCollection } = await import('.');
+      const collectors = createCollectors();
+
+      /** @type {any} */
+      const context = {
+        cmsConfig: {},
+        collection: {
+          name: 'posts',
+          folder: 'content/posts',
+          preview_path: '/blog/{{year}}/{{month}}/{{slug}}',
+          fields: [{ name: 'title', widget: 'string' }],
+        },
+      };
+
+      parseEntryCollection(context, collectors);
+
+      expect(mockAddMessage).toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'warning', strKey: 'preview_path_no_date_field' }),
+      );
+    });
+
+    it('should accept a date field defined only on the index file', async () => {
+      const { parseEntryCollection } = await import('.');
+      const collectors = createCollectors();
+
+      /** @type {any} */
+      const context = {
+        cmsConfig: {},
+        collection: {
+          name: 'posts',
+          folder: 'content/posts',
+          preview_path: '/blog/{{year}}/{{slug}}',
+          fields: [{ name: 'title', widget: 'string' }],
+          index_file: { fields: [{ name: 'pubDate', widget: 'datetime' }] },
+        },
+      };
+
+      parseEntryCollection(context, collectors);
+
+      expect(mockAddMessage).not.toHaveBeenCalledWith(
+        expect.objectContaining({ strKey: 'preview_path_no_date_field' }),
+      );
+    });
+
+    it('should error when identifier_field names a field that is not defined', async () => {
+      const { parseEntryCollection } = await import('.');
+      const collectors = createCollectors();
+
+      /** @type {any} */
+      const context = {
+        cmsConfig: {},
+        collection: {
+          name: 'posts',
+          folder: 'content/posts',
+          identifier_field: 'headline',
+          fields: [{ name: 'title', widget: 'string' }],
+        },
+      };
+
+      parseEntryCollection(context, collectors);
+
+      expect(mockAddMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          strKey: 'invalid_identifier_field',
+          values: { name: 'headline' },
+        }),
+      );
+    });
+
+    it('should warn when the collection has no title field to make slugs with', async () => {
+      const { parseEntryCollection } = await import('.');
+      const collectors = createCollectors();
+
+      /** @type {any} */
+      const context = {
+        cmsConfig: {},
+        collection: {
+          name: 'authors',
+          folder: 'content/authors',
+          fields: [{ name: 'name', widget: 'string' }],
+        },
+      };
+
+      parseEntryCollection(context, collectors);
+
+      expect(mockAddMessage).toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'warning', strKey: 'missing_identifier_field' }),
+      );
+    });
+
+    it('should not count an index file field as the identifier field', async () => {
+      const { parseEntryCollection } = await import('.');
+      const collectors = createCollectors();
+
+      /** @type {any} */
+      const context = {
+        cmsConfig: {},
+        collection: {
+          name: 'authors',
+          folder: 'content/authors',
+          fields: [{ name: 'name', widget: 'string' }],
+          index_file: { fields: [{ name: 'title', widget: 'string' }] },
+        },
+      };
+
+      parseEntryCollection(context, collectors);
+
+      expect(mockAddMessage).toHaveBeenCalledWith(
+        expect.objectContaining({ strKey: 'missing_identifier_field' }),
+      );
+    });
+
+    it('should error when the slug template refers to a field that is not defined', async () => {
+      const { parseEntryCollection } = await import('.');
+      const collectors = createCollectors();
+
+      /** @type {any} */
+      const context = {
+        cmsConfig: {},
+        collection: {
+          name: 'posts',
+          folder: 'content/posts',
+          slug: '{{year}}-{{titel}}',
+          fields: [{ name: 'title', widget: 'string' }],
+        },
+      };
+
+      parseEntryCollection(context, collectors);
+
+      expect(mockAddMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          strKey: 'option_field_not_found',
+          values: { option: 'slug', name: 'titel' },
+        }),
+      );
+    });
+
+    it('should error when the filter refers to a field that is not defined', async () => {
+      const { parseEntryCollection } = await import('.');
+      const collectors = createCollectors();
+
+      /** @type {any} */
+      const context = {
+        cmsConfig: {},
+        collection: {
+          name: 'posts',
+          folder: 'content/posts',
+          filter: { field: 'type', value: 'post' },
+          fields: [{ name: 'title', widget: 'string' }],
+        },
+      };
+
+      parseEntryCollection(context, collectors);
+
+      expect(mockAddMessage).toHaveBeenCalledWith(
+        expect.objectContaining({ strKey: 'invalid_filter_field', values: { name: 'type' } }),
+      );
+    });
+
     it('should detect format mismatch in entry collection', async () => {
       const { parseEntryCollection } = await import('.');
       const collectors = createCollectors();
@@ -146,6 +302,56 @@ describe('Collections Parser', () => {
         expect.objectContaining({
           strKey: 'file_format_mismatch',
         }),
+      );
+    });
+
+    it('should detect format mismatch in the index file', async () => {
+      const { parseEntryCollection } = await import('.');
+      const collectors = createCollectors();
+
+      // The collection’s own options agree; the index file’s don’t
+      mockIsFormatMismatch.mockImplementation((extension) => extension === 'json');
+
+      /** @type {any} */
+      const context = {
+        cmsConfig: {},
+        collection: {
+          name: 'posts',
+          folder: 'content/posts',
+          fields: [],
+          index_file: { name: 'posts', extension: 'json', format: 'yaml' },
+        },
+      };
+
+      parseEntryCollection(context, collectors);
+
+      expect(mockIsFormatMismatch).toHaveBeenCalledWith('json', 'yaml');
+      expect(mockAddMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          strKey: 'file_format_mismatch',
+          values: { extension: 'json', format: 'yaml' },
+          context: expect.objectContaining({ isIndexFile: true }),
+        }),
+      );
+    });
+
+    it('should not check the format of an index file without options of its own', async () => {
+      const { parseEntryCollection } = await import('.');
+      const collectors = createCollectors();
+
+      mockIsFormatMismatch.mockReturnValue(false);
+
+      /** @type {any} */
+      const context = {
+        cmsConfig: {},
+        collection: { name: 'posts', folder: 'content/posts', fields: [], index_file: true },
+      };
+
+      parseEntryCollection(context, collectors);
+
+      expect(mockIsFormatMismatch).toHaveBeenCalledTimes(1);
+      expect(mockAddMessage).not.toHaveBeenCalledWith(
+        expect.objectContaining({ strKey: 'file_format_mismatch' }),
       );
     });
 
@@ -288,6 +494,364 @@ describe('Collections Parser', () => {
       );
     });
 
+    it('should require i18n when the folder has the locale placeholder', async () => {
+      const { parseEntryCollection } = await import('.');
+      const collectors = createCollectors();
+
+      /** @type {any} */
+      const context = {
+        cmsConfig: { i18n: { locales: ['en', 'fr'] } },
+        collection: {
+          name: 'posts',
+          folder: 'content/{{locale}}/posts',
+          fields: [],
+        },
+      };
+
+      parseEntryCollection(context, collectors);
+
+      expect(mockAddMessage).toHaveBeenCalledWith(
+        expect.objectContaining({ strKey: 'collection_folder_i18n_required' }),
+      );
+      expect(mockAddMessage).not.toHaveBeenCalledWith(
+        expect.objectContaining({ strKey: 'invalid_collection_folder_locale' }),
+      );
+    });
+
+    it('should require site-level locales when the folder has the locale placeholder', async () => {
+      const { parseEntryCollection } = await import('.');
+      const collectors = createCollectors();
+
+      // The collection opts in, but the site defines no locales, so the placeholder would be
+      // replaced with the internal `_default` locale code
+      /** @type {any} */
+      const context = {
+        cmsConfig: {},
+        collection: {
+          name: 'posts',
+          folder: 'content/{{locale}}/posts',
+          fields: [],
+          i18n: true,
+        },
+      };
+
+      parseEntryCollection(context, collectors);
+
+      expect(mockAddMessage).toHaveBeenCalledWith(
+        expect.objectContaining({ strKey: 'collection_folder_i18n_required' }),
+      );
+
+      mockAddMessage.mockClear();
+      context.cmsConfig = { i18n: { structure: 'multiple_folders' } };
+      parseEntryCollection(context, collectors);
+
+      expect(mockAddMessage).toHaveBeenCalledWith(
+        expect.objectContaining({ strKey: 'collection_folder_i18n_required' }),
+      );
+    });
+
+    it('should accept the locale placeholder with locales defined on the collection', async () => {
+      const { parseEntryCollection } = await import('.');
+      const collectors = createCollectors();
+
+      /** @type {any} */
+      const context = {
+        cmsConfig: { i18n: { structure: 'multiple_folders' } },
+        collection: {
+          name: 'posts',
+          folder: 'content/{{locale}}/posts',
+          fields: [],
+          i18n: { locales: ['en', 'fr'] },
+        },
+      };
+
+      parseEntryCollection(context, collectors);
+
+      expect(mockAddMessage).not.toHaveBeenCalledWith(
+        expect.objectContaining({ strKey: 'collection_folder_i18n_required' }),
+      );
+    });
+
+    it('should accept the locale placeholder as a whole folder name with i18n', async () => {
+      const { parseEntryCollection } = await import('.');
+      const collectors = createCollectors();
+
+      ['content/{{locale}}/posts', '{{locale}}/posts', 'content/{{locale}}'].forEach((folder) => {
+        /** @type {any} */
+        const context = {
+          cmsConfig: { i18n: { locales: ['en', 'fr'] } },
+          collection: { name: 'posts', folder, fields: [], i18n: true },
+        };
+
+        parseEntryCollection(context, collectors);
+      });
+
+      expect(mockAddMessage).not.toHaveBeenCalledWith(
+        expect.objectContaining({ strKey: 'collection_folder_i18n_required' }),
+      );
+      expect(mockAddMessage).not.toHaveBeenCalledWith(
+        expect.objectContaining({ strKey: 'invalid_collection_folder_locale' }),
+      );
+    });
+
+    it('should reject a locale placeholder that is not a whole folder name', async () => {
+      const { parseEntryCollection } = await import('.');
+      const collectors = createCollectors();
+
+      /** @type {any} */
+      const context = {
+        cmsConfig: { i18n: { locales: ['en', 'fr'] } },
+        collection: {
+          name: 'posts',
+          folder: 'content-{{locale}}/posts',
+          fields: [],
+          i18n: true,
+        },
+      };
+
+      parseEntryCollection(context, collectors);
+
+      expect(mockAddMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          strKey: 'invalid_collection_folder_locale',
+          values: { folder: 'content-{{locale}}/posts' },
+        }),
+      );
+    });
+
+    it('should reject more than one locale placeholder in the folder', async () => {
+      const { parseEntryCollection } = await import('.');
+      const collectors = createCollectors();
+
+      /** @type {any} */
+      const context = {
+        cmsConfig: { i18n: { locales: ['en', 'fr'] } },
+        collection: {
+          name: 'posts',
+          folder: '{{locale}}/content/{{locale}}/posts',
+          fields: [],
+          i18n: true,
+        },
+      };
+
+      parseEntryCollection(context, collectors);
+
+      expect(mockAddMessage).toHaveBeenCalledWith(
+        expect.objectContaining({ strKey: 'invalid_collection_folder_locale' }),
+      );
+    });
+
+    it('should not check the locale placeholder in a folder without one', async () => {
+      const { parseEntryCollection } = await import('.');
+      const collectors = createCollectors();
+
+      /** @type {any} */
+      const context = {
+        cmsConfig: {},
+        collection: { name: 'posts', folder: 'content/posts', fields: [] },
+      };
+
+      parseEntryCollection(context, collectors);
+
+      expect(mockAddMessage).not.toHaveBeenCalledWith(
+        expect.objectContaining({ strKey: 'collection_folder_i18n_required' }),
+      );
+      expect(mockAddMessage).not.toHaveBeenCalledWith(
+        expect.objectContaining({ strKey: 'invalid_collection_folder_locale' }),
+      );
+    });
+
+    it('should accept a reorder group defined in the object format view_groups', async () => {
+      const { parseEntryCollection } = await import('.');
+      const collectors = createCollectors();
+
+      /** @type {any} */
+      const context = {
+        cmsConfig: {},
+        collection: {
+          name: 'articles',
+          folder: 'content/articles',
+          fields: [],
+          view_groups: { groups: [{ name: 'categories', label: 'Categories', field: 'category' }] },
+          reorder: { group: 'categories' },
+        },
+      };
+
+      parseEntryCollection(context, collectors);
+
+      expect(mockAddMessage).not.toHaveBeenCalledWith(
+        expect.objectContaining({ strKey: 'invalid_reorder_group' }),
+      );
+    });
+
+    it('should accept a reorder group defined in the array format view_groups', async () => {
+      const { parseEntryCollection } = await import('.');
+      const collectors = createCollectors();
+
+      /** @type {any} */
+      const context = {
+        cmsConfig: {},
+        collection: {
+          name: 'articles',
+          folder: 'content/articles',
+          fields: [],
+          view_groups: [{ name: 'categories', label: 'Categories', field: 'category' }],
+          reorder: { group: 'categories' },
+        },
+      };
+
+      parseEntryCollection(context, collectors);
+
+      expect(mockAddMessage).not.toHaveBeenCalledWith(
+        expect.objectContaining({ strKey: 'invalid_reorder_group' }),
+      );
+    });
+
+    it('should add error when the reorder group is not defined in view_groups', async () => {
+      const { parseEntryCollection } = await import('.');
+      const collectors = createCollectors();
+
+      /** @type {any} */
+      const context = {
+        cmsConfig: {},
+        collection: {
+          name: 'articles',
+          folder: 'content/articles',
+          fields: [],
+          view_groups: { groups: [{ name: 'years', label: 'Years', field: 'date' }] },
+          reorder: { group: 'categories' },
+        },
+      };
+
+      parseEntryCollection(context, collectors);
+
+      expect(mockAddMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          strKey: 'invalid_reorder_group',
+          values: { name: 'categories' },
+        }),
+      );
+    });
+
+    it('should add error when the reorder group is set without view_groups', async () => {
+      const { parseEntryCollection } = await import('.');
+      const collectors = createCollectors();
+
+      /** @type {any} */
+      const context = {
+        cmsConfig: {},
+        collection: {
+          name: 'articles',
+          folder: 'content/articles',
+          fields: [],
+          reorder: { group: 'categories' },
+        },
+      };
+
+      parseEntryCollection(context, collectors);
+
+      expect(mockAddMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          strKey: 'invalid_reorder_group',
+          values: { name: 'categories' },
+        }),
+      );
+    });
+
+    it('should skip reorder group validation when no group is configured', async () => {
+      const { parseEntryCollection } = await import('.');
+      const collectors = createCollectors();
+
+      /** @type {any} */
+      const context = {
+        cmsConfig: {},
+        collection: {
+          name: 'articles',
+          folder: 'content/articles',
+          fields: [],
+          reorder: true,
+        },
+      };
+
+      parseEntryCollection(context, collectors);
+
+      expect(mockAddMessage).not.toHaveBeenCalledWith(
+        expect.objectContaining({ strKey: 'invalid_reorder_group' }),
+      );
+    });
+
+    it('should skip reorder group validation for a non-string or empty group', async () => {
+      const { parseEntryCollection } = await import('.');
+      const collectors = createCollectors();
+
+      /** @type {any} */
+      const baseCollection = {
+        name: 'articles',
+        folder: 'content/articles',
+        fields: [],
+        view_groups: { groups: [{ name: 'categories', label: 'Categories', field: 'category' }] },
+      };
+
+      parseEntryCollection(
+        /** @type {any} */ ({ cmsConfig: {}, collection: { ...baseCollection, reorder: {} } }),
+        collectors,
+      );
+      parseEntryCollection(
+        /** @type {any} */ ({
+          cmsConfig: {},
+          collection: { ...baseCollection, reorder: { group: '' } },
+        }),
+        collectors,
+      );
+      parseEntryCollection(
+        /** @type {any} */ ({
+          cmsConfig: {},
+          collection: { ...baseCollection, reorder: { group: 123 } },
+        }),
+        collectors,
+      );
+
+      expect(mockAddMessage).not.toHaveBeenCalledWith(
+        expect.objectContaining({ strKey: 'invalid_reorder_group' }),
+      );
+    });
+
+    it('should validate the fields referenced from the view options', async () => {
+      const { parseEntryCollection } = await import('.');
+      const collectors = createCollectors();
+
+      /** @type {any} */
+      const context = {
+        cmsConfig: {},
+        collection: {
+          name: 'posts',
+          folder: 'content/posts',
+          fields: [{ name: 'title', widget: 'string' }],
+          sortable_fields: ['title', 'category'],
+          view_groups: [{ label: 'Year', field: 'date' }],
+          view_filters: { filters: [{ name: 'titled', field: 'title', pattern: '.' }] },
+        },
+      };
+
+      parseEntryCollection(context, collectors);
+
+      expect(mockAddMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          strKey: 'invalid_sortable_field',
+          values: { name: 'category' },
+        }),
+      );
+      expect(mockAddMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          strKey: 'invalid_view_group_field',
+          values: { name: 'date' },
+        }),
+      );
+      expect(mockAddMessage).not.toHaveBeenCalledWith(
+        expect.objectContaining({ strKey: 'invalid_view_filter_field' }),
+      );
+    });
+
     it('should handle index_file when true', async () => {
       const { parseEntryCollection } = await import('.');
       const collectors = createCollectors();
@@ -348,9 +912,7 @@ describe('Collections Parser', () => {
           name: 'posts',
           folder: 'content/posts',
           fields: [{ name: 'title', widget: 'string' }],
-          index_file: {
-            /* no fields */
-          },
+          index_file: {/* no fields */},
         },
       };
 
@@ -376,7 +938,7 @@ describe('Collections Parser', () => {
           name: 'posts',
           folder: 'content/posts',
           fields: [],
-          nested: true,
+          sortableFields: ['title'],
         },
       };
 
@@ -494,6 +1056,78 @@ describe('Collections Parser', () => {
       expect(mockParseFields).toHaveBeenCalled();
     });
 
+    it('should parse entry collection storing all the entries in one file', async () => {
+      const { parseCollection } = await import('.');
+      const collectors = createCollectors();
+
+      /** @type {any} */
+      const context = {
+        cmsConfig: {},
+        collection: {
+          name: 'members',
+          label: 'Members',
+          file: 'data/members.json',
+          fields: [{ name: 'title', widget: 'string' }],
+        },
+      };
+
+      parseCollection(context, collectors);
+
+      expect(mockParseFields).toHaveBeenCalled();
+      expect(mockParseCollectionFiles).not.toHaveBeenCalled();
+      expect(mockAddMessage).not.toHaveBeenCalled();
+    });
+
+    it('should validate the `file` option of an entry collection', async () => {
+      const { parseCollection } = await import('.');
+      const collectors = createCollectors();
+
+      /** @type {any} */
+      const context = {
+        cmsConfig: {},
+        collection: {
+          name: 'members',
+          label: 'Members',
+          file: 'data/members.yaml',
+          fields: [],
+        },
+      };
+
+      parseCollection(context, collectors);
+
+      expect(mockAddMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          strKey: 'invalid_collection_data_file',
+          values: { file: 'data/members.yaml' },
+        }),
+      );
+    });
+
+    it('should error when collection has conflicting options (file and folder)', async () => {
+      const { parseCollection } = await import('.');
+      const collectors = createCollectors();
+
+      /** @type {any} */
+      const context = {
+        cmsConfig: {},
+        collection: {
+          name: 'members',
+          file: 'data/members.json',
+          folder: 'content/members',
+          fields: [],
+        },
+      };
+
+      parseCollection(context, collectors);
+
+      expect(mockAddMessage).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({
+          strKey: 'invalid_collection_multiple_options',
+        }),
+      );
+      expect(mockParseFields).not.toHaveBeenCalled();
+    });
+
     it('should skip divider collections', async () => {
       const { parseCollection } = await import('.');
       const collectors = createCollectors();
@@ -528,6 +1162,54 @@ describe('Collections Parser', () => {
 
       expect(mockParseFields).not.toHaveBeenCalled();
       expect(mockParseCollectionFiles).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('parseCollection i18n option', () => {
+    it('should warn when a collection has the i18n option without site-level i18n', async () => {
+      const { parseCollection } = await import('.');
+      const collectors = createCollectors();
+
+      parseCollection(
+        {
+          cmsConfig: /** @type {any} */ ({}),
+          collection: /** @type {any} */ ({
+            name: 'posts',
+            folder: 'content/posts',
+            i18n: true,
+            fields: [{ name: 'title', widget: 'string' }],
+          }),
+        },
+        collectors,
+      );
+
+      expect(mockAddMessage).toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'warning', strKey: 'i18n_not_configured' }),
+      );
+    });
+
+    it('should check the i18n option of a file collection too', async () => {
+      const { parseCollection } = await import('.');
+      const collectors = createCollectors();
+
+      parseCollection(
+        {
+          cmsConfig: /** @type {any} */ ({ i18n: { locales: ['en'], default_locale: 'en' } }),
+          collection: /** @type {any} */ ({
+            name: 'settings',
+            files: [],
+            i18n: { default_locale: 'fr' },
+          }),
+        },
+        collectors,
+      );
+
+      expect(mockAddMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          strKey: 'i18n_invalid_default_locale',
+          values: { locale: 'fr' },
+        }),
+      );
     });
   });
 
@@ -660,6 +1342,95 @@ describe('Collections Parser', () => {
 
       expect(mockCheckName).toHaveBeenCalled();
       expect(mockParseCollectionFiles).toHaveBeenCalled();
+    });
+
+    it('should not error when at least one collection is visible', async () => {
+      const { parseCollections } = await import('.');
+      const collectors = createCollectors();
+
+      /** @type {any} */
+      const config = {
+        collections: [
+          { name: 'pages', label: 'Pages', folder: 'content/pages', fields: [], hide: true },
+          { name: 'posts', label: 'Posts', folder: 'content/posts', fields: [] },
+        ],
+      };
+
+      parseCollections(config, collectors);
+
+      expect(collectors.errors).not.toContain('config.error.no_visible_collection');
+    });
+
+    it('should error when the only collection is hidden', async () => {
+      const { parseCollections } = await import('.');
+      const collectors = createCollectors();
+
+      /** @type {any} */
+      const config = {
+        collections: [
+          { name: 'posts', label: 'Posts', folder: 'content/posts', fields: [], hide: true },
+        ],
+      };
+
+      parseCollections(config, collectors);
+
+      expect(collectors.errors).toContain('config.error.no_visible_collection');
+    });
+
+    it('should error when all the collections are hidden', async () => {
+      const { parseCollections } = await import('.');
+      const collectors = createCollectors();
+
+      /** @type {any} */
+      const config = {
+        collections: [
+          { name: 'pages', label: 'Pages', folder: 'content/pages', fields: [], hide: true },
+          { name: 'posts', label: 'Posts', folder: 'content/posts', fields: [], hide: true },
+        ],
+      };
+
+      parseCollections(config, collectors);
+
+      expect(collectors.errors).toContain('config.error.no_visible_collection');
+    });
+
+    it('should error when the collections list contains dividers only', async () => {
+      const { parseCollections } = await import('.');
+      const collectors = createCollectors();
+      /** @type {any} */
+      const config = { collections: [{ divider: true }] };
+
+      parseCollections(config, collectors);
+
+      expect(collectors.errors).toContain('config.error.no_visible_collection');
+    });
+
+    it('should error when the collections list is empty', async () => {
+      const { parseCollections } = await import('.');
+      const collectors = createCollectors();
+      /** @type {any} */
+      const config = { collections: [], singletons: [] };
+
+      parseCollections(config, collectors);
+
+      expect(collectors.errors).toContain('config.error.no_visible_collection');
+    });
+
+    it('should not error when hidden collections are accompanied by singletons', async () => {
+      const { parseCollections } = await import('.');
+      const collectors = createCollectors();
+
+      /** @type {any} */
+      const config = {
+        collections: [
+          { name: 'posts', label: 'Posts', folder: 'content/posts', fields: [], hide: true },
+        ],
+        singletons: [{ name: 'general', file: 'content/settings/general.yaml', fields: [] }],
+      };
+
+      parseCollections(config, collectors);
+
+      expect(collectors.errors).not.toContain('config.error.no_visible_collection');
     });
   });
 });

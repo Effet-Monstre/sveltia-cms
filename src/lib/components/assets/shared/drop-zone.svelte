@@ -7,7 +7,7 @@
   import UploadAssetsPreview from '$lib/components/assets/shared/upload-assets-preview.svelte';
   import { getListFormatter } from '$lib/services/contents/i18n';
   import { env } from '$lib/services/user/env.svelte';
-  import { SUPPORTED_IMAGE_TYPES } from '$lib/services/utils/media/image';
+  import { getAcceptedImageFormatLabels } from '$lib/services/utils/media/image';
 
   /**
    * @import { Snippet } from 'svelte';
@@ -20,6 +20,9 @@
    * @property {boolean} [multiple] Whether to accept multiple files.
    * @property {boolean} [showUploadButton] Whether to show the upload button.
    * @property {boolean} [showFilePreview] Whether to show file preview after files are selected.
+   * @property {boolean} [filterDroppedFiles] Whether to drop files that don’t match {@link accept}
+   * and report the mismatch. Disable this when the consumer checks the selection itself, so the
+   * user is told once, in one place. The `accept` attribute still narrows the file picker.
    * @property {(detail: { files: File[] }) => void} [onDrop] Custom `Drop` event handler.
    * @property {Snippet} [children] Slot content.
    */
@@ -32,6 +35,7 @@
     multiple = false,
     showUploadButton = false,
     showFilePreview = false,
+    filterDroppedFiles = true,
     onDrop = undefined,
     children = undefined,
     /* eslint-enable prefer-const */
@@ -48,6 +52,8 @@
   let files = $state([]);
 
   const showDefaultContent = $derived(showUploadButton || (showFilePreview && files.length));
+  // Named formats for the mismatch message, if `accept` is one of the image type lists
+  const acceptedImageFormats = $derived(getAcceptedImageFormatLabels(accept));
 
   /**
    * Open the file picker to let the user choose file(s).
@@ -68,6 +74,14 @@
     files = [];
     onDrop?.({ files });
   };
+
+  /**
+   * Format a list of strings for display in the current locale.
+   * @param {string[]} list List of strings.
+   * @returns {string} Formatted list.
+   */
+  const formatList = (list) =>
+    getListFormatter(appLocale.current, { type: 'disjunction' }).format(list);
 
   /**
    * Cache the selected files, and notify the list.
@@ -102,15 +116,11 @@
 </script>
 
 {#snippet typeMismatchAlert()}
-  {#if accept === SUPPORTED_IMAGE_TYPES.join(',')}
-    {_('dropped_image_type_mismatch')}
+  {#if acceptedImageFormats}
+    {_('dropped_image_type_mismatch', { values: { types: formatList(acceptedImageFormats) } })}
   {:else}
     {_('dropped_file_type_mismatch', {
-      values: {
-        type: getListFormatter(appLocale.current, {
-          type: 'disjunction',
-        }).format(/** @type {string} */ (accept).split(/,\s*/)),
-      },
+      values: { types: formatList(/** @type {string} */ (accept).split(/,\s*/)) },
     })}
   {/if}
 {/snippet}
@@ -157,11 +167,13 @@
 
     dragging = false;
 
-    const filteredFileList = await scanFiles(event.dataTransfer, { accept });
+    const filteredFileList = await scanFiles(event.dataTransfer, {
+      accept: filterDroppedFiles ? accept : undefined,
+    });
 
     if (filteredFileList.length) {
       updateFileList(filteredFileList);
-    } else {
+    } else if (filterDroppedFiles) {
       typeMismatch = true;
     }
   }}

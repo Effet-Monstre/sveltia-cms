@@ -1,16 +1,17 @@
 <script>
-  import { _, locale as appLocale } from '@sveltia/i18n';
-  import { Divider, Icon, Listbox, Option, OptionGroup } from '@sveltia/ui';
+  import { _ } from '@sveltia/i18n';
+  import { Divider, Icon, OptionGroup, Tree, TreeItem } from '@sveltia/ui';
   import { sleep } from '@sveltia/utils/misc';
 
-  import SingletonOption from '$lib/components/contents/list/singleton-option.svelte';
+  import CollectionTreeItem from '$lib/components/contents/list/collection-tree-item.svelte';
+  import SingletonTreeItem from '$lib/components/contents/list/singleton-tree-item.svelte';
   import PublishButton from '$lib/components/global/toolbar/items/publish-button.svelte';
   import QuickSearchBar from '$lib/components/global/toolbar/items/quick-search-bar.svelte';
+  import { appNumberFormatter } from '$lib/services/app/i18n';
   import { goto } from '$lib/services/app/navigation';
   import { cmsConfig } from '$lib/services/config';
-  import { allEntries } from '$lib/services/contents';
   import { selectedCollection } from '$lib/services/contents/collection';
-  import { getEntriesByCollection } from '$lib/services/contents/collection/entries';
+  import { isNestedCollection } from '$lib/services/contents/collection/nested';
   import { env } from '$lib/services/user/env.svelte';
 
   /**
@@ -25,13 +26,17 @@
     /* eslint-enable prefer-const */
   } = $props();
 
-  const numberFormatter = $derived(Intl.NumberFormat(appLocale.current));
   // @ts-ignore Dividers can be included in the collection list
-  const collections = $derived($cmsConfig?.collections?.filter(({ hide }) => !hide) ?? []);
-  const singletons = $derived($cmsConfig?.singletons ?? []);
+  const collections = $derived(cmsConfig.current?.collections?.filter(({ hide }) => !hide) ?? []);
+  const singletons = $derived(cmsConfig.current?.singletons ?? []);
+  // Only a nested collection has a folder tree, and with it a chevron in front of its icon. Without
+  // one, nothing in the list can expand, so the space kept for the chevrons is dropped.
+  const hasNestedCollections = $derived(
+    collections.some((collection) => !('divider' in collection) && isNestedCollection(collection)),
+  );
 </script>
 
-<div role="none" class="primary-sidebar">
+<nav class="primary-sidebar" aria-label={_('contents')}>
   {#if env.isSmallScreen}
     <header>
       <h2>{_('contents')}</h2>
@@ -44,36 +49,20 @@
       }}
     />
   {/if}
-  <Listbox aria-label={_('collection_list')} aria-controls="collection-container">
+  <!-- The chevron is the only way to expand or collapse a folder, so that activating a collection
+  or a folder always navigates to it -->
+  <Tree
+    class={hasNestedCollections ? undefined : 'flat'}
+    ariaLabel={_('collection_list')}
+    aria-controls={isSearchPage ? undefined : 'collection-container'}
+    expandOnSelect={false}
+  >
     {#if collections.length}
       <OptionGroup label={_('collections')}>
         {#each collections as collection, index (collection.name ?? index)}
           {#await sleep() then}
             {#if !('divider' in collection)}
-              {@const { name, label, icon } = collection}
-              <Option
-                label={label || name}
-                selected={env.isSmallScreen || isSearchPage
-                  ? false
-                  : $selectedCollection?.name === name}
-                onSelect={() => {
-                  goto(`/collections/${name}`, { transitionType: 'forwards' });
-                }}
-              >
-                {#snippet startIcon()}
-                  <Icon name={icon || 'bookmark_manager'} />
-                {/snippet}
-                {#snippet endIcon()}
-                  {#key $allEntries}
-                    {@const count = (
-                      'files' in collection ? collection.files : getEntriesByCollection(name)
-                    ).length}
-                    <span class="count" aria-label="({_('x_entries', { values: { count } })})">
-                      {numberFormatter.format(count)}
-                    </span>
-                  {/key}
-                {/snippet}
-              </Option>
+              <CollectionTreeItem {collection} {isSearchPage} />
             {:else if collection.divider}
               <Divider />
             {/if}
@@ -88,7 +77,7 @@
           {#each singletons as file, index (file.name ?? index)}
             {#await sleep() then}
               {#if !('divider' in file)}
-                <SingletonOption {file} />
+                <SingletonTreeItem {file} />
               {:else if file.divider}
                 <Divider />
               {/if}
@@ -97,11 +86,11 @@
         </OptionGroup>
       {:else}
         <!-- Show the singletons just like a file collection -->
-        {@const count = singletons.length}
+        {@const count = singletons.filter((file) => !('divider' in file)).length}
         <OptionGroup label={_('collections')}>
-          <Option
+          <TreeItem
             label={_('files')}
-            selected={$selectedCollection?.name === '_singletons'}
+            selected={selectedCollection.current?.name === '_singletons'}
             onSelect={() => {
               goto('/collections/_singletons', { transitionType: 'forwards' });
             }}
@@ -111,12 +100,12 @@
             {/snippet}
             {#snippet endIcon()}
               <span class="count" aria-label="({_('x_entries', { values: { count } })})">
-                {numberFormatter.format(count)}
+                {appNumberFormatter.current.format(count)}
               </span>
             {/snippet}
-          </Option>
+          </TreeItem>
         </OptionGroup>
       {/if}
     {/if}
-  </Listbox>
-</div>
+  </Tree>
+</nav>

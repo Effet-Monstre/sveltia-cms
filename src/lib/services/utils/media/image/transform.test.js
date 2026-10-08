@@ -10,13 +10,55 @@ vi.mock('$lib/services/utils/media/image/encode', () => ({
   exportCanvasAsBlob: vi.fn(),
 }));
 
+vi.mock('$lib/services/utils/media/image/heic', () => ({
+  decodeHEIC: vi.fn(),
+}));
+
+vi.mock('$lib/services/utils/media/image/sniff', () => ({
+  sniffRasterImageFormat: vi.fn(),
+}));
+
 vi.mock('$lib/services/utils/media/image/resize', () => ({
   resizeCanvas: vi.fn(),
 }));
 
+/**
+ * Create a mock element that fires `error` instead of the success event, simulating a file the
+ * browser cannot decode, such as a HEIC image saved with a `.jpg` extension.
+ * @returns {any} Mock element.
+ */
+function createUndecodableElement() {
+  return {
+    addEventListener: vi.fn((/** @type {string} */ event, /** @type {() => void} */ callback) => {
+      if (event === 'error') {
+        setTimeout(callback, 0);
+      }
+    }),
+    style: {},
+  };
+}
+
+/**
+ * Mock `Image` class that always fails to decode.
+ */
+class UndecodableImage {
+  /**
+   * Create a mock image instance.
+   */
+  constructor() {
+    Object.assign(this, createUndecodableElement());
+  }
+}
+
 describe('Image Transform Functions', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.clearAllMocks();
+
+    const { sniffRasterImageFormat } = await import('$lib/services/utils/media/image/sniff');
+
+    // `clearAllMocks()` doesn’t reset implementations, so a test that makes this report HEIC would
+    // otherwise leak into the next
+    vi.mocked(sniffRasterImageFormat).mockResolvedValue(undefined);
 
     // Mock HTMLVideoElement first
     global.HTMLVideoElement = vi.fn();
@@ -163,6 +205,7 @@ describe('Image Transform Functions', () => {
     global.createImageBitmap = vi.fn().mockResolvedValue({
       width: 800,
       height: 600,
+      close: vi.fn(),
     });
 
     // Mock OffscreenCanvas
@@ -281,6 +324,33 @@ describe('Image Transform Functions', () => {
     expect(global.URL.revokeObjectURL).toHaveBeenCalledWith('blob:mock-url');
   });
 
+  test('createImageSource should reject when the image cannot be decoded', async () => {
+    // A HEIC image saved with a `.jpg` extension fires `error` instead of `load`
+    // @ts-ignore - the mock is compatible enough for this test
+    global.Image = UndecodableImage;
+
+    const mockBlob = new Blob(['not an image'], { type: 'image/jpeg' });
+    const { createImageSource } = await import('./transform.js');
+
+    await expect(createImageSource({ blob: mockBlob })).rejects.toThrow('Failed to decode image');
+    // The object URL is released rather than leaked
+    expect(global.URL.revokeObjectURL).toHaveBeenCalledWith('blob:mock-url');
+  });
+
+  test('createVideoSource should reject when the video cannot be decoded', async () => {
+    const videoElement = createUndecodableElement();
+
+    global.document.createElement = vi.fn(() => videoElement);
+
+    const mockBlob = new Blob(['not a video'], { type: 'video/mp4' });
+    const { createVideoSource } = await import('./transform.js');
+
+    await expect(createVideoSource({ blob: mockBlob })).rejects.toThrow('Failed to decode video');
+    // The element is detached and the object URL released rather than leaked
+    expect(global.document.body.removeChild).toHaveBeenCalledWith(videoElement);
+    expect(global.URL.revokeObjectURL).toHaveBeenCalledWith('blob:mock-url');
+  });
+
   test('createSource should delegate to createVideoSource for video blobs', async () => {
     const mockBlob = new Blob(['video data'], { type: 'video/mp4' });
     const { createSource } = await import('./transform.js');
@@ -312,8 +382,11 @@ describe('Image Transform Functions', () => {
     vi.mocked(resizeCanvas).mockReturnValue({ scale: 1, width: 800, height: 600 });
 
     const result = await transformImage(mockBlob, { format: 'jpeg', quality: 90 });
+    const bitmap = await vi.mocked(global.createImageBitmap).mock.results[0].value;
 
     expect(global.createImageBitmap).toHaveBeenCalledWith(mockBlob);
+    // The decoded pixels are released once drawn
+    expect(bitmap.close).toHaveBeenCalledOnce();
     expect(resizeCanvas).toHaveBeenCalled();
     expect(exportCanvasAsBlob).toHaveBeenCalledWith(expect.any(Object), {
       format: 'jpeg',
@@ -339,6 +412,71 @@ describe('Image Transform Functions', () => {
     expect(global.createImageBitmap).toHaveBeenCalledWith(mockBlob);
     expect(global.Image).toHaveBeenCalled(); // Fallback to createImageSource
     expect(result).toBe(mockResultBlob);
+  });
+
+  test('transformImage should decode a HEIC image with the library', async () => {
+    const mockBlob = new Blob(['heic data'], { type: 'image/heic' });
+    const mockResultBlob = new Blob(['transformed'], { type: 'image/webp' });
+    const mockImageData = { width: 4032, height: 3024 };
+    const mockBitmap = { width: 4032, height: 3024, close: vi.fn() };
+    const { exportCanvasAsBlob } = await import('$lib/services/utils/media/image/encode');
+    const { decodeHEIC } = await import('$lib/services/utils/media/image/heic');
+    const { sniffRasterImageFormat } = await import('$lib/services/utils/media/image/sniff');
+    const { resizeCanvas } = await import('$lib/services/utils/media/image/resize');
+    const { transformImage } = await import('./transform.js');
+
+    // Only Safari decodes HEIC natively
+    vi.mocked(global.createImageBitmap)
+      .mockRejectedValueOnce(new Error('Not supported'))
+      .mockResolvedValueOnce(/** @type {any} */ (mockBitmap));
+    vi.mocked(sniffRasterImageFormat).mockResolvedValue('heic');
+    vi.mocked(decodeHEIC).mockResolvedValue(/** @type {any} */ (mockImageData));
+    vi.mocked(exportCanvasAsBlob).mockResolvedValue(mockResultBlob);
+    vi.mocked(resizeCanvas).mockReturnValue({ scale: 1, width: 4032, height: 3024 });
+
+    const result = await transformImage(mockBlob, { format: 'webp' });
+
+    expect(global.createImageBitmap).toHaveBeenNthCalledWith(1, mockBlob);
+    expect(sniffRasterImageFormat).toHaveBeenCalledWith(mockBlob);
+    expect(decodeHEIC).toHaveBeenCalledWith(mockBlob);
+    // The decoded pixels are turned into a bitmap, which is drawn and then released
+    expect(global.createImageBitmap).toHaveBeenNthCalledWith(2, mockImageData);
+    expect(resizeCanvas).toHaveBeenCalledWith(
+      expect.anything(),
+      { width: 4032, height: 3024 },
+      expect.anything(),
+    );
+    expect(mockBitmap.close).toHaveBeenCalled();
+    expect(global.Image).not.toHaveBeenCalled();
+    expect(result).toBe(mockResultBlob);
+  });
+
+  test('transformImage should reject when a HEIC image cannot be decoded', async () => {
+    const mockBlob = new Blob(['heic data'], { type: 'image/jpeg' });
+    const { decodeHEIC } = await import('$lib/services/utils/media/image/heic');
+    const { sniffRasterImageFormat } = await import('$lib/services/utils/media/image/sniff');
+    const { transformImage } = await import('./transform.js');
+
+    vi.mocked(global.createImageBitmap).mockRejectedValue(new Error('Not supported'));
+    vi.mocked(sniffRasterImageFormat).mockResolvedValue('heic');
+    vi.mocked(decodeHEIC).mockRejectedValue(new Error('Decoding error'));
+
+    // No point trying `<img>`, which can’t decode it either
+    await expect(transformImage(mockBlob)).rejects.toThrow('Decoding error');
+    expect(global.Image).not.toHaveBeenCalled();
+  });
+
+  test('transformImage should reject when the fallback source cannot be decoded', async () => {
+    // @ts-ignore - the mock is compatible enough for this test
+    global.Image = UndecodableImage;
+
+    const mockBlob = new Blob(['heic data'], { type: 'image/jpeg' });
+    const { transformImage } = await import('./transform.js');
+
+    vi.mocked(global.createImageBitmap).mockRejectedValue(new Error('Not supported'));
+
+    // Both `createImageBitmap` and the `<img>` fallback fail, so there’s no source to draw
+    await expect(transformImage(mockBlob)).rejects.toThrow('Failed to decode image');
   });
 
   test('transformImage should handle video source and clean up', async () => {

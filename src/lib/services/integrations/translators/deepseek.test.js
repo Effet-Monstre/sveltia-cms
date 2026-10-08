@@ -154,7 +154,7 @@ describe('DeepSeek Translator Service', () => {
         /** @type {string} */ (vi.mocked(fetch).mock.calls[0][1]?.body),
       );
 
-      expect(requestBody.model).toBe('deepseek-v4-flash');
+      expect(requestBody.model).toBe('deepseek-flash');
       expect(requestBody.stream).toBe(false);
       expect(requestBody.thinking).toEqual({ type: 'disabled' });
     });
@@ -265,7 +265,7 @@ describe('DeepSeek Translator Service', () => {
       );
 
       await expect(deepseekTranslator.translate(['test'], mockOptions)).rejects.toThrow(
-        'DeepSeek API error: 401 Unauthorized - Invalid API key',
+        'Chat Completions API error: 401 Unauthorized - Invalid API key',
       );
     });
 
@@ -281,7 +281,7 @@ describe('DeepSeek Translator Service', () => {
       );
 
       await expect(deepseekTranslator.translate(['test'], mockOptions)).rejects.toThrow(
-        'DeepSeek API error: 500 Internal Server Error',
+        'Chat Completions API error: 500 Internal Server Error',
       );
     });
 
@@ -296,7 +296,7 @@ describe('DeepSeek Translator Service', () => {
       );
 
       await expect(deepseekTranslator.translate(['test'], mockOptions)).rejects.toThrow(
-        'DeepSeek API error: 503 Service Unavailable',
+        'Chat Completions API error: 503 Service Unavailable',
       );
     });
 
@@ -312,7 +312,7 @@ describe('DeepSeek Translator Service', () => {
       );
 
       await expect(deepseekTranslator.translate(['test'], mockOptions)).rejects.toThrow(
-        'Invalid response format from DeepSeek API.',
+        'Invalid response format from Chat Completions API.',
       );
     });
 
@@ -333,16 +333,6 @@ describe('DeepSeek Translator Service', () => {
 
       await expect(deepseekTranslator.translate(['test'], mockOptions)).rejects.toThrow(
         'Failed to parse JSON response from DeepSeek API.',
-      );
-    });
-
-    it('should handle unknown non-Error exceptions', async () => {
-      const mockFetch = vi.mocked(fetch);
-
-      mockFetch.mockRejectedValueOnce('Unknown error');
-
-      await expect(deepseekTranslator.translate(['test'], mockOptions)).rejects.toThrow(
-        'Failed to translate text with DeepSeek API.',
       );
     });
   });

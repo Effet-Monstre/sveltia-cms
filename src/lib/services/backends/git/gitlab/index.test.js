@@ -1,24 +1,22 @@
 import { stripSlashes } from '@sveltia/utils/string';
-import { get } from 'svelte/store';
 import { beforeEach, describe, expect, test, vi } from 'vitest';
 
 import { getTokenPageURL, signIn, signOut } from '$lib/services/backends/git/gitlab/auth';
-import { commitChanges, fetchFileCommits } from '$lib/services/backends/git/gitlab/commits';
+import {
+  commitChanges,
+  fetchFileCommits,
+  fetchLastCommit,
+} from '$lib/services/backends/git/gitlab/commits';
 import { BACKEND_LABEL, BACKEND_NAME } from '$lib/services/backends/git/gitlab/constants';
 import { fetchBlob, fetchFiles } from '$lib/services/backends/git/gitlab/files';
 import gitlabBackend, { init } from '$lib/services/backends/git/gitlab/index';
 import { getBaseURLs, repository } from '$lib/services/backends/git/gitlab/repository';
 import { checkStatus, STATUS_DASHBOARD_URL } from '$lib/services/backends/git/gitlab/status';
 import { apiConfig, graphqlVars } from '$lib/services/backends/git/shared/api';
+import { cmsConfig } from '$lib/services/config';
 
 // Mock dependencies
 vi.mock('@sveltia/utils/string');
-vi.mock('svelte/store', () => ({
-  get: vi.fn(),
-  writable: vi.fn(() => ({ subscribe: vi.fn(), set: vi.fn(), update: vi.fn() })),
-  derived: vi.fn(() => ({ subscribe: vi.fn() })),
-  readonly: vi.fn(() => ({ subscribe: vi.fn() })),
-}));
 vi.mock('$lib/services/backends/git/gitlab/auth', () => ({
   getTokenPageURL: vi.fn(),
   signIn: vi.fn(),
@@ -27,6 +25,7 @@ vi.mock('$lib/services/backends/git/gitlab/auth', () => ({
 vi.mock('$lib/services/backends/git/gitlab/commits', () => ({
   commitChanges: vi.fn(),
   fetchFileCommits: vi.fn(),
+  fetchLastCommit: vi.fn(),
 }));
 vi.mock('$lib/services/backends/git/gitlab/files', () => ({
   fetchBlob: vi.fn(),
@@ -35,6 +34,11 @@ vi.mock('$lib/services/backends/git/gitlab/files', () => ({
 vi.mock('$lib/services/backends/git/gitlab/repository', () => ({
   repository: {},
   getBaseURLs: vi.fn(),
+  parseProjectPath: vi.fn((path) => {
+    const [repo, ...owner] = path.split('/').reverse();
+
+    return owner.length ? { owner: owner.reverse().join('/'), repo } : {};
+  }),
 }));
 vi.mock('$lib/services/backends/git/gitlab/status', () => ({
   checkStatus: vi.fn(),
@@ -45,7 +49,7 @@ vi.mock('$lib/services/backends/git/shared/api', () => ({
   graphqlVars: {},
 }));
 vi.mock('$lib/services/config', () => ({
-  cmsConfig: { subscribe: vi.fn() },
+  cmsConfig: { current: undefined },
 }));
 
 const mockPrefs = vi.hoisted(() => ({ devModeEnabled: false }));
@@ -74,8 +78,8 @@ describe('GitLab backend service', () => {
     Object.keys(apiConfig).forEach((key) => delete (/** @type {any} */ (apiConfig)[key]));
     Object.keys(graphqlVars).forEach((key) => delete (/** @type {any} */ (graphqlVars)[key]));
 
-    vi.mocked(get).mockReset();
-    vi.mocked(get).mockReturnValue({
+    cmsConfig.current = undefined;
+    cmsConfig.current = /** @type {any} */ ({
       devModeEnabled: false,
     });
     mockPrefs.devModeEnabled = false;
@@ -91,7 +95,7 @@ describe('GitLab backend service', () => {
         },
       };
 
-      vi.mocked(get).mockReturnValue(mockConfig);
+      cmsConfig.current = /** @type {any} */ (mockConfig);
 
       const result = init();
 
@@ -114,8 +118,9 @@ describe('GitLab backend service', () => {
       expect(apiConfig).toEqual(
         expect.objectContaining({
           clientId: '',
-          authURL: 'https://gitlab.com/oauth/authorize',
-          tokenURL: 'https://gitlab.com/oauth/token',
+          // Signs in through Netlify by default, like Decap CMS
+          authURL: 'https://api.netlify.com/auth',
+          tokenURL: 'https://api.netlify.com/auth',
           authScheme: 'Bearer',
           restBaseURL: 'https://gitlab.com/api/v4',
           graphqlBaseURL: 'https://gitlab.com/api/graphql',
@@ -126,6 +131,28 @@ describe('GitLab backend service', () => {
         fullPath: 'owner/repo',
         branch: 'main',
       });
+    });
+
+    test('defaults the OAuth URLs to GitLab.com with PKCE authorization', () => {
+      cmsConfig.current = /** @type {any} */ ({
+        backend: {
+          name: 'gitlab',
+          repo: 'owner/repo',
+          branch: 'main',
+          auth_type: 'pkce',
+          app_id: 'client-id',
+        },
+      });
+
+      init();
+
+      expect(apiConfig).toEqual(
+        expect.objectContaining({
+          clientId: 'client-id',
+          authURL: 'https://gitlab.com/oauth/authorize',
+          tokenURL: 'https://gitlab.com/oauth/token',
+        }),
+      );
     });
 
     test('initializes GitLab backend with custom configuration', () => {
@@ -142,7 +169,7 @@ describe('GitLab backend service', () => {
         },
       };
 
-      vi.mocked(get).mockReturnValue(mockConfig);
+      cmsConfig.current = /** @type {any} */ (mockConfig);
 
       const result = init();
 
@@ -188,7 +215,7 @@ describe('GitLab backend service', () => {
         },
       };
 
-      vi.mocked(get).mockReturnValue(mockConfig);
+      cmsConfig.current = /** @type {any} */ (mockConfig);
 
       init();
 
@@ -213,7 +240,7 @@ describe('GitLab backend service', () => {
         },
       };
 
-      vi.mocked(get).mockReturnValue(mockConfig);
+      cmsConfig.current = /** @type {any} */ (mockConfig);
 
       const result = init();
 
@@ -221,7 +248,7 @@ describe('GitLab backend service', () => {
     });
 
     test('returns undefined when no site config', () => {
-      vi.mocked(get).mockReturnValue(null);
+      cmsConfig.current = /** @type {any} */ (null);
 
       const result = init();
 
@@ -231,7 +258,7 @@ describe('GitLab backend service', () => {
     test('returns undefined when no backend config', () => {
       const mockConfig = {};
 
-      vi.mocked(get).mockReturnValue(mockConfig);
+      cmsConfig.current = /** @type {any} */ (mockConfig);
 
       const result = init();
 
@@ -248,7 +275,7 @@ describe('GitLab backend service', () => {
       };
 
       mockPrefs.devModeEnabled = true;
-      vi.mocked(get).mockReturnValueOnce(mockConfig); // for cmsConfig
+      cmsConfig.current = /** @type {any} */ (mockConfig); // for cmsConfig
 
       const consoleSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
 
@@ -266,7 +293,7 @@ describe('GitLab backend service', () => {
         },
       };
 
-      vi.mocked(get).mockReturnValueOnce(mockConfig); // for cmsConfig
+      cmsConfig.current = /** @type {any} */ (mockConfig); // for cmsConfig
 
       const consoleSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
 
@@ -284,7 +311,7 @@ describe('GitLab backend service', () => {
         },
       };
 
-      vi.mocked(get).mockReturnValue(mockConfig);
+      cmsConfig.current = /** @type {any} */ (mockConfig);
 
       const result = init();
 
@@ -308,9 +335,13 @@ describe('GitLab backend service', () => {
         signIn,
         signOut,
         fetchFiles,
+        fetchLastCommit,
         fetchBlob,
         commitChanges,
         fetchFileCommits,
+        fetchBranchHeadSHA: expect.any(Function),
+        fetchDeployments: expect.any(Function),
+        workflow: expect.any(Object),
       });
     });
 

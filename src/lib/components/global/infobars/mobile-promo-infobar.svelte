@@ -1,49 +1,35 @@
 <script>
   import { _ } from '@sveltia/i18n';
   import { Button, Infobar } from '@sveltia/ui';
-  import { IndexedDB } from '@sveltia/utils/storage';
 
-  import { showMobileSignInDialog } from '$lib/services/app/onboarding';
-  import { backend } from '$lib/services/backends';
+  import { createOneOffNotice, showMobileSignInDialog } from '$lib/services/app/onboarding';
 
-  /** @type {IndexedDB | undefined} */
-  let uiSettingsDB;
-  let showInfobar = $state(false);
+  const notice = createOneOffNotice('mobileCta');
 
   $effect(() => {
-    const { databaseName } = $backend?.repository ?? {};
-
-    if (databaseName) {
-      uiSettingsDB = new IndexedDB(databaseName, 'ui-settings');
-
-      (async () => {
-        const onboardingState = (await uiSettingsDB.get('onboarding')) ?? {};
-
-        if (!onboardingState.mobileCta) {
-          showInfobar = true;
-        }
-
-        await uiSettingsDB.set('onboarding', { ...onboardingState, mobileCta: true });
-      })();
-    }
+    notice.showIfNeeded();
   });
 </script>
 
-<Infobar show={showInfobar} dismissible={false} --sui-infobar-message-justify-content="center">
+<Infobar
+  show={notice.show.current}
+  dismissible={false}
+  --sui-infobar-message-justify-content="center"
+>
   {_('mobile_promo_title')}
   <Button
     variant="link"
     label={_('mobile_promo_button')}
     onclick={() => {
-      showInfobar = false;
-      $showMobileSignInDialog = true;
+      showMobileSignInDialog.current = true;
+      notice.hide();
     }}
   />
   <Button
     variant="link"
     label={_('later')}
     onclick={() => {
-      showInfobar = false;
+      notice.hide();
     }}
   />
 </Infobar>

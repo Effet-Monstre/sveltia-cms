@@ -1,14 +1,10 @@
-import { derived, writable } from 'svelte/store';
-
+import api from '$lib/services/backends/fs/api';
 import local from '$lib/services/backends/fs/local';
 import test from '$lib/services/backends/fs/test';
-import gitea from '$lib/services/backends/git/gitea';
-import github from '$lib/services/backends/git/github';
-import gitlab from '$lib/services/backends/git/gitlab';
-import api from '$lib/services/backends/fs/api';
+import { gitBackendServices } from '$lib/services/backends/git/services';
+import { createDerivedState, createRawState } from '$lib/services/utils/state.svelte';
 
 /**
- * @import { Readable, Writable } from 'svelte/store';
  * @import { BackendService } from '$lib/types/private';
  * @import { BackendName } from '$lib/types/public';
  */
@@ -20,9 +16,7 @@ import api from '$lib/services/backends/fs/api';
  * @see https://sveltiacms.app/en/docs/backends
  */
 export const allBackendServices = {
-  github,
-  gitlab,
-  gitea,
+  ...gitBackendServices,
   local,
   'test-repo': test,
   api,
@@ -51,39 +45,32 @@ export const validBackendNames = /** @type {BackendName[]} */ (
 );
 
 /**
- * List of all the Git backend services.
- * @type {Record<string, BackendService>}
+ * Currently selected backend service name. Use {@link selectBackend} to change it, so that the new
+ * service is initialized.
+ * @type {{ current: string | undefined }}
  */
-export const gitBackendServices = Object.fromEntries(
-  Object.entries(allBackendServices).filter(([, service]) => service.isGit),
-);
-
-/**
- * Currently selected backend service name.
- * @type {Writable<string | undefined>}
- */
-export const backendName = writable();
+export const backendName = createRawState();
 
 /**
  * Currently selected backend service.
- * @type {Readable<BackendService | undefined>}
  */
-export const backend = derived([backendName], ([name], _set, update) => {
-  update((currentService) => {
-    const newService = name ? allBackendServices[name] : undefined;
-
-    if (newService && newService !== currentService) {
-      newService.init();
-    }
-
-    return newService;
-  });
-});
+export const backend = createDerivedState(() =>
+  backendName.current ? allBackendServices[backendName.current] : undefined,
+);
 
 /**
- * Whether the last commit was published. This is used to determine if the last commit was published
- * to the remote backend. If the last commit was not published, the user will be prompted to publish
- * it.
- * @type {Writable<boolean>}
+ * Select the backend service with the given name, initializing it if it’s not the current one.
+ * @param {string | undefined} name Backend name, or `undefined` to deselect the current backend.
+ * @returns {BackendService | undefined} Selected backend service, if any.
  */
-export const isLastCommitPublished = writable(true);
+export const selectBackend = (name) => {
+  const service = name ? allBackendServices[name] : undefined;
+
+  if (service && service !== backend.current) {
+    service.init();
+  }
+
+  backendName.current = name;
+
+  return service;
+};

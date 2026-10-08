@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, test, vi } from 'vitest';
 
 import {
+  _resetAvatarURLCache,
   commitChanges,
   fetchFileCommits,
   fetchLastCommit,
@@ -8,29 +9,42 @@ import {
 import { repository } from '$lib/services/backends/git/gitlab/repository';
 import { fetchAPI, fetchGraphQL } from '$lib/services/backends/git/shared/api';
 import { createCommitMessage } from '$lib/services/backends/git/shared/commits';
+import { repositoryHead } from '$lib/services/backends/git/shared/fetch';
 import { getGitHash } from '$lib/services/utils/file';
+import { forkedRepository, openAuthoring } from '$lib/services/workflow/open-authoring';
 
 // Mock dependencies
-vi.mock('svelte/store', () => ({
-  get: vi.fn(),
-  writable: vi.fn(() => ({ subscribe: vi.fn(), set: vi.fn(), update: vi.fn() })),
-  derived: vi.fn(() => ({ subscribe: vi.fn() })),
-  readonly: vi.fn(() => ({ subscribe: vi.fn() })),
-}));
 vi.mock('@sveltia/i18n', () => ({
   _: vi.fn((key) => key),
   locale: { current: 'en', set: vi.fn() },
   dictionary: {},
 }));
-vi.mock('$lib/services/backends/git/gitlab/repository', () => ({
-  repository: {
-    repo: 'test-repo',
-    branch: 'main',
-    owner: 'test-owner',
-  },
+vi.mock('$lib/services/backends/git/gitlab/fork', () => ({ projectIds: { base: 42 } }));
+vi.mock('$lib/services/backends/git/gitlab/repository', () => {
+  const mockRepository = { repo: 'test-repo', branch: 'main', owner: 'test-owner' };
+
+  return {
+    repository: mockRepository,
+    /**
+     * Get the project ID the same way the real module does.
+     * @param {any} [repoPath] Project to address. Default: the configured project.
+     * @returns {string} URL-encoded project path.
+     */
+    getProjectId: ({ owner, repo } = mockRepository) => encodeURIComponent(`${owner}/${repo}`),
+  };
+});
+vi.mock('$lib/services/workflow/open-authoring', () => ({
+  forkedRepository: { current: undefined },
+  openAuthoring: { current: false },
 }));
 vi.mock('$lib/services/backends/git/shared/api');
-vi.mock('$lib/services/backends/git/shared/commits');
+vi.mock('$lib/services/backends/git/shared/commits', async (importOriginal) => ({
+  .../** @type {any} */ (await importOriginal()),
+  createCommitMessage: vi.fn(),
+}));
+vi.mock('$lib/services/backends/git/shared/fetch', () => ({
+  repositoryHead: { current: '' },
+}));
 vi.mock('$lib/services/utils/file', () => ({
   getGitHash: vi.fn(),
 }));
@@ -40,7 +54,11 @@ vi.mock('@sveltia/utils/file', () => ({
 
 describe('GitLab commits service', () => {
   beforeEach(() => {
+    forkedRepository.current = undefined;
+    /** @type {any} */ (openAuthoring).current = false;
     vi.clearAllMocks();
+    _resetAvatarURLCache();
+    repositoryHead.current = '';
   });
 
   describe('fetchLastCommit', () => {
@@ -107,6 +125,128 @@ describe('GitLab commits service', () => {
   });
 
   describe('commitChanges', () => {
+    /**
+     * Create minimal change and option objects for the `start_branch` tests.
+     * @returns {any[]} Changes and options.
+     */
+    const createStartBranchArgs = () => [
+      /** @type {any} */ ([{ action: 'create', path: 'test.md', data: 'x' }]),
+      /** @type {any} */ ({ commitType: 'create', branch: 'cms/posts/hello', startBranch: 'main' }),
+    ];
+
+    describe('Open Authoring', () => {
+      /**
+       * Pretend the signed-in user is contributing through the given fork.
+       * @param {any} fork Fork, or `undefined` to sign in as a maintainer.
+       */
+      const signInAs = (fork) => {
+        forkedRepository.current = fork;
+        /** @type {any} */ (openAuthoring).current = !!fork;
+      };
+
+      test('refuses to commit straight to the configured branch', async () => {
+        signInAs({ owner: 'contributor', repo: 'test-repo' });
+
+        const changes = /** @type {any} */ ([{ action: 'create', path: 'test.md', data: 'x' }]);
+
+        await expect(
+          commitChanges(changes, /** @type {any} */ ({ commitType: 'create' })),
+        ).rejects.toThrow('Cannot commit directly to the configured repository');
+
+        expect(fetchAPI).not.toHaveBeenCalled();
+      });
+
+      test('commits to the fork, branching off the configured project', async () => {
+        signInAs({ owner: 'contributor', repo: 'test-repo' });
+
+        const [changes, options] = createStartBranchArgs();
+
+        vi.mocked(createCommitMessage).mockReturnValue('Create new post');
+        vi.mocked(fetchAPI).mockResolvedValue({ id: 'c1', committed_date: '2023-01-01T12:00:00Z' });
+        vi.mocked(getGitHash).mockResolvedValue('file123');
+
+        await commitChanges(changes, options);
+
+        expect(fetchAPI).toHaveBeenCalledWith(
+          '/projects/contributor%2Ftest-repo/repository/commits',
+          expect.objectContaining({
+            body: expect.objectContaining({
+              branch: 'cms/posts/hello',
+              start_branch: 'main',
+              // The branch starts from the configured project rather than the fork’s copy of it,
+              // named by its ID: an encoded path in the body would name no project
+              start_project: 42,
+            }),
+          }),
+        );
+      });
+
+      test('leaves the start project out for a maintainer', async () => {
+        signInAs(undefined);
+
+        const [changes, options] = createStartBranchArgs();
+
+        vi.mocked(createCommitMessage).mockReturnValue('Create new post');
+        vi.mocked(fetchAPI).mockResolvedValue({ id: 'c1', committed_date: '2023-01-01T12:00:00Z' });
+        vi.mocked(getGitHash).mockResolvedValue('file123');
+
+        await commitChanges(changes, options);
+
+        expect(fetchAPI).toHaveBeenCalledWith(
+          '/projects/test-owner%2Ftest-repo/repository/commits',
+          expect.objectContaining({
+            body: expect.not.objectContaining({ start_project: expect.anything() }),
+          }),
+        );
+      });
+    });
+
+    test('creates the branch along with the commit when a start branch is given', async () => {
+      const [changes, options] = createStartBranchArgs();
+
+      vi.mocked(createCommitMessage).mockReturnValue('Create new post');
+      vi.mocked(fetchAPI).mockResolvedValue({ id: 'c1', committed_date: '2023-01-01T12:00:00Z' });
+      vi.mocked(getGitHash).mockResolvedValue('file123');
+
+      const result = await commitChanges(changes, options);
+
+      expect(fetchAPI).toHaveBeenCalledTimes(1);
+
+      expect(fetchAPI).toHaveBeenCalledWith(
+        '/projects/test-owner%2Ftest-repo/repository/commits',
+        expect.objectContaining({
+          body: expect.objectContaining({ branch: 'cms/posts/hello', start_branch: 'main' }),
+        }),
+      );
+
+      expect(result.sha).toBe('c1');
+    });
+
+    test('rethrows a rejected start branch, which is the caller’s to sort out', async () => {
+      const [changes, options] = createStartBranchArgs();
+
+      vi.mocked(createCommitMessage).mockReturnValue('Create new post');
+      // GitLab rejects `start_branch` outright once the branch is there. Only the Editorial
+      // Workflow service can tell whether the branch is a leftover or someone’s work in progress
+      vi.mocked(fetchAPI).mockRejectedValue(
+        new Error('A branch called “cms/posts/hello” already exists', { cause: { status: 400 } }),
+      );
+
+      await expect(commitChanges(changes, options)).rejects.toThrow('already exists');
+      expect(fetchAPI).toHaveBeenCalledTimes(1);
+    });
+
+    test('rethrows a failure when no start branch was requested', async () => {
+      const changes = /** @type {any} */ ([{ action: 'create', path: 'test.md', data: 'x' }]);
+      const options = /** @type {any} */ ({ commitType: 'create', branch: 'cms/posts/hello' });
+
+      vi.mocked(createCommitMessage).mockReturnValue('Create new post');
+      vi.mocked(fetchAPI).mockRejectedValue(new Error('Bad Request', { cause: { status: 400 } }));
+
+      await expect(commitChanges(changes, options)).rejects.toThrow('Bad Request');
+      expect(fetchAPI).toHaveBeenCalledTimes(1);
+    });
+
     test('commits text files successfully', async () => {
       const changes = /** @type {any} */ ([
         {
@@ -288,6 +428,116 @@ describe('GitLab commits service', () => {
 
       expect(result.files).toEqual({});
     });
+
+    describe('guard against a concurrent push', () => {
+      const changes = /** @type {any} */ ([
+        { action: 'create', path: 'new.md', data: 'x' },
+        { action: 'update', path: 'updated.md', data: 'x' },
+        { action: 'move', path: 'moved.md', previousPath: 'old.md', data: 'x' },
+        { action: 'delete', path: 'deleted.md' },
+      ]);
+
+      /**
+       * Mock the response of the last commit lookup.
+       * @param {string} sha Commit SHA.
+       * @returns {any} Response.
+       */
+      const lastCommitResponse = (sha) => ({
+        project: { repository: { tree: { lastCommit: { sha, message: '' } } } },
+      });
+
+      const changedFileError = new Error('Server responded with an error', {
+        cause: { status: 400, message: 'The file has changed since you started editing it' },
+      });
+
+      beforeEach(() => {
+        repositoryHead.current = 'loaded-head-sha';
+        vi.mocked(createCommitMessage).mockReturnValue('Update');
+        vi.mocked(getGitHash).mockResolvedValue('file123');
+      });
+
+      test('sends the loaded head as the last commit of each existing file', async () => {
+        vi.mocked(fetchAPI).mockResolvedValue({ id: 'c1', committed_date: '2023-01-01' });
+
+        await commitChanges(changes, /** @type {any} */ ({ commitType: 'update' }));
+
+        const { body } = /** @type {any} */ (vi.mocked(fetchAPI).mock.calls[0][1]);
+
+        expect(body.actions.map((/** @type {any} */ a) => a.last_commit_id)).toEqual([
+          undefined,
+          'loaded-head-sha',
+          'loaded-head-sha',
+          'loaded-head-sha',
+        ]);
+        expect(body.actions[0]).not.toHaveProperty('last_commit_id');
+      });
+
+      test('sends no last commit to a workflow branch', async () => {
+        vi.mocked(fetchAPI).mockResolvedValue({ id: 'c1', committed_date: '2023-01-01' });
+
+        await commitChanges(
+          changes,
+          /** @type {any} */ ({ commitType: 'update', branch: 'cms/posts/a' }),
+        );
+
+        const { body } = /** @type {any} */ (vi.mocked(fetchAPI).mock.calls[0][1]);
+
+        body.actions.forEach((/** @type {any} */ a) => {
+          expect(a).not.toHaveProperty('last_commit_id');
+        });
+      });
+
+      test('sends no last commit before the site data is loaded', async () => {
+        repositoryHead.current = '';
+        vi.mocked(fetchAPI).mockResolvedValue({ id: 'c1', committed_date: '2023-01-01' });
+
+        await commitChanges(changes, /** @type {any} */ ({ commitType: 'update' }));
+
+        const { body } = /** @type {any} */ (vi.mocked(fetchAPI).mock.calls[0][1]);
+
+        body.actions.forEach((/** @type {any} */ a) => {
+          expect(a).not.toHaveProperty('last_commit_id');
+        });
+      });
+
+      test('reports a commit refused because the branch has moved', async () => {
+        vi.mocked(fetchAPI).mockRejectedValue(changedFileError);
+        vi.mocked(fetchGraphQL).mockResolvedValue(lastCommitResponse('someone-elses-sha'));
+
+        await expect(
+          commitChanges(changes, /** @type {any} */ ({ commitType: 'update' })),
+        ).rejects.toThrow('The branch has moved since the site data was loaded.');
+      });
+
+      test('passes the failure on when the head is where it was expected', async () => {
+        vi.mocked(fetchAPI).mockRejectedValue(changedFileError);
+        vi.mocked(fetchGraphQL).mockResolvedValue(lastCommitResponse('loaded-head-sha'));
+
+        await expect(
+          commitChanges(changes, /** @type {any} */ ({ commitType: 'update' })),
+        ).rejects.toBe(changedFileError);
+      });
+
+      test('passes the failure on when the head can’t be looked up afterwards', async () => {
+        vi.mocked(fetchAPI).mockRejectedValue(changedFileError);
+        vi.mocked(fetchGraphQL).mockRejectedValue(new Error('Failed to send the request'));
+
+        await expect(
+          commitChanges(changes, /** @type {any} */ ({ commitType: 'update' })),
+        ).rejects.toBe(changedFileError);
+      });
+
+      test('passes any other failure on without a head lookup', async () => {
+        const serverError = new Error('Server responded with an error', { cause: { status: 500 } });
+
+        vi.mocked(fetchAPI).mockRejectedValue(serverError);
+
+        await expect(
+          commitChanges(changes, /** @type {any} */ ({ commitType: 'update' })),
+        ).rejects.toBe(serverError);
+        expect(fetchGraphQL).not.toHaveBeenCalled();
+      });
+    });
   });
 
   describe('fetchFileCommits', () => {
@@ -403,6 +653,35 @@ describe('GitLab commits service', () => {
       const result = await fetchFileCommits(['file.md']);
 
       expect(result).toEqual([]);
+    });
+
+    test('looks each avatar up only once, unless the lookup failed', async () => {
+      const commits = [
+        {
+          id: 'abc123',
+          author_name: 'Alice',
+          author_email: 'alice@example.com',
+          committed_date: '2024-06-01T12:00:00Z',
+        },
+      ];
+
+      vi.mocked(fetchAPI)
+        .mockResolvedValueOnce(commits)
+        .mockRejectedValueOnce(new Error('Network error'))
+        .mockResolvedValueOnce(commits)
+        .mockResolvedValueOnce({ avatar_url: 'https://example.com/alice.png' })
+        .mockResolvedValueOnce(commits);
+
+      expect((await fetchFileCommits(['file.md']))[0].authorAvatarURL).toBeUndefined();
+      // The failed lookup is made again
+      expect((await fetchFileCommits(['file.md']))[0].authorAvatarURL).toBe(
+        'https://example.com/alice.png',
+      );
+      // A successful one isn’t
+      expect((await fetchFileCommits(['file.md']))[0].authorAvatarURL).toBe(
+        'https://example.com/alice.png',
+      );
+      expect(fetchAPI).toHaveBeenCalledTimes(5);
     });
 
     test('handles avatar fetch failure gracefully', async () => {

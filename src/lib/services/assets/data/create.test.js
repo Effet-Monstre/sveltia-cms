@@ -1,17 +1,21 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { createFileList, saveAssets, updatedStores } from './create.js';
+import { createFileList, saveAssets, updateStores } from './create.js';
 
 // Mock dependencies
 vi.mock('$lib/services/assets', () => ({
-  allAssets: { subscribe: vi.fn() },
-  focusedAsset: { set: vi.fn() },
-  overlaidAsset: { set: vi.fn() },
   getAssetByInternalPath: vi.fn(),
   getAssetsByDirName: vi.fn(),
 }));
 
-vi.mock('$lib/services/assets/data', () => ({
+vi.mock('$lib/services/assets/state', () => ({
+  allAssets: { current: undefined },
+  focusedAsset: { set: vi.fn() },
+  overlaidAsset: { set: vi.fn() },
+}));
+
+vi.mock('$lib/services/assets/data', async (importOriginal) => ({
+  .../** @type {Record<string, any>} */ (await importOriginal()),
   assetUpdatesToast: { set: vi.fn() },
 }));
 
@@ -24,7 +28,7 @@ vi.mock('$lib/services/backends/save', () => ({
 }));
 
 vi.mock('$lib/services/config', () => ({
-  cmsConfig: { subscribe: vi.fn() },
+  cmsConfig: { current: undefined },
 }));
 
 vi.mock('$lib/services/integrations/media-libraries/default', () => ({
@@ -38,6 +42,10 @@ vi.mock('$lib/services/integrations/media-libraries/default', () => ({
 }));
 
 vi.mock('$lib/services/utils/file', () => ({
+  createPath: vi.fn((/** @type {string[]} */ segments) => segments.filter(Boolean).join('/')),
+}));
+
+vi.mock('$lib/services/assets/file-name', () => ({
   formatFileName: vi.fn((fileName) => fileName),
 }));
 
@@ -50,50 +58,29 @@ vi.mock('$lib/services/contents/collection/data', () => ({
   },
 }));
 
-vi.mock('svelte/store', () => ({
-  get: vi.fn(),
-}));
-
 vi.mock('$lib/services/backends/git/shared/integration', () => ({
   skipCIConfigured: {
-    subscribe: vi.fn((callback) => {
-      callback(false);
-      return vi.fn();
-    }),
+    current: false,
   },
   skipCIEnabled: {
-    subscribe: vi.fn((callback) => {
-      callback(false);
-      return vi.fn();
-    }),
+    current: false,
   },
 }));
 
 // Mock dependencies
 vi.mock('$lib/services/assets', () => ({
   allAssets: {
-    subscribe: vi.fn((callback) => {
-      callback([]);
-      return vi.fn();
-    }),
+    current: [],
   },
-  focusedAsset: {
-    set: vi.fn(),
-    subscribe: vi.fn(() => vi.fn()),
-  },
-  overlaidAsset: {
-    set: vi.fn(),
-    subscribe: vi.fn(() => vi.fn()),
-  },
+  focusedAsset: { current: undefined },
+  overlaidAsset: { current: undefined },
   getAssetByInternalPath: vi.fn(),
   getAssetsByDirName: vi.fn().mockReturnValue([]),
 }));
 
-vi.mock('$lib/services/assets/data', () => ({
-  assetUpdatesToast: {
-    set: vi.fn(),
-    subscribe: vi.fn(() => vi.fn()),
-  },
+vi.mock('$lib/services/assets/data', async (importOriginal) => ({
+  .../** @type {Record<string, any>} */ (await importOriginal()),
+  assetUpdatesToast: { current: undefined },
 }));
 
 vi.mock('$lib/services/assets/kinds', () => ({
@@ -106,15 +93,24 @@ vi.mock('$lib/services/backends/save', () => ({
 
 vi.mock('$lib/services/config', () => ({
   cmsConfig: {
-    subscribe: vi.fn((callback) => {
-      callback({ backend: { skip_ci: true } });
-      return vi.fn();
-    }),
+    current: { backend: { skip_ci: true } },
   },
 }));
 
 vi.mock('$lib/services/utils/file', () => ({
+  createPath: vi.fn((/** @type {string[]} */ segments) => segments.filter(Boolean).join('/')),
+}));
+
+vi.mock('$lib/services/assets/file-name', () => ({
   formatFileName: vi.fn((fileName) => fileName),
+}));
+
+vi.mock('$lib/services/assets/subfolders', () => ({
+  getUploadDirPath: vi.fn(({ folder, subfolderPath }) =>
+    folder?.internalPath !== undefined
+      ? [folder.internalPath, subfolderPath].filter(Boolean).join('/')
+      : undefined,
+  ),
 }));
 
 vi.mock('$lib/services/contents/collection/data', () => ({
@@ -161,6 +157,45 @@ describe('assets/data/create', () => {
           file: mockFile,
         },
       ]);
+    });
+
+    it('should save the files to the subfolder being browsed', async () => {
+      const { getAssetsByDirName } = await import('$lib/services/assets');
+      const mockFile = new File(['content'], 'test.jpg', { type: 'image/jpeg' });
+
+      const result = createFileList({
+        files: [mockFile],
+        folder: {
+          internalPath: 'images',
+          collectionName: undefined,
+          publicPath: '/images',
+          entryRelative: false,
+          hasTemplateTags: false,
+        },
+        subfolderPath: '2024/summer',
+      });
+
+      expect(getAssetsByDirName).toHaveBeenCalledWith('images/2024/summer');
+      expect(result[0].path).toBe('images/2024/summer/test.jpg');
+    });
+
+    it('should save the files to a root media folder without a leading slash', async () => {
+      const { getAssetsByDirName } = await import('$lib/services/assets');
+      const mockFile = new File(['content'], 'test.jpg', { type: 'image/jpeg' });
+
+      const result = createFileList({
+        files: [mockFile],
+        folder: {
+          internalPath: '',
+          collectionName: undefined,
+          publicPath: '/',
+          entryRelative: false,
+          hasTemplateTags: false,
+        },
+      });
+
+      expect(getAssetsByDirName).toHaveBeenCalledWith('');
+      expect(result[0].path).toBe('test.jpg');
     });
 
     it('should call getAssetsByDirName when folder has internalPath', async () => {
@@ -260,7 +295,7 @@ describe('assets/data/create', () => {
       ]);
     });
 
-    it('should use create action when file name does not match any original asset', () => {
+    it('should give a replacement file the original asset’s name', () => {
       const mockFile = new File(['content'], 'new-photo.jpg', { type: 'image/jpeg' });
 
       const uploadingAssets = {
@@ -294,12 +329,102 @@ describe('assets/data/create', () => {
 
       expect(result).toEqual([
         {
-          action: 'create',
-          name: 'new-photo.jpg',
-          path: '/images/new-photo.jpg',
+          action: 'update',
+          name: 'original.jpg',
+          path: '/images/original.jpg',
           file: mockFile,
         },
       ]);
+    });
+
+    it('should overwrite a same-named asset when replaceDuplicates is enabled', async () => {
+      const { getAssetsByDirName } = await import('$lib/services/assets');
+
+      vi.mocked(getAssetsByDirName).mockReturnValue([
+        {
+          name: 'existing.jpg',
+          path: '/images/existing.jpg',
+          sha: 'abc123',
+          size: 1024,
+          kind: 'image',
+          folder: {
+            internalPath: '/images',
+            collectionName: 'assets',
+            publicPath: '/images',
+            entryRelative: false,
+            hasTemplateTags: false,
+          },
+        },
+      ]);
+
+      const mockFile = new File(['content'], 'existing.jpg', { type: 'image/jpeg' });
+
+      const uploadingAssets = {
+        files: [mockFile],
+        folder: {
+          internalPath: '/images',
+          collectionName: 'assets',
+          publicPath: '/images',
+          entryRelative: false,
+          hasTemplateTags: false,
+        },
+        replaceDuplicates: true,
+      };
+
+      const result = createFileList(uploadingAssets);
+
+      expect(result).toEqual([
+        {
+          action: 'update',
+          name: 'existing.jpg',
+          path: '/images/existing.jpg',
+          file: mockFile,
+        },
+      ]);
+    });
+
+    it('should keep a same-named asset when replaceDuplicates is disabled', async () => {
+      const { getAssetsByDirName } = await import('$lib/services/assets');
+      const { formatFileName } = await import('$lib/services/assets/file-name');
+
+      vi.mocked(getAssetsByDirName).mockReturnValue([
+        {
+          name: 'existing.jpg',
+          path: '/images/existing.jpg',
+          sha: 'abc123',
+          size: 1024,
+          kind: 'image',
+          folder: {
+            internalPath: '/images',
+            collectionName: 'assets',
+            publicPath: '/images',
+            entryRelative: false,
+            hasTemplateTags: false,
+          },
+        },
+      ]);
+
+      const mockFile = new File(['content'], 'existing.jpg', { type: 'image/jpeg' });
+
+      const uploadingAssets = {
+        files: [mockFile],
+        folder: {
+          internalPath: '/images',
+          collectionName: 'assets',
+          publicPath: '/images',
+          entryRelative: false,
+          hasTemplateTags: false,
+        },
+      };
+
+      const result = createFileList(uploadingAssets);
+
+      // The unique name is `formatFileName`’s job, which is stubbed here to return the name as is
+      expect(formatFileName).toHaveBeenCalledWith('existing.jpg', {
+        slugificationEnabled: false,
+        assetNamesInSameFolder: ['existing.jpg'],
+      });
+      expect(result[0].action).toBe('create');
     });
 
     it('should match original assets case-insensitively', () => {
@@ -496,7 +621,7 @@ describe('assets/data/create', () => {
       const result = createFileList(uploadingAssets);
 
       expect(result).toHaveLength(1);
-      // When internalPath is undefined, join creates a path starting with /
+      // When internalPath is undefined, there’s no directory to save the file to
       expect(result[0].action).toBe('create');
       expect(result[0].name).toBe('test.jpg');
       expect(result[0].file).toBe(mockFile);
@@ -520,20 +645,16 @@ describe('assets/data/create', () => {
     });
   });
 
-  describe('updatedStores', () => {
+  describe('updateStores', () => {
     it('should update toast with save count', async () => {
       const { assetUpdatesToast } = await import('$lib/services/assets/data');
       const { skipCIConfigured } = await import('$lib/services/backends/git/shared/integration');
-      const { get } = await import('svelte/store');
 
-      vi.mocked(get).mockImplementation((store) => {
-        if (store === skipCIConfigured) return false;
-        return undefined;
-      });
+      /** @type {any} */ (skipCIConfigured).current = false;
 
-      updatedStores({ count: 3 });
+      updateStores({ count: 3 });
 
-      expect(assetUpdatesToast.set).toHaveBeenCalledWith({
+      expect(assetUpdatesToast.current).toEqual({
         saved: true,
         published: false,
         deleted: false,
@@ -547,17 +668,12 @@ describe('assets/data/create', () => {
       const { skipCIConfigured, skipCIEnabled } =
         await import('$lib/services/backends/git/shared/integration');
 
-      const { get } = await import('svelte/store');
+      /** @type {any} */ (skipCIConfigured).current = true;
+      /** @type {any} */ (skipCIEnabled).current = false;
 
-      vi.mocked(get).mockImplementation((store) => {
-        if (store === skipCIConfigured) return true;
-        if (store === skipCIEnabled) return false;
-        return undefined;
-      });
+      updateStores({ count: 1 });
 
-      updatedStores({ count: 1 });
-
-      expect(assetUpdatesToast.set).toHaveBeenCalledWith(
+      expect(assetUpdatesToast.current).toEqual(
         expect.objectContaining({ saved: true, published: true, count: 1 }),
       );
     });
@@ -568,24 +684,19 @@ describe('assets/data/create', () => {
       const { skipCIConfigured, skipCIEnabled } =
         await import('$lib/services/backends/git/shared/integration');
 
-      const { get } = await import('svelte/store');
+      /** @type {any} */ (skipCIConfigured).current = true;
+      /** @type {any} */ (skipCIEnabled).current = true;
 
-      vi.mocked(get).mockImplementation((store) => {
-        if (store === skipCIConfigured) return true;
-        if (store === skipCIEnabled) return true;
-        return undefined;
-      });
+      updateStores({ count: 1 });
 
-      updatedStores({ count: 1 });
-
-      expect(assetUpdatesToast.set).toHaveBeenCalledWith(
+      expect(assetUpdatesToast.current).toEqual(
         expect.objectContaining({ saved: true, published: false, count: 1 }),
       );
     });
 
     it('should update focusedAsset when it exists', async () => {
-      const { focusedAsset, getAssetByInternalPath } = await import('$lib/services/assets');
-      const { get } = await import('svelte/store');
+      const { getAssetByInternalPath } = await import('$lib/services/assets');
+      const { focusedAsset } = await import('$lib/services/assets/state');
 
       const oldAsset = {
         path: '/images/old.jpg',
@@ -601,21 +712,18 @@ describe('assets/data/create', () => {
         size: 2048,
       };
 
-      vi.mocked(get).mockImplementation((store) => {
-        if (store === focusedAsset) return oldAsset;
-        return undefined;
-      });
+      focusedAsset.current = /** @type {any} */ (oldAsset);
       vi.mocked(getAssetByInternalPath).mockReturnValue(/** @type {any} */ (newAsset));
 
-      updatedStores({ count: 1 });
+      updateStores({ count: 1 });
 
       expect(getAssetByInternalPath).toHaveBeenCalledWith('/images/old.jpg');
-      expect(focusedAsset.set).toHaveBeenCalledWith(newAsset);
+      expect(focusedAsset.current).toEqual(newAsset);
     });
 
     it('should update overlaidAsset when it exists', async () => {
-      const { overlaidAsset, getAssetByInternalPath } = await import('$lib/services/assets');
-      const { get } = await import('svelte/store');
+      const { getAssetByInternalPath } = await import('$lib/services/assets');
+      const { overlaidAsset } = await import('$lib/services/assets/state');
 
       const oldAsset = {
         path: '/images/old.jpg',
@@ -631,23 +739,18 @@ describe('assets/data/create', () => {
         size: 2048,
       };
 
-      vi.mocked(get).mockImplementation((store) => {
-        if (store === overlaidAsset) return oldAsset;
-        return undefined;
-      });
+      overlaidAsset.current = /** @type {any} */ (oldAsset);
       vi.mocked(getAssetByInternalPath).mockReturnValue(/** @type {any} */ (newAsset));
 
-      updatedStores({ count: 1 });
+      updateStores({ count: 1 });
 
       expect(getAssetByInternalPath).toHaveBeenCalledWith('/images/old.jpg');
-      expect(overlaidAsset.set).toHaveBeenCalledWith(newAsset);
+      expect(overlaidAsset.current).toEqual(newAsset);
     });
 
     it('should update both focusedAsset and overlaidAsset when they exist', async () => {
-      const { focusedAsset, getAssetByInternalPath, overlaidAsset } =
-        await import('$lib/services/assets');
-
-      const { get } = await import('svelte/store');
+      const { getAssetByInternalPath } = await import('$lib/services/assets');
+      const { focusedAsset, overlaidAsset } = await import('$lib/services/assets/state');
 
       const oldFocused = {
         path: '/images/focused.jpg',
@@ -671,25 +774,38 @@ describe('assets/data/create', () => {
         updated: true,
       };
 
-      vi.mocked(get).mockImplementation((store) => {
-        if (store === focusedAsset) return oldFocused;
-        if (store === overlaidAsset) return oldOverlaid;
-        return undefined;
-      });
+      focusedAsset.current = /** @type {any} */ (oldFocused);
+      overlaidAsset.current = /** @type {any} */ (oldOverlaid);
       vi.mocked(getAssetByInternalPath).mockImplementation(
         (path) => /** @type {any} */ (path === '/images/focused.jpg' ? newFocused : newOverlaid),
       );
 
-      updatedStores({ count: 2 });
+      updateStores({ count: 2 });
 
       expect(getAssetByInternalPath).toHaveBeenCalledWith('/images/focused.jpg');
       expect(getAssetByInternalPath).toHaveBeenCalledWith('/images/overlaid.jpg');
-      expect(focusedAsset.set).toHaveBeenCalledWith(newFocused);
-      expect(overlaidAsset.set).toHaveBeenCalledWith(newOverlaid);
+      expect(focusedAsset.current).toEqual(newFocused);
+      expect(overlaidAsset.current).toEqual(newOverlaid);
     });
   });
 
   describe('saveAssets', () => {
+    it('should refuse to upload to a folder the CMS is served from', async () => {
+      const { saveChanges } = await import('$lib/services/backends/save');
+
+      await expect(
+        saveAssets(
+          /** @type {any} */ ({
+            files: [new File([''], 'index.html')],
+            folder: { internalPath: 'static', entryRelative: false, hasTemplateTags: false },
+            subfolderPath: 'admin',
+          }),
+          { commitType: 'uploadMedia' },
+        ),
+      ).rejects.toThrow('Cannot change a file in a folder the CMS is served from');
+      expect(saveChanges).not.toHaveBeenCalled();
+    });
+
     it('should save assets and update stores', async () => {
       const mockFile = new File(['content'], 'test.jpg', { type: 'image/jpeg' });
 

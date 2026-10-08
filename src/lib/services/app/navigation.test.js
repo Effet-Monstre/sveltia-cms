@@ -1,14 +1,48 @@
-import { get } from 'svelte/store';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { showAssetOverlay } from '$lib/services/assets/view';
+import { cmsConfig } from '$lib/services/config';
+import { showContentOverlay } from '$lib/services/contents/editor';
+
 import {
+  encodeRoutePath,
   goBack,
   goto,
+  hasOverlay,
   openProductionSite,
   parseLocation,
+  redirectLegacyEntryLink,
+  resolveRoute,
   startViewTransition,
   updateContentFromHashChange,
 } from './navigation';
+
+// The module listens to `keydown` as it’s loaded, before the tests can set anything up
+const { keydownListeners } = vi.hoisted(() => {
+  /** @type {EventListener[]} */
+  const listeners = [];
+
+  /**
+   * Collect the `keydown` listeners, as Node has no global event target.
+   * @param {string} type Event type.
+   * @param {any} listener Listener.
+   */
+  // @ts-ignore - Node has no global event target
+  globalThis.addEventListener = (type, listener) => {
+    if (type === 'keydown') {
+      listeners.push(listener);
+    }
+  };
+
+  return { keydownListeners: listeners };
+});
+
+/**
+ * Press a key, as far as the module’s listeners are concerned.
+ */
+const pressKey = () => {
+  keydownListeners.forEach((listener) => listener(new Event('keydown')));
+};
 
 /**
  * Mock HashChangeEvent class for testing.
@@ -50,6 +84,11 @@ Object.defineProperty(globalThis, 'window', {
       back: vi.fn(),
       state: null,
     },
+    navigation: {
+      currentEntry: null,
+      entries: vi.fn(() => []),
+      back: vi.fn(),
+    },
     open: vi.fn(),
     dispatchEvent: vi.fn(),
   },
@@ -70,28 +109,15 @@ Object.defineProperty(globalThis, 'HashChangeEvent', {
 
 // Mock dependencies
 vi.mock('$lib/services/assets/view', () => ({
-  showAssetOverlay: { subscribe: vi.fn() },
+  showAssetOverlay: { current: undefined },
 }));
 
 vi.mock('$lib/services/config', () => ({
-  cmsConfig: { subscribe: vi.fn() },
+  cmsConfig: { current: undefined },
 }));
 
 vi.mock('$lib/services/contents/editor', () => ({
-  showContentOverlay: { subscribe: vi.fn() },
-}));
-
-vi.mock('svelte/store', () => ({
-  derived: vi.fn((stores, callback) => {
-    // Call the callback to ensure code coverage for derived functions
-    if (Array.isArray(stores)) {
-      callback([...stores].map(() => false));
-    }
-
-    return { subscribe: vi.fn() };
-  }),
-  get: vi.fn(),
-  writable: vi.fn(),
+  showContentOverlay: { current: undefined },
 }));
 
 vi.mock('@sveltia/utils/misc', () => ({
@@ -124,6 +150,17 @@ describe('navigation', () => {
         replaceState: vi.fn(),
         back: vi.fn(),
         state: null,
+      },
+      writable: true,
+      configurable: true,
+    });
+
+    // Mock window.navigation
+    Object.defineProperty(window, 'navigation', {
+      value: {
+        currentEntry: null,
+        entries: vi.fn(() => []),
+        back: vi.fn(),
       },
       writable: true,
       configurable: true,
@@ -198,6 +235,43 @@ describe('navigation', () => {
         path: '/search',
         params: { q: 'test', sort: 'date', tags: 'tag1,tag2' },
       });
+    });
+
+    it('should strip a trailing slash from the path', () => {
+      expect(parseLocation('https://example.com/#/collections/').path).toEqual('/collections');
+      expect(parseLocation('https://example.com/#/assets/-/all/').path).toEqual('/assets/-/all');
+      expect(parseLocation('https://example.com/#/collections/?filter=all')).toEqual({
+        path: '/collections',
+        params: { filter: 'all' },
+      });
+    });
+
+    it('should keep the root path as is', () => {
+      expect(parseLocation('https://example.com/#/').path).toEqual('/');
+      expect(parseLocation('https://example.com/#//').path).toEqual('/');
+    });
+
+    it('should not throw on a malformed escape sequence, decoding the valid ones only', () => {
+      // A link to a `50%off.jpg` file built before route paths were encoded
+      expect(parseLocation('https://example.com/#/assets/50%off.jpg').path).toEqual(
+        '/assets/50%off.jpg',
+      );
+      // `%E9` alone is not valid UTF-8, so it’s left as is
+      expect(parseLocation('https://example.com/#/assets/50%off%20sale%E9.jpg').path).toEqual(
+        '/assets/50%off sale%E9.jpg',
+      );
+    });
+
+    it('should decode an encoded route path back to the original path', () => {
+      const path = '/assets/images/50%off #1?.jpg';
+      const encoded = encodeRoutePath(path);
+
+      expect(encoded).toEqual('/assets/images/50%25off%20%231%3F.jpg');
+      expect(parseLocation(`https://example.com/#${encoded}`)).toEqual({ path, params: {} });
+      // An already-encoded name is kept as is, rather than being decoded to another name
+      expect(
+        parseLocation(`https://example.com/#${encodeRoutePath('/assets/a%20b.jpg')}`).path,
+      ).toEqual('/assets/a%20b.jpg');
     });
 
     it('should join duplicate keys with commas', () => {
@@ -304,6 +378,230 @@ describe('navigation', () => {
         update: expect.any(Function),
       });
     });
+
+    /**
+     * Mock the session history exposed by the Navigation API.
+     * @param {number} currentIndex Index of the current entry.
+     * @param {string[]} urls URLs of all the entries, in order.
+     */
+    const mockHistory = (currentIndex, urls) => {
+      const entries = urls.map((url, index) => ({ index, url, sameDocument: true }));
+
+      Object.defineProperty(window, 'navigation', {
+        value: {
+          currentEntry: entries[currentIndex],
+          entries: vi.fn(() => entries),
+          back: vi.fn(),
+        },
+        writable: true,
+        configurable: true,
+      });
+    };
+
+    it('should detect forward navigation with the Navigation API', () => {
+      const updateContent = vi.fn();
+      const mockStartViewTransition = vi.fn();
+
+      document.startViewTransition = mockStartViewTransition;
+
+      // Both paths have the same number of segments, so only the history knows the direction
+      const oldURL = 'https://example.com/#/collections/posts';
+      const newURL = 'https://example.com/#/collections/pages';
+
+      mockHistory(2, ['https://example.com/#/collections', oldURL, newURL]);
+
+      const event = new HashChangeEvent('hashchange', { oldURL, newURL });
+
+      Object.defineProperty(event, 'isTrusted', { value: true });
+
+      updateContentFromHashChange(event, updateContent, /^\/collections/);
+
+      expect(mockStartViewTransition).toHaveBeenCalledWith({
+        types: ['forwards'],
+        update: expect.any(Function),
+      });
+    });
+
+    it('should detect backward navigation with the Navigation API across sections', () => {
+      const updateContent = vi.fn();
+      const mockStartViewTransition = vi.fn();
+
+      document.startViewTransition = mockStartViewTransition;
+
+      const oldURL = 'https://example.com/#/assets';
+      const newURL = 'https://example.com/#/collections/posts';
+
+      mockHistory(0, [newURL, oldURL]);
+
+      const event = new HashChangeEvent('hashchange', { oldURL, newURL });
+
+      Object.defineProperty(event, 'isTrusted', { value: true });
+
+      updateContentFromHashChange(event, updateContent, /^\/collections/);
+
+      expect(mockStartViewTransition).toHaveBeenCalledWith({
+        types: ['backwards'],
+        update: expect.any(Function),
+      });
+    });
+
+    it('should use the history entry closest to the current one', () => {
+      const updateContent = vi.fn();
+      const mockStartViewTransition = vi.fn();
+
+      document.startViewTransition = mockStartViewTransition;
+
+      const oldURL = 'https://example.com/#/collections/posts';
+      const newURL = 'https://example.com/#/collections';
+
+      // The old URL appears twice; the one at index 3 is where the user has just been
+      mockHistory(2, [oldURL, 'https://example.com/#/assets', newURL, oldURL]);
+
+      const event = new HashChangeEvent('hashchange', { oldURL, newURL });
+
+      Object.defineProperty(event, 'isTrusted', { value: true });
+
+      updateContentFromHashChange(event, updateContent, /^\/collections/);
+
+      expect(mockStartViewTransition).toHaveBeenCalledWith({
+        types: ['backwards'],
+        update: expect.any(Function),
+      });
+    });
+
+    it('should ignore the current history entry when it has the old URL', () => {
+      const updateContent = vi.fn();
+      const mockStartViewTransition = vi.fn();
+
+      document.startViewTransition = mockStartViewTransition;
+
+      const oldURL = 'https://example.com/#/collections/posts';
+      const newURL = 'https://example.com/#/collections';
+
+      mockHistory(1, [oldURL, oldURL]);
+
+      const event = new HashChangeEvent('hashchange', { oldURL, newURL });
+
+      Object.defineProperty(event, 'isTrusted', { value: true });
+
+      updateContentFromHashChange(event, updateContent, /^\/collections/);
+
+      expect(mockStartViewTransition).toHaveBeenCalledWith({
+        types: ['forwards'],
+        update: expect.any(Function),
+      });
+    });
+
+    it('should compare paths when the old URL is no longer in the history', () => {
+      const updateContent = vi.fn();
+      const mockStartViewTransition = vi.fn();
+
+      document.startViewTransition = mockStartViewTransition;
+
+      const oldURL = 'https://example.com/#/collections';
+      const newURL = 'https://example.com/#/collections/posts';
+
+      // The old entry has been replaced, e.g. with `goto(path, { replaceState: true })`
+      mockHistory(0, [newURL]);
+
+      const event = new HashChangeEvent('hashchange', { oldURL, newURL });
+
+      Object.defineProperty(event, 'isTrusted', { value: true });
+
+      updateContentFromHashChange(event, updateContent, /^\/collections/);
+
+      expect(mockStartViewTransition).toHaveBeenCalledWith({
+        types: ['forwards'],
+        update: expect.any(Function),
+      });
+    });
+
+    it('should compare paths when the current entry is not in the history', () => {
+      const updateContent = vi.fn();
+      const mockStartViewTransition = vi.fn();
+
+      document.startViewTransition = mockStartViewTransition;
+
+      const oldURL = 'https://example.com/#/collections/posts';
+      const newURL = 'https://example.com/#/collections';
+
+      Object.defineProperty(window, 'navigation', {
+        value: {
+          currentEntry: { index: -1, url: newURL },
+          entries: vi.fn(() => []),
+          back: vi.fn(),
+        },
+        writable: true,
+        configurable: true,
+      });
+
+      const event = new HashChangeEvent('hashchange', { oldURL, newURL });
+
+      Object.defineProperty(event, 'isTrusted', { value: true });
+
+      updateContentFromHashChange(event, updateContent, /^\/collections/);
+
+      expect(mockStartViewTransition).toHaveBeenCalledWith({
+        types: ['backwards'],
+        update: expect.any(Function),
+      });
+    });
+
+    it('should compare paths when the Navigation API is unavailable', () => {
+      const updateContent = vi.fn();
+      const mockStartViewTransition = vi.fn();
+
+      document.startViewTransition = mockStartViewTransition;
+
+      // Simulate a browser without the Navigation API
+      Object.defineProperty(window, 'navigation', {
+        value: undefined,
+        writable: true,
+        configurable: true,
+      });
+
+      const event = new HashChangeEvent('hashchange', {
+        oldURL: 'https://example.com/#/collections',
+        newURL: 'https://example.com/#/collections/posts',
+      });
+
+      Object.defineProperty(event, 'isTrusted', { value: true });
+
+      updateContentFromHashChange(event, updateContent, /^\/collections/);
+
+      expect(mockStartViewTransition).toHaveBeenCalledWith({
+        types: ['forwards'],
+        update: expect.any(Function),
+      });
+    });
+
+    it('should treat navigation between paths of the same depth as unknown', () => {
+      const updateContent = vi.fn();
+      const mockStartViewTransition = vi.fn();
+
+      document.startViewTransition = mockStartViewTransition;
+
+      // Simulate a browser without the Navigation API
+      Object.defineProperty(window, 'navigation', {
+        value: undefined,
+        writable: true,
+        configurable: true,
+      });
+
+      const event = new HashChangeEvent('hashchange', {
+        oldURL: 'https://example.com/#/collections/posts',
+        newURL: 'https://example.com/#/collections/pages',
+      });
+
+      Object.defineProperty(event, 'isTrusted', { value: true });
+
+      updateContentFromHashChange(event, updateContent, /^\/collections/);
+
+      expect(mockStartViewTransition).toHaveBeenCalledWith({
+        types: ['unknown'],
+        update: expect.any(Function),
+      });
+    });
   });
 
   describe('goto', () => {
@@ -318,11 +616,26 @@ describe('navigation', () => {
       expect(document.startViewTransition).toHaveBeenCalled();
     });
 
-    it('should replace state when replaceState is true', async () => {
+    it('should replace state when replaceState is true, keeping the previous entry’s URL', async () => {
+      /** @type {any} */ (window.history).state = { from: 'https://example.com/#/' };
+
       await goto('/assets', { replaceState: true });
 
       expect(window.history.replaceState).toHaveBeenCalledWith(
-        { from: 'https://example.com/#/collections' },
+        { from: 'https://example.com/#/' },
+        '',
+        'https://example.com/#/assets',
+      );
+    });
+
+    it('should not record the replaced entry as the previous one', async () => {
+      // A direct link has no previous entry
+      /** @type {any} */ (window.history).state = null;
+
+      await goto('/assets', { replaceState: true });
+
+      expect(window.history.replaceState).toHaveBeenCalledWith(
+        { from: undefined },
         '',
         'https://example.com/#/assets',
       );
@@ -371,6 +684,15 @@ describe('navigation', () => {
       expect(document.startViewTransition).not.toHaveBeenCalled();
     });
 
+    it('should skip navigation when already on the same encoded path', async () => {
+      window.location.href = 'https://example.com/#/assets/50%25off.jpg';
+      window.location.hash = '#/assets/50%25off.jpg';
+
+      await goto(encodeRoutePath('/assets/50%off.jpg'));
+
+      expect(window.history.pushState).not.toHaveBeenCalled();
+    });
+
     it('should navigate when on same path but with custom state', async () => {
       window.location.href = 'https://example.com/#/collections';
       window.location.hash = '#/collections';
@@ -393,7 +715,7 @@ describe('navigation', () => {
       await goto('/collections', { replaceState: true });
 
       expect(window.history.replaceState).toHaveBeenCalledWith(
-        { from: 'https://example.com/#/collections' },
+        { from: undefined },
         '',
         'https://example.com/#/collections',
       );
@@ -408,14 +730,299 @@ describe('navigation', () => {
       await goto('/collections', { state: customState, replaceState: true });
 
       expect(window.history.replaceState).toHaveBeenCalledWith(
-        { filter: 'images', from: 'https://example.com/#/collections' },
+        { filter: 'images', from: undefined },
         '',
         'https://example.com/#/collections',
       );
     });
   });
 
+  describe('redirectLegacyEntryLink', () => {
+    it('should redirect a Netlify/Decap CMS shorthand link to the entry route', () => {
+      window.location.href = 'https://example.com/#/edit/posts/hello';
+      window.location.hash = '#/edit/posts/hello';
+
+      expect(redirectLegacyEntryLink()).toBe(true);
+
+      // The shorthand is replaced rather than pushed, so it doesn’t sit in the history, and it
+      // doesn’t become the previous entry either
+      expect(window.history.replaceState).toHaveBeenCalledWith(
+        { from: undefined },
+        '',
+        'https://example.com/#/collections/posts/entries/hello',
+      );
+    });
+
+    it('should redirect a link to a file collection entry', () => {
+      window.location.href = 'https://example.com/#/edit/settings/general';
+      window.location.hash = '#/edit/settings/general';
+
+      expect(redirectLegacyEntryLink()).toBe(true);
+
+      expect(window.history.replaceState).toHaveBeenCalledWith(
+        expect.any(Object),
+        '',
+        'https://example.com/#/collections/settings/entries/general',
+      );
+    });
+
+    it('should keep a sub path containing slashes', () => {
+      window.location.href = 'https://example.com/#/edit/posts/2026/hello';
+      window.location.hash = '#/edit/posts/2026/hello';
+
+      expect(redirectLegacyEntryLink()).toBe(true);
+
+      expect(window.history.replaceState).toHaveBeenCalledWith(
+        expect.any(Object),
+        '',
+        'https://example.com/#/collections/posts/entries/2026/hello',
+      );
+    });
+
+    it('should keep special characters in the sub path encoded', () => {
+      window.location.href = 'https://example.com/#/edit/posts/50%25off%20%231';
+      window.location.hash = '#/edit/posts/50%25off%20%231';
+
+      expect(redirectLegacyEntryLink()).toBe(true);
+
+      expect(window.history.replaceState).toHaveBeenCalledWith(
+        expect.any(Object),
+        '',
+        'https://example.com/#/collections/posts/entries/50%25off%20%231',
+      );
+    });
+
+    it('should carry the query string over', () => {
+      window.location.href = 'https://example.com/#/edit/posts/hello?_locale=fr';
+      window.location.hash = '#/edit/posts/hello?_locale=fr';
+
+      expect(redirectLegacyEntryLink()).toBe(true);
+
+      expect(window.history.replaceState).toHaveBeenCalledWith(
+        expect.any(Object),
+        '',
+        'https://example.com/#/collections/posts/entries/hello?_locale=fr',
+      );
+    });
+
+    it('should leave any other route alone', () => {
+      [
+        'https://example.com/#/collections/posts/entries/hello',
+        'https://example.com/#/collections',
+        'https://example.com/#/edit',
+        // A collection name with nothing after it doesn’t address an entry
+        'https://example.com/#/edit/posts',
+        'https://example.com/#/edit/posts/',
+      ].forEach((href) => {
+        const [, hash] = href.split('#');
+
+        window.location.href = href;
+        window.location.hash = hash;
+
+        expect(redirectLegacyEntryLink()).toBe(false);
+      });
+
+      expect(window.history.replaceState).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('resolveRoute', () => {
+    const pageNames = ['collections', 'assets', 'search', 'workflow', 'config', 'menu', 'settings'];
+
+    it('should redirect the root path to the content library', () => {
+      expect(resolveRoute('/', pageNames)).toEqual({ redirect: '#/collections' });
+    });
+
+    it('should report an unknown path as not found', () => {
+      expect(resolveRoute('/unknown', pageNames)).toEqual({ notFound: true });
+      expect(resolveRoute('', pageNames)).toEqual({ notFound: true });
+      // The page name has to fill the whole first path segment
+      expect(resolveRoute('/collections-foo', pageNames)).toEqual({ notFound: true });
+      expect(resolveRoute('/not-found', pageNames)).toEqual({ notFound: true });
+    });
+
+    it('should report a standalone page followed by a sub path as not found', () => {
+      expect(resolveRoute('/workflow/foo', pageNames)).toEqual({ notFound: true });
+      expect(resolveRoute('/config/foo', pageNames)).toEqual({ notFound: true });
+      expect(resolveRoute('/menu/foo', pageNames)).toEqual({ notFound: true });
+    });
+
+    it('should set the search mode for the content and asset libraries', () => {
+      expect(resolveRoute('/collections', pageNames)).toEqual({
+        pageName: 'collections',
+        searchMode: 'contents',
+      });
+      expect(resolveRoute('/collections/posts/entries/hello', pageNames)).toEqual({
+        pageName: 'collections',
+        searchMode: 'contents',
+      });
+      expect(resolveRoute('/assets/images', pageNames)).toEqual({
+        pageName: 'assets',
+        searchMode: 'assets',
+      });
+    });
+
+    it('should keep the search mode on the search page', () => {
+      expect(resolveRoute('/search/foo', pageNames)).toEqual({
+        pageName: 'search',
+        searchMode: undefined,
+      });
+    });
+
+    it('should clear the search mode on any other page', () => {
+      expect(resolveRoute('/workflow', pageNames)).toEqual({
+        pageName: 'workflow',
+        searchMode: null,
+      });
+      expect(resolveRoute('/settings/appearance', pageNames)).toEqual({
+        pageName: 'settings',
+        searchMode: null,
+      });
+    });
+  });
+
   describe('goBack', () => {
+    it('should use window.navigation.back() when the previous entry matches the fallback path', () => {
+      const mockNavigationBack = vi.fn();
+      const mockStartViewTransition = vi.fn();
+
+      Object.defineProperty(window, 'navigation', {
+        value: {
+          currentEntry: { index: 1 },
+          entries: vi.fn(() => [{ sameDocument: true, url: 'https://example.com/#/default' }]),
+          back: mockNavigationBack,
+        },
+        writable: true,
+        configurable: true,
+      });
+
+      document.startViewTransition = mockStartViewTransition;
+
+      goBack('/default');
+
+      expect(mockStartViewTransition).toHaveBeenCalledWith({
+        types: ['backwards'],
+        update: expect.any(Function),
+      });
+
+      const callArgs = /** @type {any} */ (mockStartViewTransition).mock.calls[0]?.[1];
+
+      if (callArgs) {
+        callArgs();
+      }
+
+      expect(mockNavigationBack).toHaveBeenCalled();
+    });
+
+    it('should go back when the previous entry matches the encoded fallback path', () => {
+      Object.defineProperty(window, 'navigation', {
+        value: {
+          currentEntry: { index: 1 },
+          entries: vi.fn(() => [
+            { sameDocument: true, url: 'https://example.com/#/assets/a/50%25off%20%231' },
+          ]),
+          back: vi.fn(),
+        },
+        writable: true,
+        configurable: true,
+      });
+
+      goBack(encodeRoutePath('/assets/a/50%off #1'));
+
+      expect(window.history.pushState).not.toHaveBeenCalled();
+      expect(document.startViewTransition).toHaveBeenCalledWith({
+        types: ['backwards'],
+        update: expect.any(Function),
+      });
+    });
+
+    it('should fall back to goto when the previous navigation entry does not match the target path', () => {
+      Object.defineProperty(window, 'navigation', {
+        value: {
+          currentEntry: { index: 1 },
+          entries: vi.fn(() => [{ sameDocument: true, url: 'https://example.com/#/collections' }]),
+          back: vi.fn(),
+        },
+        writable: true,
+        configurable: true,
+      });
+
+      goBack('/default');
+
+      expect(window.history.pushState).toHaveBeenCalledWith(
+        { from: 'https://example.com/#/collections' },
+        '',
+        'https://example.com/#/default',
+      );
+    });
+
+    it('should use window.navigation.back() for a previous entry that `returnTo` accepts', () => {
+      const mockNavigationBack = vi.fn();
+      const mockStartViewTransition = vi.fn();
+
+      Object.defineProperty(window, 'navigation', {
+        value: {
+          currentEntry: { index: 1 },
+          entries: vi.fn(() => [{ sameDocument: true, url: 'https://example.com/#/assets' }]),
+          back: mockNavigationBack,
+        },
+        writable: true,
+        configurable: true,
+      });
+
+      document.startViewTransition = mockStartViewTransition;
+
+      const returnTo = vi.fn((path) => path === '/assets');
+
+      goBack('/default', { returnTo });
+
+      expect(returnTo).toHaveBeenCalledWith('/assets');
+
+      expect(window.history.pushState).not.toHaveBeenCalled();
+      /** @type {any} */ (mockStartViewTransition).mock.calls[0][0].update();
+      expect(mockNavigationBack).toHaveBeenCalled();
+    });
+
+    it('should fall back to goto when `returnTo` rejects the previous entry', () => {
+      Object.defineProperty(window, 'navigation', {
+        value: {
+          currentEntry: { index: 1 },
+          entries: vi.fn(() => [{ sameDocument: true, url: 'https://example.com/#/assets' }]),
+          back: vi.fn(),
+        },
+        writable: true,
+        configurable: true,
+      });
+
+      goBack('/default', { returnTo: vi.fn((path) => path.startsWith('/search/')) });
+
+      expect(window.history.pushState).toHaveBeenCalledWith(
+        { from: 'https://example.com/#/collections' },
+        '',
+        'https://example.com/#/default',
+      );
+    });
+
+    it('should fall back to goto when the previous navigation entry is missing', () => {
+      Object.defineProperty(window, 'navigation', {
+        value: {
+          currentEntry: { index: 1 },
+          entries: vi.fn(() => []),
+          back: vi.fn(),
+        },
+        writable: true,
+        configurable: true,
+      });
+
+      goBack('/default');
+
+      expect(window.history.pushState).toHaveBeenCalledWith(
+        { from: 'https://example.com/#/collections' },
+        '',
+        'https://example.com/#/default',
+      );
+    });
+
     it('should use history.back() when history state has from property', () => {
       // Mock history with state
       Object.defineProperty(window, 'history', {
@@ -481,7 +1088,7 @@ describe('navigation', () => {
       goBack('/default', options);
 
       expect(window.history.replaceState).toHaveBeenCalledWith(
-        { test: true, from: 'https://example.com/#/collections' },
+        { test: true, from: undefined },
         '',
         'https://example.com/#/default',
       );
@@ -490,7 +1097,7 @@ describe('navigation', () => {
 
   describe('openProductionSite', () => {
     it('should open display_url when available', () => {
-      vi.mocked(get).mockReturnValue({
+      cmsConfig.current = /** @type {any} */ ({
         display_url: 'https://my-site.com',
         _siteURL: 'https://fallback.com',
       });
@@ -505,7 +1112,7 @@ describe('navigation', () => {
     });
 
     it('should fall back to _siteURL when no display_url', () => {
-      vi.mocked(get).mockReturnValue({
+      cmsConfig.current = /** @type {any} */ ({
         _siteURL: 'https://fallback.com',
       });
 
@@ -519,7 +1126,7 @@ describe('navigation', () => {
     });
 
     it('should use root path when no URLs available', () => {
-      vi.mocked(get).mockReturnValue({});
+      cmsConfig.current = /** @type {any} */ ({});
 
       openProductionSite();
 
@@ -570,7 +1177,7 @@ describe('navigation', () => {
         if (fn) fn();
       });
 
-      const mockTransition = { finished: Promise.resolve() };
+      const mockTransition = { ready: Promise.resolve(), finished: Promise.resolve() };
 
       // @ts-ignore - Simplified mock for testing
       document.startViewTransition = vi.fn((config) => {
@@ -589,7 +1196,7 @@ describe('navigation', () => {
 
     it('should use view transition API when document.startViewTransition is supported', async () => {
       const mockUpdateContent = vi.fn();
-      const mockTransition = { update: vi.fn() };
+      const mockTransition = { ready: Promise.resolve(), finished: Promise.resolve() };
       const { sleep } = await import('@sveltia/utils/misc');
       const { flushSync } = await import('svelte');
 
@@ -619,28 +1226,149 @@ describe('navigation', () => {
 
     it('should handle backwards transition type', async () => {
       const mockUpdateContent = vi.fn();
-      const mockTransition = { finished: Promise.resolve() };
+      const mockTransition = { ready: Promise.resolve(), finished: Promise.resolve() };
 
-      document.startViewTransition = vi.fn().mockReturnValue(mockTransition);
+      // @ts-ignore - Simplified mock for testing
+      document.startViewTransition = vi.fn((config) => {
+        config.update();
+
+        return mockTransition;
+      });
 
       startViewTransition('backwards', mockUpdateContent);
 
       await mockTransition.finished;
 
+      expect(document.startViewTransition).toHaveBeenCalledWith(
+        expect.objectContaining({ types: ['backwards'] }),
+      );
       expect(mockUpdateContent).toHaveBeenCalled();
     });
 
     it('should handle unknown transition type', async () => {
       const mockUpdateContent = vi.fn();
-      const mockTransition = { finished: Promise.resolve() };
+      const mockTransition = { ready: Promise.resolve(), finished: Promise.resolve() };
 
-      document.startViewTransition = vi.fn().mockReturnValue(mockTransition);
+      // @ts-ignore - Simplified mock for testing
+      document.startViewTransition = vi.fn((config) => {
+        config.update();
+
+        return mockTransition;
+      });
 
       startViewTransition('unknown', mockUpdateContent);
 
       await mockTransition.finished;
 
+      expect(document.startViewTransition).toHaveBeenCalledWith(
+        expect.objectContaining({ types: ['unknown'] }),
+      );
       expect(mockUpdateContent).toHaveBeenCalled();
+    });
+
+    it('should skip the running transition when a key is pressed', async () => {
+      const { promise: finished, resolve } = Promise.withResolvers();
+
+      const mockTransition = {
+        ready: Promise.resolve(),
+        finished,
+        skipTransition: vi.fn(),
+      };
+
+      // @ts-ignore - Simplified mock for testing
+      document.startViewTransition = vi.fn().mockReturnValue(mockTransition);
+
+      startViewTransition('forwards', vi.fn());
+      pressKey();
+      expect(mockTransition.skipTransition).toHaveBeenCalledTimes(1);
+
+      // Nothing to skip once the transition is over
+      resolve(undefined);
+      await finished;
+      await Promise.resolve();
+      pressKey();
+      expect(mockTransition.skipTransition).toHaveBeenCalledTimes(1);
+    });
+
+    it('should observe a rejected ready promise when the transition is skipped', async () => {
+      const mockUpdateContent = vi.fn();
+      const unhandled = vi.fn();
+
+      // A skipped transition still runs `update` and still resolves `finished`; only `ready` is
+      // rejected, which is what reaches the console when nothing observes it
+      const mockTransition = {
+        ready: Promise.reject(new DOMException('Transition was aborted', 'InvalidStateError')),
+        finished: Promise.resolve(),
+      };
+
+      process.on('unhandledRejection', unhandled);
+      document.startViewTransition = vi.fn().mockReturnValue(mockTransition);
+
+      startViewTransition('forwards', mockUpdateContent);
+
+      // Give the rejection a chance to go unhandled
+      await new Promise((resolve) => {
+        setTimeout(resolve, 10);
+      });
+
+      process.off('unhandledRejection', unhandled);
+
+      expect(unhandled).not.toHaveBeenCalled();
+    });
+
+    it('should report and observe a rejected finished promise', async () => {
+      const mockUpdateContent = vi.fn();
+      const unhandled = vi.fn();
+      const error = new Error('update failed');
+      const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+      const mockTransition = {
+        ready: Promise.resolve(),
+        finished: Promise.reject(error),
+      };
+
+      process.on('unhandledRejection', unhandled);
+      document.startViewTransition = vi.fn().mockReturnValue(mockTransition);
+
+      startViewTransition('forwards', mockUpdateContent);
+
+      await new Promise((resolve) => {
+        setTimeout(resolve, 10);
+      });
+
+      process.off('unhandledRejection', unhandled);
+
+      expect(consoleError).toHaveBeenCalledWith(error);
+      expect(unhandled).not.toHaveBeenCalled();
+    });
+
+    it('should start a new transition once a skipped one has settled', async () => {
+      const mockUpdateContent = vi.fn();
+
+      const skipped = {
+        ready: Promise.reject(new DOMException('Transition was aborted', 'InvalidStateError')),
+        finished: Promise.resolve(),
+      };
+
+      const startViewTransitionMock = vi.fn().mockReturnValue(skipped);
+
+      document.startViewTransition = startViewTransitionMock;
+
+      startViewTransition('forwards', mockUpdateContent);
+
+      // Wait for `finished` to settle, which releases the guard against nested transitions
+      await new Promise((resolve) => {
+        setTimeout(resolve, 10);
+      });
+
+      startViewTransitionMock.mockReturnValue({
+        ready: Promise.resolve(),
+        finished: Promise.resolve(),
+      });
+
+      startViewTransition('backwards', mockUpdateContent);
+
+      expect(startViewTransitionMock).toHaveBeenCalledTimes(2);
     });
 
     it('should handle TypeError when startViewTransition throws', async () => {
@@ -664,27 +1392,28 @@ describe('navigation', () => {
     });
   });
 
-  describe('hasOverlay derived store', () => {
-    it('should test the derived callback logic for hasOverlay', () => {
-      // The hasOverlay store is derived from [showContentOverlay, showAssetOverlay]
-      // The callback returns true if either overlay is shown
-      /**
-       * Test callback for hasOverlay derived store.
-       * @type {(a: boolean, b: boolean) => boolean}
-       */
-      const callback = (contentOverlay, assetOverlay) => contentOverlay || assetOverlay;
+  describe('hasOverlay derived state', () => {
+    it('should be true if either overlay is shown', () => {
+      showContentOverlay.current = false;
+      showAssetOverlay.current = false;
+      expect(hasOverlay.current).toBe(false);
 
-      expect(callback(false, false)).toBe(false);
-      expect(callback(true, false)).toBe(true);
-      expect(callback(false, true)).toBe(true);
-      expect(callback(true, true)).toBe(true);
+      showContentOverlay.current = true;
+      expect(hasOverlay.current).toBe(true);
+
+      showContentOverlay.current = false;
+      showAssetOverlay.current = true;
+      expect(hasOverlay.current).toBe(true);
+
+      showContentOverlay.current = true;
+      expect(hasOverlay.current).toBe(true);
     });
   });
 
   describe('goBack with history.back()', () => {
     it('should call window.history.back when history state has from property', async () => {
       const mockHistoryBack = vi.fn();
-      const mockTransition = { finished: Promise.resolve() };
+      const mockTransition = { ready: Promise.resolve(), finished: Promise.resolve() };
 
       // Mock history with state and back method
       Object.defineProperty(window, 'history', {

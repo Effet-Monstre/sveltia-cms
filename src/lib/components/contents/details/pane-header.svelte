@@ -1,162 +1,266 @@
 <script>
   import { _ } from '@sveltia/i18n';
   import { Divider, Menu, MenuButton, MenuItem, Spacer, Toolbar } from '@sveltia/ui';
-  import equal from 'fast-deep-equal';
-  import { writable } from 'svelte/store';
 
   import CopyMenuItems from '$lib/components/contents/details/editor/copy-menu-items.svelte';
-  import TranslateButton from '$lib/components/contents/details/editor/translate-button.svelte';
+  import ResetDialog from '$lib/components/contents/details/editor/reset-dialog.svelte';
+  import ResetMenuItems from '$lib/components/contents/details/editor/reset-menu-items.svelte';
   import LocaleSwitcher from '$lib/components/contents/details/locale-switcher.svelte';
   import PreviewButton from '$lib/components/contents/details/preview-button.svelte';
+  import PreviewLinkButton from '$lib/components/contents/details/preview-link-button.svelte';
   import { backend } from '$lib/services/backends';
-  import { entryDraft, filterRealValues } from '$lib/services/contents/draft';
+  import { isDraftReadonly } from '$lib/services/config/readonly';
+  import { getEntryDraftContext } from '$lib/services/contents/draft/state.svelte';
   import { toggleLocale } from '$lib/services/contents/draft/update/locale';
-  import { revertChanges } from '$lib/services/contents/draft/update/revert';
-  import { getEntryPreviewURL, getEntryRepoBlobURL } from '$lib/services/contents/entry';
+  import { canResetEntry } from '$lib/services/contents/draft/update/reset';
+  import { getLocaleContentLabel } from '$lib/services/contents/editor/panes';
+  import { getEntryRepoBlobURL } from '$lib/services/contents/entry';
   import { getLocaleLabel } from '$lib/services/contents/i18n';
-  import { DEFAULT_I18N_CONFIG } from '$lib/services/contents/i18n/config';
+  import { getDraftI18nConfig } from '$lib/services/contents/i18n/config';
+  import { deployments, deployPollTimedOut, productionSHA } from '$lib/services/deployments';
+  import { getEntryPreviewLink } from '$lib/services/deployments/link';
+  import { recheckDeployments } from '$lib/services/deployments/poll';
   import { env } from '$lib/services/user/env.svelte';
   import { prefs } from '$lib/services/user/prefs.svelte';
+  import { createRawState } from '$lib/services/utils/state.svelte';
   import { openNewTab } from '$lib/services/utils/window';
+  import {
+    getUnpublishedEntryByDraft,
+    isPendingDeletion,
+    workflowEnabled,
+  } from '$lib/services/workflow';
 
   /**
-   * @import { Writable } from 'svelte/store';
    * @import { EntryEditorPane } from '$lib/types/private';
+   * @import { ResetAction } from '$lib/services/contents/editor/reset';
    */
 
   /**
    * @typedef {object} Props
    * @property {string} id The wrapper element’s `id` attribute.
-   * @property {Writable<?EntryEditorPane>} thisPane This pane’s mode and locale.
-   * @property {Writable<?EntryEditorPane>} [thatPane] Another pane’s mode and locale.
+   * @property {{ current: ?EntryEditorPane }} thisPane This pane’s mode and locale.
+   * @property {{ current: ?EntryEditorPane }} [thatPane] Another pane’s mode and locale.
    */
+
+  const entryDraft = getEntryDraftContext();
 
   /** @type {Props} */
   let {
     /* eslint-disable prefer-const */
     id,
     thisPane,
-    thatPane = writable(null),
+    thatPane = createRawState(null),
     /* eslint-enable prefer-const */
   } = $props();
 
-  const collection = $derived($entryDraft?.collection);
-  const collectionFile = $derived($entryDraft?.collectionFile);
-  const originalEntry = $derived($entryDraft?.originalEntry);
-  const originalValues = $derived($entryDraft?.originalValues ?? {});
+  const collection = $derived(entryDraft.current?.collection);
+  const collectionFile = $derived(entryDraft.current?.collectionFile);
+  const originalEntry = $derived(entryDraft.current?.originalEntry);
+  /* v8 ignore start -- the header is only rendered for a pane while the draft is there */
   const { i18nEnabled, saveAllLocales, allLocales, defaultLocale } = $derived(
-    (collectionFile ?? collection)?._i18n ?? DEFAULT_I18N_CONFIG,
+    getDraftI18nConfig(entryDraft.current),
   );
-  const isLocaleEnabled = $derived($entryDraft?.currentLocales[$thisPane?.locale ?? '']);
+  const isLocaleEnabled = $derived(
+    entryDraft.current?.currentLocales[thisPane.current?.locale ?? ''],
+  );
   const isOnlyLocale = $derived(
-    Object.values($entryDraft?.currentLocales ?? {}).filter((enabled) => enabled).length === 1,
+    Object.values(entryDraft.current?.currentLocales ?? {}).filter((enabled) => enabled).length ===
+      1,
   );
+  /* v8 ignore stop */
   const otherLocales = $derived(
-    i18nEnabled ? allLocales.filter((l) => l !== $thisPane?.locale) : [],
+    i18nEnabled ? allLocales.filter((l) => l !== thisPane.current?.locale) : [],
   );
   const canCopy = $derived(!!otherLocales.length);
-  const canRevert = $derived(
-    $thisPane?.locale &&
-      !equal(
-        originalValues[$thisPane.locale],
-        // Exclude internal properties from the comparison
-        filterRealValues($state.snapshot($entryDraft?.currentValues[$thisPane.locale]) ?? {}),
-      ),
-  );
-  const canPreview = $derived($entryDraft?.canPreview ?? true);
-  const previewURL = $derived(
-    collection && originalEntry && $thisPane?.locale
-      ? getEntryPreviewURL(originalEntry, $thisPane.locale, collection, collectionFile)
+  // Every option in the menu edits the content, which an entry awaiting deletion doesn’t allow
+  const pendingDeletion = $derived(isPendingDeletion(entryDraft.current?.originalEntry));
+  // Nor does a read-only entry, but it can still be viewed on the site or in the repository, so the
+  // menu keeps the links to it
+  const readonly = $derived(isDraftReadonly(entryDraft.current));
+  /**
+   * Whether restoring the default values or clearing the fields would change anything. It takes
+   * going through the whole locale, so it’s only checked as the menu opens rather than on every
+   * change.
+   */
+  let resetAvailability = $state({ restore: false, clear: false });
+  /** @type {ResetAction} */
+  let resetAction = $state('restore');
+  let showResetDialog = $state(false);
+  /** @type {MenuButton | undefined} */
+  let menuButton = $state();
+
+  /**
+   * Check whether restoring the default values or clearing the fields would change anything.
+   */
+  const updateResetAvailability = () => {
+    const draft = entryDraft.current;
+    const locale = thisPane.current?.locale;
+
+    /* v8 ignore next 3 -- the menu is only offered for an edit pane while the draft is there */
+    if (!draft || !locale) {
+      return;
+    }
+
+    resetAvailability = {
+      restore: canResetEntry({ draft, locale, restore: true }),
+      clear: canResetEntry({ draft, locale }),
+    };
+  };
+
+  /* v8 ignore next -- the header is only rendered for a pane while the draft is there */
+  const canPreview = $derived(entryDraft.current?.canPreview ?? true);
+  // Look the entry up in the store rather than reading the draft, so the preview link follows the
+  // head commit as it moves with each save, the same way the entry toolbar does
+  const pullRequest = $derived(
+    workflowEnabled.current && entryDraft.current
+      ? getUnpublishedEntryByDraft(entryDraft.current)?.workflow.pullRequest
       : undefined,
+  );
+  // `PreviewLinkButton` renders nothing when there’s no link to offer, so the link is resolved
+  // here as well — the divider above the button has to know whether anything will follow it
+  /* v8 ignore start -- only read for an existing entry, once the pane is set up */
+  const previewLink = $derived(
+    originalEntry && collection && thisPane.current
+      ? getEntryPreviewLink({
+          entry: originalEntry,
+          locale: thisPane.current.locale,
+          collection,
+          collectionFile,
+          pullRequest,
+          deployments: deployments.current,
+          productionSHA: productionSHA.current,
+          pollTimedOut: deployPollTimedOut.current,
+        })
+      : undefined,
+  );
+  /* v8 ignore stop */
+  // Whether the menu has anything that doesn’t edit the content, all a read-only entry gets
+  const hasLinkItems = $derived(
+    !!originalEntry &&
+      !!collection &&
+      !!(previewLink || deployPollTimedOut.current || prefs.devModeEnabled),
   );
 </script>
 
 <div role="none" {id} class="header">
-  <Toolbar variant="secondary" aria-label={_('secondary')}>
+  <Toolbar variant="secondary" ariaLabel={_('secondary')}>
     {#if i18nEnabled && allLocales.length > 1}
       <LocaleSwitcher {id} {thisPane} {thatPane} />
       {#if (env.isSmallScreen || env.isMediumScreen) && canPreview}
         <PreviewButton {thisPane} />
       {/if}
     {:else if !(env.isSmallScreen || env.isMediumScreen)}
-      <h3 role="none">{$thisPane?.mode === 'preview' ? _('preview') : _('edit')}</h3>
+      <h3 role="none">{thisPane.current?.mode === 'preview' ? _('preview') : _('edit')}</h3>
     {:else if canPreview}
       <PreviewButton {thisPane} />
     {/if}
     <Spacer flex />
-    {#if $thisPane?.mode === 'edit'}
-      {@const localeLabel = getLocaleLabel($thisPane.locale) ?? $thisPane.locale}
-      {#if false && canCopy}
-        <TranslateButton locale={$thisPane.locale} {otherLocales} />
+    {#if thisPane.current?.mode === 'edit'}
+      {@const paneLocale = thisPane.current.locale}
+      {@const localeLabel = getLocaleLabel(paneLocale) ?? paneLocale}
+      {#if !readonly || hasLinkItems}
+        <MenuButton
+          variant="ghost"
+          iconic
+          disabled={pendingDeletion}
+          popupPosition="bottom-right"
+          aria-label={getLocaleContentLabel('show_content_options_x_locale', paneLocale)}
+          onclick={updateResetAvailability}
+          onkeydown={updateResetAvailability}
+          bind:this={menuButton}
+        >
+          {#snippet popup()}
+            <Menu ariaLabel={getLocaleContentLabel('content_options_x_locale', paneLocale)}>
+              {#if !readonly}
+                {#if canCopy && thisPane.current?.locale}
+                  <CopyMenuItems locale={thisPane.current.locale} {otherLocales} submenu />
+                {/if}
+                <!-- The fork hides every Revert command; see `docs/fork.md` -->
+                <ResetMenuItems
+                  scope="locale"
+                  separator={canCopy}
+                  available={resetAvailability}
+                  onSelect={(action) => {
+                    resetAction = action;
+                    showResetDialog = true;
+                  }}
+                />
+                {#if !saveAllLocales && thisPane.current?.locale}
+                  <Divider />
+                  <MenuItem
+                    label={_(
+                      isLocaleEnabled
+                        ? 'disable_x_locale'
+                        : entryDraft.current?.currentValues[thisPane.current.locale]
+                          ? 'reenable_x_locale'
+                          : 'enable_x_locale',
+                      { values: { locale: localeLabel } },
+                    )}
+                    disabled={thisPane.current.locale === defaultLocale ||
+                      (isLocaleEnabled && isOnlyLocale)}
+                    onclick={() => {
+                      /* v8 ignore next 6 -- the menu is only offered for a pane with a locale */
+                      if (entryDraft.current) {
+                        toggleLocale({
+                          draft: entryDraft.current,
+                          locale: thisPane.current?.locale ?? '',
+                        });
+                      }
+                    }}
+                  />
+                {/if}
+              {/if}
+              {#if originalEntry && collection && thisPane.current}
+                {#if !readonly && hasLinkItems}
+                  <Divider />
+                {/if}
+                <PreviewLinkButton
+                  as="menuitem"
+                  entry={originalEntry}
+                  locale={thisPane.current.locale}
+                  {collection}
+                  {collectionFile}
+                  {pullRequest}
+                />
+                {#if deployPollTimedOut.current}
+                  <MenuItem
+                    label={_('deploy_preview.check_again')}
+                    onclick={() => {
+                      recheckDeployments();
+                    }}
+                  />
+                {/if}
+                {#if prefs.devModeEnabled}
+                  <MenuItem
+                    disabled={!backend.current?.repository?.blobBaseURL}
+                    label={backend.current?.repository?.label
+                      ? _('view_on_x', { values: { service: backend.current.repository.label } })
+                      : _('view_in_repository')}
+                    onclick={() => {
+                      /* v8 ignore next 3 -- the item is only offered for an existing entry */
+                      if (originalEntry && thisPane.current) {
+                        openNewTab(getEntryRepoBlobURL(originalEntry, thisPane.current.locale));
+                      }
+                    }}
+                  />
+                {/if}
+              {/if}
+            </Menu>
+          {/snippet}
+        </MenuButton>
       {/if}
-      <MenuButton
-        variant="ghost"
-        iconic
-        popupPosition="bottom-right"
-        aria-label={_('show_content_options_x_locale', { values: { locale: localeLabel } })}
-      >
-        {#snippet popup()}
-          <Menu aria-label={_('content_options_x_locale', { values: { locale: localeLabel } })}>
-            {#if canCopy && $thisPane?.locale}
-              <CopyMenuItems locale={$thisPane.locale} {otherLocales} />
-            {/if}
-            {#if false}
-              <MenuItem
-                label={_('revert_changes')}
-                disabled={!canRevert}
-                onclick={() => {
-                  revertChanges({ locale: $thisPane?.locale });
-                }}
-              />
-            {/if}
-            {#if !saveAllLocales && $thisPane?.locale}
-              <Divider />
-              <MenuItem
-                label={_(
-                  isLocaleEnabled
-                    ? 'disable_x_locale'
-                    : $state.snapshot($entryDraft?.currentValues[$thisPane.locale])
-                      ? 'reenable_x_locale'
-                      : 'enable_x_locale',
-                  { values: { locale: localeLabel } },
-                )}
-                disabled={$thisPane.locale === defaultLocale || (isLocaleEnabled && isOnlyLocale)}
-                onclick={() => {
-                  toggleLocale($thisPane?.locale ?? '');
-                }}
-              />
-            {/if}
-            {#if originalEntry && (previewURL || prefs.devModeEnabled)}
-              <Divider />
-              {#if previewURL}
-                <MenuItem
-                  label={_('view_on_live_site')}
-                  onclick={() => {
-                    openNewTab(previewURL);
-                  }}
-                />
-              {/if}
-              {#if prefs.devModeEnabled}
-                <MenuItem
-                  disabled={!$backend?.repository?.blobBaseURL}
-                  label={_('view_on_x', {
-                    values: { service: $backend?.repository?.label },
-                    default: _('view_in_repository'),
-                  })}
-                  onclick={() => {
-                    if (originalEntry && $thisPane) {
-                      openNewTab(getEntryRepoBlobURL(originalEntry, $thisPane.locale));
-                    }
-                  }}
-                />
-              {/if}
-            {/if}
-          </Menu>
-        {/snippet}
-      </MenuButton>
     {/if}
   </Toolbar>
 </div>
+
+<ResetDialog
+  bind:open={showResetDialog}
+  action={resetAction}
+  locale={thisPane.current?.locale}
+  onClose={() => {
+    menuButton?.focus();
+  }}
+/>
 
 <style>
   .header {

@@ -1,10 +1,10 @@
 <script>
   import { _, locale as appLocale } from '@sveltia/i18n';
-  import { Alert, Toast } from '@sveltia/ui';
-  import { onMount } from 'svelte';
+  import { onMount, untrack } from 'svelte';
 
   import PageContainerMainArea from '$lib/components/common/page-container-main-area.svelte';
   import PageContainer from '$lib/components/common/page-container.svelte';
+  import BackupFeedback from '$lib/components/contents/details/backup-feedback.svelte';
   import ContentDetailsOverlay from '$lib/components/contents/details/content-details-overlay.svelte';
   import EntryList from '$lib/components/contents/list/entry-list.svelte';
   import FileList from '$lib/components/contents/list/file-list.svelte';
@@ -12,201 +12,83 @@
   import PrimaryToolbar from '$lib/components/contents/list/primary-toolbar.svelte';
   import SecondarySidebar from '$lib/components/contents/list/secondary-sidebar.svelte';
   import SecondaryToolbar from '$lib/components/contents/list/secondary-toolbar.svelte';
+  import NotFound from '$lib/components/global/not-found.svelte';
   import SearchMainArea from '$lib/components/search/search-main-area.svelte';
-  import {
-    announcedPageStatus,
-    goto,
-    parseLocation,
-    updateContentFromHashChange,
-  } from '$lib/services/app/navigation';
-  import {
-    getCollection,
-    getCollectionLabel,
-    getFirstCollection,
-    getSingletonCollection,
-    getValidCollections,
-    selectedCollection,
-  } from '$lib/services/contents/collection';
-  import { contentUpdatesToast } from '$lib/services/contents/collection/data';
-  import {
-    getCollectionFileEntry,
-    getCollectionFileLabel,
-  } from '$lib/services/contents/collection/files';
-  import { listedEntries } from '$lib/services/contents/collection/view';
-  import { createDraft } from '$lib/services/contents/draft/create';
+  import { updateContentFromHashChange } from '$lib/services/app/navigation';
+  import { getCollectionLabel, selectedCollection } from '$lib/services/contents/collection';
+  import { listedEntries, listedUnpublishedEntries } from '$lib/services/contents/collection/view';
+  import { showBackupToastIfNeeded } from '$lib/services/contents/draft/backup';
+  import { EntryDraftState } from '$lib/services/contents/draft/state.svelte';
   import { showContentOverlay } from '$lib/services/contents/editor';
-  import { getEntrySummary } from '$lib/services/contents/entry/summary';
-  import { isSearchRoute } from '$lib/services/search/navigation';
+  import { CONTENTS_ROUTE_REGEX, resolveContentsRoute } from '$lib/services/contents/navigation';
   import { env } from '$lib/services/user/env.svelte';
+  import { watch } from '$lib/services/utils/state.svelte';
+  import { workflowDataReady } from '$lib/services/workflow';
 
   /**
-   * @import { InternalCollection } from '$lib/types/private';
+   * Draft open in the content editor overlay, if any.
    */
-
-  const ROUTE_REGEX =
-    /^\/collections(?:\/(?<_collectionName>[^/]+)(?:\/(?<routeType>new|entries))?(?:\/(?<subPath>.+?))?)?$/;
+  const entryDraft = new EntryDraftState();
 
   let isIndexPage = $state(false);
   let isSearchPage = $state(false);
+  /** Message key shown on the Not Found view, or an empty string when the route resolved. */
+  let notFoundKey = $state('');
+  /**
+   * Whether the route can’t be resolved until the Editorial Workflow drafts are in. The route is
+   * tried again once they are; the effect below re-runs {@link navigate}.
+   */
+  let awaitingDrafts = $state(false);
+  /** @type {string | undefined} */
   let editorLocale = $state();
 
-  const MainContent = $derived('files' in ($selectedCollection ?? {}) ? FileList : EntryList);
+  // The unpublished entries are listed too, and can be the only ones in the collection
+  const hasListedEntries = $derived(
+    !!(listedEntries.current.length || listedUnpublishedEntries.current.length),
+  );
+
+  const MainContent = $derived(
+    'files' in (selectedCollection.current ?? {}) ? FileList : EntryList,
+  );
 
   /**
    * Navigate to the content list or content details page given the URL hash.
-   * @todo Show Not Found page.
    */
   const navigate = () => {
-    const { path, params } = parseLocation();
-    const match = path.match(ROUTE_REGEX);
-
-    isIndexPage = false;
-    isSearchPage = false;
-
-    // Set the editor locale if specified in the URL params, e.g., `?_locale=fr`
-    editorLocale = params._locale;
-    delete params._locale;
-
-    // `/collections/_singletons` should not be used unless there is only the singleton collection
-    if ($selectedCollection?.name === '_singletons' && getValidCollections().length) {
-      $selectedCollection = undefined;
-    }
-
-    if (!match?.groups) {
-      $showContentOverlay = false;
-      // Check if it’s the search page, which has a different URL pattern (`#/search/{query}`)
-      isSearchPage = isSearchRoute(path);
-
-      return; // Different page
-    }
-
-    const { _collectionName, routeType, subPath } = match.groups;
-
-    if (!_collectionName) {
-      if (env.isSmallScreen) {
-        // Show the collection list only
-        $selectedCollection = undefined;
-        $showContentOverlay = false;
-        $announcedPageStatus = _('viewing_collection_list');
-        isIndexPage = true;
-      } else {
-        // Redirect to the selected, first or singleton collection
-        const collection = $selectedCollection || getFirstCollection() || getSingletonCollection();
-
-        goto(`/collections/${collection?.name}`, { replaceState: true });
-      }
-
-      return;
-    }
-
-    /** @type {InternalCollection | undefined} */
-    const collection = getCollection(_collectionName);
-
-    if (!collection || collection.hide) {
-      $selectedCollection = undefined;
-    } else if ($selectedCollection?.name !== collection.name) {
-      $selectedCollection = collection;
-    }
-
-    if (!collection || !$selectedCollection) {
-      $showContentOverlay = false;
-      $announcedPageStatus = _('collection_not_found');
-
-      return; // Not Found
-    }
-
-    const { name: collectionName } = $selectedCollection;
-    const collectionLabel = getCollectionLabel($selectedCollection);
-    const _fileMap = '_fileMap' in $selectedCollection ? $selectedCollection._fileMap : undefined;
-
-    if (!routeType) {
-      $showContentOverlay = false;
-      $announcedPageStatus = _('viewing_x_collection', {
-        values: {
-          collection: collectionLabel,
-          count: $listedEntries.length,
-        },
-      });
-
-      return;
-    }
-
-    $showContentOverlay = true;
-
-    if (_fileMap) {
-      // File/singleton collection
-      if (routeType === 'entries' && subPath) {
-        const originalEntry = getCollectionFileEntry(collectionName, subPath);
-        const collectionFile = _fileMap[subPath];
-
-        if (originalEntry) {
-          createDraft({ collection, collectionFile, originalEntry });
-        } else {
-          // File is not yet created
-          createDraft({
-            collection,
-            collectionFile,
-            originalEntry: {
-              slug: collectionFile.name,
-              locales: Object.fromEntries(
-                collectionFile._i18n.initialLocales.map((_locale) => [_locale, {}]),
-              ),
-            },
-          });
-        }
-
-        $announcedPageStatus = _(`edit_${collection._type}_announcement`, {
-          values: {
-            collection: collectionLabel,
-            file: getCollectionFileLabel(collectionFile),
-          },
-        });
-      }
-    } else {
-      // Entry collection
-      if (routeType === 'new' && !subPath) {
-        createDraft({
-          collection,
-          dynamicValues: params,
-          isIndexFile: !!window.history.state?.index,
-        });
-
-        $announcedPageStatus = _('create_entry_announcement', {
-          values: {
-            collection: collectionLabel,
-          },
-        });
-      }
-
-      if (routeType === 'entries' && subPath) {
-        const originalEntry = $listedEntries.find((entry) => entry.subPath === subPath);
-
-        if (originalEntry && appLocale.current) {
-          createDraft({ collection, originalEntry });
-
-          $announcedPageStatus = _('edit_entry_announcement', {
-            values: {
-              collection: collectionLabel,
-              entry: getEntrySummary($selectedCollection, originalEntry),
-            },
-          });
-        }
-      }
-    }
+    ({ isIndexPage, isSearchPage, notFoundKey, awaitingDrafts, editorLocale } =
+      resolveContentsRoute({ entryDraft }));
   };
 
   onMount(() => {
     navigate();
 
     return () => {
-      $showContentOverlay = false;
+      showContentOverlay.current = false;
     };
+  });
+
+  watch(
+    () => showContentOverlay.current,
+    () => {
+      if (!showContentOverlay.current) {
+        // The draft is kept once the editor is closed, so its backup can be looked up. There is no
+        // draft before an entry has been opened
+        showBackupToastIfNeeded(entryDraft.current);
+      }
+    },
+  );
+
+  $effect(() => {
+    if (awaitingDrafts && workflowDataReady.current) {
+      // Opening an entry reads and replaces the draft, which is no reason to navigate again
+      untrack(() => navigate());
+    }
   });
 </script>
 
 <svelte:window
   onhashchange={(event) => {
-    updateContentFromHashChange(event, navigate, ROUTE_REGEX);
+    updateContentFromHashChange(event, navigate, CONTENTS_ROUTE_REGEX);
   }}
 />
 
@@ -219,25 +101,32 @@
   {#snippet main()}
     {#if isSearchPage}
       <SearchMainArea />
+    {:else if notFoundKey}
+      <PageContainerMainArea id="collection-container" aria-label={_('content_library')}>
+        {#snippet mainContent()}
+          <NotFound message={_(notFoundKey)} />
+        {/snippet}
+      </PageContainerMainArea>
     {:else if !env.isSmallScreen || !isIndexPage}
       <PageContainerMainArea
+        id="collection-container"
         aria-label={_('x_collection', {
           values: {
             collection:
               // `appLocale.current` is a key, because `getCollectionLabel` can return a localized
               // label
-              appLocale.current && $selectedCollection
-                ? getCollectionLabel($selectedCollection)
+              appLocale.current && selectedCollection.current
+                ? getCollectionLabel(selectedCollection.current)
                 : '',
           },
         })}
-        aria-description={$selectedCollection?.description}
+        aria-description={selectedCollection.current?.description}
       >
         {#snippet primaryToolbar()}
           <PrimaryToolbar />
         {/snippet}
         {#snippet secondaryToolbar()}
-          {#if $selectedCollection?._type === 'entry' && $listedEntries.length}
+          {#if selectedCollection.current?._type === 'entry' && hasListedEntries}
             <SecondaryToolbar />
           {/if}
         {/snippet}
@@ -252,20 +141,9 @@
   {/snippet}
 </PageContainer>
 
-{#if $showContentOverlay}
-  <ContentDetailsOverlay {editorLocale} />
+{#if showContentOverlay.current}
+  <ContentDetailsOverlay {entryDraft} {editorLocale} loading={awaitingDrafts} />
 {/if}
 
-<Toast bind:show={$contentUpdatesToast.saved}>
-  <Alert status="success">
-    {_($contentUpdatesToast.published ? 'entry_saved_and_published' : 'entry_saved', {
-      values: { count: $contentUpdatesToast.count },
-    })}
-  </Alert>
-</Toast>
-
-<Toast bind:show={$contentUpdatesToast.deleted}>
-  <Alert status="success">
-    {_('entries_deleted', { values: { count: $contentUpdatesToast.count } })}
-  </Alert>
-</Toast>
+<!-- Outside the overlay, so the toast can tell the user about the backup once it’s closed -->
+<BackupFeedback />

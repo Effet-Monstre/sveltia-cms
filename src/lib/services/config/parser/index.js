@@ -1,7 +1,16 @@
+import { isURL } from '@sveltia/utils/string';
+
+import { customComponentRegistry } from '$lib/services/api/registries';
+import { warnDeprecation } from '$lib/services/config/deprecations';
 import { parseBackendConfig } from '$lib/services/config/parser/backend';
 import { parseCollections } from '$lib/services/config/parser/collections';
+import { parseFields } from '$lib/services/config/parser/fields';
+import { parseI18nConfig } from '$lib/services/config/parser/i18n';
 import { parseMediaConfig } from '$lib/services/config/parser/media';
-import { checkUnsupportedOptions } from '$lib/services/config/parser/utils/validator';
+import { parseMediaLibraries } from '$lib/services/config/parser/media-libraries';
+import { parseSlugConfig } from '$lib/services/config/parser/slug';
+import { addMessage, checkUnsupportedOptions } from '$lib/services/config/parser/utils/validator';
+import { isNonEmptyString } from '$lib/services/utils/string';
 
 /**
  * @import { CmsConfig } from '$lib/types/public';
@@ -13,13 +22,6 @@ import { checkUnsupportedOptions } from '$lib/services/config/parser/utils/valid
  * @type {UnsupportedOption[]}
  */
 const UNSUPPORTED_OPTIONS = [
-  // @todo Remove this warning when Sveltia CMS adds support for editorial workflow.
-  {
-    type: 'warning',
-    prop: 'publish_mode',
-    value: 'editorial_workflow',
-    strKey: 'editorial_workflow_unsupported',
-  },
   // Sveltia CMS doesn’t use a proxy server for local workflow, so this option is not applicable.
   { type: 'warning', prop: 'local_backend', strKey: 'unsupported_ignored_option' },
   // Sveltia CMS detects user’s locale from the browser, so this option is not applicable.
@@ -28,6 +30,15 @@ const UNSUPPORTED_OPTIONS = [
   // applicable.
   { type: 'warning', prop: 'search', strKey: 'unsupported_ignored_option' },
 ];
+
+/**
+ * Options that hold the URL of the site and have to be absolute. A `site_url` that isn’t a URL
+ * isn’t rejected at runtime, but it’s then unusable as the base of every preview link, so the links
+ * are silently dropped. The `display_url` option is only ever opened in a new tab, where a relative
+ * path resolves against the CMS origin as well as an absolute URL does, so it’s not checked.
+ * @type {(keyof CmsConfig)[]}
+ */
+const URL_OPTIONS = ['site_url'];
 
 /**
  * Parse and validate the CMS configuration.
@@ -39,7 +50,31 @@ const UNSUPPORTED_OPTIONS = [
  */
 export const parseCmsConfig = (cmsConfig, collectors) => {
   parseBackendConfig(cmsConfig, collectors);
+
+  URL_OPTIONS.forEach((option) => {
+    const url = cmsConfig[option];
+
+    // An empty string is as good as none, and a value of another type is reported against the
+    // JSON schema
+    if (isNonEmptyString(url) && !isURL(url.trim())) {
+      addMessage({
+        strKey: 'invalid_url_option',
+        values: { option, url },
+        context: { cmsConfig },
+        collectors,
+      });
+    }
+  });
+
+  // The option still works, but `logo.src` replaces it
+  if (cmsConfig.logo_url !== undefined) {
+    warnDeprecation('logo_url');
+  }
+
   parseMediaConfig(cmsConfig, collectors);
+  parseMediaLibraries({ config: cmsConfig, context: { cmsConfig }, collectors });
+  parseSlugConfig(cmsConfig, collectors);
+  parseI18nConfig(cmsConfig, collectors);
   parseCollections(cmsConfig, collectors);
 
   checkUnsupportedOptions({
@@ -47,5 +82,11 @@ export const parseCmsConfig = (cmsConfig, collectors) => {
     config: cmsConfig,
     context: { cmsConfig },
     collectors,
+  });
+
+  // Parse fields in custom editor components registered with `CMS.registerEditorComponent()`.
+  // @todo Figure out how to handle lazy-loaded components, as they may not be parsed here.
+  customComponentRegistry.forEach(({ fields }, componentName) => {
+    parseFields(fields, { cmsConfig, componentName }, collectors);
   });
 };

@@ -7,49 +7,69 @@
 -->
 <script>
   import { _ } from '@sveltia/i18n';
-  import { Button, Icon, Menu, MenuButton, MenuItem, Spacer, TruncatedText } from '@sveltia/ui';
-  import { isObject } from '@sveltia/utils/object';
-  import { escapeRegExp } from '@sveltia/utils/string';
-  import { unflatten } from 'flat';
-  import { getContext, onMount, untrack } from 'svelte';
-
-  import Image from '$lib/components/assets/shared/image.svelte';
-  import ExpandIcon from '$lib/components/common/expand-icon.svelte';
-  import VisibilityObserver from '$lib/components/common/visibility-observer.svelte';
-  import FieldEditor from '$lib/components/contents/details/editor/field-editor.svelte';
-  import AddItemButton from '$lib/components/contents/details/fields/object/add-item-button.svelte';
-  import ObjectHeader from '$lib/components/contents/details/fields/object/object-header.svelte';
-  import { getMediaFieldURL } from '$lib/services/assets/info';
-  import { entryDraft } from '$lib/services/contents/draft';
-  import { getDefaultValues } from '$lib/services/contents/draft/defaults';
-  import { updateListField } from '$lib/services/contents/draft/update/list';
   import {
-    getInitialExpanderState,
-    syncExpanderStates,
-  } from '$lib/services/contents/editor/expanders';
-  import { getField } from '$lib/services/contents/entry/fields';
-  import { formatSummary, getListFieldInfo } from '$lib/services/contents/fields/list/helper';
-  import { DEFAULT_I18N_CONFIG } from '$lib/services/contents/i18n/config';
-  import { env } from '$lib/services/user/env.svelte';
+    Button,
+    Icon,
+    Menu,
+    MenuButton,
+    MenuItem,
+    Spacer,
+    VisibilityObserver,
+  } from '@sveltia/ui';
+  import { sleep } from '@sveltia/utils/misc';
+  import { getContext, onMount } from 'svelte';
+  import { flip } from 'svelte/animate';
+
+  import ExpandIcon from '$lib/components/common/expand-icon.svelte';
+  import ReorderControls from '$lib/components/common/reorder-controls.svelte';
+  import AddItemButton from '$lib/components/contents/details/fields/object/add-item-button.svelte';
+  import ObjectBody from '$lib/components/contents/details/fields/object/object-body.svelte';
+  import ObjectHeader from '$lib/components/contents/details/fields/object/object-header.svelte';
+  import { getEntryDraftContext } from '$lib/services/contents/draft/state.svelte';
+  import { updateListFieldForLocales } from '$lib/services/contents/draft/update/list';
+  import { getValueMapSnapshot } from '$lib/services/contents/draft/value-map.svelte';
+  import { isExpanded, syncExpanderStates } from '$lib/services/contents/editor/fields';
+  import { getSubtree } from '$lib/services/contents/entry/subtree';
+  import {
+    formatSummary,
+    getListFieldInfo,
+    getListItemKey,
+    isSingleItemList,
+    tagListItems,
+  } from '$lib/services/contents/fields/list/helpers';
+  import {
+    createListItem,
+    getInitialListExpanderStates,
+  } from '$lib/services/contents/fields/list/items';
+  import { getUnknownTypeMessage } from '$lib/services/contents/fields/object/helpers';
+  import { getObjectThumbnail } from '$lib/services/contents/fields/object/thumbnail';
+  import { isFieldTranslatable } from '$lib/services/contents/i18n/fields';
+  import { createDragSorter } from '$lib/services/utils/drag-sorting.svelte';
 
   /**
-   * @import { FieldEditorContext, FieldEditorProps } from '$lib/types/private';
+   * @import { FieldEditorContext, FieldEditorProps, MediaFieldSource } from '$lib/types/private';
    * @import {
    * ComplexListField,
    * ListFieldWithSubField,
    * ListFieldWithSubFields,
    * ListFieldWithTypes,
+   * VariableFieldType,
    * } from '$lib/types/public';
    */
 
   /**
    * @typedef {object} Props
    * @property {ComplexListField} fieldConfig Field configuration.
-   * @property {string[]} currentValue Field value.
+   * @property {Record<string, any>[]} currentValue Field value.
+   * @property {string} [summaryId] ID for the item count, which labels the list.
    */
 
+  const entryDraft = getEntryDraftContext();
+
   /** @type {FieldEditorContext} */
-  const { valueStoreKey = 'currentValues' } = getContext('field-editor') ?? {};
+  const { valueStoreKey = 'currentValues', parentComponentNames = [] } =
+    getContext('field-editor') ?? {};
+  const componentName = parentComponentNames.at(-1);
 
   /** @type {FieldEditorProps & Props} */
   let {
@@ -58,6 +78,9 @@
     keyPath,
     typedKeyPath,
     fieldConfig,
+    required = true,
+    readonly = false,
+    summaryId,
     /* eslint-enable prefer-const */
   } = $props();
 
@@ -84,78 +107,130 @@
   const { fields } = $derived(/** @type {ListFieldWithSubFields} */ (fieldConfig));
   const { types, typeKey = 'type' } = $derived(/** @type {ListFieldWithTypes} */ (fieldConfig));
   const { hasSingleSubField, hasVariableTypes } = $derived(getListFieldInfo(fieldConfig));
-  const keyPathRegex = $derived(new RegExp(`^${escapeRegExp(keyPath)}\\.(\\d+)(.*)?`));
-  const isIndexFile = $derived($entryDraft?.isIndexFile ?? false);
-  const collection = $derived($entryDraft?.collection);
-  const collectionName = $derived($entryDraft?.collectionName ?? '');
-  const collectionFile = $derived($entryDraft?.collectionFile);
-  const fileName = $derived($entryDraft?.fileName);
-  const { defaultLocale } = $derived((collectionFile ?? collection)?._i18n ?? DEFAULT_I18N_CONFIG);
-  const isDuplicateField = $derived(locale !== defaultLocale && i18n === 'duplicate');
-  const valueMap = $derived($state.snapshot($entryDraft?.[valueStoreKey][locale]) ?? {});
+  /* v8 ignore start -- a list has either types, subfields or a single subfield */
+  /** The types of a list with variable types. */
+  const variableTypes = $derived(types ?? []);
+  /** The subfields of an item in a list without variable types. */
+  const singleSubFields = $derived(fields ?? (field ? [field] : []));
+  /* v8 ignore stop */
+
+  /**
+   * Get the configuration of the given type.
+   * @param {string} type Type name.
+   * @returns {VariableFieldType | undefined} Type configuration.
+   */
+  const getTypeConfig = (type) => variableTypes.find(({ name }) => name === type);
+
+  /* v8 ignore start -- the editor is only rendered while the draft is there */
+  const isIndexFile = $derived(!!entryDraft.current?.isIndexFile);
+  const collectionName = $derived(entryDraft.current?.collectionName ?? '');
+  /* v8 ignore stop */
+  const fileName = $derived(entryDraft.current?.fileName);
+  const defaultLocale = $derived(entryDraft.current?.defaultLocale);
+  // The items can’t be added, removed or reordered in a read-only field, which includes a field
+  // duplicated from the default locale, whether with its own `duplicate` strategy or along with an
+  // ancestor’s, in another locale. Changing them there would change the default locale as well
+  const isLocked = $derived(readonly || (locale !== defaultLocale && i18n === 'duplicate'));
+  const valueMap = $derived(getValueMapSnapshot(entryDraft.current, locale, valueStoreKey));
   const parentExpandedKeyPath = $derived(`${keyPath}#`);
-  const parentExpanded = $derived($entryDraft?.expanderStates?._[parentExpandedKeyPath] ?? true);
   /** @type {Record<string, any>[]} */
-  const items = $derived(
-    unflatten(
-      Object.fromEntries(
-        Object.entries(valueMap)
-          .filter(([_keyPath]) => keyPathRegex.test(_keyPath))
-          .map(([_keyPath, value]) => [`${fieldName}${_keyPath.slice(keyPath.length)}`, value]),
-      ),
-    )[fieldName] ?? [],
+  const items = $derived(getSubtree(valueMap, keyPath) ?? []);
+  // A list limited to one item is shown like an Object field: no item count, list toggle or reorder
+  // controls, and no way to remove the item if it’s required. A list with variable types keeps the
+  // Remove button though, as that’s the only way to choose another type for the item
+  const singleItem = $derived(isSingleItemList({ fieldConfig, itemCount: items.length }));
+  const canRemoveItem = $derived(allowRemove && !(singleItem && required && !hasVariableTypes));
+  // The single item can’t be collapsed along with the list, as there is no toggle to expand it
+  const parentExpanded = $derived(
+    singleItem || isExpanded(entryDraft.current, parentExpandedKeyPath),
   );
   const itemExpanderStates = $derived(
     items.map((_item, index) => {
       const key = `${keyPath}.${index}`;
 
-      return [key, $entryDraft?.expanderStates?._[key] ?? true];
+      return [key, isExpanded(entryDraft.current, key)];
     }),
   );
   const hasMaxItems = $derived(items.length >= max);
+  /** The subfields of every item, regardless of its type. */
+  const allSubFields = $derived(
+    hasVariableTypes
+      ? variableTypes.flatMap(({ fields: typeFields = [] }) => typeFields)
+      : singleSubFields,
+  );
   const hasEditableSubFields = $derived(
     locale === defaultLocale ||
-      (hasVariableTypes
-        ? (types?.flatMap(({ fields: typeFields = [] }) => typeFields) ?? [])
-        : (fields ?? (field ? [field] : []))
-      ).some(({ i18n: subI18n = false }) => subI18n === true || subI18n === 'translate'),
+      allSubFields.some(({ i18n: subI18n }) => isFieldTranslatable(subI18n)),
   );
-  const isAddDisabled = $derived(isDuplicateField || !hasEditableSubFields);
+  const isAddDisabled = $derived(isLocked || !hasEditableSubFields);
 
   /**
-   * List item thumbnails.
-   * @type {(string | undefined)[]}
+   * @type {HTMLElement | undefined}
    */
-  const thumbnails = $state([]);
+  let itemList = $state();
+
+  /**
+   * Update the expander states of the list and its items.
+   * @param {Record<string, boolean>} stateMap Map of key path and state.
+   */
+  const updateExpanderStates = (stateMap) => {
+    // The controls are disabled once the draft is gone, so this is only a race with the editor
+    // closing
+    /* v8 ignore next 3 */
+    if (!entryDraft.current) {
+      return;
+    }
+
+    syncExpanderStates({ draft: entryDraft.current, stateMap });
+  };
 
   /**
    * Initialize the expander state.
    */
   const initializeExpanderState = () => {
-    syncExpanderStates({
-      [parentExpandedKeyPath]: minimizeCollapsed === 'auto' ? !items.length : !minimizeCollapsed,
-      ...Object.fromEntries(
-        items.map((__, index) => {
-          const key = `${keyPath}.${index}`;
+    const draft = entryDraft.current;
 
-          return [key, getInitialExpanderState({ key, locale, collapsed })];
-        }),
-      ),
-    });
+    // The editor is mounted with a draft; this is only a race with the editor closing
+    /* v8 ignore next 3 */
+    if (!draft) {
+      return;
+    }
+
+    updateExpanderStates(
+      getInitialListExpanderStates({
+        draft,
+        keyPath,
+        itemCount: items.length,
+        locale,
+        collapsed,
+        minimizeCollapsed,
+      }),
+    );
   };
 
   /**
    * Update the value for the List field with subfield(s).
    * @param {(arg: { valueList: any[], expanderStateList: boolean[] }) => void} manipulate
-   * See {@link updateListField}.
+   * See {@link updateListFieldForLocales}.
    */
   const updateComplexList = (manipulate) => {
-    Object.keys($entryDraft?.[valueStoreKey] ?? {}).forEach((_locale) => {
-      if (!(i18n !== 'duplicate' && _locale !== locale)) {
-        updateListField({ locale: _locale, valueStoreKey, keyPath, manipulate });
-      }
-    });
+    const draft = entryDraft.current;
+
+    // The items are gone along with the draft, so this is only a race with the editor closing
+    /* v8 ignore next 3 */
+    if (!draft) {
+      return;
+    }
+
+    updateListFieldForLocales({ draft, locale, i18n, valueStoreKey, keyPath, manipulate });
   };
+
+  /**
+   * Get the list item element at the specified index.
+   * @param {number} index Target index.
+   * @returns {HTMLElement | undefined} List item element.
+   */
+  const getItem = (index) => /** @type {HTMLElement} */ (itemList?.children[index]);
 
   /**
    * Add a new subfield to the list.
@@ -165,89 +240,108 @@
    * @param {string} [args.type] Variable type name. If the field doesn’t have variable types, it
    * will be `undefined`.
    */
-  const addItem = ({ index = addToTop ? 0 : items.length, dupIndex, type } = {}) => {
+  const addItem = async ({ index = addToTop ? 0 : items.length, dupIndex, type } = {}) => {
+    const draft = entryDraft.current;
+
+    // The controls are disabled once the draft is gone, so this is only a race with the editor
+    // closing
+    /* v8 ignore next 3 */
+    if (!draft) {
+      return;
+    }
+
     updateComplexList(({ valueList, expanderStateList }) => {
-      const subFields = type
-        ? (types?.find(({ name }) => name === type)?.fields ?? [])
-        : (fields ?? (field ? [field] : []));
+      /* v8 ignore next -- a type is only added from the menu listing the known ones */
+      const subFields = type ? (getTypeConfig(type)?.fields ?? []) : singleSubFields;
 
-      const newItem = (() => {
-        if (typeof dupIndex === 'number') {
-          return structuredClone(valueList[dupIndex]);
-        }
-
-        const item = unflatten(getDefaultValues({ fields: subFields, locale, defaultLocale }));
-
-        return hasSingleSubField && field ? item[field.name] : item;
-      })();
-
-      if (type) {
-        newItem[typeKey] = type;
-      }
-
-      if (!hasSingleSubField) {
-        // Add a random ID to the new item to ensure it is unique. This is necessary for the `key`
-        // attribute in the `each` block.
-        newItem.__sc_item_id = crypto.randomUUID();
-
-        // Track original key paths for existing items before they shift due to the insertion
-        valueList.forEach((item, i) => {
-          if (isObject(item)) {
-            item.__sc_item_original_key_path ??= `${keyPath}.${i}`;
-          }
-        });
-      }
+      const newItem = createListItem({
+        valueList,
+        keyPath,
+        dupIndex,
+        subFields,
+        hasSingleSubField,
+        field,
+        type,
+        typeKey,
+        locale,
+        defaultLocale: draft.defaultLocale,
+      });
 
       valueList.splice(index, 0, newItem);
       expanderStateList.splice(index, 0, true);
     });
 
     // Expand the parent if it is collapsed to show the newly added item
-    syncExpanderStates({ [parentExpandedKeyPath]: true });
+    updateExpanderStates({ [parentExpandedKeyPath]: true });
+
+    await sleep(50);
+    // Move the placeholder into view
+    getItem(index)?.scrollIntoView();
+    // Wait until the placeholder is replaced with the actual content
+    await sleep(100);
+    // Scroll again for the sticky toolbar
+    itemList?.closest('.content')?.scrollBy({ top: -50, behavior: 'instant' });
+    // Move focus to the expander button
+    getItem(index)?.querySelector('button')?.focus();
   };
 
   /**
    * Remove a subfield.
    * @param {number} index Target index.
    */
-  const removeItem = (index) => {
+  const removeItem = async (index) => {
     updateComplexList(({ valueList, expanderStateList }) => {
       if (!hasSingleSubField) {
         // Track original key paths for existing items before they shift due to the removal
-        valueList.forEach((item, i) => {
-          if (isObject(item)) {
-            item.__sc_item_original_key_path ??= `${keyPath}.${i}`;
-          }
-        });
+        tagListItems(valueList, keyPath);
       }
 
       valueList.splice(index, 1);
       expanderStateList.splice(index, 1);
     });
+
+    await sleep(50);
+    (getItem(index) ?? itemList?.closest('[role="group"]')?.querySelector('button'))?.focus();
   };
 
   /**
-   * Swap a subfield with the next one.
-   * @param {number} index Target index.
+   * Move a subfield to another position in the list.
+   * @param {number} from Source index.
+   * @param {number} to Destination index.
    */
-  const moveDownItem = (index) => {
+  const moveItem = (from, to) => {
     updateComplexList(({ valueList, expanderStateList }) => {
       if (!hasSingleSubField) {
-        // Ensure the IDs are unique before swapping
-        valueList[index].__sc_item_id ??= crypto.randomUUID();
-        valueList[index + 1].__sc_item_id ??= crypto.randomUUID();
-        // Track original key paths for correct revert after reordering
-        valueList[index].__sc_item_original_key_path ??= `${keyPath}.${index}`;
-        valueList[index + 1].__sc_item_original_key_path ??= `${keyPath}.${index + 1}`;
+        // Ensure the IDs are unique before reordering, so that the `each` block below keeps
+        // following each item rather than its position, and track original key paths for correct
+        // revert after reordering
+        tagListItems(valueList, keyPath, { assignIds: true });
       }
 
-      [valueList[index], valueList[index + 1]] = [valueList[index + 1], valueList[index]];
-      [expanderStateList[index], expanderStateList[index + 1]] = [
-        expanderStateList[index + 1],
-        expanderStateList[index],
-      ];
+      valueList.splice(to, 0, ...valueList.splice(from, 1));
+      // The expander states are only manipulated with the default locale, so this list may be empty
+      expanderStateList.splice(to, 0, ...expanderStateList.splice(from, 1));
     });
   };
+
+  const sorter = createDragSorter({
+    /**
+     * Get the number of items in the list.
+     * @returns {number} Item count.
+     */
+    getItemCount: () => items.length,
+    /**
+     * Get the list element.
+     * @returns {HTMLElement | undefined} Element.
+     */
+    getListElement: () => itemList,
+    onMove: moveItem,
+    /**
+     * Wait for the moved item to be rendered in its new position.
+     * @returns {Promise<void>} Promise.
+     */
+    settle: () => sleep(50),
+  });
 
   /**
    * Format the summary template.
@@ -269,95 +363,60 @@
     });
 
   /**
-   * Get the thumbnail image URL for a list item.
+   * Get the thumbnail of a collapsed list item.
    * @param {number} index List index.
-   * @returns {Promise<string | undefined>} Thumbnail image URL.
+   * @param {string} [type] Variable type name of the item, if the list has variable types.
+   * @returns {MediaFieldSource | undefined} Thumbnail.
    */
-  const getThumbnail = async (index) => {
-    if (!thumbnailFieldName) {
-      return undefined;
-    }
-
-    const fieldNameNormalized = thumbnailFieldName.replace(/^fields\./, '');
-    const itemKeyPath = `${keyPath}.${index}`;
-
-    // For single-subfield lists (`field:` option), values are stored at the item key path directly
-    // (without the field name). `getField(itemKeyPath)` already traverses into the subfield, so we
-    // use it to validate the name match too.
-    const thumbnailKeyPath = hasSingleSubField
-      ? itemKeyPath
-      : `${itemKeyPath}.${fieldNameNormalized}`;
-
-    const thumbnailValue = valueMap[thumbnailKeyPath];
-
-    if (!thumbnailValue) {
-      return undefined;
-    }
-
-    const thumbnailFieldConfig = getField({
+  const getThumbnail = (index, type) =>
+    getObjectThumbnail({
+      thumbnailFieldName,
+      keyPath: `${keyPath}.${index}`,
+      typedKeyPath: type ? `${typedKeyPath}.*<${type}>` : `${typedKeyPath}.*`,
+      hasSingleSubField,
       collectionName,
       fileName,
+      componentName,
       valueMap,
-      keyPath: thumbnailKeyPath,
       isIndexFile,
+      entry: entryDraft.current?.originalEntry,
+      files: entryDraft.current?.files,
     });
-
-    if (
-      thumbnailFieldConfig?.widget !== 'image' ||
-      (hasSingleSubField && thumbnailFieldConfig.name !== fieldNameNormalized)
-    ) {
-      return undefined;
-    }
-
-    return getMediaFieldURL({
-      value: thumbnailValue,
-      entry: $entryDraft?.originalEntry,
-      collectionName,
-      fileName,
-      typedKeyPath: hasSingleSubField
-        ? `${typedKeyPath}.*`
-        : `${typedKeyPath}.*.${fieldNameNormalized}`,
-    });
-  };
 
   /**
-   * Update thumbnails for all items.
+   * Warn about unknown variable types used in the list items.
    */
-  const updateThumbnails = async () => {
-    if (!thumbnailFieldName) {
+  const warnUnknownTypes = () => {
+    if (!hasVariableTypes) {
       return;
     }
 
-    thumbnails.length = items.length;
+    items.forEach((item, index) => {
+      const type = item?.[typeKey];
 
-    items.forEach(async (_item, index) => {
-      const itemThumbnail = await getThumbnail(index);
-
-      if (thumbnails[index] !== itemThumbnail) {
-        thumbnails[index] = itemThumbnail;
+      if (type && types.some(({ name }) => name === type)) {
+        return;
       }
+
+      const message = getUnknownTypeMessage({ fieldType: 'list', type, typeKey, types });
+
+      // eslint-disable-next-line no-console
+      console.warn(`List item ${keyPath}.${index}: ${message}`);
     });
   };
 
-  $effect(() => {
-    void [items];
-
-    untrack(() => {
-      updateThumbnails();
-    });
-  });
-
   onMount(() => {
     initializeExpanderState();
+    warnUnknownTypes();
   });
 </script>
 
 {#snippet addPositionItems(/** @type {number} */ insertIndex, /** @type {string} */ position)}
   {#if hasVariableTypes}
-    <MenuItem label={_(`add_item_${position}`)} disabled={hasMaxItems}>
+    <MenuItem label={_(`add_item_${position}`)}>
       <!-- eslint-disable-next-line no-shadow -->
       {#snippet items()}
-        {#each types ?? [] as { name, label: itemLabel } (name)}
+        {#each variableTypes as { name, label: itemLabel } (name)}
           <MenuItem
             label={itemLabel || name}
             onclick={() => addItem({ index: insertIndex, type: name })}
@@ -366,183 +425,190 @@
       {/snippet}
     </MenuItem>
   {:else}
-    <MenuItem
-      label={_(`add_item_${position}`)}
-      disabled={hasMaxItems}
-      onclick={() => addItem({ index: insertIndex })}
-    />
+    <MenuItem label={_(`add_item_${position}`)} onclick={() => addItem({ index: insertIndex })} />
   {/if}
 {/snippet}
 
-<div role="none" class="toolbar top">
-  <Button
-    iconic
-    disabled={!items.length}
-    aria-label={parentExpanded ? _('collapse') : _('expand')}
-    aria-expanded={parentExpanded}
-    aria-controls="list-{fieldId}-item-list"
-    onclick={() => {
-      syncExpanderStates({ [parentExpandedKeyPath]: !parentExpanded });
-    }}
-  >
-    {#snippet startIcon()}
-      <ExpandIcon expanded={parentExpanded} />
-    {/snippet}
-  </Button>
-  <div role="none" class="summary" id="object-{fieldId}-summary">
-    {items.length}
-    {(items.length === 1 ? labelSingular : undefined) || label || fieldName}
-  </div>
-  <Spacer flex />
-  {#if parentExpanded && items.length > 1}
-    <Button
-      variant="tertiary"
-      size="small"
-      label={_('expand_all')}
-      disabled={itemExpanderStates.every(([, value]) => value)}
-      onclick={() => {
-        syncExpanderStates(Object.fromEntries(itemExpanderStates.map(([key]) => [key, true])));
-      }}
-    />
-    <Button
-      variant="tertiary"
-      size="small"
-      label={_('collapse_all')}
-      disabled={itemExpanderStates.every(([, value]) => !value)}
-      onclick={() => {
-        syncExpanderStates(Object.fromEntries(itemExpanderStates.map(([key]) => [key, false])));
-      }}
-    />
-  {/if}
-</div>
-{#if allowAdd && (addToTop || !items.length)}
-  <div role="none" class="toolbar top add">
-    <AddItemButton disabled={isAddDisabled} {fieldConfig} {items} {addItem} />
-  </div>
+{#if singleItem}
+  <!-- There is no item count to label the list with, so label it with the field name instead -->
+  <div role="none" id={summaryId} hidden>{labelSingular || label || fieldName}</div>
 {/if}
-<div role="none" id="list-{fieldId}-item-list" class="item-list" class:collapsed={!parentExpanded}>
-  {#each items as item, index (isObject(item) ? (item.__sc_item_id ?? index) : index)}
-    <VisibilityObserver>
-      {@const itemKeyPath = `${keyPath}.${index}`}
-      {@const expanded = $entryDraft?.expanderStates?._[itemKeyPath] ?? true}
-      {@const typeConfig = hasVariableTypes
-        ? types?.find(({ name }) => name === item[typeKey])
-        : undefined}
-      {@const subFields = hasVariableTypes
-        ? (typeConfig?.fields ?? [])
-        : (fields ?? (field ? [field] : []))}
-      {@const summaryTemplate = hasVariableTypes ? typeConfig?.summary || summary : summary}
-      <!-- @todo Support drag sorting. -->
-      <div role="none" class="item">
-        <ObjectHeader
-          label={hasVariableTypes ? typeConfig?.label || typeConfig?.name : ''}
-          controlId="list-{fieldId}-item-{index}-body"
-          {expanded}
-          toggleExpanded={subFields.length
-            ? () => syncExpanderStates({ [itemKeyPath]: !expanded })
-            : undefined}
+{#if !singleItem || !items.length}
+  <div role="none" class="toolbar top" class:single={singleItem}>
+    {#if !singleItem}
+      <div role="none" class="label">
+        <Button
+          iconic
+          disabled={!items.length}
+          aria-label={parentExpanded ? _('collapse') : _('expand')}
+          aria-expanded={parentExpanded}
+          aria-controls="list-{fieldId}-item-list"
+          onclick={() => {
+            updateExpanderStates({ [parentExpandedKeyPath]: !parentExpanded });
+          }}
         >
-          {#snippet centerContent()}
-            {#if allowReorder}
-              <Button
-                size="small"
-                iconic
-                disabled={isDuplicateField || index === 0}
-                aria-label={_('move_up')}
-                onclick={() => moveDownItem(index - 1)}
-              >
-                {#snippet startIcon()}
-                  <Icon name="arrow_upward" />
-                {/snippet}
-              </Button>
-              <Spacer />
-              <Button
-                iconic
-                size="small"
-                disabled={isDuplicateField || index === items.length - 1}
-                aria-label={_('move_down')}
-                onclick={() => moveDownItem(index)}
-              >
-                {#snippet startIcon()}
-                  <Icon name="arrow_downward" />
-                {/snippet}
-              </Button>
-            {/if}
+          {#snippet startIcon()}
+            <ExpandIcon expanded={parentExpanded} />
           {/snippet}
-          {#snippet endContent()}
-            {#if allowAdd}
-              <MenuButton
-                variant="ghost"
-                size="small"
-                iconic
-                popupPosition="bottom-right"
-                aria-label={_('list_item_options')}
-                disabled={isAddDisabled}
-              >
-                {#snippet popup()}
-                  <Menu aria-label={_('list_item_options')}>
-                    {#if allowDuplicate}
-                      <MenuItem
-                        label={_('duplicate')}
-                        disabled={hasMaxItems}
-                        onclick={() => addItem({ index: index + 1, dupIndex: index })}
-                      />
-                    {/if}
-                    {@render addPositionItems(index, 'above')}
-                    {@render addPositionItems(index + 1, 'below')}
-                  </Menu>
-                {/snippet}
-              </MenuButton>
-            {/if}
-            {#if allowRemove}
-              <Button
-                variant="ghost"
-                size="small"
-                iconic
-                aria-label={_('remove')}
-                onclick={() => removeItem(index)}
-              >
-                {#snippet startIcon()}
-                  <Icon name="close" />
-                {/snippet}
-              </Button>
-            {/if}
-          {/snippet}
-        </ObjectHeader>
-        <div role="none" class="item-body" id="list-{fieldId}-item-{index}-body">
-          {#if expanded}
-            {#each subFields as subField (subField.name)}
-              <VisibilityObserver>
-                <FieldEditor
-                  keyPath={hasSingleSubField ? itemKeyPath : `${itemKeyPath}.${subField.name}`}
-                  typedKeyPath={hasVariableTypes
-                    ? `${typedKeyPath}.*<${item[typeKey]}>.${subField.name}`
-                    : `${typedKeyPath}.*.${subField.name}`}
-                  {locale}
-                  fieldConfig={subField}
-                  context={hasSingleSubField ? 'single-subfield-list-field' : undefined}
-                />
-              </VisibilityObserver>
-            {/each}
-          {:else}
-            <div role="none" class="summary">
-              {#if thumbnails[index]}
-                <Image src={thumbnails[index]} variant="icon" cover />
-              {/if}
-              <TruncatedText lines={env.isSmallScreen ? 2 : 1}>
-                {_formatSummary(index, summaryTemplate)}
-              </TruncatedText>
-            </div>
-          {/if}
+        </Button>
+        <div role="none" class="summary" id={summaryId}>
+          {items.length}
+          {(items.length === 1 ? labelSingular : undefined) || label || fieldName}
         </div>
       </div>
-    </VisibilityObserver>
+    {/if}
+    <div role="none" class="actions">
+      {#if allowAdd && (addToTop || !items.length || !parentExpanded)}
+        <AddItemButton disabled={isAddDisabled} {fieldConfig} {items} {addItem} />
+      {/if}
+      {#if parentExpanded && items.length > 1}
+        {#each [true, false] as expanded (expanded)}
+          <Button
+            variant="tertiary"
+            size="small"
+            label={_(expanded ? 'expand_all' : 'collapse_all')}
+            disabled={itemExpanderStates.every(([, value]) => value === expanded)}
+            onclick={() => {
+              updateExpanderStates(
+                Object.fromEntries(itemExpanderStates.map(([key]) => [key, expanded])),
+              );
+            }}
+          />
+        {/each}
+      {/if}
+    </div>
+  </div>
+{/if}
+<div
+  role="none"
+  id="list-{fieldId}-item-list"
+  class="item-list"
+  class:collapsed={!parentExpanded}
+  bind:this={itemList}
+  ondragovercapture={sorter.onDragOver}
+  ondropcapture={sorter.onDrop}
+>
+  {#each sorter.displayOrder as index (getListItemKey(items, index))}
+    {@const item = items[index]}
+    <!--
+      The wrapper is what the `flip` animation moves: `animate:` only works on an element at the top
+      level of a keyed `each` block, and the item itself sits inside `VisibilityObserver`.
+    -->
+    <div role="none" class="item-wrapper" animate:flip={{ duration: 200 }}>
+      <VisibilityObserver>
+        {@const itemKeyPath = `${keyPath}.${index}`}
+        {@const type = hasVariableTypes ? item[typeKey] : undefined}
+        {@const typeConfig = type ? getTypeConfig(type) : undefined}
+        {@const unknownType = hasVariableTypes && !typeConfig}
+        {@const expanded = isExpanded(entryDraft.current, itemKeyPath)}
+        {@const subFields = hasVariableTypes ? (typeConfig?.fields ?? []) : singleSubFields}
+        {@const summaryTemplate = hasVariableTypes ? typeConfig?.summary || summary : summary}
+        <div
+          role="group"
+          class="item"
+          class:unknown-type={unknownType}
+          class:dragging={sorter.dragIndex === index}
+          draggable={sorter.grabbedIndex === index}
+          ondragstart={(event) => {
+            // A nested sortable list starts its own drag; the event just bubbles through here
+            if (event.target === event.currentTarget) {
+              sorter.onDragStart(index, event, _formatSummary(index, summaryTemplate));
+            }
+          }}
+          ondragend={(event) => {
+            if (event.target === event.currentTarget) {
+              sorter.onDragEnd();
+            }
+          }}
+        >
+          <ObjectHeader
+            label={hasVariableTypes ? typeConfig?.label || typeConfig?.name : ''}
+            controlId="list-{fieldId}-item-{index}-body"
+            {expanded}
+            toggleExpanded={subFields.length
+              ? () => updateExpanderStates({ [itemKeyPath]: !expanded })
+              : undefined}
+          >
+            {#snippet centerContent()}
+              {#if allowReorder && !singleItem}
+                <ReorderControls
+                  {index}
+                  itemCount={items.length}
+                  disabled={isLocked || items.length < 2}
+                  icon="drag_handle"
+                  onGrab={() => sorter.grab(index)}
+                  onRelease={sorter.release}
+                  onMove={(to, action) => sorter.move(index, to, action)}
+                />
+              {/if}
+            {/snippet}
+            {#snippet endContent()}
+              {#if allowAdd && !hasMaxItems}
+                <MenuButton
+                  variant="ghost"
+                  size="small"
+                  iconic
+                  popupPosition="bottom-right"
+                  aria-label={_('list_item_options')}
+                  disabled={isAddDisabled}
+                >
+                  {#snippet popup()}
+                    <Menu ariaLabel={_('list_item_options')}>
+                      {#if allowDuplicate}
+                        <MenuItem
+                          label={_('duplicate')}
+                          disabled={unknownType}
+                          onclick={() => addItem({ index: index + 1, dupIndex: index })}
+                        />
+                      {/if}
+                      {@render addPositionItems(index, 'above')}
+                      {@render addPositionItems(index + 1, 'below')}
+                    </Menu>
+                  {/snippet}
+                </MenuButton>
+              {/if}
+              {#if canRemoveItem}
+                <Button
+                  variant="ghost"
+                  size="small"
+                  iconic
+                  aria-label={_('remove')}
+                  disabled={isLocked}
+                  onclick={() => removeItem(index)}
+                >
+                  {#snippet startIcon()}
+                    <Icon name="close" />
+                  {/snippet}
+                </Button>
+              {/if}
+            {/snippet}
+          </ObjectHeader>
+          <div role="none" class="item-body" id="list-{fieldId}-item-{index}-body">
+            <ObjectBody
+              {locale}
+              {subFields}
+              getSubFieldProps={(subField) => ({
+                keyPath: hasSingleSubField ? itemKeyPath : `${itemKeyPath}.${subField.name}`,
+                typedKeyPath: hasVariableTypes
+                  ? `${typedKeyPath}.*<${type}>.${subField.name}`
+                  : `${typedKeyPath}.*.${subField.name}`,
+                context: hasSingleSubField ? 'single-subfield-list-field' : undefined,
+              })}
+              {expanded}
+              {unknownType}
+              getSummary={() => _formatSummary(index, summaryTemplate)}
+              getThumbnail={() => getThumbnail(index, type)}
+            />
+          </div>
+        </div>
+      </VisibilityObserver>
+    </div>
   {/each}
 </div>
-{#if allowAdd && !addToTop && items.length}
+{#if allowAdd && !addToTop && items.length && parentExpanded && !hasMaxItems}
   <div role="none" class="toolbar bottom add">
-    <AddItemButton disabled={isAddDisabled} {fieldConfig} {items} {addItem} />
     <Spacer flex />
+    <AddItemButton disabled={isAddDisabled} {fieldConfig} {items} {addItem} />
   </div>
 {/if}
 
@@ -550,37 +616,71 @@
   .toolbar {
     display: flex;
     align-items: center;
+    flex-wrap: wrap;
+    gap: 0 8px;
+    position: sticky;
+    z-index: 10;
+    background-color: var(--sui-primary-background-color);
+    min-height: var(--sui-secondary-toolbar-size);
 
-    &.top.add {
-      margin-block: 8px 16px !important;
+    &.top {
+      top: 0;
     }
 
-    &.bottom.add {
-      margin-block: 16px 0 !important;
+    &.bottom {
+      bottom: 0;
+    }
+
+    & > div {
+      display: flex;
+      align-items: center;
+
+      &.actions {
+        flex-wrap: wrap;
+        margin-block: 8px;
+        margin-inline-start: auto;
+      }
+    }
+
+    &.single > div.actions {
+      /* With no item count on the left, the Add button goes where the item would be */
+      margin-inline-start: 0;
     }
   }
 
   .item-list {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+
     &.collapsed {
       display: none;
     }
   }
 
   .item {
-    margin: 16px 0;
+    flex: none;
+    position: relative;
     border-width: 2px;
     border-color: var(--sui-secondary-border-color);
     border-radius: var(--sui-control-medium-border-radius);
+    background-color: var(--sui-primary-background-color); /* for dragging opacity */
 
-    .summary {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      padding: 8px;
+    &.unknown-type {
+      overflow: hidden;
 
-      &:empty {
-        display: none;
+      :global(.alert) {
+        border-width: 0;
+        border-radius: 0;
       }
+    }
+
+    /* The dragged item is left as a faint placeholder marking the gap it would drop into. The
+      pointer already carries the browser’s own drag image of it, so showing it twice at full
+      strength would just be confusing. */
+
+    &.dragging {
+      opacity: 0.25;
     }
   }
 </style>

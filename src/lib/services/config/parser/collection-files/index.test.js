@@ -42,11 +42,6 @@ vi.mock('@sveltia/i18n', () => ({
 }));
 
 const mockGetStore = vi.fn();
-
-vi.mock('svelte/store', () => ({
-  get: mockGetStore,
-}));
-
 const mockParseFields = vi.fn();
 
 vi.mock('$lib/services/config/parser/fields', () => ({
@@ -289,6 +284,29 @@ describe('Collection Files Parser', () => {
         expect.objectContaining({
           strKey: 'collection_file_i18n_required',
         }),
+      );
+    });
+
+    it('should warn when the file has the i18n option but the collection does not', async () => {
+      const { parseCollectionFile } = await import('.');
+      const collectors = createCollectors();
+
+      /** @type {any} */
+      const context = {
+        cmsConfig: { i18n: { locales: ['en', 'fr'] } },
+        collection: { name: 'settings', files: [] },
+        collectionFile: {
+          name: 'general',
+          file: 'content/settings/general.yaml',
+          fields: [{ name: 'title', widget: 'string' }],
+          i18n: true,
+        },
+      };
+
+      parseCollectionFile(context, collectors);
+
+      expect(mockAddMessage).toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'warning', strKey: 'i18n_not_configured' }),
       );
     });
 

@@ -1,4 +1,7 @@
-import { locale as appLocale } from '@sveltia/i18n';
+import {
+  fetchJSON,
+  getSupportedLocale,
+} from '$lib/services/integrations/media-libraries/stock/utils';
 
 /**
  * @import {
@@ -61,7 +64,7 @@ export const parseResults = (results) =>
       downloadURL: largeImageURL,
       fileName: /** @type {string} */ (previewURL.split('/').pop()).replace('_150.', '_1280.'),
       kind: 'image',
-      credit: `<a href="${pageURL}">Photo by ${user} on Pixabay`,
+      credit: `<a href="${pageURL}">Photo by ${user} on Pixabay</a>`,
     }),
   );
 
@@ -69,11 +72,7 @@ export const parseResults = (results) =>
  * Get the best matching locale supported by Pixabay API.
  * @returns {string} Locale code.
  */
-export const getLocale = () => {
-  const [locale] = appLocale.current.toLowerCase().split('-');
-
-  return SUPPORTED_LOCALES.includes(locale) ? locale : 'en';
-};
+export const getLocale = () => getSupportedLocale(SUPPORTED_LOCALES, 'en');
 
 /**
  * Fetch curated pictures.
@@ -90,14 +89,8 @@ export const list = async ({ apiKey }) => {
     editors_choice: String(true),
   });
 
-  const response = await fetch(`${ENDPOINT}/?${params}`);
-
-  if (!response.ok) {
-    return Promise.reject();
-  }
-
   /** @type {FetchResult[]} */
-  const results = (await response.json()).hits;
+  const results = (await fetchJSON(`${ENDPOINT}/?${params}`)).hits;
 
   return parseResults(results);
 };
@@ -118,14 +111,8 @@ export const search = async (query, { apiKey }) => {
     q: query,
   });
 
-  const response = await fetch(`${ENDPOINT}/?${params}`);
-
-  if (!response.ok) {
-    return Promise.reject();
-  }
-
   /** @type {FetchResult[]} */
-  const results = (await response.json()).hits;
+  const results = (await fetchJSON(`${ENDPOINT}/?${params}`)).hits;
 
   return parseResults(results);
 };

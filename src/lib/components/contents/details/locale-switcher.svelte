@@ -1,60 +1,64 @@
 <script>
   import { _ } from '@sveltia/i18n';
   import { Divider, Icon, Option, Select, SelectButton, SelectButtonGroup } from '@sveltia/ui';
-  import { writable } from 'svelte/store';
 
-  import { entryDraft } from '$lib/services/contents/draft';
+  import { getEntryDraftContext } from '$lib/services/contents/draft/state.svelte';
+  import { hasInvalidFields } from '$lib/services/contents/draft/validate/reveal';
+  import { afterPendingFieldUpdates } from '$lib/services/contents/editor/pending';
   import { entryEditorSettings } from '$lib/services/contents/editor/settings';
   import { getLocaleLabel } from '$lib/services/contents/i18n';
-  import { DEFAULT_I18N_CONFIG } from '$lib/services/contents/i18n/config';
+  import { getDraftI18nConfig } from '$lib/services/contents/i18n/config';
   import { env } from '$lib/services/user/env.svelte';
+  import { createRawState } from '$lib/services/utils/state.svelte';
 
   /**
-   * @import { Writable } from 'svelte/store';
    * @import { EntryEditorPane } from '$lib/types/private';
    */
 
   /**
    * @typedef {object} Props
    * @property {string} id The wrapper element’s `id` attribute.
-   * @property {Writable<?EntryEditorPane>} thisPane This pane’s mode and locale.
-   * @property {Writable<?EntryEditorPane>} [thatPane] Another pane’s mode and locale.
+   * @property {{ current: ?EntryEditorPane }} thisPane This pane’s mode and locale.
+   * @property {{ current: ?EntryEditorPane }} [thatPane] Another pane’s mode and locale.
    */
+
+  const entryDraft = getEntryDraftContext();
 
   /** @type {Props} */
   let {
     /* eslint-disable prefer-const */
     id,
     thisPane,
-    thatPane = writable(null),
+    thatPane = createRawState(null),
     /* eslint-enable prefer-const */
   } = $props();
 
-  const collection = $derived($entryDraft?.collection);
-  const collectionFile = $derived($entryDraft?.collectionFile);
-  const { allLocales } = $derived((collectionFile ?? collection)?._i18n ?? DEFAULT_I18N_CONFIG);
+  const { allLocales } = $derived(getDraftI18nConfig(entryDraft.current));
+  /* v8 ignore start -- the switcher is only rendered while the draft is there */
+  const validities = $derived(entryDraft.current?.validities ?? {});
+  const canPreview = $derived(entryDraft.current?.canPreview ?? true);
+  /* v8 ignore stop */
   const listedLocales = $derived(
     env.isSmallScreen || env.isMediumScreen
       ? [...allLocales]
-      : allLocales.filter((locale) => !($thatPane?.mode === 'edit' && $thatPane.locale === locale)),
+      : allLocales.filter(
+          (locale) => !(thatPane.current?.mode === 'edit' && thatPane.current.locale === locale),
+        ),
   );
   const hasAnyError = $derived(
-    Object.entries($entryDraft?.validities ?? {}).some(
-      ([locale, validityMap]) =>
-        listedLocales.includes(locale) &&
-        Object.values(validityMap ?? {}).some(({ valid }) => !valid),
+    Object.entries(validities).some(
+      ([locale, validityMap]) => listedLocales.includes(locale) && hasInvalidFields(validityMap),
     ),
   );
-  const canPreview = $derived($entryDraft?.canPreview ?? true);
   const useDropDown = $derived(env.isSmallScreen || env.isMediumScreen || allLocales.length >= 5);
   const SelectComponent = $derived(useDropDown ? Select : SelectButtonGroup);
   const OptionComponent = $derived(useDropDown ? Option : SelectButton);
   const variant = $derived(useDropDown ? undefined : 'tertiary');
   const size = $derived(useDropDown ? undefined : 'small');
   const currentValue = $derived(
-    $thisPane?.mode === 'edit'
-      ? $thisPane.locale
-      : $thisPane?.mode === 'preview'
+    thisPane.current?.mode === 'edit'
+      ? thisPane.current.locale
+      : thisPane.current?.mode === 'preview'
         ? 'preview'
         : undefined,
   );
@@ -64,17 +68,16 @@
   <SelectComponent
     value={currentValue}
     class={hasAnyError && useDropDown ? 'error' : undefined}
-    aria-label={_('switch_locale')}
+    ariaLabel={_('switch_locale')}
     aria-controls={id.replace('-header', '-body')}
   >
     <!-- Need an inner to style elements inside the <dialog> -->
     <div role="none" class="inner">
       {#each listedLocales as locale (locale)}
         {@const label = getLocaleLabel(locale) ?? locale}
-        {@const disabled = !$entryDraft?.currentLocales[locale]}
-        {@const hasError = Object.values($entryDraft?.validities[locale] ?? {}).some(
-          ({ valid }) => !valid,
-        )}
+        {@const disabled = !entryDraft.current?.currentLocales[locale]}
+        <!-- A locale without content, e.g. a disabled one, is left out of the validation -->
+        {@const hasError = hasInvalidFields(validities[locale])}
         <OptionComponent
           {variant}
           {size}
@@ -85,15 +88,17 @@
             : hasError
               ? _('locale_content_error_short')
               : ''}"
-          selected={$thisPane?.mode === 'edit' && $thisPane.locale === locale}
+          selected={thisPane.current?.mode === 'edit' && thisPane.current.locale === locale}
           class={hasError ? 'error' : ''}
           data-mode="edit"
           onSelect={() => {
-            $thisPane = { mode: 'edit', locale };
+            afterPendingFieldUpdates(() => {
+              thisPane.current = { mode: 'edit', locale };
 
-            if ($thatPane?.mode === 'preview') {
-              $thatPane = { mode: 'preview', locale };
-            }
+              if (thatPane.current?.mode === 'preview') {
+                thatPane.current = { mode: 'preview', locale };
+              }
+            });
           }}
         >
           {#snippet startIcon()}
@@ -105,7 +110,7 @@
           {/snippet}
         </OptionComponent>
       {/each}
-      {#if $thatPane?.mode === 'edit' && canPreview && $entryEditorSettings?.showPreview}
+      {#if thatPane.current?.mode === 'edit' && canPreview && entryEditorSettings.current?.showPreview}
         {#if useDropDown}
           <Divider />
         {/if}
@@ -114,10 +119,15 @@
           {size}
           label={_('preview')}
           value="preview"
-          selected={$thisPane?.mode === 'preview'}
+          selected={thisPane.current?.mode === 'preview'}
           data-mode="preview"
           onSelect={() => {
-            $thisPane = { mode: 'preview', locale: $thatPane?.locale ?? '' };
+            // Read the locale now: the other pane may change while the updates land
+            const { locale } = /** @type {EntryEditorPane} */ (thatPane.current);
+
+            afterPendingFieldUpdates(() => {
+              thisPane.current = { mode: 'preview', locale };
+            });
           }}
         />
       {/if}

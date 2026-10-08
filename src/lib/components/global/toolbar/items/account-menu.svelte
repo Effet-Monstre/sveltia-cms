@@ -2,6 +2,7 @@
   import { _ } from '@sveltia/i18n';
   import { Divider, Menu, MenuItem } from '@sveltia/ui';
 
+  import AppInstallMenuItem from '$lib/components/global/toolbar/items/app-install-menu-item.svelte';
   import ShortcutsMenuItem from '$lib/components/help/shortcuts-menu-item.svelte';
   import SettingsDialog from '$lib/components/settings/settings-dialog.svelte';
   import { goto, openProductionSite } from '$lib/services/app/navigation';
@@ -27,11 +28,11 @@
 
   let showPrefsDialog = $state(false);
 
-  const isLocalRepo = $derived($backendName === 'local');
-  const isTestRepo = $derived($backendName === 'test-repo');
+  const isLocalRepo = $derived(backendName.current === 'local');
+  const isTestRepo = $derived(backendName.current === 'test-repo');
 </script>
 
-<Menu aria-label={_('account')}>
+<Menu ariaLabel={_('account')}>
   <MenuItem
     label={isLocalRepo
       ? _('working_with_local_repo')
@@ -53,9 +54,9 @@
   {#if prefs.devModeEnabled}
     <MenuItem
       label={_('git_repository')}
-      disabled={!$backend?.repository?.treeBaseURL}
+      disabled={!backend.current?.repository?.treeBaseURL}
       onclick={() => {
-        openNewTab($backend?.repository?.treeBaseURL);
+        openNewTab(backend.current?.repository?.treeBaseURL);
       }}
     />
     <MenuItem
@@ -80,14 +81,15 @@
   {#if !prefs.devModeEnabled}
     <ShortcutsMenuItem {menuButton} />
   {/if}
-  {#if $canShowMobileSignInDialog}
+  {#if canShowMobileSignInDialog.current}
     <MenuItem
       label={_('sign_in_with_mobile')}
       onclick={() => {
-        $showMobileSignInDialog = true;
+        showMobileSignInDialog.current = true;
       }}
     />
   {/if}
+  <AppInstallMenuItem />
   <Divider />
   <MenuItem
     label={_('sign_out')}

@@ -5,27 +5,33 @@
   @see https://sveltiacms.app/en/docs/fields/richtext
 -->
 <script>
-  import { TextEditor } from '@sveltia/ui';
-  import { getDateTimeParts } from '@sveltia/utils/datetime';
-  import { sleep } from '@sveltia/utils/misc';
   import {
     $createTableNodeWithDimensions as createTableNodeWithDimensions,
     TableNode,
   } from '@lexical/table';
+  import { _ } from '@sveltia/i18n';
+  import { TextEditor } from '@sveltia/ui';
+  import { sleep } from '@sveltia/utils/misc';
   import {
     $createParagraphNode as createParagraphNode,
-    $getNodeByKey as getNodeByKey,
     getNearestEditorFromDOMNode,
+    $getNodeByKey as getNodeByKey,
     $insertNodes as insertNodes,
   } from 'lexical';
-  import { getContext, untrack } from 'svelte';
-  import { get } from 'svelte/store';
-  import { _ } from '@sveltia/i18n';
+  import { getContext, tick } from 'svelte';
 
-  import { cmsConfig } from '$lib/services/config';
-  import { entryDraft } from '$lib/services/contents/draft';
+  import { EditorComponent } from '$lib/components/contents/details/fields/rich-text/custom-node-features';
   import InsertTableDialog from '$lib/components/contents/details/fields/rich-text/insert-table-dialog.svelte';
-  import { getAssetLibraryFolderMap } from '$lib/services/contents/fields/file/helper';
+  import { customComponentRegistry } from '$lib/services/api/registries';
+  import { cmsConfig } from '$lib/services/config';
+  import { getEntryDraftContext } from '$lib/services/contents/draft/state.svelte';
+  import { getValueMapSnapshot } from '$lib/services/contents/draft/value-map.svelte';
+  import { trackPendingFieldUpdate } from '$lib/services/contents/editor/pending';
+  import { getField } from '$lib/services/contents/entry/fields';
+  import {
+    getAssetLibraryFolderMap,
+    getDefaultAssetFolder,
+  } from '$lib/services/contents/fields/file/helpers';
   import { processResource } from '$lib/services/contents/fields/file/process';
   import {
     BUILTIN_COMPONENTS,
@@ -33,48 +39,52 @@
     COMPONENT_NAME_PREFIX_REGEX,
     DEFAULT_BUTTONS,
     DEFAULT_MODES,
+    getValueFormat,
     NODE_NAME_MAP,
   } from '$lib/services/contents/fields/rich-text';
-  import { EditorComponent } from '$lib/services/contents/fields/rich-text/components';
+  import { getComponentDef } from '$lib/services/contents/fields/rich-text/components/definitions';
+  import { supportsHTML } from '$lib/services/contents/fields/rich-text/components/utils';
   import {
-    customComponentRegistry,
-    getComponentDef,
-  } from '$lib/services/contents/fields/rich-text/components/definitions';
+    getDroppedImages,
+    getPastedImages,
+  } from '$lib/services/contents/fields/rich-text/images';
   import { getCanonicalLocale, getDirection } from '$lib/services/contents/i18n';
   import { getDefaultMediaLibraryOptions } from '$lib/services/integrations/media-libraries/default';
-  import {
-    RASTER_IMAGE_EXTENSION_REGEX,
-    SUPPORTED_IMAGE_TYPES,
-    VECTOR_IMAGE_EXTENSION_REGEX,
-  } from '$lib/services/utils/media/image';
+  import { syncValues, watch } from '$lib/services/utils/state.svelte';
 
   /**
+   * @import { ImageEntry } from '$lib/services/contents/fields/rich-text/images';
    * @import { FieldEditorContext, FieldEditorProps } from '$lib/types/private';
-   * @import { EditorComponentDefinition, ImageField, MarkdownField } from '$lib/types/public';
-   */
-
-  /**
-   * @typedef {{ file?: File, src?: string, alt?: string }} ImageEntry
+   * @import {
+   * EditorComponentDefinition,
+   * ImageField,
+   * MarkdownField,
+   * RichTextField,
+   * } from '$lib/types/public';
    */
 
   /**
    * @typedef {object} Props
-   * @property {MarkdownField} fieldConfig Field configuration.
+   * @property {MarkdownField | RichTextField} fieldConfig Field configuration.
    * @property {string | undefined} currentValue Field value.
    */
 
-  const DATA_URL_REGEX = /^data:(?<type>image\/.+?);base64,.+/;
+  const entryDraft = getEntryDraftContext();
 
-  const defaultConfig = $cmsConfig?.field_defaults?.richtext ?? {};
+  const defaultConfig = cmsConfig.current?.field_defaults?.richtext ?? {};
+  /* v8 ignore start -- the editor is always rendered within a field editor */
   /** @type {FieldEditorContext} */
-  const { fieldContext = undefined } = getContext('field-editor') ?? {};
+  const { fieldContext, parentComponentNames, valueStoreKey } = getContext('field-editor') ?? {};
+  /* v8 ignore stop */
   const inEditorComponent = fieldContext === 'rich-text-editor-component';
+  const componentName = parentComponentNames.at(-1);
 
   /** @type {FieldEditorProps & Props} */
   let {
     /* eslint-disable prefer-const */
     locale,
     keyPath,
+    typedKeyPath,
     fieldId,
     fieldConfig,
     currentValue = $bindable(),
@@ -89,6 +99,10 @@
   let inputValue = $state('');
 
   let cleanupTimeout = 0;
+  /**
+   * Whether the editor has yet to write a change made by the user back to {@link inputValue}.
+   */
+  let pending = $state(false);
 
   /** Whether the insert-table dialog is open. */
   let showTableDialog = $state(false);
@@ -109,8 +123,10 @@
   const NOOP_TABLE_TRANSFORMER = {
     type: 'element',
     dependencies: [],
+    // eslint-disable-next-line jsdoc/require-jsdoc
     export: () => null,
     regExp: /(?!)/,
+    // eslint-disable-next-line jsdoc/require-jsdoc
     replace: () => {},
   };
 
@@ -139,6 +155,33 @@
   };
 
   /**
+   * The fork’s built-in `table` component. Tables use the native Lexical nodes that `@sveltia/ui`
+   * already registers, so the component object is created directly rather than from a component
+   * definition going through {@link EditorComponent}.
+   * @type {import('@sveltia/ui').TextEditorComponent}
+   */
+  const tableComponent = $derived({
+    id: 'table',
+    label: _('editor_components.table'),
+    icon: 'table',
+    // The property is typed as a node instance, but the editor takes the class, as it does for a
+    // component created with `EditorComponent`
+    node: /** @type {any} */ (TableNode),
+    // eslint-disable-next-line jsdoc/require-jsdoc
+    createNode: () => {
+      // Insert a placeholder paragraph, then open the dialog. The dialog’s confirm and cancel
+      // handlers replace or remove this placeholder node
+      const placeholder = createParagraphNode();
+
+      pendingTablePlaceholderKey = placeholder.getKey();
+      showTableDialog = true;
+
+      return placeholder;
+    },
+    transformer: NOOP_TABLE_TRANSFORMER,
+  });
+
+  /**
    * Remove the pending placeholder paragraph when the user cancels the insert-table dialog.
    */
   const onTableCancel = () => {
@@ -160,10 +203,20 @@
     editor_components: _editorComponents = defaultConfig.editor_components ??
       // Include all built-in and custom components by default
       [...BUILTIN_COMPONENTS, ...customComponentRegistry.keys()],
+    allow_nested_components: _allowNestedComponents,
     linked_images: linkedImagesEnabled = defaultConfig.linked_images ?? true,
+    use_emoji_autocomplete: useEmojiAutocomplete = defaultConfig.use_emoji_autocomplete ?? true,
+    use_markdown_shortcuts: useMarkdownShortcuts = defaultConfig.use_markdown_shortcuts ?? true,
     minimal = defaultConfig.minimal ?? false,
   } = $derived(fieldConfig);
+  const format = $derived(getValueFormat(fieldConfig));
   const modes = $derived(_modes.map((name) => NODE_NAME_MAP[name]).filter(Boolean));
+  /* v8 ignore start -- the editor is only rendered while the draft is there */
+  const isIndexFile = $derived(entryDraft.current?.isIndexFile ?? false);
+  const collectionName = $derived(entryDraft.current?.collectionName ?? '');
+  /* v8 ignore stop */
+  const fileName = $derived(entryDraft.current?.fileName);
+  const valueMap = $derived(getValueMapSnapshot(entryDraft.current, locale, valueStoreKey));
   const buttons = $derived(
     [
       ..._buttons,
@@ -174,46 +227,62 @@
       .map((name) => BUTTON_NAME_MAP[name])
       .filter(Boolean),
   );
-  const components = $derived.by(() => {
-    // Disable nested components
+  const allowNestedComponents = $derived.by(() => {
+    let nested = _allowNestedComponents;
+
     if (inEditorComponent) {
+      // Retrieve the parent Markdown or RichText field config
+      nested = /** @type {MarkdownField | RichTextField} */ (
+        getField({
+          collectionName,
+          fileName,
+          isIndexFile,
+          valueMap,
+          // Extract the parent field name, e.g. `body:c55:content` -> `body`
+          keyPath: /** @type {string} */ (keyPath.match(/^[^:]+/)?.[0]),
+        })
+      )?.allow_nested_components;
+    }
+
+    return nested ?? defaultConfig.allow_nested_components ?? true;
+  });
+  const components = $derived.by(() => {
+    if (inEditorComponent && !allowNestedComponents) {
       return [];
     }
 
-    return _editorComponents
-      .map((name) => {
-        if (name === 'table') {
-          // Tables use native Lexical nodes already registered in @sveltia/ui's core; create the
-          // component object directly rather than going through EditorComponent/CustomNode.
-          return /** @type {import('@sveltia/ui').TextEditorComponent} */ ({
-            id: 'table',
-            label: _('editor_components.table'),
-            icon: 'table',
-            node: TableNode,
-            createNode: () => {
-              // Insert a placeholder paragraph, then open the dialog. The dialog's confirm/cancel
-              // handlers will replace or remove this placeholder node.
-              const placeholder = createParagraphNode();
-              pendingTablePlaceholderKey = placeholder.getKey();
-              showTableDialog = true;
-              return placeholder;
-            },
-            transformer: NOOP_TABLE_TRANSFORMER,
-          });
-        }
+    // The fork adds a built-in `table` component, which uses the Lexical table nodes that
+    // `@sveltia/ui` already registers rather than a component definition; see `docs/fork.md`
+    return _editorComponents.flatMap((name) => {
+      if (name === 'table') {
+        return [tableComponent];
+      }
 
-        const def = getComponentDef(
-          name === 'image' && linkedImagesEnabled ? 'linked-image' : name,
-        );
+      const def = getComponentDef(name === 'image' && linkedImagesEnabled ? 'linked-image' : name);
 
-        return def
-          ? /** @type {import('@sveltia/ui').TextEditorComponent} */ (new EditorComponent(def))
-          : null;
-      })
-      .filter((c) => !!c);
+      return def &&
+        // Only the components with HTML syntax can be used in HTML
+        (format !== 'html' || supportsHTML(def)) &&
+        // Compare the definition IDs, because the parent component names are the IDs, which are
+        // prefixed for custom components, e.g. `x-youtube`
+        (allowNestedComponents !== 'exclude_self' || !parentComponentNames.includes(def.id))
+        ? [/** @type {import('@sveltia/ui').TextEditorComponent} */ (new EditorComponent(def))]
+        : [];
+    });
   });
   const imageComponent = $derived(
     components.find(({ id }) => id === 'image' || id === 'linked-image'),
+  );
+  const targetAssetFolder = $derived(
+    getDefaultAssetFolder(
+      getAssetLibraryFolderMap({
+        collectionName,
+        fileName,
+        componentName,
+        typedKeyPath,
+        isIndexFile,
+      }),
+    ),
   );
 
   /**
@@ -226,12 +295,9 @@
     const outer = /** @type {HTMLElement} */ (target)?.closest('div');
     const editor = getNearestEditorFromDOMNode(outer);
 
-    if (!$entryDraft || !imageComponent || !outer?.matches('.lexical-root') || !editor) {
+    if (!entryDraft.current || !imageComponent || !outer?.matches('.lexical-root') || !editor) {
       return;
     }
-
-    const draft = $entryDraft;
-    const { collectionName, fileName, isIndexFile } = draft;
 
     const srcFieldConfig =
       /** @type {import('@sveltia/ui').TextEditorComponent & EditorComponentDefinition} */ (
@@ -242,8 +308,8 @@
       fieldConfig: /** @type {ImageField} */ (srcFieldConfig),
     });
 
-    const folderMap = getAssetLibraryFolderMap({ collectionName, fileName, isIndexFile });
-    const folder = Object.values(folderMap).find(({ enabled }) => enabled)?.folder;
+    const draft = entryDraft.current;
+    const folder = targetAssetFolder;
 
     // eslint-disable-next-line no-restricted-syntax
     for (const { file, src: externalSrc, alt = '' } of images) {
@@ -274,142 +340,25 @@
   };
 
   /**
-   * Handle pasted file. If it’s an image, insert it to the editor content.
+   * Handle pasted content. If it includes images, insert them to the editor content.
    * @param {ClipboardEvent} event `paste` event.
    */
   const onPaste = async (event) => {
-    const { target, clipboardData } = event;
-    const pastedItems = clipboardData?.items;
-
-    if (!pastedItems) {
-      return;
-    }
-
-    /** @type {ImageEntry[]} */
-    let images = [];
-
-    const fileIndex = [...pastedItems].findIndex(
-      ({ kind, type }) => kind === 'file' && SUPPORTED_IMAGE_TYPES.includes(type),
-    );
-
-    const htmlIndex = [...pastedItems].findIndex(
-      ({ kind, type }) => kind === 'string' && type === 'text/html',
-    );
-
-    if (fileIndex > -1 && htmlIndex > -1) {
-      // Handle pasted remote files: When a remote image is copied within the browser, both file and
-      // HTML with `<img>` are added to the clipboard. Scrape the filename and alt text from the
-      // HTML content
-      const file = fileIndex > -1 ? pastedItems[fileIndex].getAsFile() : undefined;
-
-      if (!file) {
-        return;
-      }
-
-      // Clear the clipboard to prevent Lexical from pasting the HTML
-      pastedItems.clear();
-      event.stopPropagation();
-
-      let alt = '';
-      let fileName = file.name;
-
-      /** @type {?HTMLImageElement} */
-      const img = await new Promise((resolve) => {
-        pastedItems[htmlIndex].getAsString((str) => {
-          resolve(new DOMParser().parseFromString(str, 'text/html').querySelector('img'));
-        });
-      });
-
-      if (img) {
-        alt = img.alt;
-
-        if (/^https?:/.test(img.src)) {
-          const name = new URL(img.src).pathname.split('/').pop() ?? '';
-
-          if (RASTER_IMAGE_EXTENSION_REGEX.test(name) || VECTOR_IMAGE_EXTENSION_REGEX.test(name)) {
-            fileName = name;
-          }
-        }
-      }
-
-      images = [{ file: new File([file], fileName, { type: file.type }), alt }];
-    } else {
-      // Handle pasted local files
-      images = [...clipboardData.files]
-        .filter(({ type }) => SUPPORTED_IMAGE_TYPES.includes(type))
-        .map((file) => ({ file }));
-    }
+    const { target } = event;
+    const images = await getPastedImages(event);
 
     if (images.length) {
-      images = images.map(({ file, alt }, index) => {
-        // Rename pasted file with generic name
-        if (file?.name === 'image.png') {
-          const { year, month, day, hour, minute, second } = getDateTimeParts();
-          const suffix = images.length > 1 ? `-${index + 1}` : '';
-          const fileName = `${year}${month}${day}-${hour}${minute}${second}${suffix}.png`;
-
-          file = new File([file], fileName, { type: file.type });
-        }
-
-        return { file, alt };
-      });
-
       await insertImages({ target, images });
     }
   };
 
   /**
-   * Handle dropped file(s). If it’s an image, insert it to the editor content.
+   * Handle dropped content. If it includes images, insert them to the editor content.
    * @param {DragEvent} event `drop` event.
    */
   const onDrop = async (event) => {
-    const { target, dataTransfer } = event;
-    const droppedFiles = dataTransfer?.files;
-    /** @type {ImageEntry[]} */
-    let images = [];
-
-    if (droppedFiles?.length) {
-      // Handle dropped local files
-      images = [...droppedFiles]
-        .filter(({ type }) => SUPPORTED_IMAGE_TYPES.includes(type))
-        .map((file) => ({ file }));
-    } else {
-      // Handle dropped remote files: The clipboard doesn’t contain the file itself but the HTML may
-      // contain `<img>`; use the `src` and `alt` attributes to insert a new image. We don’t fetch
-      // the file unless a data URL is given, because it’s likely to fail due to the external site’s
-      // CORS policy
-      const html = event.dataTransfer?.getData('text/html');
-
-      if (html) {
-        const img = new DOMParser().parseFromString(html, 'text/html').querySelector('img');
-
-        if (img) {
-          const { src, alt } = img;
-          const dataMatcher = src.match(DATA_URL_REGEX);
-          /** @type {File | undefined} */
-          let file = undefined;
-
-          if (dataMatcher) {
-            const type = dataMatcher.groups?.type ?? '';
-
-            if (SUPPORTED_IMAGE_TYPES.includes(type)) {
-              try {
-                const blob = await (await fetch(src)).blob();
-                const { year, month, day, hour, minute, second } = getDateTimeParts();
-                const extension = type.split('/')[1];
-                const fileName = `${year}${month}${day}-${hour}${minute}${second}.${extension}`;
-
-                file = new File([blob], fileName, { type });
-              } catch {
-                return;
-              }
-            }
-          }
-
-          images = [{ file, src, alt }];
-        }
-      }
-    }
+    const { target } = event;
+    const images = await getDroppedImages(event);
 
     if (images.length) {
       await insertImages({ target, images });
@@ -417,17 +366,14 @@
   };
 
   /**
-   * Update {@link inputValue} based on {@link currentValue} while avoiding a cycle dependency.
+   * Remove the extra values of the components that are no longer present in the editor, shortly
+   * after {@link currentValue} has changed.
    */
-  const setInputValue = () => {
-    const newValue = typeof currentValue === 'string' ? currentValue : '';
-
-    if (inputValue !== newValue) {
-      inputValue = newValue;
-    }
-
+  const scheduleExtraValueCleanup = () => {
     // Skip cleanup when used as a nested component editor
-    if (!$entryDraft || inEditorComponent) {
+    const draft = entryDraft.current;
+
+    if (!draft || inEditorComponent) {
       return;
     }
 
@@ -436,44 +382,66 @@
     // Remove values that are not present in the editor anymore. Otherwise, they will trigger
     // validation errors when the entry is saved.
     cleanupTimeout = window.setTimeout(() => {
-      Object.keys($entryDraft?.extraValues[locale] ?? {}).forEach((key) => {
+      Object.keys(draft.extraValues[locale]).forEach((key) => {
         const [prefix] = key.match(COMPONENT_NAME_PREFIX_REGEX) ?? [];
 
         if (
           prefix?.startsWith(`${keyPath}:`) &&
           !wrapper?.querySelector(`[data-key-path-prefix="${prefix}"]`)
         ) {
-          delete $entryDraft.extraValues[locale][key];
+          delete draft.extraValues[locale][key];
         }
       });
     }, 500);
   };
 
-  /**
-   * Update {@link currentValue} based on {@link inputValue} while avoiding a cycle dependency.
-   */
-  const setCurrentValue = () => {
-    const newValue = inputValue;
+  // Sync `inputValue` with `currentValue` in both directions
+  syncValues(
+    () => currentValue,
+    (value) => {
+      currentValue = value;
+    },
+    () => inputValue,
+    (input) => {
+      inputValue = input;
+    },
+    (value) => (typeof value === 'string' ? value : ''),
+  );
 
-    if (currentValue !== newValue) {
-      currentValue = newValue;
-    }
-  };
+  // Registered after the sync above, so it runs right after the input value has been updated
+  watch(
+    () => currentValue,
+    () => {
+      scheduleExtraValueCleanup();
+    },
+  );
 
-  $effect(() => {
-    void [currentValue];
-
-    untrack(() => {
-      setInputValue();
-    });
+  // Cancel the pending cleanup when the component is destroyed, e.g. when the content details
+  // overlay is closed. Otherwise, the callback would read reactive state belonging to a destroyed
+  // effect, causing a `derived_inert` warning.
+  $effect(() => () => {
+    window.clearTimeout(cleanupTimeout);
   });
 
+  // While the editor holds a change made by the user, register it as a pending update: the editor
+  // converts the content to Markdown with a short delay, so a save right after a change would
+  // otherwise validate and write the previous value
   $effect(() => {
-    void [inputValue];
+    if (!pending) {
+      return undefined;
+    }
 
-    untrack(() => {
-      setCurrentValue();
-    });
+    /** @type {PromiseWithResolvers<void>} */
+    const { promise, resolve } = Promise.withResolvers();
+
+    trackPendingFieldUpdate(promise);
+
+    // Settle once the value has reached `currentValue` through the bindings and effects, or when
+    // the editor goes away
+    return async () => {
+      await tick();
+      resolve();
+    };
   });
 </script>
 
@@ -487,10 +455,14 @@
       <TextEditor
         lang={getCanonicalLocale(locale)}
         dir={getDirection(locale)}
+        {format}
         {modes}
         {buttons}
         {components}
+        {useEmojiAutocomplete}
+        {useMarkdownShortcuts}
         bind:value={inputValue}
+        bind:pending
         flex
         {readonly}
         {required}
@@ -518,6 +490,7 @@
 
 <style>
   .wrapper {
+    --sui-paragraph-margin: 20px;
     display: contents;
 
     &.minimal {

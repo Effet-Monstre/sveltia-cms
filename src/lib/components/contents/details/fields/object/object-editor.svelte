@@ -6,27 +6,40 @@
 -->
 <script>
   import { _ } from '@sveltia/i18n';
-  import { Button, Checkbox, Icon, TruncatedText } from '@sveltia/ui';
+  import { Button, Checkbox, Icon } from '@sveltia/ui';
   import { toRaw } from '@sveltia/utils/object';
   import { getContext, onMount, tick } from 'svelte';
 
-  import VisibilityObserver from '$lib/components/common/visibility-observer.svelte';
-  import FieldEditor from '$lib/components/contents/details/editor/field-editor.svelte';
   import AddItemButton from '$lib/components/contents/details/fields/object/add-item-button.svelte';
+  import ObjectBody from '$lib/components/contents/details/fields/object/object-body.svelte';
   import ObjectHeader from '$lib/components/contents/details/fields/object/object-header.svelte';
-  import { entryDraft, i18nAutoDupEnabled } from '$lib/services/contents/draft';
+  import { suspendAutoDuplication } from '$lib/services/contents/draft';
   import { getDefaultValues } from '$lib/services/contents/draft/defaults';
-  import { copyDefaultLocaleValues } from '$lib/services/contents/draft/update/locale';
+  import { getEntryDraftContext } from '$lib/services/contents/draft/state.svelte';
+  import {
+    copyDefaultLocaleValues,
+    forEachTargetLocale,
+  } from '$lib/services/contents/draft/update/locale';
+  import { getValueMapSnapshot } from '$lib/services/contents/draft/value-map.svelte';
   import {
     getInitialExpanderState,
+    isExpanded,
     syncExpanderStates,
-  } from '$lib/services/contents/editor/expanders';
-  import { formatSummary } from '$lib/services/contents/fields/object/helper';
-  import { DEFAULT_I18N_CONFIG } from '$lib/services/contents/i18n/config';
-  import { env } from '$lib/services/user/env.svelte';
+  } from '$lib/services/contents/editor/fields';
+  import { getKeysByPrefix } from '$lib/services/contents/entry/key-paths';
+  import {
+    formatSummary,
+    getUnknownTypeMessage,
+  } from '$lib/services/contents/fields/object/helpers';
+  import { getObjectThumbnail } from '$lib/services/contents/fields/object/thumbnail';
 
   /**
-   * @import { EntryDraft, FieldEditorContext, FieldEditorProps } from '$lib/types/private';
+   * @import {
+   * EntryDraft,
+   * FieldEditorContext,
+   * FieldEditorProps,
+   * MediaFieldSource,
+   * } from '$lib/types/private';
    * @import {
    * ObjectField,
    * ObjectFieldWithSubFields,
@@ -40,8 +53,15 @@
    * @property {object | undefined} currentValue Field value.
    */
 
+  const entryDraft = getEntryDraftContext();
+
   /** @type {FieldEditorContext} */
-  const { fieldContext, valueStoreKey = 'currentValues' } = getContext('field-editor') ?? {};
+  const {
+    fieldContext,
+    valueStoreKey = 'currentValues',
+    parentComponentNames = [],
+  } = getContext('field-editor') ?? {};
+  const componentName = parentComponentNames.at(-1);
   // Hide the header/expander if in a single subfield list field because it’s redundant
   const hideHeader = fieldContext === 'single-subfield-list-field';
 
@@ -54,6 +74,9 @@
     fieldLabel,
     fieldConfig,
     required = true,
+    // `FieldEditor` only renders the editor in a locale where the field is shown, and makes it
+    // read-only in a locale whose values follow the default locale
+    readonly = false,
     /* eslint-enable prefer-const */
   } = $props();
 
@@ -65,47 +88,52 @@
     // Field type-specific options
     collapsed,
     summary,
+    thumbnail: thumbnailFieldName,
   } = $derived(fieldConfig);
   const { fields } = $derived(/** @type {ObjectFieldWithSubFields} */ (fieldConfig));
   const { types, typeKey = 'type' } = $derived(/** @type {ObjectFieldWithTypes} */ (fieldConfig));
-  const isIndexFile = $derived($entryDraft?.isIndexFile ?? false);
-  const collection = $derived($entryDraft?.collection);
-  const collectionName = $derived($entryDraft?.collectionName ?? '');
-  const collectionFile = $derived($entryDraft?.collectionFile);
-  const fileName = $derived($entryDraft?.fileName);
-  const { defaultLocale } = $derived((collectionFile ?? collection)?._i18n ?? DEFAULT_I18N_CONFIG);
-  const valueMap = $derived($state.snapshot($entryDraft?.[valueStoreKey][locale]) ?? {});
+  /* v8 ignore start -- the editor is only rendered while the draft is there */
+  const isIndexFile = $derived(entryDraft.current?.isIndexFile ?? false);
+  const collectionName = $derived(entryDraft.current?.collectionName ?? '');
+  /* v8 ignore stop */
+  const fileName = $derived(entryDraft.current?.fileName);
+  const defaultLocale = $derived(entryDraft.current?.defaultLocale);
+  const valueMap = $derived(getValueMapSnapshot(entryDraft.current, locale, valueStoreKey));
   const getFieldArgs = $derived({ collectionName, fileName, valueMap, isIndexFile });
+  // Ask the shared key path index rather than scanning the whole value map: the editor renders one
+  // component per field, and a large entry would otherwise be walked once per Object field on
+  // every keystroke
   const hasValues = $derived(
-    Object.entries(valueMap).some(
-      ([_keyPath, value]) => _keyPath.startsWith(`${keyPath}.`) && value !== undefined,
-    ),
-  );
-  const canEdit = $derived(
-    fieldContext === 'rich-text-editor-component' || locale === defaultLocale || i18n !== false,
+    getKeysByPrefix(valueMap, `${keyPath}.`).some((_keyPath) => valueMap[_keyPath] !== undefined),
   );
   const parentExpandedKeyPath = $derived(`${keyPath}#`);
-  const parentExpanded = $derived($entryDraft?.expanderStates?._[parentExpandedKeyPath] ?? true);
+  const parentExpanded = $derived(isExpanded(entryDraft.current, parentExpandedKeyPath));
   const hasVariableTypes = $derived(Array.isArray(types));
   const typeKeyPath = $derived(`${keyPath}.${typeKey}`);
-  const typeConfig = $derived(
-    hasVariableTypes ? types?.find(({ name }) => name === valueMap[typeKeyPath]) : undefined,
-  );
+  /* v8 ignore start -- only read for an object with variable types */
+  const type = $derived(hasVariableTypes ? valueMap[typeKeyPath] : undefined);
+  /* v8 ignore stop */
+  const typeConfig = $derived(type ? types?.find(({ name }) => name === type) : undefined);
+  const unknownType = $derived(hasVariableTypes && !typeConfig);
   const subFields = $derived((hasVariableTypes ? typeConfig?.fields : fields) ?? []);
   const summaryTemplate = $derived(hasVariableTypes ? typeConfig?.summary || summary : summary);
-  const addButtonDisabled = $derived(locale !== defaultLocale && i18n === 'duplicate');
 
   /**
    * Initialize the expander state.
    */
   const initializeExpanderState = () => {
-    if (hideHeader) {
+    const draft = entryDraft.current;
+
+    if (hideHeader || !draft) {
       return;
     }
 
     const key = parentExpandedKeyPath;
 
-    syncExpanderStates({ [key]: getInitialExpanderState({ key, locale, collapsed }) });
+    syncExpanderStates({
+      draft,
+      stateMap: { [key]: getInitialExpanderState({ draft, key, locale, collapsed }) },
+    });
   };
 
   /**
@@ -113,67 +141,86 @@
    * @param {object} [args] Arguments.
    * @param {string} [args.type] Variable type name. If the field doesn’t have variable types, it
    * will be `undefined`.
+   * @returns {Promise<void>} A promise that resolves once the fields have been added.
    */
-  const addFields = async ({ type } = {}) => {
-    // Avoid triggering the Proxy’s i18n duplication strategy for descendant fields
-    $i18nAutoDupEnabled = false;
+  const addFields = async ({ type: _type } = {}) =>
+    // Avoid triggering the Proxy’s i18n duplication strategy for descendant fields. The suspension
+    // has to span the `await` below, because the values are written after it
+    suspendAutoDuplication(async () => {
+      const draft = entryDraft.current;
 
-    if (type) {
-      Object.keys($entryDraft?.[valueStoreKey] ?? {}).forEach((_locale) => {
-        if (_locale === locale || i18n === 'duplicate') {
-          /** @type {EntryDraft} */ ($entryDraft)[valueStoreKey][_locale][typeKeyPath] = type;
-        }
-      });
+      /* v8 ignore next 3 -- the button is only offered while the draft is there */
+      if (!draft) {
+        return;
+      }
 
-      // Wait until `subFields` is updated
-      await tick();
-    }
-
-    const newContent = Object.fromEntries(
-      Object.entries(getDefaultValues({ fields: subFields, locale, defaultLocale })) //
-        .map(([_keyPath, value]) => [`${keyPath}.${_keyPath}`, value]),
-    );
-
-    const newValueMap =
-      locale === defaultLocale ? newContent : copyDefaultLocaleValues(newContent, locale);
-
-    Object.entries($entryDraft?.[valueStoreKey] ?? {}).forEach(([_locale, _valueMap]) => {
-      if (_locale === locale || i18n === 'duplicate') {
-        // Apply the new values while keeping the Proxy
-        /** @type {EntryDraft} */ ($entryDraft)[valueStoreKey][_locale] = Object.assign(
-          _valueMap,
-          toRaw({ ...newValueMap, ..._valueMap }),
+      if (_type) {
+        forEachTargetLocale(
+          { valueStore: draft[valueStoreKey], locale, i18n, draft, keyPath },
+          (_valueMap) => {
+            _valueMap[typeKeyPath] = _type;
+          },
         );
 
-        // Disable validation
-        delete (/** @type {EntryDraft} */ ($entryDraft)[valueStoreKey][_locale][keyPath]);
+        // Wait until `subFields` is updated
+        await tick();
       }
-    });
 
-    $i18nAutoDupEnabled = true;
-  };
+      const newContent = Object.fromEntries(
+        Object.entries(
+          getDefaultValues({ fields: subFields, locale, defaultLocale: draft.defaultLocale }),
+        ) //
+          .map(([_keyPath, value]) => [`${keyPath}.${_keyPath}`, value]),
+      );
+
+      const newValueMap =
+        locale === defaultLocale
+          ? newContent
+          : copyDefaultLocaleValues({
+              draft,
+              content: newContent,
+              targetLanguage: locale,
+              keyPathPrefix: keyPath,
+            });
+
+      forEachTargetLocale(
+        { valueStore: draft[valueStoreKey], locale, i18n, draft, keyPath },
+        (_valueMap) => {
+          // Apply the new values through the Proxy
+          Object.assign(_valueMap, toRaw({ ...newValueMap, ..._valueMap }));
+
+          // Disable validation
+          delete _valueMap[keyPath];
+        },
+      );
+    });
 
   /**
    * Remove the object’s subfields from the entry draft.
    */
   const removeFields = () => {
-    $i18nAutoDupEnabled = false;
-
-    Object.entries($entryDraft?.[valueStoreKey] ?? {}).forEach(([_locale, _valueMap]) => {
-      if (_locale === locale || i18n === 'duplicate') {
-        Object.keys(_valueMap).forEach((_keyPath) => {
-          if (_keyPath.startsWith(`${keyPath}.`)) {
-            /** @type {EntryDraft} */ ($entryDraft)[valueStoreKey][_locale][_keyPath] = null;
-            delete $entryDraft?.[valueStoreKey][_locale][_keyPath];
-          }
+    forEachTargetLocale(
+      {
+        valueStore: entryDraft.current?.[valueStoreKey],
+        locale,
+        i18n,
+        // The Remove button is only offered while the draft is there
+        draft: /** @type {EntryDraft} */ (entryDraft.current),
+        keyPath,
+      },
+      (_valueMap) => {
+        // Assign `null` before deleting each property, so the draft proxy can revalidate the field.
+        // The value map is the draft’s live map, which is mutated right below, so its key paths
+        // have to be read as they are right now
+        getKeysByPrefix(_valueMap, `${keyPath}.`, { live: true }).forEach((_keyPath) => {
+          _valueMap[_keyPath] = null;
+          delete _valueMap[_keyPath];
         });
 
         // Enable validation
-        /** @type {EntryDraft} */ ($entryDraft)[valueStoreKey][_locale][keyPath] = null;
-      }
-    });
-
-    $i18nAutoDupEnabled = true;
+        _valueMap[keyPath] = null;
+      },
+    );
   };
 
   /**
@@ -182,8 +229,40 @@
    */
   const _formatSummary = () => formatSummary({ ...getFieldArgs, keyPath, locale, summaryTemplate });
 
+  /**
+   * Get the thumbnail of the collapsed object.
+   * @returns {MediaFieldSource | undefined} Thumbnail.
+   */
+  const getThumbnail = () =>
+    getObjectThumbnail({
+      thumbnailFieldName,
+      keyPath,
+      typedKeyPath: type ? `${typedKeyPath}<${type}>` : typedKeyPath,
+      collectionName,
+      fileName,
+      componentName,
+      valueMap,
+      isIndexFile,
+      entry: entryDraft.current?.originalEntry,
+      files: entryDraft.current?.files,
+    });
+
+  /**
+   * Warn about unknown variable type.
+   */
+  const warnUnknownType = () => {
+    const message = getUnknownTypeMessage({ fieldType: 'object', type, typeKey, types });
+
+    // eslint-disable-next-line no-console
+    console.warn(`Object field ${keyPath}: ${message}`);
+  };
+
   onMount(() => {
     initializeExpanderState();
+
+    if (hasValues && unknownType) {
+      warnUnknownType();
+    }
   });
 </script>
 
@@ -191,7 +270,7 @@
   <Checkbox
     label={_('add_x', { values: { name: fieldLabel || fieldName } })}
     checked={hasValues}
-    disabled={addButtonDisabled}
+    disabled={readonly}
     onChange={({ detail: { checked } }) => {
       if (checked) {
         addFields();
@@ -203,22 +282,28 @@
 {/if}
 
 {#if hasVariableTypes && !hasValues}
-  <AddItemButton disabled={addButtonDisabled} {fieldConfig} addItem={addFields} />
+  <AddItemButton disabled={readonly} {fieldConfig} addItem={addFields} />
 {/if}
 
-{#if (!(!required || hasVariableTypes) || hasValues) && canEdit}
+{#if !(!required || hasVariableTypes) || hasValues}
   <div
     role="group"
     class="wrapper"
+    class:unknown-type={unknownType}
+    class:expanded={parentExpanded}
     aria-labelledby={parentExpanded ? undefined : `object-${fieldId}-summary`}
   >
     {#if !hideHeader}
       <ObjectHeader
-        label={hasVariableTypes ? typeConfig?.label || typeConfig?.name : ''}
+        label={hasVariableTypes ? typeConfig?.label || type : ''}
         controlId="object-{fieldId}-item-list"
         expanded={parentExpanded}
         toggleExpanded={subFields.length
-          ? () => syncExpanderStates({ [parentExpandedKeyPath]: !parentExpanded })
+          ? () =>
+              syncExpanderStates({
+                draft: /** @type {EntryDraft} */ (entryDraft.current),
+                stateMap: { [parentExpandedKeyPath]: !parentExpanded },
+              })
           : undefined}
       >
         {#snippet endContent()}
@@ -226,7 +311,7 @@
             <Button
               size="small"
               iconic
-              disabled={addButtonDisabled}
+              disabled={readonly}
               aria-label={_('remove')}
               onclick={() => {
                 removeFields();
@@ -241,48 +326,50 @@
       </ObjectHeader>
     {/if}
     <div role="none" class="item-list" id="object-{fieldId}-item-list">
-      {#if parentExpanded}
-        {#each subFields as subField (subField.name)}
-          {@const subFieldKeyPath = `${keyPath}.${subField.name}`}
-          <VisibilityObserver>
-            <FieldEditor
-              keyPath={subFieldKeyPath}
-              typedKeyPath={hasVariableTypes && typeConfig?.name
-                ? `${typedKeyPath}<${typeConfig.name}>.${subField.name}`
-                : subFieldKeyPath}
-              {locale}
-              fieldConfig={subField}
-            />
-          </VisibilityObserver>
-        {/each}
-      {:else}
-        {@const formattedSummary = _formatSummary()}
-        {#if formattedSummary}
-          <div role="none" class="summary" id="object-{fieldId}-summary">
-            <TruncatedText lines={env.isSmallScreen ? 2 : 1}>
-              {formattedSummary}
-            </TruncatedText>
-          </div>
-        {/if}
-      {/if}
+      <ObjectBody
+        {locale}
+        {subFields}
+        getSubFieldProps={(subField) => ({
+          keyPath: `${keyPath}.${subField.name}`,
+          typedKeyPath:
+            hasVariableTypes && type
+              ? `${typedKeyPath}<${type}>.${subField.name}`
+              : `${typedKeyPath}.${subField.name}`,
+        })}
+        expanded={parentExpanded}
+        {unknownType}
+        getSummary={_formatSummary}
+        {getThumbnail}
+        summaryId="object-{fieldId}-summary"
+      />
     </div>
   </div>
 {/if}
 
 <style>
   .wrapper {
-    border-width: 2px;
+    border-inline-width: 2px;
     border-color: var(--sui-secondary-border-color);
     border-radius: var(--sui-control-medium-border-radius);
+
+    &.expanded,
+    &:has(:global(.summary)) {
+      border-bottom-width: 2px;
+    }
+
+    &.unknown-type {
+      overflow: hidden;
+
+      :global(.alert) {
+        border-width: 0;
+        border-radius: 0;
+      }
+    }
   }
 
   :global(.sui.checkbox) + .wrapper {
     & > :global(.group) {
       margin-top: 8px;
     }
-  }
-
-  .summary {
-    padding: 8px;
   }
 </style>

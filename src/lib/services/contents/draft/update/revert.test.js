@@ -1,36 +1,29 @@
 // @ts-nocheck
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { entryDraft } from '$lib/services/contents/draft';
 import { getField } from '$lib/services/contents/entry/fields';
 
-import { resolveOriginalKeyPath, revertChanges, revertFields, revertLocale } from './revert';
+import {
+  revertChanges as _revertChanges,
+  isFieldChanged,
+  resolveOriginalKeyPath,
+  revertFields,
+  revertLocale,
+} from './revert';
 
-vi.mock('$lib/services/contents/draft');
 vi.mock('$lib/services/contents/entry/fields');
-vi.mock('$lib/services/user/prefs.svelte', () => ({
-  prefs: { devModeEnabled: false },
-}));
-vi.mock('svelte/store', async () => {
-  const actual = await vi.importActual('svelte/store');
-
-  return {
-    ...actual,
-    get: vi.fn(() => ({ devModeEnabled: false })),
-  };
-});
 
 describe('draft/update/revert', () => {
   let mockEntryDraft;
-  let mockUpdate;
-  let mockGet;
+  /**
+   * Revert changes made to the mock entry draft.
+   * @param {any} [args] Arguments other than the draft.
+   * @returns {void} Nothing.
+   */
+  const revertChanges = (args = {}) => _revertChanges({ draft: mockEntryDraft, ...args });
 
   beforeEach(async () => {
     vi.clearAllMocks();
-
-    const { get } = await import('svelte/store');
-
-    mockGet = vi.mocked(get);
 
     mockEntryDraft = {
       collection: {
@@ -67,24 +60,6 @@ describe('draft/update/revert', () => {
       },
     };
 
-    mockUpdate = vi.fn((fn) => {
-      if (typeof fn === 'function') {
-        return fn(mockEntryDraft);
-      }
-
-      return mockEntryDraft;
-    });
-
-    mockGet.mockImplementation((store) => {
-      if (store === entryDraft) {
-        return mockEntryDraft;
-      }
-
-      return undefined;
-    });
-
-    vi.mocked(entryDraft).update = mockUpdate;
-
     vi.mocked(getField).mockImplementation(({ keyPath }) => {
       if (keyPath === 'title') {
         return { name: 'title', widget: 'string', i18n: 'translate' };
@@ -103,10 +78,61 @@ describe('draft/update/revert', () => {
   });
 
   describe('revertChanges', () => {
+    it('restores the folder the entry is filed in', () => {
+      // Moving an entry with the path editor is a change of its own, so a full revert undoes it
+      mockEntryDraft.originalPath = 'company';
+      mockEntryDraft.currentPath = 'archive';
+
+      revertChanges();
+
+      expect(mockEntryDraft.currentPath).toBe('company');
+    });
+
+    it('restores the slugs', () => {
+      // A slug edited with the slug editor names the file, or the folder in a nested collection, so
+      // a full revert undoes the rename too
+      mockEntryDraft.originalSlugs = { en: 'company', ja: 'kaisha' };
+      mockEntryDraft.currentSlugs = { en: 'company', ja: 'kigyou' };
+
+      revertChanges();
+
+      const { currentSlugs } = mockEntryDraft;
+
+      expect(currentSlugs).toEqual({ en: 'company', ja: 'kaisha' });
+      // A copy, so that editing the slug again doesn’t alter the original
+      expect(currentSlugs).not.toBe(mockEntryDraft.originalSlugs);
+    });
+
+    it('leaves the slugs alone when only one locale is reverted', () => {
+      mockEntryDraft.originalSlugs = { en: 'company', ja: 'kaisha' };
+      mockEntryDraft.currentSlugs = { en: 'company', ja: 'kigyou' };
+
+      revertChanges({ locale: 'ja' });
+
+      expect(mockEntryDraft.currentSlugs).toEqual({ en: 'company', ja: 'kigyou' });
+    });
+
+    it('leaves the folder alone when only one locale is reverted', () => {
+      mockEntryDraft.originalPath = 'company';
+      mockEntryDraft.currentPath = 'archive';
+
+      revertChanges({ locale: 'en' });
+
+      expect(mockEntryDraft.currentPath).toBe('archive');
+    });
+
+    it('leaves the folder alone when only one field is reverted', () => {
+      mockEntryDraft.originalPath = 'company';
+      mockEntryDraft.currentPath = 'archive';
+
+      revertChanges({ keyPath: 'title' });
+
+      expect(mockEntryDraft.currentPath).toBe('archive');
+    });
+
     it('should revert all fields in all locales', () => {
       revertChanges();
 
-      expect(mockUpdate).toHaveBeenCalled();
       expect(mockEntryDraft.currentValues.en.title).toBe('Original Title');
       expect(mockEntryDraft.currentValues.en.body).toBe('Original Body');
       expect(mockEntryDraft.currentValues.ja.title).toBe('Original Japanese Title');
@@ -115,7 +141,6 @@ describe('draft/update/revert', () => {
     it('should revert all fields in specific locale', () => {
       revertChanges({ locale: 'en' });
 
-      expect(mockUpdate).toHaveBeenCalled();
       expect(mockEntryDraft.currentValues.en.title).toBe('Original Title');
       expect(mockEntryDraft.currentValues.en.body).toBe('Original Body');
     });
@@ -123,7 +148,6 @@ describe('draft/update/revert', () => {
     it('should revert specific field in all locales', () => {
       revertChanges({ keyPath: 'title' });
 
-      expect(mockUpdate).toHaveBeenCalled();
       expect(mockEntryDraft.currentValues.en.title).toBe('Original Title');
       expect(mockEntryDraft.currentValues.ja.title).toBe('Original Japanese Title');
     });
@@ -131,16 +155,50 @@ describe('draft/update/revert', () => {
     it('should revert specific field in specific locale', () => {
       revertChanges({ locale: 'en', keyPath: 'title' });
 
-      expect(mockUpdate).toHaveBeenCalled();
       expect(mockEntryDraft.currentValues.en.title).toBe('Original Title');
       // Other values should remain modified
       expect(mockEntryDraft.currentValues.en.body).toBe('Modified Body');
     });
 
+    it('should not revert a sibling whose name begins with the key path', () => {
+      const currentValues = {
+        en: {
+          tag: 'Modified Tag',
+          tags: 'Modified Tags',
+          tagline: 'Modified Tagline',
+          'tag.0': 'Modified Item',
+        },
+      };
+
+      revertFields({
+        locale: 'en',
+        isDefaultLocale: true,
+        keyPath: 'tag',
+        getFieldArgs: {
+          valueMap: {
+            tag: 'Original Tag',
+            tags: 'Original Tags',
+            tagline: 'Original Tagline',
+            'tag.0': 'Original Item',
+          },
+          collectionName: 'posts',
+          fileName: undefined,
+          keyPath: '',
+          isIndexFile: false,
+        },
+        currentValues,
+        reset: false,
+      });
+
+      expect(currentValues.en.tag).toBe('Original Tag');
+      expect(currentValues.en['tag.0']).toBe('Original Item');
+      expect(currentValues.en.tags).toBe('Modified Tags');
+      expect(currentValues.en.tagline).toBe('Modified Tagline');
+    });
+
     it('should only revert translatable fields in non-default locale', () => {
       revertChanges({ locale: 'ja' });
 
-      expect(mockUpdate).toHaveBeenCalled();
       expect(mockEntryDraft.currentValues.ja.title).toBe('Original Japanese Title');
       expect(mockEntryDraft.currentValues.ja.body).toBe('Original Japanese Body');
     });
@@ -148,7 +206,6 @@ describe('draft/update/revert', () => {
     it('should revert all fields including i18n-duplicate in default locale', () => {
       revertChanges({ locale: 'en' });
 
-      expect(mockUpdate).toHaveBeenCalled();
       expect(mockEntryDraft.currentValues.en.title).toBe('Original Title');
       expect(mockEntryDraft.currentValues.en.date).toBe('2024-01-01');
     });
@@ -156,7 +213,6 @@ describe('draft/update/revert', () => {
     it('should handle empty keyPath as reverting all fields', () => {
       revertChanges({ locale: 'en', keyPath: '' });
 
-      expect(mockUpdate).toHaveBeenCalled();
       expect(mockEntryDraft.currentValues.en.title).toBe('Original Title');
       expect(mockEntryDraft.currentValues.en.body).toBe('Original Body');
     });
@@ -175,8 +231,79 @@ describe('draft/update/revert', () => {
 
       revertChanges({ locale: 'en', keyPath: 'metadata.author' });
 
-      expect(mockUpdate).toHaveBeenCalled();
       expect(mockEntryDraft.currentValues.en['metadata.author']).toBe('Original Author');
+    });
+
+    describe('with KeyValue fields', () => {
+      beforeEach(() => {
+        vi.mocked(getField).mockImplementation(({ keyPath }) => {
+          if (keyPath === 'labels') {
+            return { name: 'labels', widget: 'keyvalue', i18n: true };
+          }
+
+          if (keyPath === 'metadata') {
+            return { name: 'metadata', widget: 'keyvalue', i18n: 'duplicate_keys' };
+          }
+
+          return undefined;
+        });
+
+        mockEntryDraft.currentValues = {
+          en: { 'labels.x': 'X2', 'metadata.a': '1', 'metadata.bee': '2', 'metadata.c': '3' },
+          ja: { 'labels.y': 'Y2', 'metadata.a': 'いち', 'metadata.bee': 'に', 'metadata.c': '' },
+        };
+
+        mockEntryDraft.originalValues = {
+          en: { 'labels.x': 'X', 'metadata.a': '1', 'metadata.b': '2' },
+          ja: { 'labels.y': 'Y', 'metadata.a': 'イチ', 'metadata.b': 'ニ' },
+        };
+      });
+
+      it('should revert the pairs of a translatable field in any locale', () => {
+        revertChanges({ keyPath: 'labels' });
+
+        expect(mockEntryDraft.currentValues.en['labels.x']).toBe('X');
+        expect(mockEntryDraft.currentValues.ja['labels.y']).toBe('Y');
+      });
+
+      it('should mirror the keys reverted in the default locale to the other locales', () => {
+        revertChanges({ locale: 'en', keyPath: 'metadata' });
+
+        expect(mockEntryDraft.currentValues.en).toEqual({
+          'labels.x': 'X2',
+          'metadata.a': '1',
+          'metadata.b': '2',
+        });
+        // The values are kept: `bee` is renamed back to `b`, and the added `c` is dropped
+        expect(mockEntryDraft.currentValues.ja).toEqual({
+          'labels.y': 'Y2',
+          'metadata.a': 'いち',
+          'metadata.b': 'に',
+        });
+      });
+
+      it('should line up the pairs reverted in another locale with the default locale', () => {
+        revertChanges({ locale: 'ja', keyPath: 'metadata' });
+
+        expect(mockEntryDraft.currentValues.en).toEqual({
+          'labels.x': 'X2',
+          'metadata.a': '1',
+          'metadata.bee': '2',
+          'metadata.c': '3',
+        });
+        expect(mockEntryDraft.currentValues.ja).toEqual({
+          'labels.y': 'Y2',
+          'metadata.a': 'イチ',
+          'metadata.bee': 'ニ',
+          'metadata.c': '',
+        });
+      });
+
+      it('should revert everything consistently', () => {
+        revertChanges();
+
+        expect(mockEntryDraft.currentValues).toEqual(mockEntryDraft.originalValues);
+      });
     });
   });
 
@@ -712,6 +839,131 @@ describe('draft/update/revert', () => {
         currentPrefix: 'sections.0.items.1',
         originalPrefix: 'sections.0.items.0',
       });
+    });
+  });
+
+  describe('isFieldChanged', () => {
+    it('should compare the value of a simple field', () => {
+      expect(
+        isFieldChanged({
+          currentValueMap: { title: 'Hello', body: 'New' },
+          originalValueMap: { title: 'Hello', body: 'Old' },
+          keyPath: 'title',
+        }),
+      ).toBe(false);
+      expect(
+        isFieldChanged({
+          currentValueMap: { title: 'Hi' },
+          originalValueMap: { title: 'Hello' },
+          keyPath: 'title',
+        }),
+      ).toBe(true);
+      expect(
+        isFieldChanged({ currentValueMap: { title: '' }, originalValueMap: {}, keyPath: 'title' }),
+      ).toBe(true);
+    });
+
+    it('should treat a missing value and an undefined value alike', () => {
+      expect(
+        isFieldChanged({
+          currentValueMap: { title: undefined },
+          originalValueMap: {},
+          keyPath: 'title',
+        }),
+      ).toBe(false);
+    });
+
+    it('should compare the subfields of an object field', () => {
+      const originalValueMap = { 'author.name': 'Alice', 'author.email': 'a@example.com' };
+
+      expect(
+        isFieldChanged({
+          currentValueMap: { ...originalValueMap },
+          originalValueMap,
+          keyPath: 'author',
+        }),
+      ).toBe(false);
+      expect(
+        isFieldChanged({
+          currentValueMap: { ...originalValueMap, 'author.name': 'Bob' },
+          originalValueMap,
+          keyPath: 'author',
+        }),
+      ).toBe(true);
+      expect(
+        isFieldChanged({
+          currentValueMap: { 'author.name': 'Alice' },
+          originalValueMap,
+          keyPath: 'author',
+        }),
+      ).toBe(true);
+    });
+
+    it('should not match a sibling field sharing the key path as a prefix', () => {
+      expect(
+        isFieldChanged({
+          currentValueMap: { author: 'Alice', authors: 'Bob' },
+          originalValueMap: { author: 'Alice', authors: 'Carol' },
+          keyPath: 'author',
+        }),
+      ).toBe(false);
+    });
+
+    it('should ignore empty placeholders and internal props', () => {
+      expect(
+        isFieldChanged({
+          currentValueMap: {
+            author: {},
+            'author.name': 'Alice',
+            'author.tags': [],
+            'author.links.0.__sc_item_id': 'abc',
+          },
+          originalValueMap: { 'author.name': 'Alice' },
+          keyPath: 'author',
+        }),
+      ).toBe(false);
+    });
+
+    it('should compare the items of a list field', () => {
+      expect(
+        isFieldChanged({
+          currentValueMap: { tags: [], 'tags.0': 'a', 'tags.1': 'b' },
+          originalValueMap: { 'tags.0': 'a', 'tags.1': 'b' },
+          keyPath: 'tags',
+        }),
+      ).toBe(false);
+      expect(
+        isFieldChanged({
+          currentValueMap: { 'tags.0': 'b', 'tags.1': 'a' },
+          originalValueMap: { 'tags.0': 'a', 'tags.1': 'b' },
+          keyPath: 'tags',
+        }),
+      ).toBe(true);
+    });
+
+    it('should compare a field inside a reordered list item with its original value', () => {
+      const originalValueMap = {
+        'items.0.author.name': 'Alice',
+        'items.1.author.name': 'Bob',
+      };
+
+      const currentValueMap = {
+        'items.0.author.name': 'Bob',
+        'items.0.__sc_item_original_key_path': 'items.1',
+        'items.1.author.name': 'Alice',
+        'items.1.__sc_item_original_key_path': 'items.0',
+      };
+
+      expect(isFieldChanged({ currentValueMap, originalValueMap, keyPath: 'items.0.author' })).toBe(
+        false,
+      );
+      expect(
+        isFieldChanged({
+          currentValueMap: { ...currentValueMap, 'items.1.author.name': 'Carol' },
+          originalValueMap,
+          keyPath: 'items.1.author',
+        }),
+      ).toBe(true);
     });
   });
 

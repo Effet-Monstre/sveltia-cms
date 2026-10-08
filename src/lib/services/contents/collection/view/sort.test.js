@@ -11,6 +11,7 @@ import { getSortKeyGetter, MARKDOWN_FIELD_KEYS, sortEntries } from './sort';
 // Mock external dependencies
 vi.mock('$lib/services/contents/collection/entries/index-file', () => ({
   getIndexFile: vi.fn(),
+  isCollectionIndexFile: vi.fn(),
 }));
 
 vi.mock('$lib/services/contents/collection/view/sort-keys', () => ({
@@ -19,6 +20,9 @@ vi.mock('$lib/services/contents/collection/view/sort-keys', () => ({
 
 vi.mock('$lib/services/contents/entry/fields', () => ({
   getField: vi.fn(),
+}));
+
+vi.mock('$lib/services/contents/entry/values', () => ({
   getPropertyValue: vi.fn(),
 }));
 
@@ -26,7 +30,7 @@ vi.mock('$lib/services/contents/entry/summary', () => ({
   getEntrySummary: vi.fn(),
 }));
 
-vi.mock('$lib/services/contents/fields/date-time/helper', () => ({
+vi.mock('$lib/services/contents/fields/date-time/parse', () => ({
   getDate: vi.fn(),
 }));
 
@@ -34,11 +38,14 @@ vi.mock('$lib/services/utils/markdown', () => ({
   removeMarkdownSyntax: vi.fn(),
 }));
 
-const { getIndexFile } = await import('$lib/services/contents/collection/entries/index-file');
+const { getIndexFile, isCollectionIndexFile } =
+  await import('$lib/services/contents/collection/entries/index-file');
+
 const { getSortKeyType } = await import('$lib/services/contents/collection/view/sort-keys');
-const { getField, getPropertyValue } = await import('$lib/services/contents/entry/fields');
+const { getField } = await import('$lib/services/contents/entry/fields');
+const { getPropertyValue } = await import('$lib/services/contents/entry/values');
 const { getEntrySummary } = await import('$lib/services/contents/entry/summary');
-const { getDate } = await import('$lib/services/contents/fields/date-time/helper');
+const { getDate } = await import('$lib/services/contents/fields/date-time/parse');
 const { removeMarkdownSyntax } = await import('$lib/services/utils/markdown');
 
 describe('MARKDOWN_FIELD_KEYS', () => {
@@ -46,6 +53,23 @@ describe('MARKDOWN_FIELD_KEYS', () => {
     expect(MARKDOWN_FIELD_KEYS).toEqual(['title', 'summary', 'description']);
   });
 });
+
+/**
+ * Give the entries the order values 10, 2 and 100, in that order.
+ * @param {Entry[]} entries Entries.
+ * @param {string} [key] Order field key.
+ * @returns {Entry[]} Entries with the order values.
+ */
+const withOrders = (entries, key = 'order') =>
+  entries.map((entry, index) => ({
+    ...entry,
+    locales: {
+      en: {
+        ...entry.locales.en,
+        content: { ...entry.locales.en?.content, [key]: [10, 2, 100][index] },
+      },
+    },
+  }));
 
 describe('sortEntries', () => {
   /** @type {InternalCollection} */
@@ -117,6 +141,10 @@ describe('sortEntries', () => {
 
     // Default mock for getIndexFile - no index file
     vi.mocked(getIndexFile).mockReturnValue(null);
+    // Tell the index file by its slug unless a test says otherwise
+    vi.mocked(isCollectionIndexFile).mockImplementation(
+      (collection, entry) => entry.slug === getIndexFile(collection)?.name,
+    );
   });
 
   test('should not sort entries when no key provided', () => {
@@ -151,6 +179,29 @@ describe('sortEntries', () => {
     const result = sortEntries(mockEntries, mockCollection, conditions);
 
     expect(result.map((e) => e.slug)).toEqual(['entry-1', 'entry-2', 'entry-3']); // Original order since compare logic isn't mocked
+  });
+
+  test('should sort entries sharing a slug by their own values', () => {
+    const conditions = { key: 'order', order: 'ascending' };
+
+    vi.mocked(getField).mockReturnValue({ name: 'order', widget: 'number', label: 'Order' });
+    vi.mocked(getSortKeyType).mockReturnValue(Number);
+
+    vi.mocked(getPropertyValue).mockImplementation(({ entry, key }) =>
+      key === 'order' ? entry.locales.en.content.order : undefined,
+    );
+
+    // A published entry and its unpublished revision, or two nested entries in different
+    // folders, can carry the same slug; the sort must not conflate their keys
+    const entries = /** @type {any[]} */ ([
+      { id: 'a', slug: 'same', locales: { en: { content: { order: 3 } } } },
+      { id: 'b', slug: 'same', locales: { en: { content: { order: 1 } } } },
+      { id: 'c', slug: 'other', locales: { en: { content: { order: 2 } } } },
+    ]);
+
+    const result = sortEntries(entries, mockCollection, conditions);
+
+    expect(result.map((e) => e.id)).toEqual(['b', 'c', 'a']);
   });
 
   test('should sort by string field in descending order', () => {
@@ -529,6 +580,31 @@ describe('sortEntries', () => {
     expect(result.map((e) => e.slug)).toEqual(['a-entry', 'b-entry', 'c-entry']);
   });
 
+  test('should only strip the markdown syntax of the beginning of a long value', () => {
+    const longTitle = `**A Title**${'x'.repeat(5000)}`;
+
+    const entries = [
+      {
+        id: '1',
+        sha: 'sha1',
+        slug: 'long-entry',
+        subPath: '',
+        locales: { en: { path: 'path1', slug: 'long-entry', content: { title: longTitle } } },
+      },
+    ];
+
+    vi.mocked(getField).mockReturnValue({ name: 'title', widget: 'markdown', label: 'Title' });
+    vi.mocked(getSortKeyType).mockReturnValue(String);
+    vi.mocked(getPropertyValue).mockImplementation(({ entry }) => entry.locales.en.content.title);
+    vi.mocked(removeMarkdownSyntax).mockImplementation((value) => value);
+
+    sortEntries(entries, mockCollection, { key: 'title', order: 'ascending' });
+
+    // Stripping a value crafted to be nested deeply takes time growing faster than its length, so
+    // a sort key is cut short first
+    expect(removeMarkdownSyntax).toHaveBeenCalledWith(longTitle.slice(0, 1000));
+  });
+
   test('should strip markdown syntax when sorting richtext fields', () => {
     const conditions = { key: 'title', order: 'ascending' };
 
@@ -679,6 +755,48 @@ describe('sortEntries', () => {
 
     // entry-3 should be first (index file), then sorted A, B
     expect(result.map((e) => e.slug)).toEqual(['entry-3', 'entry-2', 'entry-1']);
+  });
+
+  test('should move the index file of this collection to top, not another one with its slug', () => {
+    const conditions = { key: 'title', order: 'ascending' };
+
+    // The inner collection’s index file carries the `_index` slug into the outer collection, and
+    // its title sorts first
+    const innerIndex = {
+      id: 'inner-index',
+      slug: '_index',
+      subPath: 'posts/_index',
+      locales: {
+        en: { path: 'content/posts/_index.md', slug: '_index', content: { title: 'A Posts' } },
+      },
+    };
+
+    const ownIndex = {
+      id: 'own-index',
+      slug: '_index',
+      subPath: '_index',
+      locales: {
+        en: { path: 'content/_index.md', slug: '_index', content: { title: 'Z Home' } },
+      },
+    };
+
+    vi.mocked(getIndexFile).mockReturnValue({ name: '_index' });
+    vi.mocked(isCollectionIndexFile).mockImplementation(
+      (_collection, entry) => entry.locales.en.path === 'content/_index.md',
+    );
+    vi.mocked(getField).mockReturnValue({ name: 'title', widget: 'string', label: 'Title' });
+    vi.mocked(getSortKeyType).mockReturnValue(String);
+    vi.mocked(getPropertyValue).mockImplementation(({ entry }) => entry.locales.en.content.title);
+
+    const result = sortEntries([ownIndex, innerIndex, ...mockEntries], mockCollection, conditions);
+
+    expect(result.map((e) => e.id)).toEqual([
+      'own-index',
+      'inner-index',
+      'entry-2',
+      'entry-1',
+      'entry-3',
+    ]);
   });
 
   test('should handle empty entries array', () => {
@@ -1262,13 +1380,7 @@ describe('sortEntries', () => {
     const locale = 'en';
     const reorderableCollection = { ...mockCollection, reorder: true };
 
-    vi.mocked(getPropertyValue).mockImplementation(({ entry }) => {
-      const orders = { 'entry-1': 10, 'entry-2': 2, 'entry-3': 100 };
-
-      return orders[entry.slug];
-    });
-
-    const result = sortEntries(mockEntries, reorderableCollection, {
+    const result = sortEntries(withOrders(mockEntries), reorderableCollection, {
       key: 'order',
       order: 'ascending',
       locale,
@@ -1282,18 +1394,10 @@ describe('sortEntries', () => {
 
   test('should sort numerically when the key is the special _manual key', () => {
     const locale = 'en';
-    const reorderableCollection = { ...mockCollection, reorder: true };
+    // The resolved key should be the actual order field, not `_manual`.
+    const reorderableCollection = { ...mockCollection, reorder: { key: 'weight' } };
 
-    vi.mocked(getPropertyValue).mockImplementation(({ entry, key }) => {
-      // The resolved key should be the actual order field, not `_manual`.
-      expect(key).toBe('order');
-
-      const orders = { 'entry-1': 10, 'entry-2': 2, 'entry-3': 100 };
-
-      return orders[entry.slug];
-    });
-
-    const result = sortEntries(mockEntries, reorderableCollection, {
+    const result = sortEntries(withOrders(mockEntries, 'weight'), reorderableCollection, {
       key: '_manual',
       order: 'ascending',
       locale,
@@ -1301,6 +1405,76 @@ describe('sortEntries', () => {
 
     expect(result.map((e) => e.slug)).toEqual(['entry-2', 'entry-1', 'entry-3']);
     expect(vi.mocked(getSortKeyType)).not.toHaveBeenCalled();
+  });
+
+  test('should sort by the position in the array for the _manual key of an array file collection', () => {
+    const arrayFileCollection = {
+      ...mockCollection,
+      _type: 'entry',
+      _file: { ...mockCollection._file, format: 'json', arrayFile: true },
+    };
+
+    const result = sortEntries(
+      mockEntries.map((entry, index) => ({ ...entry, arrayIndex: 2 - index })),
+      arrayFileCollection,
+      { key: '_manual', order: 'ascending' },
+    );
+
+    expect(result.map((e) => e.slug)).toEqual(['entry-3', 'entry-2', 'entry-1']);
+    expect(vi.mocked(getPropertyValue)).not.toHaveBeenCalled();
+  });
+
+  test('should keep the index file at the top when sorting by the order field', () => {
+    vi.mocked(isCollectionIndexFile).mockImplementation(
+      (_collection, entry) => entry.slug === 'entry-3',
+    );
+
+    const result = sortEntries(
+      withOrders(mockEntries),
+      { ...mockCollection, reorder: true },
+      {
+        key: '_manual',
+        order: 'ascending',
+      },
+    );
+
+    expect(result.map((e) => e.slug)).toEqual(['entry-3', 'entry-2', 'entry-1']);
+  });
+
+  test('should put an entry without a valid order value last, like the reorder UI', () => {
+    const reorderableCollection = { ...mockCollection, reorder: true };
+
+    /**
+     * Create an entry with the given order value.
+     * @param {string} slug Slug.
+     * @param {any} order Order value, or `undefined` to leave it out.
+     * @returns {Entry} Entry.
+     */
+    const entry = (slug, order) => ({
+      id: slug,
+      slug,
+      subPath: slug,
+      locales: { en: { slug, path: `${slug}.md`, content: order === undefined ? {} : { order } } },
+    });
+
+    const entries = [entry('a', undefined), entry('b', 2), entry('c', 'x'), entry('d', 1)];
+
+    expect(
+      sortEntries(entries, reorderableCollection, { key: '_manual', order: 'ascending' }).map(
+        (e) => e.slug,
+      ),
+    ).toEqual(['d', 'b', 'a', 'c']);
+    // Sorting by the order field itself does the same
+    expect(
+      sortEntries(entries, reorderableCollection, { key: 'order', order: 'ascending' }).map(
+        (e) => e.slug,
+      ),
+    ).toEqual(['d', 'b', 'a', 'c']);
+    expect(
+      sortEntries(entries, reorderableCollection, { key: '_manual', order: 'descending' }).map(
+        (e) => e.slug,
+      ),
+    ).toEqual(['c', 'a', 'b', 'd']);
   });
 
   test('should fall back to the _manual key when the collection has no reorder configuration', () => {

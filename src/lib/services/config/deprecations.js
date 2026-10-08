@@ -2,27 +2,33 @@
  * Mapping of deprecation warnings that have been issued once. This prevents flooding the console
  * with repeated warnings.
  * @type {Record<string, boolean>}
- * @internal
  */
 export const warnedOnceMap = {
   slug_length: false,
+  slug_editor_tag: false,
   yaml_quote: false,
   uuid_read_only: false,
   save_all_locales: false,
   automatic_deployments: false,
   multiple_folders_i18n_root: false,
   omit_default_locale_from_filename: false,
+  logo_url: false,
 };
 
 /**
  * Deprecation warning messages.
  * @type {Record<string, string>}
- * @internal
  */
 export const warningMessages = {
   slug_length:
     'The `slug_length` collection option is deprecated and will be removed in Sveltia CMS 1.0. ' +
     'Use the global `slug.maxlength` option instead. ',
+  slug_editor_tag:
+    'The `{{fields._slug}}` and `{{fields._slug | localize}}` slug template tags are deprecated ' +
+    'and will be removed in Sveltia CMS 1.0. Use the `slug` collection option’s object form ' +
+    'instead: `{{fields._slug}}` is equivalent to `slug: { editable: true }`, and ' +
+    '`{{fields._slug | localize}}` is equivalent to `slug: { editable: true, i18n: true }`. ' +
+    'https://sveltiacms.app/en/docs/collections/entries/slugs#making-slugs-editable',
   yaml_quote:
     'The `yaml_quote` collection option is deprecated and will be removed in Sveltia CMS 1.0. ' +
     'Use the global `output.yaml.quote` option instead. `yaml_quote: true` is equivalent to ' +
@@ -34,7 +40,7 @@ export const warningMessages = {
     'The `save_all_locales` i18n option is deprecated and will be removed in Sveltia CMS 1.0. ' +
     'Use the `initial_locales` option instead. `save_all_locales: false` is equivalent to ' +
     '`initial_locales: all`. ' +
-    'https://sveltiacms.app/en/docs/i18n#disabling-non-default-locale-content',
+    'https://sveltiacms.app/en/docs/i18n/options#disabling-non-default-locale-content',
   automatic_deployments:
     'The `automatic_deployments` backend option is deprecated and will be removed in Sveltia CMS ' +
     '1.0. Use the `skip_ci` option instead. `automatic_deployments: false` is equivalent to ' +
@@ -43,11 +49,14 @@ export const warningMessages = {
   multiple_folders_i18n_root:
     'The `multiple_folders_i18n_root` i18n structure is deprecated and will be removed in ' +
     'Sveltia CMS 1.0. Use the `multiple_root_folders` structure instead. ' +
-    'https://sveltiacms.app/en/docs/i18n#multiple-root-folders',
+    'https://sveltiacms.app/en/docs/i18n/structures#multiple-root-folders',
   omit_default_locale_from_filename:
     'The `omit_default_locale_from_filename` i18n option is deprecated and will be removed in ' +
     'Sveltia CMS 1.0. Use the `omit_default_locale_from_file_path` option instead. ' +
-    'https://sveltiacms.app/en/docs/i18n#managing-content-structure',
+    'https://sveltiacms.app/en/docs/i18n/structures',
+  logo_url:
+    'The `logo_url` option is deprecated and will be removed in a future version of Sveltia CMS. ' +
+    'Use the `logo.src` option instead. https://sveltiacms.app/en/docs/customization#custom-logo',
 };
 
 /**

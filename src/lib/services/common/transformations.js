@@ -5,9 +5,11 @@ import dayjsLocalizedFormat from 'dayjs/plugin/localizedFormat';
 import dayjsUTC from 'dayjs/plugin/utc';
 
 import { slugify } from '$lib/services/common/slug';
-import { parseDateTimeConfig } from '$lib/services/contents/fields/date-time/helper';
+import { parseDateTimeConfig } from '$lib/services/contents/fields/date-time/config';
+import { getOrCreateBounded } from '$lib/services/utils/cache';
 
 /**
+ * @import { StringTransformation } from '$lib/types/private';
  * @import { DateTimeField, Field } from '$lib/types/public';
  */
 
@@ -38,19 +40,113 @@ dayjs.extend(dayjsCustomParseFormat);
 dayjs.extend(dayjsLocalizedFormat);
 dayjs.extend(dayjsUTC);
 
-export const DATE_TRANSFORMATION_REGEX = /^date\('(?<format>.+?)'(?:,\s*'(?<timeZone>.+?)')?\)$/;
-export const DEFAULT_TRANSFORMATION_REGEX = /^default\('(?<defaultValue>.+?)'\)$/;
-export const TERNARY_TRANSFORMATION_REGEX =
-  /^ternary\('(?<truthyValue>.*?)',\s*'(?<falsyValue>.*?)'\)$/;
-export const TRUNCATE_TRANSFORMATION_REGEX = /^truncate\((?<max>\d+)(?:,\s*'(?<ellipsis>.+?)')?\)$/;
-export const TRANSFORMATION_SPLIT_REGEX = /\s*\|\s*/;
-
 const DATE_ONLY_REGEX = /^\d{4}-[01]\d-[0-3]\d$/;
 const DATE_PART_REGEX = /T\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?Z$/;
 
+const TRANSFORMATION_PARSERS = Object.entries({
+  date: /^date\('(?<format>.+?)'(?:,\s*'(?<timeZone>.+?)')?\)$/,
+  default: /^default\('(?<defaultValue>.+?)'\)$/,
+  ternary: /^ternary\('(?<truthyValue>.*?)',\s*'(?<falsyValue>.*?)'\)$/,
+  truncate: /^truncate\((?<max>\d+)(?:,\s*'(?<ellipsis>.+?)')?\)$/,
+});
+
+/**
+ * Parse a single transformation string into a structured object.
+ * @param {string} transformation The transformation string.
+ * @returns {StringTransformation} Parsed transformation.
+ */
+const parseTransformation = (transformation) => {
+  // eslint-disable-next-line no-restricted-syntax
+  for (const [method, regex] of TRANSFORMATION_PARSERS) {
+    const entries = Object.entries(transformation.match(regex)?.groups ?? {});
+
+    if (entries.length) {
+      return {
+        method,
+        args: Object.fromEntries(entries.filter(([, value]) => value !== undefined)),
+      };
+    }
+  }
+
+  return { method: transformation, args: {} };
+};
+
+/**
+ * Split a string containing a value and transformations at the pipe (`|`) characters, except for
+ * those within a quoted transformation argument like `default('Untitled | Draft')`. A single quote
+ * only opens an argument after `(` or `,`, and only closes it before `,` or `)`, so an apostrophe
+ * within an argument, as in `default('Don't')`, doesn’t throw off the parsing.
+ * @param {string} string The string to be split.
+ * @returns {string[]} Trimmed segments.
+ */
+const splitTransformations = (string) => {
+  /** @type {string[]} */
+  const segments = [];
+  let segment = '';
+  let quoted = false;
+
+  [...string].forEach((char, index) => {
+    if (char === "'") {
+      if (!quoted && /[(,]\s*$/.test(string.slice(0, index))) {
+        quoted = true;
+      } else if (quoted && /^\s*[,)]/.test(string.slice(index + 1))) {
+        quoted = false;
+      }
+    }
+
+    if (char === '|' && !quoted) {
+      segments.push(segment.trim());
+      segment = '';
+    } else {
+      segment += char;
+    }
+  });
+
+  segments.push(segment.trim());
+
+  return segments;
+};
+
+/**
+ * Cache of parsed placeholders, keyed by the placeholder string. Summary and slug templates are
+ * applied to every entry, e.g. on every keystroke of an entry search, but only have a few
+ * placeholders, which are parsed once here instead of once per entry.
+ * @type {Map<string, { value: string, transformations: StringTransformation[] }>}
+ */
+const parsedTransformationsCache = new Map();
+
+/**
+ * Parse a string containing a value and multiple transformations separated by the pipe (`|`)
+ * character. The result is cached and shared between callers, so it’s frozen.
+ * @param {string} string The string containing a value and transformations.
+ * @returns {{ value: string, transformations: StringTransformation[] }} Parsed value and
+ * transformation entries.
+ */
+export const parseTransformations = (string) =>
+  getOrCreateBounded(
+    parsedTransformationsCache,
+    string,
+    () => {
+      const [value, ...rawTransformations] = splitTransformations(string.trim());
+
+      return Object.freeze({
+        value,
+        transformations: /** @type {StringTransformation[]} */ (
+          Object.freeze(
+            rawTransformations.map((tf) => {
+              const { method, args } = parseTransformation(tf);
+
+              return Object.freeze({ method, args: Object.freeze(args) });
+            }),
+          )
+        ),
+      });
+    },
+    500,
+  );
+
 /**
  * Transform the input value to its uppercase string representation.
- * @internal
  * @param {any} value The value to be transformed to uppercase.
  * @returns {string} The uppercase string representation of the input value.
  */
@@ -58,7 +154,6 @@ export const applyUpperCaseTransformation = (value) => String(value).toUpperCase
 
 /**
  * Transform the input value to a string and returns it in lowercase.
- * @internal
  * @param {any} value The value to be transformed to lowercase.
  * @returns {string} The lowercase string representation of the input value.
  */
@@ -67,7 +162,6 @@ export const applyLowerCaseTransformation = (value) => String(value).toLowerCase
 /**
  * Transform the input value to a formatted string based on the provided format and time zone
  * options.
- * @internal
  * @param {any} value The input value to be transformed into a date string.
  * @param {DateTimeTransformationArgs} args Transformation arguments.
  * @param {DateTimeField} fieldConfig Field configuration containing date and time settings.
@@ -95,7 +189,6 @@ export const applyDateTransformation = (value, { format, timeZone }, fieldConfig
 /**
  * Return the string representation of the given value if it is truthy; otherwise, returns the
  * provided default value.
- * @internal
  * @param {any} value The value to evaluate for truthiness.
  * @param {DefaultTransformationArgs} args Transformation arguments.
  * @returns {string} The stringified value or the default value.
@@ -105,7 +198,6 @@ export const applyDefaultTransformation = (value, { defaultValue }) =>
 
 /**
  * Return one of two values based on the truthiness of the input value.
- * @internal
  * @param {any} value The value to evaluate for truthiness.
  * @param {TernaryTransformationArgs} args Transformation arguments.
  * @returns {string} Returns `truthyValue` if `value` is truthy, otherwise returns `falsyValue`.
@@ -115,7 +207,6 @@ export const ternaryTransformation = (value, { truthyValue, falsyValue }) =>
 
 /**
  * Truncate a string to a specified maximum length and append an ellipsis if truncation occurs.
- * @internal
  * @param {any} value The value to be truncated.
  * @param {TruncateTransformationArgs} args Transformation arguments.
  * @returns {string} The truncated string with ellipsis if applicable.
@@ -125,67 +216,43 @@ export const applyTruncateTransformation = (value, { max, ellipsis = '…' }) =>
 
 /**
  * Apply a single string transformation to the value based on the specified transformation type.
- * @internal
  * @param {object} args Arguments.
  * @param {Field} [args.fieldConfig] Field configuration, used for date transformations.
  * @param {any} args.value Original value to be transformed.
- * @param {string} args.transformation Transformation, e.g `upper`, `truncate(10)`.
+ * @param {StringTransformation} args.transformation Transformation entry.
  * @param {string} [args.locale] BCP 47 language tag passed to the `slugify` transformation.
  * @returns {string} Transformed value.
  * @see https://decapcms.org/docs/summary-strings/
  * @see https://sveltiacms.app/en/docs/string-transformations
  */
 export const applyTransformation = ({ fieldConfig, value, transformation, locale }) => {
-  if (transformation === 'upper') {
-    return applyUpperCaseTransformation(value);
+  const { method, args } = transformation;
+
+  switch (method) {
+    case 'upper':
+      return applyUpperCaseTransformation(value);
+    case 'lower':
+      return applyLowerCaseTransformation(value);
+    case 'slugify':
+      // Don’t fall back to a random UUID for an empty value; the transformation is used in Compute
+      // fields, where a value that changes on every render causes an infinite update loop
+      // @see https://github.com/sveltia/sveltia-cms/issues/946
+      return slugify(String(value), { fallback: false, locale });
+    case 'date':
+      return applyDateTransformation(
+        value,
+        /** @type {DateTimeTransformationArgs} */ (args),
+        /** @type {DateTimeField} */ (fieldConfig ?? {}),
+      );
+    case 'default':
+      return applyDefaultTransformation(value, /** @type {DefaultTransformationArgs} */ (args));
+    case 'ternary':
+      return ternaryTransformation(value, /** @type {TernaryTransformationArgs} */ (args));
+    case 'truncate':
+      return applyTruncateTransformation(value, /** @type {TruncateTransformationArgs} */ (args));
+    default:
+      return String(value);
   }
-
-  if (transformation === 'lower') {
-    return applyLowerCaseTransformation(value);
-  }
-
-  if (transformation === 'slugify') {
-    return slugify(String(value), { locale });
-  }
-
-  const dateTransformer = transformation.match(DATE_TRANSFORMATION_REGEX);
-
-  if (dateTransformer?.groups) {
-    return applyDateTransformation(
-      value,
-      /** @type {DateTimeTransformationArgs} */ (dateTransformer.groups),
-      /** @type {DateTimeField} */ (fieldConfig ?? {}),
-    );
-  }
-
-  const defaultTransformer = transformation.match(DEFAULT_TRANSFORMATION_REGEX);
-
-  if (defaultTransformer?.groups) {
-    return applyDefaultTransformation(
-      value,
-      /** @type {DefaultTransformationArgs} */ (defaultTransformer.groups),
-    );
-  }
-
-  const ternaryTransformer = transformation.match(TERNARY_TRANSFORMATION_REGEX);
-
-  if (ternaryTransformer?.groups) {
-    return ternaryTransformation(
-      value,
-      /** @type {TernaryTransformationArgs} */ (ternaryTransformer.groups),
-    );
-  }
-
-  const truncateTransformer = transformation.match(TRUNCATE_TRANSFORMATION_REGEX);
-
-  if (truncateTransformer?.groups) {
-    return applyTruncateTransformation(
-      value,
-      /** @type {TruncateTransformationArgs} */ (truncateTransformer.groups),
-    );
-  }
-
-  return String(value);
 };
 
 /**
@@ -193,7 +260,7 @@ export const applyTransformation = ({ fieldConfig, value, transformation, locale
  * @param {object} args Arguments.
  * @param {Field} [args.fieldConfig] Field configuration.
  * @param {any} args.value Original value.
- * @param {string[]} args.transformations List of transformations.
+ * @param {StringTransformation[]} args.transformations Transformation entries.
  * @param {string} [args.locale] BCP 47 language tag passed to the `slugify` transformation.
  * @returns {string} Transformed value.
  */

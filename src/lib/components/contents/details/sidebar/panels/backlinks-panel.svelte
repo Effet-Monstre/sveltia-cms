@@ -3,17 +3,20 @@
   import { Button } from '@sveltia/ui';
 
   import PanelContainer from '$lib/components/contents/details/sidebar/panels/panel-container.svelte';
-  import { goto } from '$lib/services/app/navigation';
-  import { entryDraft } from '$lib/services/contents/draft';
-  import { getBacklinks } from '$lib/services/contents/entry/backlinks';
+  import { encodeRoutePath, goto } from '$lib/services/app/navigation';
+  import { getEntryDraftContext } from '$lib/services/contents/draft/state.svelte';
+  import { getBacklinks } from '$lib/services/contents/entry/relations/backlinks';
 
   /**
    * @import { EntryBacklink } from '$lib/types/private';
    */
 
+  const entryDraft = getEntryDraftContext();
+  const id = $props.id();
+
   /** @type {EntryBacklink[]} */
   const backlinks = $derived.by(() => {
-    const draft = $entryDraft;
+    const draft = entryDraft.current;
 
     if (!draft?.originalEntry) {
       return [];
@@ -51,20 +54,21 @@
 
 <PanelContainer title={_('entry_sidebar.backlinks.title')}>
   {#if backlinks.length > 0}
-    {#each groupedEntries as { collectionLabel, items } (collectionLabel)}
-      <section class="collection" role="group">
-        <h4>{collectionLabel}</h4>
+    {#each groupedEntries as { collectionLabel, items }, index (collectionLabel)}
+      <section class="collection" role="group" aria-labelledby="{id}-{index}-label">
+        <h4 id="{id}-{index}-label">{collectionLabel}</h4>
         {#each items as ref (ref.entry.id)}
           <Button
             class="ref"
             variant="ghost"
             onclick={() => {
-              goto(`/collections/${ref.collectionName}/entries/${ref.entry.subPath}`, {
-                transitionType: 'forwards',
-              });
+              goto(
+                encodeRoutePath(`/collections/${ref.collectionName}/entries/${ref.entry.subPath}`),
+                { transitionType: 'forwards' },
+              );
             }}
           >
-            <span class="summary">{ref.summary}</span>
+            <span class="summary"><bdi>{ref.summary}</bdi></span>
           </Button>
         {/each}
       </section>

@@ -1,10 +1,9 @@
-import { _, locale as appLocale } from '@sveltia/i18n';
 import { getHash } from '@sveltia/utils/crypto';
 import { getPathInfo } from '@sveltia/utils/file';
-import { compare, escapeRegExp } from '@sveltia/utils/string';
+import { escapeRegExp } from '@sveltia/utils/string';
 import sanitize from 'sanitize-filename';
 
-import { slugify } from '$lib/services/common/slug';
+import { getOrCreateAsync } from '$lib/services/utils/cache';
 
 /**
  * Create a regular expression that matches the given path.
@@ -49,56 +48,6 @@ export const encodeFilePath = (path) => {
 };
 
 /**
- * Encode the given (partial) file path or file name. We can use {@link decodeURIComponent} as is.
- * @param {string} path Original path.
- * @returns {string} Decoded path.
- */
-export const decodeFilePath = (path) => decodeURIComponent(path);
-
-/**
- * @type {Map<string, Intl.NumberFormat>}
- */
-const fileSizeFormatterCache = new Map();
-
-/**
- * Format the given file size in bytes, KB, MB, GB or TB.
- * @param {number} size File size.
- * @returns {string} Formatted size.
- */
-export const formatSize = (size) => {
-  const locale = appLocale.current;
-  let formatter = fileSizeFormatterCache.get(locale);
-
-  if (!formatter) {
-    formatter = new Intl.NumberFormat(locale, { maximumFractionDigits: 1 });
-    fileSizeFormatterCache.set(locale, formatter);
-  }
-
-  const kb = 1000;
-  const mb = kb * 1000;
-  const gb = mb * 1000;
-  const tb = gb * 1000;
-
-  if (size < kb) {
-    return _('file_size_units.b', { values: { size: formatter.format(size) } });
-  }
-
-  if (size < mb) {
-    return _('file_size_units.kb', { values: { size: formatter.format(size / kb) } });
-  }
-
-  if (size < gb) {
-    return _('file_size_units.mb', { values: { size: formatter.format(size / mb) } });
-  }
-
-  if (size < tb) {
-    return _('file_size_units.gb', { values: { size: formatter.format(size / gb) } });
-  }
-
-  return _('file_size_units.tb', { values: { size: formatter.format(size / tb) } });
-};
-
-/**
  * Check if the given file name or slug has duplicate(s) or its variant in the other names. If
  * found, rename it by prepending a number like `summer-beach-2.jpg`.
  * @param {string} name Original name.
@@ -112,51 +61,76 @@ export const renameIfNeeded = (name, otherNames) => {
 
   const { filename: slug, extension } = getPathInfo(name);
 
+  // Case-insensitive, since `Photo.jpg` and `photo.jpg` clash on a case-insensitive file system
+  // like macOS’s or Windows’s
   const regex = new RegExp(
     `^${escapeRegExp(slug)}(?:-(?<num>\\d+?))?${extension ? `\\.${extension}` : ''}$`,
+    'i',
   );
 
-  const dupName = otherNames
-    .sort((a, b) => compare(a.split('.')[0], b.split('.')[0]))
-    .findLast((p) => regex.test(p));
+  // Only the highest number already taken matters, so the names are scanned once rather than
+  // sorted. The caller’s array is left alone: it’s typically every name in the folder, reused for
+  // each of the files being added
+  let highest = -1;
 
-  if (!dupName) {
+  otherNames.forEach((otherName) => {
+    const match = otherName.match(regex);
+
+    if (match) {
+      highest = Math.max(highest, Number(match.groups?.num ?? 0));
+    }
+  });
+
+  if (highest === -1) {
     return name;
   }
 
-  const number = Number(dupName.match(regex)?.groups?.num ?? 0) + 1;
-
-  return `${slug}-${number}${extension ? `.${extension}` : ''}`;
+  return `${slug}-${highest + 1}${extension ? `.${extension}` : ''}`;
 };
 
 /**
- * Format the file name for uploading, ensuring it is sanitized and optionally slugified.
- * @param {string} originalName The original file name.
- * @param {object} [options] Options.
- * @param {boolean} [options.slugificationEnabled] Whether to slugify the file name.
- * @param {string[]} [options.assetNamesInSameFolder] List of asset names in the same folder to
- * avoid name conflicts.
- * @returns {string} The formatted file name, sanitized and possibly slugified.
+ * Sanitize a file or folder name: normalize it to NFC (composed characters), replace every kind of
+ * whitespace — non-breaking spaces, tabs, newlines and so on — with a regular space, collapsing
+ * consecutive ones, then drop the characters a file system won’t take.
+ * @param {string} name Name.
+ * @returns {string} Sanitized name.
  */
-export const formatFileName = (
-  originalName,
-  { slugificationEnabled = false, assetNamesInSameFolder = [] } = {},
-) => {
-  // Normalize the name to NFC format (composed characters), then replace all whitespace characters
-  // (including non-breaking spaces, tabs, newlines, etc.) with regular spaces before sanitizing.
-  // Consecutive whitespace characters are collapsed into a single space.
-  let fileName = sanitize(originalName.normalize().replace(/[\s\u00A0\u202F]+/g, ' '));
+export const sanitizeFileName = (name) =>
+  sanitize(name.normalize().replace(/[\s\u00A0\u202F]+/g, ' '));
 
-  if (slugificationEnabled) {
-    const { filename, extension } = getPathInfo(fileName);
-    const slug = slugify(filename);
+/**
+ * Groups of file extensions that refer to the same file format, meaning that replacing one with
+ * another doesn’t change how the file is handled.
+ * @type {string[][]}
+ */
+const EQUIVALENT_FILE_EXTENSIONS = [
+  ['jpg', 'jpeg', 'jpe', 'jfif'],
+  ['tif', 'tiff'],
+  ['htm', 'html'],
+  ['yml', 'yaml'],
+  ['md', 'markdown'],
+  ['mpg', 'mpeg'],
+  ['mid', 'midi'],
+  ['aif', 'aiff'],
+];
 
-    // Lowercase the extension to match the slug’s lowercase behavior, ensuring consistent file
-    // references (e.g., `.JPG` → `.jpg`, `.MOV` → `.mov`)
-    fileName = `${slug}${extension ? `.${extension.toLowerCase()}` : ''}`;
+/**
+ * Check if the given two file extensions refer to the same file format. The comparison is
+ * case-insensitive, so `PNG` and `png` are equivalent. Well-known aliases, such as `jpeg` and
+ * `jpg`, are also considered equivalent.
+ * @param {string} [a] File extension without a leading dot.
+ * @param {string} [b] File extension without a leading dot.
+ * @returns {boolean} Result. `true` if both extensions are omitted.
+ */
+export const isEquivalentFileExtension = (a, b) => {
+  const _a = a?.toLowerCase() ?? '';
+  const _b = b?.toLowerCase() ?? '';
+
+  if (_a === _b) {
+    return true;
   }
 
-  return renameIfNeeded(fileName, assetNamesInSameFolder);
+  return EQUIVALENT_FILE_EXTENSIONS.some((group) => group.includes(_a) && group.includes(_b));
 };
 
 /**
@@ -165,6 +139,30 @@ export const formatFileName = (
  * @returns {string} Path.
  */
 export const createPath = (segments) => segments.filter(Boolean).join('/');
+
+/**
+ * Remove the given directory from the start of a path, if the path sits below it.
+ * @param {string} path Path, e.g. `images/photo.jpg`.
+ * @param {string | undefined} dir Directory path, e.g. `images`. An empty string or `undefined`
+ * leaves the path as is.
+ * @returns {string} Path relative to the directory, e.g. `photo.jpg`, or the original path if it
+ * doesn’t sit below the directory.
+ */
+export const stripPathPrefix = (path, dir) =>
+  dir && path.startsWith(`${dir}/`) ? path.slice(dir.length + 1) : path;
+
+/**
+ * Sanitize a path by removing potentially dangerous path traversal segments (`.` and `..`). This
+ * prevents path traversal attacks when paths are constructed from user input.
+ * @param {string} path Path to sanitize, e.g. `../../../secret` or `images/../config`.
+ * @returns {string} Sanitized path with `.` and `..` segments removed, e.g. `secret` or
+ * `images/config`.
+ */
+export const sanitizePath = (path) =>
+  path
+    .split('/')
+    .filter((segment) => segment !== '.' && segment !== '..')
+    .join('/');
 
 /**
  * Resolve the given file path. This processes only dot(s) in the middle of the path; leading dots
@@ -209,16 +207,49 @@ export const getBlob = (input) =>
   typeof input === 'string' ? new Blob([input], { type: 'text/plain' }) : input;
 
 /**
+ * Get the size of the given file or blob in bytes. A string is measured as UTF-8, the encoding a
+ * `Blob` created from it would use.
+ * @param {File | Blob | string} input File or Blob object, or a string representing the file
+ * content.
+ * @returns {number} Size in bytes.
+ */
+export const getByteSize = (input) =>
+  typeof input === 'string' ? new TextEncoder().encode(input).length : input.size;
+
+/**
+ * Compute the Git object ID (SHA-1 hash) of the given blob.
+ * @param {Blob} blob File or Blob object.
+ * @returns {Promise<string>} Git object ID (SHA-1 hash) of the blob.
+ * @see https://stackoverflow.com/a/68806436
+ * @see https://github.com/Richienb/git-hash-object/blob/master/index.js
+ */
+const computeGitHash = async (blob) => {
+  const buffer = await blob.arrayBuffer();
+
+  return getHash(new Blob([`blob ${buffer.byteLength}\0`, buffer]));
+};
+
+/**
+ * Git object IDs of the blobs hashed so far. A `File` picked by the user is hashed for every
+ * duplicate check, listing and save it takes part in, and each hash reads the whole file again, so
+ * a batch of uploads would otherwise read every file once per file in the batch. That many reads
+ * in flight at once make Chrome fail them with `NotReadableError`. A blob’s content never changes,
+ * so the promise is kept for the blob’s lifetime, and concurrent callers share the one read.
+ * @type {WeakMap<Blob, Promise<string>>}
+ */
+const gitHashCache = new WeakMap();
+
+/**
  * Get the Git object ID (SHA-1 hash) of the given file or blob.
  * @param {File | Blob | string} input File or Blob object, or a string representing the file
  * content.
  * @returns {Promise<string>} Git object ID (SHA-1 hash) of the file.
- * @see https://stackoverflow.com/a/68806436
- * @see https://github.com/Richienb/git-hash-object/blob/master/index.js
  */
-export const getGitHash = async (input) => {
-  const file = getBlob(input);
-  const buffer = await file.arrayBuffer();
+export const getGitHash = (input) => {
+  if (typeof input === 'string') {
+    return computeGitHash(getBlob(input));
+  }
 
-  return getHash(new Blob([`blob ${buffer.byteLength}\0`, buffer]));
+  // A failure isn’t remembered, leaving room for a retry, e.g. once the file is readable again
+  return getOrCreateAsync(gitHashCache, input, () => computeGitHash(input));
 };

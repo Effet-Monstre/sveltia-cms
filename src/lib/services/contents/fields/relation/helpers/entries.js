@@ -1,0 +1,151 @@
+import { isCollectionIndexFile } from '$lib/services/contents/collection/entries/index-file';
+import { stripIndexFileName } from '$lib/services/contents/collection/nested';
+import { getFieldDisplayValue } from '$lib/services/contents/entry/values';
+import {
+  analyzeListFields,
+  processListFields,
+} from '$lib/services/contents/fields/relation/helpers/list-fields';
+import { createSimpleOption } from '$lib/services/contents/fields/relation/helpers/options';
+import { replaceTemplateFields } from '$lib/services/contents/fields/relation/helpers/templates';
+
+/**
+ * @import {
+ * Entry,
+ * FlattenedEntryContent,
+ * GetFieldArgs,
+ * InternalCollection,
+ * InternalLocaleCode,
+ * PendingEntry,
+ * RelationOption,
+ * } from '$lib/types/private';
+ * @import { FieldKeyPath } from '$lib/types/public';
+ */
+
+/**
+ * @typedef {object} ReplacementContext
+ * @property {string} slug The slug of the entry.
+ * @property {InternalLocaleCode} locale The current locale.
+ * @property {(keyPath: FieldKeyPath, _locale?: InternalLocaleCode) => string} getDisplayValue
+ * Function to get the display value of a field.
+ */
+
+/**
+ * @typedef {object} FallbackContext
+ * @property {FlattenedEntryContent} content Content of the entry.
+ * @property {Record<InternalLocaleCode, FlattenedEntryContent>} locales Locales of the entry.
+ * @property {InternalLocaleCode} defaultLocale Default locale of the entry.
+ * @property {FieldKeyPath} identifierField Identifier field for the entry.
+ */
+
+/**
+ * @typedef {object} TemplateStrings
+ * @property {string} _valueField Normalized value field template.
+ * @property {string} _displayField Normalized display field template.
+ * @property {string} _searchField Normalized search field template.
+ * @property {string[]} allFieldNames All field names extracted from templates.
+ * @property {boolean} hasListFields Whether any field names include a list wildcard (*).
+ */
+
+/**
+ * Process a single entry to generate relation options.
+ * @param {object} params Parameters.
+ * @param {Entry} params.refEntry Reference entry.
+ * @param {FlattenedEntryContent} params.content Entry content.
+ * @param {InternalCollection} params.collection Collection configuration.
+ * @param {TemplateStrings} params.templates Template strings.
+ * @param {string} [params.fileName] File name.
+ * @param {InternalLocaleCode} params.locale Current locale.
+ * @param {string} params.identifierField Identifier field.
+ * @param {PendingEntry[]} [params.pendingEntries] Entries created from a Relation field of the
+ * draft being edited, which a Relation field of the entry can refer to before they are saved.
+ * @returns {RelationOption[]} Array of relation options.
+ */
+export const processEntry = ({
+  refEntry,
+  content,
+  collection,
+  templates,
+  fileName,
+  locale,
+  identifierField,
+  pendingEntries = undefined,
+}) => {
+  const { locales } = refEntry;
+
+  const {
+    name: collectionName,
+    _i18n: { defaultLocale },
+  } = collection;
+
+  const { allFieldNames, hasListFields } = templates;
+  // In a nested collection an entry’s slug is its path within the collection folder, ending with
+  // the file name shared by every entry. A reference to the entry leaves that name out, the same
+  // way a preview path does
+  const slug = stripIndexFileName(collection, refEntry.slug);
+  const isIndexFile = isCollectionIndexFile(collection, refEntry);
+  /** @type {GetFieldArgs} */
+  const getFieldArgs = { collectionName, fileName, isIndexFile, keyPath: '' };
+
+  /**
+   * Wrapper for {@link getFieldDisplayValue}.
+   * @param {FieldKeyPath} keyPath Field key path.
+   * @param {InternalLocaleCode} [_locale] Target locale.
+   * @returns {string} Display value.
+   */
+  const getDisplayValue = (keyPath, _locale) =>
+    getFieldDisplayValue({
+      ...getFieldArgs,
+      keyPath,
+      // A multi-file entry can lack a locale’s file, including the default locale’s
+      valueMap: _locale ? (locales[_locale]?.content ?? {}) : content,
+      locale: _locale ?? locale,
+      pendingEntries,
+    });
+
+  const context = { slug, locale, getDisplayValue };
+  const fallbackContext = { content, locales, defaultLocale, identifierField };
+
+  if (!hasListFields) {
+    return [createSimpleOption({ templates, allFieldNames, context, fallbackContext })];
+  }
+
+  // Handle list fields
+  const baseFieldGroups = analyzeListFields(allFieldNames, getFieldArgs);
+
+  const { results, hasProcessedListFields } = processListFields({
+    baseFieldGroups,
+    content,
+    templates,
+    allFieldNames,
+    context,
+    fallbackContext,
+  });
+
+  if (hasProcessedListFields) {
+    return results;
+  }
+
+  const { _displayField, _valueField, _searchField } = templates;
+
+  // Fallback for complex multi-list scenarios or unhandled cases
+  const processedTemplates = {
+    label: _displayField,
+    value: _valueField,
+    searchValue: _searchField,
+  };
+
+  const { label, value, searchValue } = replaceTemplateFields(
+    processedTemplates,
+    allFieldNames.filter((name) => !name.includes('*')),
+    context,
+    fallbackContext,
+  );
+
+  return [
+    {
+      label: label || '',
+      value: value || slug,
+      searchValue: searchValue || label || '',
+    },
+  ];
+};

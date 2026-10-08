@@ -1,12 +1,8 @@
 import { getDateTimeParts } from '@sveltia/utils/datetime';
-import { truncate } from '@sveltia/utils/string';
-import { get } from 'svelte/store';
+import { escapeRegExp, truncate } from '@sveltia/utils/string';
 
-import {
-  TEMPLATE_TAG_REGEX,
-  TEMPLATE_TAG_REPLACE_REGEX,
-} from '$lib/services/common/template/constants';
 import { replaceTemplatePlaceholder } from '$lib/services/common/template/replacers';
+import { replaceTemplateTags } from '$lib/services/common/template/tags';
 import { cmsConfig } from '$lib/services/config';
 import { getEntriesByCollection } from '$lib/services/contents/collection/entries';
 import { renameIfNeeded } from '$lib/services/utils/file';
@@ -17,15 +13,7 @@ import { renameIfNeeded } from '$lib/services/utils/file';
  */
 
 /**
- * Checks if a string contains template tags.
- * @param {string} str The string to check.
- * @returns {boolean} True if the string contains template tags, false otherwise.
- */
-export const hasTemplateTags = (str) => TEMPLATE_TAG_REGEX.test(str);
-
-/**
  * Creates existing slugs list for uniqueness validation.
- * @internal
  * @param {string} collectionName Collection name.
  * @param {string | undefined} locale Locale string.
  * @returns {string[]} List of existing slugs.
@@ -43,7 +31,7 @@ const getExistingSlugs = (collectionName, locale) =>
  * @see https://decapcms.org/docs/configuration-options/#slug-type
  * @see https://decapcms.org/docs/configuration-options/#slug
  * @see https://decapcms.org/docs/collection-folder/#media-and-public-folder
- * @see https://sveltiacms.app/en/docs/collections/entries#managing-entry-slugs
+ * @see https://sveltiacms.app/en/docs/collections/entries/slugs#entry-slugs
  * @see https://sveltiacms.app/en/docs/media/internal#using-placeholders
  */
 export const fillTemplate = (template, options) => {
@@ -64,7 +52,7 @@ export const fillTemplate = (template, options) => {
     _file: { basePath } = {},
   } = _type === 'entry' ? collection : {};
 
-  const slugOptions = get(cmsConfig)?.slug;
+  const slugOptions = cmsConfig.current?.slug;
   // @todo Remove the legacy option prior to the 1.0 release.
   const maxlength = legacySlugLength ?? slugOptions?.maxlength;
   const timeZone = slugOptions?.timezone === 'local' ? undefined : 'UTC';
@@ -80,22 +68,33 @@ export const fillTemplate = (template, options) => {
     getFieldArgs: { collectionName, keyPath: '', valueMap, isIndexFile },
   };
 
-  // Use a negative lookahead assertion to support a template tag for the `default` transformation
-  // like `{{fields.slug | default('{{fields.title}}')}}`
-  let slug = template
-    .replace(TEMPLATE_TAG_REPLACE_REGEX, (_match, tag) => replaceTemplatePlaceholder(tag, context))
-    .trim();
+  // Use a negative lookahead assertion to support nested template tags in transformations like
+  // `{{fields.slug | default('{{fields.title}}')}}` or `{{draft | ternary('{{subtitle}}',
+  // '{{title}}')}}`
+  let slug = replaceTemplateTags(template, (_match, tag) =>
+    replaceTemplatePlaceholder(tag, context),
+  ).trim();
 
-  // We don't have to rename it when creating a path with a slug given. Skip truncation because the
+  // We don’t have to rename it when creating a path with a slug given. Skip truncation because the
   // slug has already been truncated during its own generation, and truncating the entire filled
   // path template (e.g. `{{slug}}/+page`) would break the non-slug parts of the path.
   if (currentSlug) {
     return slug;
   }
 
-  // Truncate a long slug if needed
+  // Truncate a long slug if needed, and remove the replacement character the cut may leave at the
+  // end, which is a hyphen by default but can be configured with `slug.sanitize_replacement`. Like
+  // `slugify`, leave the end alone if the slug isn’t cut or `slug.trim` is turned off, so a slug
+  // can still end with the replacement
   if (typeof maxlength === 'number') {
-    slug = truncate(slug, maxlength, { ellipsis: '' }).replace(/-$/, '');
+    const { sanitize_replacement: replacement = '-', trim = true } = slugOptions ?? {};
+    const truncated = truncate(slug, maxlength, { ellipsis: '' });
+
+    if (truncated !== slug && replacement && trim) {
+      slug = truncated.replace(new RegExp(`(?:${escapeRegExp(replacement)})+$`), '');
+    } else {
+      slug = truncated;
+    }
   }
 
   return renameIfNeeded(slug, getExistingSlugs(collectionName, locale));

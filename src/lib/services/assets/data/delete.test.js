@@ -3,18 +3,12 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { deleteAssets, updateStores } from './delete.js';
 
 // Mock dependencies
-vi.mock('$lib/services/assets', () => ({
-  focusedAsset: {
-    update: vi.fn(),
-    subscribe: vi.fn(() => vi.fn()),
-  },
+vi.mock('$lib/services/assets/state', () => ({
+  focusedAsset: { current: undefined },
 }));
 
 vi.mock('$lib/services/assets/data', () => ({
-  assetUpdatesToast: {
-    set: vi.fn(),
-    subscribe: vi.fn(() => vi.fn()),
-  },
+  assetUpdatesToast: { current: undefined },
 }));
 
 vi.mock('$lib/services/backends/save', () => ({
@@ -30,9 +24,22 @@ vi.mock('$lib/services/contents/collection/data', () => ({
   },
 }));
 
+vi.mock('$lib/services/assets/data/cascade', () => ({
+  planAssetDeletion: vi.fn(async () => ({ targets: [], blockers: [] })),
+}));
+
+vi.mock('$lib/services/contents/entry/cascade', () => ({
+  buildTargetChanges: vi.fn(async () => ({ changes: [], savingEntries: [] })),
+}));
+
+const { planAssetDeletion } = await import('$lib/services/assets/data/cascade');
+const { buildTargetChanges } = await import('$lib/services/contents/entry/cascade');
+
 describe('assets/data/delete', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(planAssetDeletion).mockResolvedValue({ targets: [], blockers: [] });
+    vi.mocked(buildTargetChanges).mockResolvedValue({ changes: [], savingEntries: [] });
   });
 
   describe('updateStores', () => {
@@ -64,19 +71,15 @@ describe('assets/data/delete', () => {
       ];
 
       const mockFocusedAsset = createMockAsset('/images/photo1.jpg', 'photo1.jpg');
-      const { focusedAsset } = await import('$lib/services/assets');
+      const { focusedAsset } = await import('$lib/services/assets/state');
       const { assetUpdatesToast } = await import('$lib/services/assets/data');
 
-      vi.mocked(focusedAsset.update).mockImplementation((fn) => {
-        const result = fn(mockFocusedAsset);
-
-        expect(result).toBeUndefined();
-      });
+      focusedAsset.current = mockFocusedAsset;
 
       updateStores({ assets: deletedAssets });
 
-      expect(focusedAsset.update).toHaveBeenCalledTimes(1);
-      expect(assetUpdatesToast.set).toHaveBeenCalledWith({
+      expect(focusedAsset.current).toBeUndefined();
+      expect(assetUpdatesToast.current).toEqual({
         saved: false,
         published: false,
         deleted: true,
@@ -87,36 +90,41 @@ describe('assets/data/delete', () => {
     it('should keep focused asset if it does not match deleted assets', async () => {
       const deletedAssets = [createMockAsset('/images/photo1.jpg', 'photo1.jpg')];
       const mockFocusedAsset = createMockAsset('/images/different.jpg', 'different.jpg');
-      const { focusedAsset } = await import('$lib/services/assets');
+      const { focusedAsset } = await import('$lib/services/assets/state');
 
-      vi.mocked(focusedAsset.update).mockImplementation((fn) => {
-        const result = fn(mockFocusedAsset);
-
-        expect(result).toBe(mockFocusedAsset);
-      });
+      focusedAsset.current = mockFocusedAsset;
 
       updateStores({ assets: deletedAssets });
 
-      expect(focusedAsset.update).toHaveBeenCalledTimes(1);
+      expect(focusedAsset.current).toBe(mockFocusedAsset);
     });
 
     it('should handle undefined focused asset', async () => {
       const deletedAssets = [createMockAsset('/images/photo1.jpg', 'photo1.jpg')];
-      const { focusedAsset } = await import('$lib/services/assets');
+      const { focusedAsset } = await import('$lib/services/assets/state');
 
-      vi.mocked(focusedAsset.update).mockImplementation((fn) => {
-        const result = fn(undefined);
-
-        expect(result).toBeUndefined();
-      });
+      focusedAsset.current = undefined;
 
       updateStores({ assets: deletedAssets });
 
-      expect(focusedAsset.update).toHaveBeenCalledTimes(1);
+      expect(focusedAsset.current).toBeUndefined();
     });
   });
 
   describe('deleteAssets', () => {
+    it('refuses to delete a file in a folder the CMS is served from', async () => {
+      const { saveChanges } = await import('$lib/services/backends/save');
+
+      await expect(
+        deleteAssets([/** @type {any} */ ({ path: 'static/admin/index.html', sha: 'a' })]),
+      ).rejects.toThrow('Cannot change a file in a folder the CMS is served from');
+      // An empty folder’s placeholder counts too
+      await expect(
+        deleteAssets([], { extraChanges: [{ action: 'delete', path: 'static/cms/.gitkeep' }] }),
+      ).rejects.toThrow('Cannot change a file in a folder the CMS is served from');
+      expect(saveChanges).not.toHaveBeenCalled();
+    });
+
     /**
      * Create a mock asset with SHA for testing.
      * @param {string} path Asset path.
@@ -160,6 +168,7 @@ describe('assets/data/delete', () => {
           { action: 'delete', path: '/images/photo1.jpg', previousSha: 'sha1' },
           { action: 'delete', path: '/images/photo2.jpg', previousSha: 'sha2' },
         ],
+        savingEntries: [],
         options: { commitType: 'deleteMedia' },
       });
     });
@@ -177,12 +186,39 @@ describe('assets/data/delete', () => {
 
       await deleteAssets(assetsToDelete);
 
-      expect(assetUpdatesToast.set).toHaveBeenCalledWith({
+      expect(assetUpdatesToast.current).toEqual({
         saved: false,
         published: false,
         deleted: true,
         count: 1,
       });
+    });
+
+    it('should commit the extra changes along, and keep quiet when asked', async () => {
+      const assetsToDelete = [createMockAssetWithSha('/images/photo1.jpg', 'photo1.jpg', 'sha1')];
+      const { saveChanges } = await import('$lib/services/backends/save');
+      const { assetUpdatesToast } = await import('$lib/services/assets/data');
+      /** @type {import('$lib/types/private').FileChange} */
+      const extraChange = { action: 'delete', path: '/images/.gitkeep', previousSha: 'k' };
+
+      /** @type {any} */ (assetUpdatesToast).current = undefined;
+      vi.mocked(saveChanges).mockResolvedValue({
+        commit: { sha: 'def456', files: {} },
+        savedEntries: [],
+        savedAssets: [],
+      });
+
+      await deleteAssets(assetsToDelete, { extraChanges: [extraChange], notify: false });
+
+      expect(saveChanges).toHaveBeenCalledWith({
+        changes: [
+          { action: 'delete', path: '/images/photo1.jpg', previousSha: 'sha1' },
+          extraChange,
+        ],
+        savingEntries: [],
+        options: { commitType: 'deleteMedia' },
+      });
+      expect(assetUpdatesToast.current).toBeUndefined();
     });
 
     it('should handle empty assets array', async () => {
@@ -198,8 +234,68 @@ describe('assets/data/delete', () => {
 
       expect(saveChanges).toHaveBeenCalledWith({
         changes: [],
+        savingEntries: [],
         options: { commitType: 'deleteMedia' },
       });
+    });
+
+    it('should rewrite the entries using the assets in the same commit', async () => {
+      const asset = createMockAssetWithSha('/images/photo1.jpg', 'photo1.jpg', 'sha1');
+      const { saveChanges } = await import('$lib/services/backends/save');
+
+      const target = /** @type {any} */ ({
+        entry: { id: 'post-1' },
+        collection: { name: 'posts' },
+      });
+
+      const cascadeChange = /** @type {any} */ ({
+        action: 'update',
+        slug: 'post-1',
+        path: 'content/posts/post-1.md',
+        data: 'image: ""',
+      });
+
+      vi.mocked(planAssetDeletion).mockResolvedValue({ targets: [target], blockers: [] });
+      vi.mocked(buildTargetChanges).mockResolvedValue({
+        changes: [cascadeChange],
+        savingEntries: [target.entry],
+      });
+      vi.mocked(saveChanges).mockResolvedValue({
+        commit: { sha: 'abc123', files: {} },
+        savedEntries: [],
+        savedAssets: [],
+      });
+
+      await deleteAssets([asset]);
+
+      expect(planAssetDeletion).toHaveBeenCalledWith([asset]);
+      expect(buildTargetChanges).toHaveBeenCalledWith({ targets: [target] });
+      expect(saveChanges).toHaveBeenCalledWith({
+        changes: [
+          { action: 'delete', path: '/images/photo1.jpg', previousSha: 'sha1' },
+          cascadeChange,
+        ],
+        savingEntries: [target.entry],
+        options: { commitType: 'deleteMedia' },
+      });
+    });
+
+    it('should refuse to delete assets that entries require', async () => {
+      const asset = createMockAssetWithSha('/images/photo1.jpg', 'photo1.jpg', 'sha1');
+      const { saveChanges } = await import('$lib/services/backends/save');
+      const { assetUpdatesToast } = await import('$lib/services/assets/data');
+
+      assetUpdatesToast.current = /** @type {any} */ (undefined);
+      vi.mocked(planAssetDeletion).mockResolvedValue({
+        targets: [],
+        blockers: [/** @type {any} */ ({ entry: { id: 'post-1' }, keyPath: 'image' })],
+      });
+
+      await expect(deleteAssets([asset])).rejects.toThrow(
+        'Cannot delete assets that entries require',
+      );
+      expect(saveChanges).not.toHaveBeenCalled();
+      expect(assetUpdatesToast.current).toBeUndefined();
     });
   });
 });

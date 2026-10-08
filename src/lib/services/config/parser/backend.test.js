@@ -20,6 +20,8 @@ const mockI18nStrings = {
   'config.error.oauth_no_app_id': 'OAuth app ID is required',
   'config.warning.oauth_no_app_id':
     'OAuth application ID is not defined. Users are required to provide an access token to sign in.',
+  'config.error.open_authoring_no_workflow':
+    'The `open_authoring` option requires the `editorial_workflow` publish mode.',
 };
 
 /**
@@ -46,11 +48,6 @@ vi.mock('@sveltia/i18n', () => ({
 }));
 
 const mockGetStore = vi.fn();
-
-vi.mock('svelte/store', () => ({
-  get: mockGetStore,
-}));
-
 const mockIsObject = vi.fn();
 
 vi.mock('@sveltia/utils/object', () => ({
@@ -64,16 +61,19 @@ vi.mock('$lib/services/config/deprecations', () => ({
 }));
 
 vi.mock('$lib/services/backends', () => ({
-  gitBackendServices: {
-    github: { name: 'github' },
-    gitlab: { name: 'gitlab' },
-    gitea: { name: 'gitea' },
-  },
   validBackendNames: ['github', 'gitlab', 'gitea', 'local'],
   unsupportedBackends: {
     azure: { label: 'Azure DevOps' },
     bitbucket: { label: 'Bitbucket' },
     'git-gateway': { label: 'Git Gateway', deprecated: true },
+  },
+}));
+
+vi.mock('$lib/services/backends/git/services', () => ({
+  gitBackendServices: {
+    github: { name: 'github' },
+    gitlab: { name: 'gitlab' },
+    gitea: { name: 'gitea' },
   },
 }));
 
@@ -329,13 +329,8 @@ describe('parseBackendConfig', () => {
 
       parseBackendConfig(config, collectors);
 
-      // repo === undefined check AND typeof repo !== 'string' check both fail
-      expect(collectors.errors.size).toBe(2);
-
-      const errors = [...collectors.errors];
-
-      expect(errors.some((e) => e === 'Missing repository')).toBe(true);
-      expect(errors.some((e) => e === 'Invalid repository format')).toBe(true);
+      // A missing repository is reported once, not also as a malformed one
+      expect([...collectors.errors]).toEqual(['Missing repository']);
     });
 
     it('should error when repository is not a string', async () => {
@@ -483,6 +478,35 @@ describe('parseBackendConfig', () => {
       const [error] = [...collectors.errors];
 
       expect(error).toBe('OAuth implicit flow is not supported');
+    });
+
+    it('should link to the Gitea/Forgejo documentation page for the Gitea backend', async () => {
+      const { parseBackendConfig } = await import('./backend.js');
+      const collectors = createCollectors();
+      const original = mockI18nStrings['config.error.oauth_implicit_flow'];
+
+      mockI18nStrings['config.error.oauth_implicit_flow'] = 'Not supported. <a>Learn more</a>';
+
+      /** @type {any} */
+      const config = {
+        backend: {
+          name: 'gitea',
+          repo: 'owner/repo',
+          auth_type: 'implicit',
+        },
+      };
+
+      try {
+        parseBackendConfig(config, collectors);
+      } finally {
+        mockI18nStrings['config.error.oauth_implicit_flow'] = original;
+      }
+
+      const [error] = [...collectors.errors];
+
+      expect(error).toContain(
+        'href="https://sveltiacms.app/en/docs/backends/gitea-forgejo#authentication"',
+      );
     });
 
     it('should warn when Gitea backend has no app_id and auth_type is not set', async () => {
@@ -740,6 +764,130 @@ describe('parseBackendConfig', () => {
       parseBackendConfig(config, collectors);
 
       expect(mockCheckUnsupportedOptions).not.toHaveBeenCalled();
+    });
+  });
+  describe('open authoring', () => {
+    it('should accept the option with the editorial workflow publish mode', async () => {
+      const { parseBackendConfig } = await import('./backend.js');
+      const collectors = createCollectors();
+
+      /** @type {any} */
+      const config = {
+        publish_mode: 'editorial_workflow',
+        backend: {
+          name: 'github',
+          repo: 'owner/repo',
+          open_authoring: true,
+          auth_scope: 'public_repo',
+        },
+      };
+
+      parseBackendConfig(config, collectors);
+
+      expect(collectors.errors.size).toBe(0);
+      expect(collectors.warnings.size).toBe(0);
+    });
+
+    it('should warn when the authentication scope is left at the broad default', async () => {
+      const { parseBackendConfig } = await import('./backend.js');
+      const collectors = createCollectors();
+
+      /** @type {any} */
+      const config = {
+        publish_mode: 'editorial_workflow',
+        backend: { name: 'github', repo: 'owner/repo', open_authoring: true },
+      };
+
+      parseBackendConfig(config, collectors);
+
+      expect(collectors.errors.size).toBe(0);
+      // A console warning is hardcoded English with a plain URL, not a localized string
+      expect([...collectors.warnings]).toEqual([
+        expect.stringContaining('`auth_scope: public_repo` if your repository is public'),
+      ]);
+    });
+
+    it('should stay quiet when the broader scope is chosen deliberately', async () => {
+      const { parseBackendConfig } = await import('./backend.js');
+      const collectors = createCollectors();
+
+      /** @type {any} */
+      const config = {
+        publish_mode: 'editorial_workflow',
+        backend: { name: 'github', repo: 'owner/repo', open_authoring: true, auth_scope: 'repo' },
+      };
+
+      parseBackendConfig(config, collectors);
+
+      expect(collectors.warnings.size).toBe(0);
+    });
+
+    it('should error without the editorial workflow publish mode', async () => {
+      const { parseBackendConfig } = await import('./backend.js');
+      const collectors = createCollectors();
+
+      /** @type {any} */
+      const config = {
+        backend: {
+          name: 'github',
+          repo: 'owner/repo',
+          open_authoring: true,
+          auth_scope: 'public_repo',
+        },
+      };
+
+      parseBackendConfig(config, collectors);
+
+      expect([...collectors.errors]).toEqual([
+        'The `open_authoring` option requires the `editorial_workflow` publish mode.',
+      ]);
+    });
+
+    it('should accept the option with the GitLab backend', async () => {
+      const { parseBackendConfig } = await import('./backend.js');
+      const collectors = createCollectors();
+
+      /** @type {any} */
+      const config = {
+        publish_mode: 'editorial_workflow',
+        backend: { name: 'gitlab', repo: 'group/project', open_authoring: true },
+      };
+
+      parseBackendConfig(config, collectors);
+
+      expect(collectors.errors.size).toBe(0);
+      // GitLab has no `auth_scope` option, so the scope warning doesn’t apply to it
+      expect(collectors.warnings.size).toBe(0);
+    });
+
+    it('should accept the option with the Gitea backend without asking for a scope', async () => {
+      const { parseBackendConfig } = await import('./backend.js');
+      const collectors = createCollectors();
+
+      /** @type {any} */
+      const config = {
+        publish_mode: 'editorial_workflow',
+        backend: { name: 'gitea', repo: 'owner/repo', app_id: 'app', open_authoring: true },
+      };
+
+      parseBackendConfig(config, collectors);
+
+      // The `auth_scope` warning is about GitHub’s broad default scope; Gitea/Forgejo scopes are
+      // already limited to what the CMS uses
+      expect([...collectors.warnings]).toEqual([]);
+      expect([...collectors.errors]).toEqual([]);
+    });
+
+    it('should stay quiet when the option is off', async () => {
+      const { parseBackendConfig } = await import('./backend.js');
+      const collectors = createCollectors();
+      /** @type {any} */
+      const config = { backend: { name: 'github', repo: 'owner/repo' } };
+
+      parseBackendConfig(config, collectors);
+
+      expect(collectors.errors.size).toBe(0);
+      expect(collectors.warnings.size).toBe(0);
     });
   });
 });

@@ -1,46 +1,27 @@
-import { beforeEach, describe, expect, test, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 
-import { filterEntries, parseFilterConfig } from './filter';
+import { selectedCollection } from '$lib/services/contents/collection';
+
+import { filterEntries, parseFilterConfig, viewFilters } from './filter';
 
 /**
  * @import { Entry, FilteringConditions, InternalCollection } from '$lib/types/private';
  */
 
 // Mock dependencies
-vi.mock('svelte/store', () => ({
-  derived: vi.fn(() => ({
-    subscribe: vi.fn(() => vi.fn()),
-  })),
-  get: vi.fn(() => ({})),
-  toStore: vi.fn((getter) => ({
-    subscribe: vi.fn((fn) => {
-      fn(getter());
-      return vi.fn();
-    }),
-  })),
-  writable: vi.fn(() => ({ subscribe: vi.fn() })),
-}));
-
-vi.mock('$lib/services/assets/view', () => ({
-  currentView: {
-    subscribe: vi.fn(() => vi.fn()),
-    set: vi.fn(),
-  },
-}));
-
 vi.mock('$lib/services/contents/collection', () => ({
-  selectedCollection: {
-    subscribe: vi.fn(() => vi.fn()),
-  },
+  selectedCollection: { current: undefined },
 }));
 
 vi.mock('$lib/services/contents/collection/view/settings', () => ({
-  entryListSettings: {
-    subscribe: vi.fn(() => vi.fn()),
-  },
+  entryListSettings: { current: undefined },
 }));
 
 vi.mock('$lib/services/contents/entry/fields', () => ({
+  getField: vi.fn(),
+}));
+
+vi.mock('$lib/services/contents/entry/values', () => ({
   getPropertyValue: vi.fn(),
 }));
 
@@ -49,7 +30,7 @@ vi.mock('$lib/services/utils/regex', () => ({
 }));
 
 describe('Test filterEntries()', async () => {
-  const { getPropertyValue } = await import('$lib/services/contents/entry/fields');
+  const { getPropertyValue } = await import('$lib/services/contents/entry/values');
   const { getRegex } = await import('$lib/services/utils/regex');
 
   /** @type {InternalCollection} */
@@ -374,6 +355,170 @@ describe('Test filterEntries()', async () => {
   });
 });
 
+describe('Test filterEntries() with a comparison', async () => {
+  const { getField } = await import('$lib/services/contents/entry/fields');
+  const { getPropertyValue } = await import('$lib/services/contents/entry/values');
+  const { getRegex } = await import('$lib/services/utils/regex');
+
+  /**
+   * Create an entry.
+   * @param {string} id Entry ID.
+   * @param {Record<string, any>} content Content.
+   * @returns {any} Entry.
+   */
+  const createEntry = (id, content) => ({
+    id,
+    slug: id,
+    sha: id,
+    path: `content/events/${id}.md`,
+    locales: { en: content },
+  });
+
+  const entries = [
+    createEntry('past', { date: '2026-09-15T18:00', priority: 1, category: 'concert' }),
+    createEntry('today', { date: '2026-09-16T18:00', priority: 5, category: 'festival' }),
+    createEntry('future', { date: '2026-09-17T18:00', priority: 10, category: 'concert' }),
+    createEntry('undated', { priority: 3 }),
+    createEntry('tagged', { priority: 3, tags: ['news', 'updates'] }),
+  ];
+
+  const fields = [
+    { name: 'date', widget: 'datetime' },
+    { name: 'priority', widget: 'number' },
+    { name: 'category', widget: 'relation', collection: 'categories' },
+    { name: 'tags', widget: 'relation', collection: 'tags', multiple: true },
+  ];
+
+  /** @type {any} */
+  const collection = {
+    name: 'events',
+    _type: 'entry',
+    _i18n: { defaultLocale: 'en' },
+    folder: 'content/events',
+    fields,
+    view_filters: [
+      { label: 'Upcoming', field: 'date', gte: '{{now}}' },
+      { label: 'Past', field: 'date', lt: '{{now}}' },
+      { label: 'Today', field: 'date', pattern: '^{{today}}' },
+      { label: 'This year', field: 'date', gte: '{{year}}-01-01', lt: '2027-01-01' },
+      { label: 'Important', field: 'priority', gte: 5 },
+      { label: 'Not important', field: 'priority', lt: 5 },
+      { label: 'Concerts', field: 'category', eq: 'Concert' },
+      { label: 'Other than concerts', field: 'category', ne: 'concert' },
+      { label: 'Some', field: 'category', in: ['festival', 'workshop'] },
+      { label: 'News', field: 'tags', pattern: 'news' },
+      { label: 'Updates', field: 'tags', eq: 'Updates' },
+      { label: 'Not news', field: 'tags', ne: 'news' },
+      { label: 'Dated', field: 'date', empty: false },
+      { label: 'Undated', field: 'date', empty: true },
+    ],
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2026, 8, 16, 14, 5, 9));
+
+    vi.mocked(getPropertyValue).mockImplementation(({ entry, key, resolveRef = true }) => {
+      const value = /** @type {any} */ (entry).locales?.en?.[key];
+      /**
+       * Resolve a category label.
+       * @param {string} slug Category slug.
+       * @returns {string} Label.
+       */
+      const getLabel = (slug) => slug.charAt(0).toUpperCase() + slug.slice(1);
+
+      if (key === 'category' && resolveRef && typeof value === 'string') {
+        return getLabel(value);
+      }
+
+      // A multiple relation field resolves to an array of labels
+      if (key === 'tags' && resolveRef && Array.isArray(value)) {
+        return value.map(getLabel);
+      }
+
+      return value;
+    });
+
+    vi.mocked(getField).mockImplementation(
+      ({ keyPath }) => /** @type {any} */ (fields.find(({ name }) => name === keyPath)),
+    );
+
+    vi.mocked(getRegex).mockImplementation((pattern) =>
+      typeof pattern === 'string' ? new RegExp(pattern) : undefined,
+    );
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /**
+   * Filter the entries and get the IDs of the result.
+   * @param {FilteringConditions[]} filters Filters.
+   * @returns {string[]} Entry IDs.
+   */
+  const filter = (filters) => filterEntries(entries, collection, filters).map(({ id }) => id);
+
+  test('compares a DateTime field with the current date and time', () => {
+    expect(filter([{ field: 'date', gte: '{{now}}' }])).toEqual(['today', 'future']);
+    expect(filter([{ field: 'date', lt: '{{now}}' }])).toEqual(['past']);
+    expect(filter([{ field: 'date', pattern: '^{{today}}' }])).toEqual(['today']);
+    expect(filter([{ field: 'date', gte: '{{year}}-01-01', lt: '2027-01-01' }])).toEqual([
+      'past',
+      'today',
+      'future',
+    ]);
+  });
+
+  test('looks up the field configuration to parse a date', () => {
+    filter([{ field: 'date', gte: '{{now}}' }]);
+
+    expect(getField).toHaveBeenCalledWith({ collectionName: 'events', keyPath: 'date' });
+  });
+
+  test('compares a number field', () => {
+    expect(filter([{ field: 'priority', gte: 5 }])).toEqual(['today', 'future']);
+    expect(filter([{ field: 'priority', lt: 5 }])).toEqual(['past', 'undated', 'tagged']);
+  });
+
+  test('matches any item of a multiple relation field', () => {
+    // @see https://github.com/sveltia/sveltia-cms/issues/997
+    expect(filter([{ field: 'tags', pattern: 'news' }])).toEqual(['tagged']);
+    expect(filter([{ field: 'tags', eq: 'Updates' }])).toEqual(['tagged']);
+    expect(filter([{ field: 'tags', ne: 'news' }])).toEqual(['past', 'today', 'future', 'undated']);
+  });
+
+  test('compares the raw or referenced value for equality', () => {
+    expect(filter([{ field: 'category', eq: 'Concert' }])).toEqual(['past', 'future']);
+    expect(filter([{ field: 'category', ne: 'concert' }])).toEqual(['today', 'undated', 'tagged']);
+    expect(filter([{ field: 'category', in: ['festival', 'workshop'] }])).toEqual(['today']);
+  });
+
+  test('checks whether a field is empty', () => {
+    // @see https://github.com/sveltia/sveltia-cms/issues/1004
+    expect(filter([{ field: 'date', empty: false }])).toEqual(['past', 'today', 'future']);
+    expect(filter([{ field: 'date', empty: true }])).toEqual(['undated', 'tagged']);
+  });
+
+  test('combines the filters', () => {
+    expect(
+      filter([
+        { field: 'date', gte: '{{now}}' },
+        { field: 'category', eq: 'Concert' },
+      ]),
+    ).toEqual(['future']);
+  });
+
+  test('ignores a filter whose comparison is not configured', () => {
+    const all = ['past', 'today', 'future', 'undated', 'tagged'];
+
+    expect(filter([{ field: 'priority', gte: 6 }])).toEqual(all);
+    expect(filter([{ field: 'priority', gt: 5 }])).toEqual(all);
+    expect(filter([{ field: 'priority' }])).toEqual(all);
+  });
+});
+
 describe('Test parseFilterConfig()', () => {
   test('returns empty options for undefined input', () => {
     const result = parseFilterConfig(undefined);
@@ -493,195 +638,65 @@ describe('Test parseFilterConfig()', () => {
   });
 });
 
-describe('initializeViewFilters', () => {
-  test('calls set with empty array when collection is undefined', async () => {
-    const { initializeViewFilters } = await import('./filter');
-    const mockSet = vi.fn();
-
-    initializeViewFilters(undefined, mockSet);
-
-    expect(mockSet).toHaveBeenCalledWith([]);
+describe('viewFilters', () => {
+  beforeEach(() => {
+    selectedCollection.current = undefined;
   });
 
-  test('calls set with empty array for file collection', async () => {
-    const { initializeViewFilters } = await import('./filter');
-    const mockSet = vi.fn();
+  test('is empty when no collection is selected', () => {
+    expect(viewFilters.current).toEqual([]);
+  });
 
-    const fileCollection = /** @type {any} */ ({
-      name: 'pages',
+  test('is empty for a file collection', () => {
+    selectedCollection.current = /** @type {any} */ ({
+      name: 'settings',
       _type: 'file',
       files: [],
-      _fileMap: {},
     });
 
-    initializeViewFilters(fileCollection, mockSet);
-
-    expect(mockSet).toHaveBeenCalledWith([]);
+    expect(viewFilters.current).toEqual([]);
   });
 
-  test('processes and sets filters for entry collection', async () => {
-    const { initializeViewFilters } = await import('./filter');
-    const { currentView } = await import('$lib/services/contents/collection/view');
-    const mockSet = vi.fn();
-
-    vi.mocked(currentView).update = vi.fn();
-
-    const entryCollection = /** @type {any} */ ({
+  test('lists the filters of the selected entry collection', () => {
+    selectedCollection.current = /** @type {any} */ ({
       name: 'posts',
       _type: 'entry',
       folder: 'content/posts',
       view_filters: [
-        { field: 'status', pattern: 'published', name: 'published' },
-        { field: 'category', pattern: 'tech', name: 'tech' },
+        { field: 'author', pattern: 'john', label: 'John' },
+        { field: 'status', pattern: 'draft', label: 'Draft' },
       ],
     });
 
-    initializeViewFilters(entryCollection, mockSet);
-
-    expect(mockSet).toHaveBeenCalledWith([
-      { field: 'status', pattern: 'published', name: 'published' },
-      { field: 'category', pattern: 'tech', name: 'tech' },
+    expect(viewFilters.current).toEqual([
+      { field: 'author', pattern: 'john', label: 'John' },
+      { field: 'status', pattern: 'draft', label: 'Draft' },
     ]);
-
-    expect(vi.mocked(currentView).update).toHaveBeenCalled();
   });
 
-  test('handles entry collection with no view_filters', async () => {
-    const { initializeViewFilters } = await import('./filter');
-    const { currentView } = await import('$lib/services/contents/collection/view');
-    const mockSet = vi.fn();
-
-    vi.mocked(currentView).update = vi.fn();
-
-    const entryCollection = /** @type {any} */ ({
+  test('is empty for an entry collection without view_filters', () => {
+    selectedCollection.current = /** @type {any} */ ({
       name: 'posts',
       _type: 'entry',
       folder: 'content/posts',
     });
 
-    initializeViewFilters(entryCollection, mockSet);
-
-    expect(mockSet).toHaveBeenCalledWith([]);
-
-    expect(vi.mocked(currentView).update).toHaveBeenCalled();
+    expect(viewFilters.current).toEqual([]);
   });
 
-  test('handles entry collection with view_filters object format', async () => {
-    const { initializeViewFilters } = await import('./filter');
-    const { currentView } = await import('$lib/services/contents/collection/view');
-    const mockSet = vi.fn();
-
-    vi.mocked(currentView).update = vi.fn();
-
-    const entryCollection = /** @type {any} */ ({
+  test('supports the view_filters object format', () => {
+    selectedCollection.current = /** @type {any} */ ({
       name: 'posts',
       _type: 'entry',
       folder: 'content/posts',
       view_filters: {
-        filters: [
-          { field: 'status', pattern: 'published', name: 'published' },
-          { field: 'category', pattern: 'tech', name: 'tech' },
-        ],
-        default: 'published',
+        default: 'drafts',
+        filters: [{ name: 'drafts', field: 'draft', pattern: true, label: 'Drafts' }],
       },
     });
 
-    initializeViewFilters(entryCollection, mockSet);
-
-    expect(mockSet).toHaveBeenCalledWith([
-      { field: 'status', pattern: 'published', name: 'published' },
-      { field: 'category', pattern: 'tech', name: 'tech' },
+    expect(viewFilters.current).toEqual([
+      { name: 'drafts', field: 'draft', pattern: true, label: 'Drafts' },
     ]);
-
-    expect(vi.mocked(currentView).update).toHaveBeenCalled();
-  });
-
-  test('sets default filter when currentView has no existing filters (defaultFilter truthy branch)', async () => {
-    const { initializeViewFilters } = await import('./filter');
-    const { currentView } = await import('$lib/services/contents/collection/view');
-    const mockSet = vi.fn();
-
-    // Make update invoke its callback so the ternary branch is executed
-    // @ts-ignore
-    vi.mocked(currentView).update = vi.fn((cb) => cb({ filters: undefined }));
-
-    const entryCollection = /** @type {any} */ ({
-      name: 'posts',
-      _type: 'entry',
-      folder: 'content/posts',
-      view_filters: {
-        filters: [{ field: 'status', pattern: 'published', name: 'published' }],
-        default: 'published',
-      },
-    });
-
-    initializeViewFilters(entryCollection, mockSet);
-
-    // The update callback should be called with the defaultFilter wrapped in an array.
-    // Note: parseFilterConfig strips the 'name' from the returned default object.
-    const updateCallback = vi.mocked(currentView).update.mock.calls[0][0];
-    // @ts-ignore
-    const result = updateCallback({ filters: undefined });
-
-    expect(result.filters).toEqual([{ field: 'status', pattern: 'published' }]);
-  });
-});
-
-describe('Test viewFilters store', () => {
-  test('viewFilters derived callback calls initializeViewFilters when selectedCollection changes', async () => {
-    vi.resetModules();
-
-    // Use the real svelte/store functions for this isolated test
-    const {
-      writable,
-      derived: realDerived,
-      get: realGet,
-    } = /** @type {typeof import('svelte/store')} */ (await vi.importActual('svelte/store'));
-
-    vi.doMock('svelte/store', () => ({
-      derived: realDerived,
-      get: realGet,
-      writable,
-    }));
-
-    const _selectedCollection = writable(/** @type {any} */ (undefined));
-    const _currentView = writable({ type: 'list' });
-
-    vi.doMock('$lib/services/contents/collection', () => ({
-      selectedCollection: _selectedCollection,
-    }));
-
-    vi.doMock('$lib/services/contents/collection/view', () => ({
-      currentView: _currentView,
-    }));
-
-    vi.doMock('$lib/services/contents/entry/fields', () => ({
-      getPropertyValue: vi.fn(),
-    }));
-
-    vi.doMock('$lib/services/utils/regex', () => ({
-      getRegex: vi.fn(),
-    }));
-
-    const { viewFilters } = await import('./filter');
-    let filterValues = /** @type {any} */ (null);
-
-    const unsub = viewFilters.subscribe((value) => {
-      filterValues = value;
-    });
-
-    // Set a folder collection with view_filters to exercise line 124
-    _selectedCollection.set(
-      /** @type {any} */ ({
-        name: 'posts',
-        _type: 'entry',
-        folder: 'content/posts',
-        view_filters: [{ field: 'status', pattern: 'published', name: 'published' }],
-      }),
-    );
-
-    expect(Array.isArray(filterValues)).toBe(true);
-
-    unsub();
   });
 });

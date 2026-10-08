@@ -5,7 +5,7 @@
 
   import PanelContainer from '$lib/components/contents/details/sidebar/panels/panel-container.svelte';
   import { backend } from '$lib/services/backends';
-  import { entryDraft } from '$lib/services/contents/draft';
+  import { getEntryDraftContext } from '$lib/services/contents/draft/state.svelte';
   import { fetchEntryHistory } from '$lib/services/contents/entry/history';
   import { formatDate } from '$lib/services/utils/date';
   import { openNewTab } from '$lib/services/utils/window';
@@ -13,6 +13,8 @@
   /**
    * @import { FileCommit } from '$lib/types/private';
    */
+
+  const entryDraft = getEntryDraftContext();
 
   /** @type {FileCommit[]} */
   let commits = $state([]);
@@ -23,8 +25,9 @@
    * Load the commit history for the current entry, using the external cache.
    */
   const load = async () => {
-    const entry = $entryDraft?.originalEntry;
+    const entry = entryDraft.current?.originalEntry;
 
+    /* v8 ignore next 3 -- the panel is only offered for an existing entry */
     if (!entry) {
       return;
     }
@@ -47,37 +50,38 @@
   {:else if commits.length > 0}
     <div role="list" class="commits">
       {#each commits as commit (commit.sha)}
-        {@const commitURL = $backend?.repository?.commitBaseURL
-          ? `${$backend.repository.commitBaseURL}/${commit.sha}`
+        {@const commitURL = backend.current?.repository?.commitBaseURL
+          ? `${backend.current.repository.commitBaseURL}/${commit.sha}`
           : undefined}
-        <Button
-          class="ref"
-          variant="ghost"
-          role="link"
-          disabled={!commitURL}
-          onclick={() => {
-            if (commitURL) {
-              openNewTab(commitURL);
-            }
-          }}
-        >
-          {#if commit.authorAvatarURL}
-            <img
-              class="avatar"
-              src={commit.authorAvatarURL}
-              alt=""
-              width="24"
-              height="24"
-              loading="lazy"
-            />
-          {:else}
-            <span class="avatar placeholder" aria-hidden="true"></span>
-          {/if}
-          <span class="details">
-            <span class="author">{commit.authorName}</span>
-            <span class="date">{formatDate(commit.date, appLocale.current)}</span>
-          </span>
-        </Button>
+        <div role="listitem">
+          <Button
+            class="ref"
+            variant="ghost"
+            role="link"
+            disabled={!commitURL}
+            onclick={() => {
+              // The button is disabled without a URL
+              openNewTab(/** @type {string} */ (commitURL));
+            }}
+          >
+            {#if commit.authorAvatarURL}
+              <img
+                class="avatar"
+                src={commit.authorAvatarURL}
+                alt=""
+                width="24"
+                height="24"
+                loading="lazy"
+              />
+            {:else}
+              <span class="avatar placeholder" aria-hidden="true"></span>
+            {/if}
+            <span class="details">
+              <span class="author"><bdi>{commit.authorName}</bdi></span>
+              <span class="date">{formatDate(commit.date, appLocale.current)}</span>
+            </span>
+          </Button>
+        </div>
       {/each}
     </div>
   {:else}

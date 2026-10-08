@@ -7,7 +7,7 @@ global.fetch = vi.fn();
 
 const defaultOptions = {
   apiKey: 'sk-proj-test-key-1234567890abcdef',
-  model: 'gpt-5.4-nano',
+  model: 'gpt-6-luna',
   systemPrompt: 'You are a helpful assistant.',
   userMessage: 'Hello!',
 };
@@ -94,7 +94,7 @@ describe('OpenAI AI Client', () => {
       expect(body.store).toBe(false);
     });
 
-    it('should use default temperature and max_output_tokens when not provided', async () => {
+    it('should use default max_output_tokens when not provided', async () => {
       vi.mocked(fetch).mockResolvedValueOnce(
         new Response(JSON.stringify({ output_text: 'ok' }), { status: 200 }),
       );
@@ -103,20 +103,20 @@ describe('OpenAI AI Client', () => {
 
       const body = JSON.parse(/** @type {string} */ (vi.mocked(fetch).mock.calls[0][1]?.body));
 
-      expect(body.temperature).toBe(0.3);
+      expect(body).not.toHaveProperty('temperature');
       expect(body.max_output_tokens).toBe(4000);
     });
 
-    it('should forward custom temperature and maxTokens', async () => {
+    it('should forward custom maxTokens without temperature', async () => {
       vi.mocked(fetch).mockResolvedValueOnce(
         new Response(JSON.stringify({ output_text: 'ok' }), { status: 200 }),
       );
 
-      await complete({ ...defaultOptions, temperature: 1.0, maxTokens: 512 });
+      await complete({ ...defaultOptions, maxTokens: 512 });
 
       const body = JSON.parse(/** @type {string} */ (vi.mocked(fetch).mock.calls[0][1]?.body));
 
-      expect(body.temperature).toBe(1.0);
+      expect(body).not.toHaveProperty('temperature');
       expect(body.max_output_tokens).toBe(512);
     });
 
@@ -129,7 +129,7 @@ describe('OpenAI AI Client', () => {
       );
 
       await expect(complete(defaultOptions)).rejects.toThrow(
-        'OpenAI API error: 401 Unauthorized - Invalid API key',
+        'Responses API error: 401 Unauthorized - Invalid API key',
       );
     });
 
@@ -139,7 +139,7 @@ describe('OpenAI AI Client', () => {
       );
 
       await expect(complete(defaultOptions)).rejects.toThrow(
-        'OpenAI API error: 429 Too Many Requests',
+        'Responses API error: 429 Too Many Requests',
       );
     });
 
@@ -149,7 +149,7 @@ describe('OpenAI AI Client', () => {
       );
 
       await expect(complete(defaultOptions)).rejects.toThrow(
-        'OpenAI API error: 500 Internal Server Error',
+        'Responses API error: 500 Internal Server Error',
       );
     });
 
@@ -157,7 +157,7 @@ describe('OpenAI AI Client', () => {
       vi.mocked(fetch).mockResolvedValueOnce(new Response(JSON.stringify({}), { status: 200 }));
 
       await expect(complete(defaultOptions)).rejects.toThrow(
-        'Invalid response format from OpenAI API.',
+        'Invalid response format from Responses API.',
       );
     });
 
@@ -167,7 +167,7 @@ describe('OpenAI AI Client', () => {
       );
 
       await expect(complete(defaultOptions)).rejects.toThrow(
-        'Invalid response format from OpenAI API.',
+        'Invalid response format from Responses API.',
       );
     });
 
@@ -179,7 +179,7 @@ describe('OpenAI AI Client', () => {
       );
 
       await expect(complete(defaultOptions)).rejects.toThrow(
-        'Invalid response format from OpenAI API.',
+        'Invalid response format from Responses API.',
       );
     });
   });

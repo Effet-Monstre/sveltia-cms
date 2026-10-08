@@ -1,61 +1,69 @@
 <script>
   import { _ } from '@sveltia/i18n';
   import { PromptDialog, Spacer } from '@sveltia/ui';
-  import { sanitize } from 'isomorphic-dompurify';
 
   import TranslatorSelector from '$lib/components/settings/controls/translator-selector.svelte';
   import { showContentOverlay, translatorApiKeyDialogState } from '$lib/services/contents/editor';
+  import { getServiceDescription } from '$lib/services/integrations/service-description';
   import { translator } from '$lib/services/integrations/translators';
+  import { saveApiKey } from '$lib/services/user/api-keys';
   import { prefs } from '$lib/services/user/prefs.svelte';
 
-  const { serviceId, apiLabel, developerURL, apiKeyURL, apiKeyPattern } = $derived($translator);
+  const { serviceId, apiLabel, developerURL, apiKeyURL, apiKeyPattern } = $derived(
+    translator.current,
+  );
+
+  // eslint-disable-next-line svelte/prefer-writable-derived
+  let inputValue = $state('');
 
   $effect(() => {
-    if (!$showContentOverlay && $translatorApiKeyDialogState.show) {
+    // Update the input value when a different translator service is selected
+    inputValue = prefs.apiKeys?.[serviceId] ?? '';
+  });
+
+  $effect(() => {
+    if (!showContentOverlay.current && translatorApiKeyDialogState.current.show) {
       // Close the dialog when the Content Editor is closed
-      $translatorApiKeyDialogState.show = false;
-      $translatorApiKeyDialogState.resolve?.();
+      translatorApiKeyDialogState.current.show = false;
+      translatorApiKeyDialogState.current.resolve?.();
     }
   });
+
+  /**
+   * Saves the API key to the user preferences if it matches the expected pattern.
+   */
+  const saveKey = () => {
+    const apiKey = saveApiKey(serviceId, inputValue, apiKeyPattern);
+
+    if (apiKey !== undefined) {
+      translatorApiKeyDialogState.current.show = false;
+      translatorApiKeyDialogState.current.resolve?.(apiKey);
+    }
+  };
 </script>
 
 <PromptDialog
-  bind:open={$translatorApiKeyDialogState.show}
+  bind:open={translatorApiKeyDialogState.current.show}
+  bind:value={inputValue}
   title={_('translate_fields', {
-    values: { count: $translatorApiKeyDialogState.multiple ? 2 : 1 },
+    values: { count: translatorApiKeyDialogState.current.multiple ? 2 : 1 },
   })}
-  showOk={false}
   textboxAttrs={{
     spellcheck: false,
     monospace: true,
-    'aria-label': _('api_key'),
+    ariaLabel: _('api_key'),
   }}
-  oninput={(event) => {
-    const _value = /** @type {HTMLInputElement} */ (event.target).value.trim();
-
-    if (apiKeyPattern?.test(_value)) {
-      prefs.apiKeys ??= {};
-      prefs.apiKeys[serviceId] = _value;
-      $translatorApiKeyDialogState.show = false;
-      $translatorApiKeyDialogState.resolve?.(_value);
-    }
-  }}
+  oninput={() => saveKey()}
+  onOk={() => saveKey()}
   onCancel={() => {
-    $translatorApiKeyDialogState.resolve?.();
+    translatorApiKeyDialogState.current.resolve?.();
   }}
 >
   <TranslatorSelector />
   <Spacer />
-  {@html sanitize(
-    _('prefs.i18n.translators.description', {
-      values: {
-        service: apiLabel,
-        homeHref: `href="${developerURL}"`,
-        apiKeyHref: `href="${apiKeyURL}"`,
-      },
-    })
-      // Remove invisible characters used for link detection in the locale string
-      .replace(/[\u2068\u2069]/g, ''),
-    { ALLOWED_TAGS: ['a'], ALLOWED_ATTR: ['href', 'target', 'rel'] },
-  )}
+  {@html getServiceDescription('prefs.i18n.translators.description', {
+    service: apiLabel,
+    developerURL,
+    apiKeyURL,
+  })}
 </PromptDialog>

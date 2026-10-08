@@ -1,7 +1,6 @@
 <script>
   import { _ } from '@sveltia/i18n';
   import { Dialog, Icon, Tab, TabList, TabPanel } from '@sveltia/ui';
-  import { get } from 'svelte/store';
 
   import { panels } from '$lib/components/settings';
   import PanelContainer from '$lib/components/settings/panel-container.svelte';
@@ -35,8 +34,8 @@
   }}
 >
   <div role="none" class="wrapper">
-    <TabList orientation="vertical" aria-label={_('categories')}>
-      {#each get(panels) as { key, icon, enabled = true } (key)}
+    <TabList orientation="vertical" ariaLabel={_('categories')}>
+      {#each panels.current as { key, icon, enabled = true } (key)}
         {#if enabled}
           <Tab
             label={_(`prefs.${key}.title`)}
@@ -53,7 +52,7 @@
         {/if}
       {/each}
     </TabList>
-    {#each get(panels) as { key, component } (key)}
+    {#each panels.current as { key, component } (key)}
       <TabPanel id="prefs-tab-{key}">
         <PanelContainer Panel={component} />
       </TabPanel>

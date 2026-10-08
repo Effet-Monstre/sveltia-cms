@@ -1,21 +1,24 @@
 import { beforeEach, describe, expect, test, vi } from 'vitest';
 
+import { lockedBranch } from '$lib/services/backends/branch-access';
 import {
+  checkBranchAccess,
   checkRepositoryAccess,
   fetchDefaultBranchName,
   getBaseURLs,
+  getBranchPath,
+  getProjectId,
+  parseProjectPath,
   repository,
 } from '$lib/services/backends/git/gitlab/repository';
 import { fetchAPI, fetchGraphQL } from '$lib/services/backends/git/shared/api';
 
 // Mock dependencies
 vi.mock('$lib/services/backends/git/shared/api');
-vi.mock('$lib/services/user/account.svelte', () => ({
-  user: { account: { id: 123 } },
-}));
 vi.mock('@sveltia/i18n', () => ({
   _: vi.fn(() => 'Translation message'),
 }));
+
 describe('GitLab repository service', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -25,6 +28,49 @@ describe('GitLab repository service', () => {
     test('has expected structure', () => {
       expect(repository).toBeDefined();
       expect(typeof repository).toBe('object');
+    });
+  });
+
+  describe('parseProjectPath', () => {
+    test('splits a nested namespace from the project name', () => {
+      expect(parseProjectPath('group/subgroup/project')).toEqual({
+        owner: 'group/subgroup',
+        repo: 'project',
+      });
+
+      expect(parseProjectPath('owner/repo')).toEqual({ owner: 'owner', repo: 'repo' });
+    });
+
+    test('returns nothing for a path without a namespace', () => {
+      expect(parseProjectPath('project')).toEqual({});
+    });
+  });
+
+  describe('getProjectId', () => {
+    test('returns the percent-encoded project path', () => {
+      Object.assign(repository, { owner: 'group/subgroup', repo: 'project' });
+
+      expect(getProjectId()).toBe('group%2Fsubgroup%2Fproject');
+    });
+
+    test('addresses another project, such as an Open Authoring contributor’s fork', () => {
+      expect(getProjectId({ owner: 'contributor', repo: 'project' })).toBe('contributor%2Fproject');
+    });
+  });
+
+  describe('getBranchPath', () => {
+    test('returns the REST API path of the branch with both names percent-encoded', () => {
+      Object.assign(repository, { owner: 'group/subgroup', repo: 'project' });
+
+      expect(getBranchPath('cms/posts/c#-tips')).toBe(
+        '/projects/group%2Fsubgroup%2Fproject/repository/branches/cms%2Fposts%2Fc%23-tips',
+      );
+    });
+
+    test('addresses a branch in another project, such as a contributor’s fork', () => {
+      expect(getBranchPath('cms/posts/hello', { owner: 'contributor', repo: 'project' })).toBe(
+        '/projects/contributor%2Fproject/repository/branches/cms%2Fposts%2Fhello',
+      );
     });
   });
 
@@ -54,37 +100,83 @@ describe('GitLab repository service', () => {
   });
 
   describe('checkRepositoryAccess', () => {
-    test('succeeds when user is a member', async () => {
-      Object.assign(repository, {
-        owner: 'test-owner',
-        repo: 'test-repo',
+    beforeEach(() => {
+      Object.assign(repository, { owner: 'test-owner', repo: 'test-repo' });
+    });
+
+    test('succeeds when the user can push to the repository', async () => {
+      vi.mocked(fetchGraphQL).mockResolvedValue({
+        project: { userPermissions: { pushCode: true } },
       });
 
-      const mockResponse = { ok: true };
-
-      vi.mocked(fetchAPI).mockResolvedValue(mockResponse);
-
       await expect(checkRepositoryAccess()).resolves.toBeUndefined();
+      expect(fetchGraphQL).toHaveBeenCalledWith(expect.stringContaining('pushCode'));
+    });
+
+    test('throws error when the user has a role lower than Developer', async () => {
+      vi.mocked(fetchGraphQL).mockResolvedValue({
+        project: { userPermissions: { pushCode: false } },
+      });
+
+      await expect(checkRepositoryAccess()).rejects.toThrow('Not a collaborator of the repository');
+    });
+
+    test('throws error when the project is not visible to the user', async () => {
+      vi.mocked(fetchGraphQL).mockResolvedValue({ project: null });
+
+      await expect(checkRepositoryAccess()).rejects.toThrow('Not a collaborator of the repository');
+    });
+  });
+
+  describe('checkBranchAccess', () => {
+    beforeEach(() => {
+      Object.assign(repository, { owner: 'test-owner', repo: 'test-repo', branch: 'release/1.0' });
+      lockedBranch.current = undefined;
+    });
+
+    test('leaves the branch writable when the user can push to it', async () => {
+      vi.mocked(fetchAPI).mockResolvedValue({ name: 'release/1.0', can_push: true });
+
+      await checkBranchAccess();
+
+      expect(lockedBranch.current).toBeUndefined();
       expect(fetchAPI).toHaveBeenCalledWith(
-        '/projects/test-owner%2Ftest-repo/members/all/123',
-        expect.objectContaining({
-          headers: { Accept: 'application/json' },
-          responseType: 'raw',
-        }),
+        '/projects/test-owner%2Ftest-repo/repository/branches/release%2F1.0',
       );
     });
 
-    test('throws error when user is not a member', async () => {
-      Object.assign(repository, {
-        owner: 'test-owner',
-        repo: 'test-repo',
-      });
+    test('locks the branch when the user can’t push to it', async () => {
+      vi.mocked(fetchAPI).mockResolvedValue({ name: 'release/1.0', can_push: false });
 
-      const mockResponse = { ok: false };
+      await checkBranchAccess();
 
-      vi.mocked(fetchAPI).mockResolvedValue(mockResponse);
+      expect(lockedBranch.current).toBe('release/1.0');
+    });
 
-      await expect(checkRepositoryAccess()).rejects.toThrow('Not a collaborator of the repository');
+    test('unlocks the branch when the user can push to it again', async () => {
+      lockedBranch.current = 'release/1.0';
+      vi.mocked(fetchAPI).mockResolvedValue({ name: 'release/1.0', can_push: true });
+
+      await checkBranchAccess();
+
+      expect(lockedBranch.current).toBeUndefined();
+    });
+
+    test('leaves the branch writable when the request fails', async () => {
+      lockedBranch.current = 'release/1.0';
+      vi.mocked(fetchAPI).mockRejectedValue(new Error('Not Found'));
+
+      await expect(checkBranchAccess()).resolves.toBeUndefined();
+      expect(lockedBranch.current).toBeUndefined();
+    });
+
+    test('leaves the branch writable when the branch is unknown', async () => {
+      Object.assign(repository, { branch: undefined });
+
+      await checkBranchAccess();
+
+      expect(lockedBranch.current).toBeUndefined();
+      expect(fetchAPI).not.toHaveBeenCalled();
     });
   });
 
