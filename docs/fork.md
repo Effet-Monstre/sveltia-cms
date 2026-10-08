@@ -38,7 +38,7 @@ A release is upstream’s `major.minor` with a four-digit patch made of one repe
 
 ## Upstream sync
 
-`.github/workflows/upstream-sync.yml` runs every Monday and on demand. It sends this repository to kranq, our build machine, which runs the `upstream-sync` task from the infrastructure repository. That task merges `upstream/main`, resolves conflicts, runs every gate in `ci/tasks/upstream-sync.md` and opens a pull request. The workflow then merges the pull request and tags the release.
+`.github/workflows/upstream-sync.yml` runs every Monday and on demand. It first checks with a dry-run push that `SYNC_TOKEN` can write to this repository, so a missing grant fails in seconds rather than after the whole sync. It then sends this repository to kranq, our build machine, which runs the `upstream-sync` task from the infrastructure repository. That task merges `upstream/main`, resolves conflicts, runs every gate in `ci/tasks/upstream-sync.md` and opens a pull request. The workflow then merges the pull request and tags the release.
 
 `Kranqfile` defines the build image and `ci/tasks/setup.md` how the project comes up in it.
 
@@ -48,7 +48,7 @@ The workflow needs these repository settings:
 | --- | --- | --- |
 | `KRANQ_URL` | secret | The kranq push URL, `ssh://user@host:port/~/kranq.git` |
 | `KRANQ_SSH_KEY` | secret | Private key trusted by the kranq machine and registered as an access key on the infrastructure repository |
-| `SYNC_TOKEN` | secret | Fine-grained token for this repository: Contents, Pull requests and Workflows, all read and write. `GITHUB_TOKEN` cannot push the upstream changes to `.github/workflows/`. |
+| `SYNC_TOKEN` | secret | Fine-grained token for this repository: Contents, Pull requests and Workflows, all read and write. `GITHUB_TOKEN` cannot push the upstream changes to `.github/workflows/`. The dry run catches a missing Contents grant but not a missing Workflows grant, which only shows when the push carries a workflow change. |
 | `INFRASTRUCTURE_REF` | variable | Optional. Branch of the infrastructure repository to use, `main` by default. |
 
 Run it by hand with `gh workflow run upstream-sync.yml`. Set `merge` to `false` to open the pull request without merging it.
