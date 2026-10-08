@@ -23,11 +23,13 @@ test('edits a nested field in a YAML file', async ({ cms, page }) => {
   await page.getByRole('row', { name: 'Contact Page' }).click();
 
   const editor = page.getByRole('group', { name: 'Content Editor' });
+  const office = editor.getByRole('group', { name: /Office/ });
 
+  await expect(office).toBeVisible();
   // The fork starts the expanders collapsed; see `docs/fork.md`
   await expandAll(editor);
 
-  const city = editor.getByRole('group', { name: /Office/ }).getByRole('textbox', { name: 'City' });
+  const city = office.getByRole('textbox', { name: 'City' });
 
   await expect(city).toHaveValue('Toronto');
   await city.fill('Vancouver');

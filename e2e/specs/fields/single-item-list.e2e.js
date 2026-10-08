@@ -54,6 +54,7 @@ test('fills in the item of a required list limited to one item', async ({ cms, p
   const sponsor = editor.getByRole('group', { name: 'Sponsor', exact: true });
 
   await editor.getByRole('textbox', { name: 'Title' }).fill('Night Sky');
+  await expect(author).toBeVisible();
   // The fork starts the expanders collapsed; see `docs/fork.md`
   await expandAll(editor);
   // The author’s subfields are there to fill in, without the list controls
@@ -79,6 +80,7 @@ test('adds the missing item to an existing entry without counting it as a change
   const editor = page.getByRole('group', { name: 'Content Editor' });
   const saveButton = editor.getByRole('button', { name: 'Save' });
 
+  await expect(editor.getByRole('group', { name: 'Author', exact: true })).toBeVisible();
   // The fork starts the expanders collapsed; see `docs/fork.md`
   await expandAll(editor);
 

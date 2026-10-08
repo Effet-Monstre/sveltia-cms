@@ -284,6 +284,7 @@ test.describe('draft backup', () => {
     // content left the keys of the last items in place, which were saved as extra values
     await cms.open();
     await editAndLeave(page, async (editor) => {
+      await expect(editor.getByRole('group', { name: /Links.*Field/ })).toBeVisible();
       // The fork starts the expanders collapsed; see `docs/fork.md`
       await expandAll(editor);
       await editor

@@ -66,6 +66,7 @@ test('keeps the duplicated subfields in a locale enabled for an entry', async ({
 
   await french.getByRole('button', { name: /Enable.*French/ }).click();
   await french.getByRole('textbox', { name: 'Title' }).fill('Vieille ville');
+  await expect(french.getByRole('group', { name: /Stops.*Field/ })).toBeVisible();
   // The fork starts the expanders collapsed; see `docs/fork.md`
   await expandAll(french);
   // The stops used to be left out of the French content, as their subfields aren’t localized
