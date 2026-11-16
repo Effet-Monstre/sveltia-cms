@@ -39,6 +39,16 @@ export const getSubtreeEntries = (keyPath, value) => ({
 });
 
 /**
+ * Get a value to pass to `unflatten()`, which fills a placeholder in from its children in place. A
+ * placeholder is replaced with a new one of the same kind, so the value map is left as it is: it
+ * may be a snapshot the entry draft is compared against, which would otherwise look changed.
+ * @param {any} value Value.
+ * @returns {any} Value to unflatten.
+ */
+const copyPlaceholder = (value) =>
+  isPlaceholder(value) ? (Array.isArray(value) ? [] : {}) : value;
+
+/**
  * Assemble the non-primitive value stored under the given key path from its child key paths.
  * @param {FlattenedEntryContent} valueMap Flattened entry content.
  * @param {FieldKeyPath} keyPath Key path of the field.
@@ -56,11 +66,15 @@ export const getSubtree = (valueMap, keyPath, { live = false } = {}) => {
 
   // Wrap everything under a single root key, because `unflatten()` only builds an array from
   // numeric key segments when they are nested, not when they are at the top level
-  const entries = keys.map((key) => [`_${key.slice(keyPath.length)}`, valueMap[key]]);
+  const entries = keys.map((key) => [
+    `_${key.slice(keyPath.length)}`,
+    copyPlaceholder(valueMap[key]),
+  ]);
+
   const placeholder = valueMap[keyPath];
 
   if (isPlaceholder(placeholder)) {
-    entries.push(['_', placeholder]);
+    entries.push(['_', copyPlaceholder(placeholder)]);
   }
 
   return unflattenMap(Object.fromEntries(entries))._;
@@ -72,8 +86,8 @@ export const getSubtree = (valueMap, keyPath, { live = false } = {}) => {
  * @property {FieldKeyPath} [keyPath] Key path of the field.
  * @property {FieldKeyPath[]} [keys] Child key paths.
  * @property {any[]} [values] Values of the child key paths and the field’s own key path, in that
- * order, with an object or array replaced with its kind, as {@link getSubtree} fills a placeholder
- * in place.
+ * order, with an object or array replaced with its kind, as each snapshot holds new placeholder
+ * objects.
  * @property {any} [subtree] Assembled value.
  */
 

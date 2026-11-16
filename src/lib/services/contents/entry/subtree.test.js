@@ -96,6 +96,27 @@ describe('getSubtree()', () => {
     expect(getSubtree(valueMap, 'snippet')).toEqual({ code: 'a' });
   });
 
+  test('should leave the placeholders in the value map empty', () => {
+    // The value map may be a snapshot that the entry draft is compared against, so filling its
+    // placeholders in would make the draft look changed
+    const valueMap = {
+      items: [],
+      'items.0.name': 'A',
+      'items.0.tags': [],
+      'items.0.tags.0': 'x',
+      'items.1.details': {},
+      'items.1.details.note': 'B',
+    };
+
+    expect(getSubtree(valueMap, 'items')).toEqual([
+      { name: 'A', tags: ['x'] },
+      { details: { note: 'B' } },
+    ]);
+    expect(valueMap.items).toEqual([]);
+    expect(valueMap['items.0.tags']).toEqual([]);
+    expect(valueMap['items.1.details']).toEqual({});
+  });
+
   test('should return undefined when there are no children', () => {
     expect(getSubtree({ snippet: {} }, 'snippet')).toBeUndefined();
     expect(getSubtree({}, 'snippet')).toBeUndefined();
