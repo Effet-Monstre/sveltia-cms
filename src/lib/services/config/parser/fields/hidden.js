@@ -1,4 +1,5 @@
-import { replaceTemplateTags } from '$lib/services/common/template/tags';
+import { processNestedTemplates } from '$lib/services/common/template/nested';
+import { splitTemplateTags } from '$lib/services/common/template/tags';
 import { parseTransformations } from '$lib/services/common/transformations';
 import { addMessage } from '$lib/services/config/parser/utils/validator';
 import { mergeI18nConfigs } from '$lib/services/contents/i18n/config/merge';
@@ -9,23 +10,26 @@ import { mergeI18nConfigs } from '$lib/services/contents/i18n/config/merge';
  */
 
 /**
- * Check whether the given template uses the `{{locale}}` tag, with or without transformations.
+ * Check whether the given template uses the `{{locale}}` tag, with or without transformations, also
+ * in a transformation argument, e.g. `default('{{locale}}')`.
  * @param {string} template Template.
  * @returns {boolean} Result.
  */
-const hasLocaleTag = (template) => {
-  let found = false;
+const hasLocaleTag = (template) =>
+  splitTemplateTags(template).tags.some((placeholder) => {
+    const { value, transformations } = parseTransformations(placeholder);
+    let found = value === 'locale';
 
-  replaceTemplateTags(template, (match, placeholder) => {
-    if (parseTransformations(placeholder).value === 'locale') {
-      found = true;
-    }
+    processNestedTemplates(transformations, (innerTag) => {
+      if (hasLocaleTag(`{{${innerTag}}}`)) {
+        found = true;
+      }
 
-    return match;
+      return '';
+    });
+
+    return found;
   });
-
-  return found;
-};
 
 /**
  * Parse and validate a Hidden field configuration. The `{{locale}}` tag in the `default` option is

@@ -2,9 +2,15 @@ import { sleep } from '@sveltia/utils/misc';
 import { describe, expect, onTestFinished, test, vi } from 'vitest';
 import { render } from 'vitest-browser-svelte';
 
+import { holdViewTransition } from '$lib/services/app/navigation';
 import { createMockAsset } from '$lib/test/config';
 
 import AssetPreview from './asset-preview.svelte';
+
+vi.mock('$lib/services/app/navigation', async (importOriginal) => ({
+  ...(await importOriginal()),
+  holdViewTransition: vi.fn(),
+}));
 
 /** A transparent 1×1 PNG. */
 const PNG_BYTES = Uint8Array.from(
@@ -77,6 +83,25 @@ describe('AssetPreview', () => {
       .toBe(true);
   });
 
+  test('shows a lazily loaded asset and its thumbnail once they’re in view', async () => {
+    const file = new File([PNG_BYTES], 'lazy.png', { type: 'image/png' });
+    const asset = createMockAsset({ name: 'lazy.png', file, asset: { unsaved: true } });
+    // The full-size image, then a thumbnail, which is looked up once it has been in view a moment
+    const { container } = await render(AssetPreview, { kind: 'image', asset, dissolve: false });
+
+    const { container: tileContainer } = await render(AssetPreview, {
+      kind: 'image',
+      asset,
+      variant: 'tile',
+      dissolve: false,
+    });
+
+    await expect.poll(() => container.querySelector('img')?.getAttribute('src')).toMatch(/^blob:/);
+    await expect
+      .poll(() => tileContainer.querySelector('img')?.getAttribute('src'))
+      .toMatch(/^blob:/);
+  });
+
   test('shows a fallback icon when the image fails to load', async () => {
     const onError = vi.fn();
 
@@ -89,6 +114,91 @@ describe('AssetPreview', () => {
 
     await expect.poll(() => container.textContent?.trim()).toBe('draft');
     await vi.waitFor(() => expect(onError).toHaveBeenCalledOnce());
+  });
+
+  test('shows the next asset after one whose image has failed to load', async () => {
+    const broken = createMockAsset({
+      name: 'broken.png',
+      file: new File([new Uint8Array([1, 2, 3])], 'broken.png', { type: 'image/png' }),
+      asset: { unsaved: true },
+    });
+
+    const valid = createMockAsset({
+      name: 'dot.png',
+      file: new File([PNG_BYTES], 'dot.png', { type: 'image/png' }),
+      asset: { unsaved: true },
+    });
+
+    const { container, rerender } = await render(AssetPreview, {
+      kind: 'image',
+      asset: broken,
+      loading: 'eager',
+      dissolve: false,
+    });
+
+    await expect.poll(() => container.textContent?.trim()).toBe('draft');
+
+    // The info panel keeps the same preview while the focus moves to another asset
+    await rerender({ asset: valid });
+
+    await expect
+      .poll(() => {
+        const src = container.querySelector('img')?.getAttribute('src');
+
+        return !!src && src === valid.blobURL;
+      })
+      .toBe(true);
+    await expect
+      .poll(() => container.querySelector('.preview')?.classList.contains('loaded'))
+      .toBe(true);
+    expect(container.textContent?.trim()).toBe('');
+  });
+
+  test.each([
+    ['an image', undefined],
+    ['a thumbnail', /** @type {const} */ ('tile')],
+  ])('shows the latest asset after a quick move from one to another, as %s', async (_, variant) => {
+    const { promise: firstFile, resolve: resolveFirst } = Promise.withResolvers();
+
+    // The first asset is read from a file handle, which takes a while
+    const first = createMockAsset({
+      name: 'first.png',
+      asset: { handle: /** @type {any} */ ({ getFile: vi.fn(() => firstFile) }) },
+    });
+
+    const second = createMockAsset({
+      name: 'second.png',
+      file: new File([PNG_BYTES], 'second.png', { type: 'image/png' }),
+      asset: { unsaved: true },
+    });
+
+    const { container, rerender } = await render(AssetPreview, {
+      kind: 'image',
+      asset: first,
+      variant,
+      loading: 'eager',
+      dissolve: false,
+    });
+
+    // Move on while the first asset is still being read
+    await sleep(50);
+    await rerender({ asset: second });
+
+    /**
+     * Get the source of the image shown.
+     * @returns {string | null | undefined} URL.
+     */
+    const getSrc = () => container.querySelector('img')?.getAttribute('src');
+
+    // The second asset shows up while the first one is still being read
+    await expect.poll(getSrc).toMatch(/^blob:/);
+
+    const src = getSrc();
+
+    // The first lookup ends, too late to replace the second asset
+    resolveFirst(new File([PNG_BYTES], 'first.png', { type: 'image/png' }));
+    await sleep(200);
+    expect(getSrc()).toBe(src);
   });
 
   test('shows an icon for a document or an audio file without controls', async () => {
@@ -188,5 +298,167 @@ describe('AssetPreview', () => {
     removed.unmount();
     // Nothing is left to show the backdrop in
     expect(removed.container.querySelector('.blur')).toBeNull();
+  });
+
+  test('blurs the thumbnail being made for an asset behind itself', async () => {
+    const file = new File([PNG_BYTES], 'thumb.png', { type: 'image/png' });
+    const asset = createMockAsset({ name: 'thumb.png', file, asset: { unsaved: true } });
+
+    // A tile starts making the thumbnail, which the backdrop lookup then joins
+    await render(AssetPreview, { kind: 'image', asset, variant: 'tile', loading: 'eager' });
+
+    const { container } = await render(AssetPreview, {
+      kind: 'image',
+      asset,
+      loading: 'eager',
+      blurBackground: true,
+    });
+
+    const media = /** @type {HTMLImageElement} */ (container.querySelector('img:not([role])'));
+
+    // The backdrop ends up with the thumbnail’s own URL rather than the media’s
+    await expect
+      .poll(() => {
+        const src = container.querySelector('.blur img')?.getAttribute('src');
+
+        return !!src && src.startsWith('blob:') && src !== media.getAttribute('src');
+      })
+      .toBe(true);
+  });
+
+  test('releases the thumbnail found for the backdrop of a removed preview', async () => {
+    const revokeObjectURL = vi.spyOn(URL, 'revokeObjectURL');
+    const file = new File([PNG_BYTES], 'gone.png', { type: 'image/png' });
+    const asset = createMockAsset({ name: 'gone.png', file, asset: { unsaved: true } });
+
+    onTestFinished(() => revokeObjectURL.mockRestore());
+
+    const tile = await render(AssetPreview, {
+      kind: 'image',
+      asset,
+      variant: 'tile',
+      loading: 'eager',
+    });
+
+    const { unmount } = await render(AssetPreview, {
+      kind: 'image',
+      asset,
+      loading: 'eager',
+      blurBackground: true,
+    });
+
+    // Removed while the backdrop lookup waits for the thumbnail being made
+    unmount();
+
+    /**
+     * Get the URL the tile displays its thumbnail with.
+     * @returns {string | null | undefined} URL.
+     */
+    const tileSrc = () => tile.container.querySelector('img')?.getAttribute('src');
+
+    await expect.poll(tileSrc).toMatch(/^blob:/);
+    // Each lookup gets a URL of its own, and the removed preview’s one is released
+    await vi.waitFor(() =>
+      expect(revokeObjectURL.mock.calls.some(([url]) => url !== tileSrc())).toBe(true),
+    );
+  });
+
+  test('keeps the media as the backdrop when no thumbnail is cached for it', async () => {
+    // The asset has been preloaded, so its URL is looked up before the cached thumbnail
+    const blobURL = URL.createObjectURL(new Blob([PNG_BYTES], { type: 'image/png' }));
+    const asset = createMockAsset({ name: 'preloaded.png', asset: { blobURL } });
+
+    onTestFinished(() => URL.revokeObjectURL(blobURL));
+
+    const { container } = await render(AssetPreview, {
+      kind: 'image',
+      asset,
+      loading: 'eager',
+      blurBackground: true,
+    });
+
+    await expect
+      .poll(() => container.querySelector('.blur img')?.getAttribute('src'))
+      .toBe(blobURL);
+    // The thumbnail lookup that finds nothing doesn’t clear it
+    await sleep(100);
+    expect(container.querySelector('.blur img')?.getAttribute('src')).toBe(blobURL);
+  });
+
+  describe('holdTransition', () => {
+    const src = `data:image/png;base64,${btoa(String.fromCharCode(...PNG_BYTES))}`;
+
+    /**
+     * Get the hold the preview has added, and whether it has been released.
+     * @returns {Promise<{ hold: Promise<any>, isReleased: () => boolean }>} Hold.
+     */
+    const getHold = async () => {
+      await vi.waitFor(() => expect(holdViewTransition).toHaveBeenCalledOnce());
+
+      const [hold] = vi.mocked(holdViewTransition).mock.calls[0];
+      let released = false;
+
+      hold.then(() => {
+        released = true;
+      });
+
+      /**
+       * Check whether the hold has been released.
+       * @returns {boolean} Result.
+       */
+      const isReleased = () => released;
+
+      return { hold, isReleased };
+    };
+
+    test('holds the running view transition until the media is loaded', async () => {
+      const { container } = await render(AssetPreview, {
+        kind: 'image',
+        src,
+        loading: 'eager',
+        holdTransition: true,
+      });
+
+      const { hold } = await getHold();
+
+      await hold;
+      expect(container.querySelector('img')?.complete).toBe(true);
+    });
+
+    test('releases the view transition once the media fails to load', async () => {
+      const { container } = await render(AssetPreview, {
+        kind: 'image',
+        src: 'data:image/png;base64,AAAA',
+        loading: 'eager',
+        holdTransition: true,
+      });
+
+      const { hold } = await getHold();
+
+      await hold;
+      await expect.poll(() => container.textContent?.trim()).toBe('draft');
+    });
+
+    test('releases the view transition once the preview is removed', async () => {
+      const { unmount } = await render(AssetPreview, {
+        kind: 'image',
+        src: 'https://example.com/never.png',
+        loading: 'eager',
+        holdTransition: true,
+      });
+
+      const { hold, isReleased } = await getHold();
+
+      expect(isReleased()).toBe(false);
+      unmount();
+      await hold;
+    });
+
+    test('doesn’t hold the view transition by default', async () => {
+      const { container } = await render(AssetPreview, { kind: 'image', src, loading: 'eager' });
+
+      await expect.poll(() => container.querySelector('img')?.complete).toBe(true);
+      expect(holdViewTransition).not.toHaveBeenCalled();
+    });
   });
 });

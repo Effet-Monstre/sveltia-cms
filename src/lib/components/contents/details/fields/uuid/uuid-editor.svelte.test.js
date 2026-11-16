@@ -1,7 +1,8 @@
 import { describe, expect, test } from 'vitest';
 import { page } from 'vitest/browser';
 
-import { createMockDraft, renderWithDraft } from '$lib/test/draft';
+import { createMockDraft } from '$lib/test/draft';
+import { renderFieldEditor } from '$lib/test/field.svelte';
 
 import UuidEditor from './uuid-editor.svelte';
 
@@ -17,27 +18,27 @@ const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9
  * @param {string | undefined} [options.currentValue] Field value.
  * @param {string} [options.locale] Locale of the pane.
  * @param {Partial<UuidField>} [options.config] Field options.
+ * @param {Record<string, any>} [options.context] Any other Svelte context, e.g. `field-editor`.
+ * @param {Record<string, any>} [options.props] Any other prop, e.g. `readonly`.
  * @returns {Promise<{ props: { locale: string, currentValue: string | undefined } }>} Props, whose
  * `currentValue` follows the editor and whose `locale` can be changed as the entry editor does.
  */
-const renderEditor = async ({ currentValue = undefined, locale = 'en', config = {} } = {}) => {
-  const props = $state({
-    locale,
-    keyPath: 'id',
-    typedKeyPath: 'id',
-    fieldId: 'id',
-    fieldLabel: 'ID',
+const renderEditor = async ({
+  currentValue = undefined,
+  locale = 'en',
+  config = {},
+  context = {},
+  props = {},
+} = {}) =>
+  renderFieldEditor(UuidEditor, {
     fieldConfig: /** @type {UuidField} */ ({ name: 'id', widget: 'uuid', ...config }),
+    fieldLabel: 'ID',
+    locale,
     currentValue,
-  });
-
-  await renderWithDraft(UuidEditor, {
     draft: createMockDraft({ i18n: { defaultLocale: 'en', allLocales: ['en', 'ja'] } }),
+    context,
     props,
   });
-
-  return { props };
-};
 
 describe('UuidEditor', () => {
   test('generates a UUID for a new entry', async () => {
@@ -73,6 +74,15 @@ describe('UuidEditor', () => {
     ).toMatch(UUID_REGEX);
   });
 
+  test('generates a UUID in another locale within a rich text editor component', async () => {
+    const { props } = await renderEditor({
+      locale: 'ja',
+      context: { 'field-editor': { valueStoreKey: 'extraValues', parentComponentNames: ['yt'] } },
+    });
+
+    expect(props.currentValue).toMatch(UUID_REGEX);
+  });
+
   test('generates a UUID when the editor is reused for another locale', async () => {
     const { props } = await renderEditor({ currentValue: 'existing', config: { i18n: true } });
 
@@ -102,8 +112,18 @@ describe('UuidEditor', () => {
     await expect.element(page.getByRole('textbox')).toHaveAttribute('aria-readonly', 'true');
   });
 
-  test('can be edited when the deprecated `read_only` option is off', async () => {
-    const { props } = await renderEditor({ config: { read_only: false } });
+  // `FieldEditor` lets the `read_only` option switch off the default, but not a lock
+  test('follows the readonly prop, whatever the `read_only` option', async () => {
+    await renderEditor({ config: { read_only: false }, props: { readonly: true } });
+    await expect.element(page.getByRole('textbox')).toHaveAttribute('aria-readonly', 'true');
+  });
+
+  test('can be edited when not read-only', async () => {
+    const { props } = await renderEditor({
+      config: { read_only: false },
+      props: { readonly: false },
+    });
+
     const input = page.getByRole('textbox');
 
     await expect.element(input).not.toHaveAttribute('aria-readonly', 'true');

@@ -1,7 +1,9 @@
 <script>
   import AssetListItem from '$lib/components/assets/list/asset-list-item.svelte';
-  import { encodeRoutePath, goto } from '$lib/services/app/navigation';
+  import { createAssetDragSource } from '$lib/services/assets/drag';
   import { canPreviewAsset } from '$lib/services/assets/kinds';
+  import { canMoveAssets, getDraggedAssets } from '$lib/services/assets/movable';
+  import { showAssetDetails } from '$lib/services/assets/navigation';
   import { focusedAsset, selectedAssetPathSet, selectedAssets } from '$lib/services/assets/state';
   import { focusedSubfolder } from '$lib/services/assets/subfolders';
   import { listedAssetIndexMap } from '$lib/services/assets/view';
@@ -18,12 +20,7 @@
    */
 
   /** @type {Props} */
-  let {
-    /* eslint-disable prefer-const */
-    asset,
-    viewType,
-    /* eslint-enable prefer-const */
-  } = $props();
+  let { asset, viewType } = $props();
 
   /**
    * Update the asset selection.
@@ -43,12 +40,16 @@
   selected={selectedAssetPathSet.current.has(asset.path)}
   canPreview={canPreviewAsset(asset)}
   onSelectionChange={updateSelection}
+  dragSource={canMoveAssets([asset])
+    ? createAssetDragSource(() => getDraggedAssets(asset))
+    : undefined}
   onFocus={() => {
     focusedAsset.current = asset;
     // Show the asset’s info in the sidebar in place of a folder’s
     focusedSubfolder.current = undefined;
   }}
   onPreview={() => {
-    goto(encodeRoutePath(`/assets/${asset.path}`), { transitionType: 'forwards' });
+    // Stay in the selected folder, e.g. All Assets, rather than moving to the asset’s own folder
+    showAssetDetails(asset);
   }}
 />

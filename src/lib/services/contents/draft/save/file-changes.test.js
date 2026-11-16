@@ -10,6 +10,7 @@ import {
   isSingleFileEntry,
   resolveCacheDB,
 } from '$lib/services/contents/draft/save/file-changes';
+import { fileStates, updateFileState } from '$lib/services/contents/file/state';
 
 vi.mock('$lib/services/backends', () => ({ backend: { current: null } }));
 
@@ -188,7 +189,152 @@ describe('buildEntryFileChanges()', () => {
       _file,
       entry,
       locale: undefined,
+      state: {},
     });
+  });
+
+  test('passes the source text of the values read from the file being overwritten', async () => {
+    const sourceMap = { price: { value: 10, source: '10.0' } };
+
+    /**
+     * Plan a file rename.
+     * @returns {any} Planned change.
+     */
+    const planChange = () => ({
+      action: 'move',
+      slug: 'new',
+      path: 'posts/new.md',
+      previousPath: 'posts/old.md',
+      currentPath: 'posts/old.md',
+    });
+
+    fileStates.clear();
+    updateFileState('posts/old.md', { valueSources: sourceMap });
+
+    await buildEntryFileChanges({
+      draft,
+      config: singleFileConfig,
+      _file,
+      entry,
+      cacheDB: undefined,
+      planChange,
+    });
+
+    expect(formatEntryData).toHaveBeenLastCalledWith(
+      expect.objectContaining({ state: { valueSources: sourceMap } }),
+    );
+    // The renamed file takes them over
+    expect(fileStates.get('posts/new.md')?.valueSources).toBe(sourceMap);
+
+    // Not for an item of a file storing all the entries, as the source map is for the whole file
+    await buildEntryFileChanges({
+      draft,
+      config: singleFileConfig,
+      _file: { format: 'json', arrayFile: true },
+      entry,
+      cacheDB: undefined,
+      planChange,
+    });
+
+    expect(formatEntryData).toHaveBeenLastCalledWith(expect.objectContaining({ state: {} }));
+
+    fileStates.clear();
+  });
+
+  test('saves a file in the front matter format it was read in, even once renamed', async () => {
+    /**
+     * Plan a file rename.
+     * @returns {any} Planned change.
+     */
+    const planChange = () => ({
+      action: 'move',
+      slug: 'new',
+      path: 'posts/new.md',
+      previousPath: 'posts/old.md',
+      currentPath: 'posts/old.md',
+    });
+
+    fileStates.clear();
+    updateFileState('posts/old.md', { format: 'toml-frontmatter' });
+
+    await buildEntryFileChanges({
+      draft,
+      config: singleFileConfig,
+      _file: { format: 'frontmatter' },
+      entry,
+      cacheDB: undefined,
+      planChange,
+    });
+
+    expect(formatEntryData).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        _file: {
+          format: 'toml-frontmatter',
+          configuredFormat: 'frontmatter',
+          fmDelimiters: ['+++', '+++'],
+        },
+      }),
+    );
+    // The renamed file takes it over
+    expect(fileStates.get('posts/new.md')?.format).toBe('toml-frontmatter');
+
+    fileStates.clear();
+  });
+
+  test('passes the comments at the top of the file being overwritten', async () => {
+    /**
+     * Plan a file rename.
+     * @returns {any} Planned change.
+     */
+    const planChange = () => ({
+      action: 'move',
+      slug: 'new',
+      path: 'posts/new.md',
+      previousPath: 'posts/old.md',
+      currentPath: 'posts/old.md',
+    });
+
+    fileStates.clear();
+    updateFileState('posts/old.md', { leadingComment: '# Note' });
+
+    await buildEntryFileChanges({
+      draft,
+      config: singleFileConfig,
+      _file,
+      entry,
+      cacheDB: undefined,
+      planChange,
+    });
+
+    expect(formatEntryData).toHaveBeenLastCalledWith(
+      expect.objectContaining({ state: { leadingComment: '# Note' } }),
+    );
+    // The renamed file takes them over
+    expect(fileStates.get('posts/new.md')?.leadingComment).toBe('# Note');
+
+    // A new item of a file storing all the entries leaves that file’s comments alone, as the file
+    // is written as a whole later
+    /**
+     * Plan a new item.
+     * @returns {any} Planned change.
+     */
+    const planCreate = () => ({ action: 'create', slug: 'new', path: 'posts/new.md' });
+
+    updateFileState('posts/new.md', { leadingComment: '# Note' });
+
+    await buildEntryFileChanges({
+      draft,
+      config: singleFileConfig,
+      _file: { format: 'yaml', arrayFile: true },
+      entry,
+      cacheDB: undefined,
+      planChange: planCreate,
+    });
+
+    expect(formatEntryData).toHaveBeenLastCalledWith(expect.objectContaining({ state: {} }));
+    expect(fileStates.get('posts/new.md')?.leadingComment).toBe('# Note');
+
+    fileStates.clear();
   });
 
   test.each([[{ i18nSingleFile: true }], [{ i18nSingleFileDefaultRoot: true }]])(
@@ -260,6 +406,7 @@ describe('buildEntryFileChanges()', () => {
         _file,
         entry,
         locale,
+        state: {},
       });
     });
   });
@@ -281,6 +428,34 @@ describe('buildEntryFileChanges()', () => {
     expect(changes.map(({ path }) => path)).toEqual(['en/a.md', 'de/a.md']);
     expect(formatEntryData).toHaveBeenCalledTimes(2);
     expect(formatEntryData).not.toHaveBeenCalledWith(expect.objectContaining({ locale: 'fr' }));
+  });
+
+  test('formats a file with the source text of the TOML dates read from it', async () => {
+    const sourceMap = { date: { value: '1979-05-27', source: '1979-05-27' } };
+
+    updateFileState('posts/old.toml', { valueSources: sourceMap });
+
+    await buildEntryFileChanges({
+      draft,
+      config: singleFileConfig,
+      _file: { format: 'toml' },
+      entry,
+      cacheDB: undefined,
+      planChange: vi.fn(() => ({
+        action: 'move',
+        slug: 'new',
+        path: 'posts/new.toml',
+        previousPath: 'posts/old.toml',
+        currentPath: 'posts/old.toml',
+      })),
+    });
+
+    expect(formatEntryData).toHaveBeenCalledWith(
+      expect.objectContaining({ state: { valueSources: sourceMap } }),
+    );
+    // The renamed file takes them over
+    expect(fileStates.get('posts/new.toml')?.valueSources).toBe(sourceMap);
+    fileStates.clear();
   });
 
   test('returns no changes when nothing is planned', async () => {

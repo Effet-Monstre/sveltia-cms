@@ -1,6 +1,8 @@
 import { backend } from '$lib/services/backends';
 import { formatEntryData } from '$lib/services/contents/draft/save/entry-file';
 import { getSavedFileConfig } from '$lib/services/contents/file/detected-formats';
+import { takeOverFileState } from '$lib/services/contents/file/state';
+import { usesSingleFileStructure } from '$lib/services/contents/i18n/config';
 import { getRepositoryDatabase } from '$lib/services/utils/database';
 
 /**
@@ -63,10 +65,8 @@ export const getPreviousSha = async ({ previousPath, cacheDB }) => {
  * file.
  * @returns {boolean} Result.
  */
-export const isSingleFileEntry = ({
-  i18nEnabled,
-  structureMap: { i18nSingleFile, i18nSingleFileDefaultRoot } = /** @type {any} */ ({}),
-}) => !i18nEnabled || !!i18nSingleFile || !!i18nSingleFileDefaultRoot;
+export const isSingleFileEntry = ({ i18nEnabled, structureMap = /** @type {any} */ ({}) }) =>
+  !i18nEnabled || usesSingleFileStructure(structureMap);
 
 /**
  * Build the file changes for an entry, one for each file it occupies: a single one, or one per
@@ -112,14 +112,23 @@ export const buildEntryFileChanges = async ({
         };
       }
 
+      // What is remembered about a file storing all the entries of an entry collection, e.g. the
+      // source map keyed by the position of each item, only applies when the whole file is
+      // formatted, see `combineArrayFileChanges()`. A new item has no path of its own to take it
+      // over from either, which would make the file forget it before it’s written
+      const state = _file.arrayFile
+        ? {}
+        : takeOverFileState({ previousPath: currentPath, path: change.path });
+
       const [previousSha, data] = await Promise.all([
         getPreviousSha({ cacheDB, previousPath: currentPath }),
         formatEntryData({
           draft,
           config,
-          _file: getSavedFileConfig({ _file, previousPath: currentPath, path: change.path }),
+          _file: getSavedFileConfig({ _file, format: state.format }),
           entry,
           locale,
+          state,
         }),
       ]);
 

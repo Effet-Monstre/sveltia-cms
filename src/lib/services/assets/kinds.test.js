@@ -1,23 +1,26 @@
-import mime from 'mime';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+import mime from '$lib/services/utils/mime';
+import { createMockAssetFolder } from '$lib/test/factories';
 
 import {
   ASSET_KINDS,
   canCreateThumbnail,
   canEditAsset,
   canPreviewAsset,
+  canPreviewFile,
   DOC_EXTENSION_REGEX,
   getAssetKind,
   getMediaKind,
   getMediaKindFromPath,
   getMediaKindFromType,
-  hasPDFThumbnail,
   isMediaKind,
+  isPDF,
   MEDIA_KINDS,
 } from './kinds';
 
 // Mock dependencies
-vi.mock('mime', () => ({
+vi.mock('$lib/services/utils/mime', () => ({
   default: {
     getType: vi.fn().mockReturnValue(null),
   },
@@ -58,10 +61,6 @@ describe('assets/kinds', () => {
   });
 
   describe('canCreateThumbnail', () => {
-    afterEach(() => {
-      vi.unstubAllEnvs();
-    });
-
     it('should create a thumbnail for an image, a video or a PDF document', () => {
       expect(canCreateThumbnail(/** @type {any} */ ({ name: 'a.jpg', kind: 'image' }))).toBe(true);
       expect(canCreateThumbnail(/** @type {any} */ ({ name: 'a.mp4', kind: 'video' }))).toBe(true);
@@ -70,34 +69,20 @@ describe('assets/kinds', () => {
       );
     });
 
-    it('should not for any other file, or a PDF document in the npm build', () => {
+    it('should not for any other file', () => {
       expect(canCreateThumbnail(/** @type {any} */ ({ name: 'a.mp3', kind: 'audio' }))).toBe(false);
       expect(canCreateThumbnail(/** @type {any} */ ({ name: 'a.docx', kind: 'document' }))).toBe(
-        false,
-      );
-
-      vi.stubEnv('NPM_BUILD', 'true');
-
-      expect(canCreateThumbnail(/** @type {any} */ ({ name: 'a.pdf', kind: 'document' }))).toBe(
         false,
       );
     });
   });
 
-  describe('hasPDFThumbnail', () => {
-    afterEach(() => {
-      vi.unstubAllEnvs();
-    });
-
-    it('should generate a thumbnail for a PDF document', () => {
-      expect(hasPDFThumbnail('files/brochure.pdf')).toBe(true);
-      expect(hasPDFThumbnail('files/brochure.docx')).toBe(false);
-    });
-
-    it('should not in the npm build, which doesn’t include PDF.js', () => {
-      vi.stubEnv('NPM_BUILD', 'true');
-
-      expect(hasPDFThumbnail('files/brochure.pdf')).toBe(false);
+  describe('isPDF', () => {
+    it('should match the extension case-insensitively', () => {
+      expect(isPDF('files/brochure.pdf')).toBe(true);
+      expect(isPDF('Brochure.PDF')).toBe(true);
+      expect(isPDF('brochure.pdf.zip')).toBe(false);
+      expect(isPDF('pdf')).toBe(false);
     });
   });
 
@@ -112,6 +97,46 @@ describe('assets/kinds', () => {
       expect(isMediaKind('document')).toBe(false);
       expect(isMediaKind('other')).toBe(false);
       expect(isMediaKind('unknown')).toBe(false);
+    });
+  });
+
+  describe('canPreviewFile', () => {
+    beforeEach(async () => {
+      const { isTextFileType } = await import('@sveltia/utils/file');
+
+      vi.mocked(isTextFileType).mockImplementation((type) => type.startsWith('text/'));
+    });
+
+    it('should preview a media file whatever its name', () => {
+      expect(canPreviewFile('image', 'photo')).toBe(true);
+      expect(canPreviewFile('video', 'clip.mp4')).toBe(true);
+      expect(canPreviewFile('audio', 'song.mp3')).toBe(true);
+    });
+
+    it('should preview a PDF document', () => {
+      vi.mocked(mime.getType).mockReturnValue('application/pdf');
+
+      expect(canPreviewFile('document', 'files/report.pdf')).toBe(true);
+      expect(mime.getType).toHaveBeenCalledWith('files/report.pdf');
+    });
+
+    it('should preview a plaintext file', () => {
+      vi.mocked(mime.getType).mockReturnValue('text/plain');
+
+      expect(canPreviewFile('document', 'notes.txt')).toBe(true);
+    });
+
+    it('should not preview another document', () => {
+      vi.mocked(mime.getType).mockReturnValue('application/zip');
+
+      expect(canPreviewFile('other', 'archive.zip')).toBe(false);
+    });
+
+    it('should not preview a file of an unknown type', async () => {
+      const { isTextFileType } = await import('@sveltia/utils/file');
+
+      expect(canPreviewFile('other', 'unknown')).toBe(false);
+      expect(isTextFileType).not.toHaveBeenCalled();
     });
   });
 
@@ -139,13 +164,11 @@ describe('assets/kinds', () => {
       name: path.split('/').pop() || '',
       sha: 'abc123',
       size: 1024,
-      folder: {
+      folder: createMockAssetFolder({
+        collectionName: 'test',
         internalPath: 'test',
         publicPath: 'test',
-        collectionName: 'test',
-        entryRelative: false,
-        hasTemplateTags: false,
-      },
+      }),
     });
 
     it('should return true for media assets', () => {
@@ -409,13 +432,11 @@ describe('assets/kinds', () => {
       name: path.split('/').pop() || '',
       sha: 'abc123',
       size: 1024,
-      folder: {
+      folder: createMockAssetFolder({
+        collectionName: 'test',
         internalPath: 'test',
         publicPath: 'test',
-        collectionName: 'test',
-        entryRelative: false,
-        hasTemplateTags: false,
-      },
+      }),
     });
 
     it('should return true for text files', () => {

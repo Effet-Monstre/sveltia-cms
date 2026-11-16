@@ -4,7 +4,9 @@ import { flushSync } from 'svelte';
 import { showAssetOverlay } from '$lib/services/assets/view';
 import { cmsConfig } from '$lib/services/config';
 import { showContentOverlay } from '$lib/services/contents/editor';
+import { getEntryEditorPath } from '$lib/services/contents/editor/route';
 import { createDerivedState, createRawState } from '$lib/services/utils/state.svelte';
+import { decodeURIComponentSafely, encodePathSegments } from '$lib/services/utils/url';
 import { openNewTab } from '$lib/services/utils/window';
 
 /**
@@ -58,49 +60,25 @@ export const mainAreaTitle = createRawState('');
 export const overlayTitle = createRawState('');
 
 /**
- * Percent-encode each segment of the given route path, keeping the slashes, so a file or folder
- * name containing a `%`, `#` or `?` sign makes it through the URL hash intact and is decoded back
- * to the same name by {@link parseLocation}. Build every route that contains an entry or asset
- * path with this before passing it to {@link goto} or {@link goBack}.
- * @param {string} path Route path without a query string, e.g. `/assets/images/50%off.jpg`.
- * @returns {string} Encoded path, e.g. `/assets/images/50%25off.jpg`.
- */
-export const encodeRoutePath = (path) => path.split('/').map(encodeURIComponent).join('/');
-
-/**
- * Decode the given route path. A malformed escape sequence, e.g. the `%` sign in a link to a
- * `50%off.jpg` file built before route paths were encoded, would make `decodeURIComponent()` throw,
- * so in that case only the valid escape sequences are decoded and anything else is left as is.
- * @param {string} path Encoded route path.
- * @returns {string} Decoded path.
- */
-const decodeRoutePath = (path) => {
-  try {
-    return decodeURIComponent(path);
-  } catch {
-    return path.replace(/(?:%[\da-f]{2})+/gi, (sequence) => {
-      try {
-        return decodeURIComponent(sequence);
-      } catch {
-        return sequence;
-      }
-    });
-  }
-};
-
-/**
  * Parse the URL and return the decoded result.
  * @param {string} [href] URL. Omit this to use the current URL.
  * @returns {{ path: string, params: Record<string, string> }} Path and search params.
  */
 export const parseLocation = (href = window.location.href) => {
-  const { origin, hash } = new URL(href);
-  const { pathname, searchParams } = new URL(`${origin}${hash.substring(1)}`);
+  const hashPath = new URL(href).hash.substring(1);
+  // Split the hash into a path and a query string by hand rather than parsing it as a URL of its
+  // own, which would resolve any `.` or `..` segment, even a percent-encoded one, so that searching
+  // for `..` would lead to the root path. A second `#` ends both
+  const [pathname, ...query] = hashPath.split('#')[0].split('?');
+  const searchParams = new URLSearchParams(query.join('?'));
 
   return {
+    // Give the path a leading slash if it lacks one, e.g. a link with the slashes percent-encoded.
     // Drop any trailing slash before decoding, so a hand-typed `#/collections/` resolves the same
     // way as `#/collections` rather than matching no route at all. The root path is left as is
-    path: decodeRoutePath(pathname.replace(/(?!^)\/+$/, '')),
+    path: decodeURIComponentSafely(
+      `${pathname.startsWith('/') ? '' : '/'}${pathname}`.replace(/(?!^)\/+$/, ''),
+    ),
     params: Object.fromEntries(
       // Merge multiple values of the same key with a comma, e.g. `?a=1&a=2` becomes `{ a: '1,2' }`.
       // This is to support both `?tags=tag1,tag2` and `?tags=tag1&tags=tag2` formats for dynamic
@@ -117,16 +95,81 @@ export const parseLocation = (href = window.location.href) => {
  */
 let activeTransition = null;
 
+/**
+ * Longest time, in milliseconds, the running view transition waits for the holds added with
+ * {@link holdViewTransition} before it takes the snapshot of the new state anyway.
+ */
+export const VIEW_TRANSITION_HOLD_LIMIT = 300;
+
+/**
+ * Promises the running view transition waits for before the new state is captured.
+ * @type {Set<Promise<any>>}
+ */
+const transitionHolds = new Set();
+/**
+ * Whether the running view transition has been skipped, in which case it doesn’t wait for holds.
+ */
+let transitionSkipped = false;
+/**
+ * Function to stop waiting for the holds, once the running transition has been skipped, if any.
+ * @type {(() => void) | undefined}
+ */
+let stopWaitingForHolds = undefined;
+
+/**
+ * Make the running view transition wait for the given promise before it captures the new state,
+ * for up to {@link VIEW_TRANSITION_HOLD_LIMIT} milliseconds, so that content loaded asynchronously,
+ * such as an image in the asset details overlay, is part of the animation rather than popping in
+ * once it’s over. Call this while the content is being updated; the call does nothing if no
+ * transition is running.
+ * @param {Promise<any>} promise Promise to wait for. A rejection counts as settled.
+ */
+export const holdViewTransition = (promise) => {
+  if (activeTransition) {
+    transitionHolds.add(promise);
+  }
+};
+
+/**
+ * Wait for the holds added with {@link holdViewTransition}, up to the time limit, and clear them.
+ */
+const waitForTransitionHolds = async () => {
+  if (!transitionHolds.size || transitionSkipped) {
+    transitionHolds.clear();
+
+    return;
+  }
+
+  const skipped = /** @type {PromiseWithResolvers<void>} */ (Promise.withResolvers());
+
+  stopWaitingForHolds = skipped.resolve;
+
+  await Promise.race([
+    Promise.allSettled(transitionHolds),
+    sleep(VIEW_TRANSITION_HOLD_LIMIT),
+    skipped.promise,
+  ]);
+
+  stopWaitingForHolds = undefined;
+  transitionHolds.clear();
+};
+
 // Finish the running view transition as soon as a key is pressed. Until the animation is over, the
 // transition overlay catches every hit test, and Sveltia UI only activates a button with its
 // keyboard shortcut if a hit test finds the button, so a shortcut pressed right after the page
 // changed would be ignored, e.g. Accel+S or Escape right after the entry editor opened, and the
 // browser would handle Accel+S itself. The listener is added as the module is loaded, so it runs
-// before the one Sveltia UI adds once a component with a shortcut is mounted
+// before the one Sveltia UI adds once a component with a shortcut is mounted. Rendering stays
+// suppressed until the new state has been captured, even for a skipped transition, so it also stops
+// waiting for the content it holds for, e.g. while the user flips through assets with a key
 globalThis.addEventListener?.(
   'keydown',
   () => {
-    activeTransition?.skipTransition();
+    if (activeTransition) {
+      activeTransition.skipTransition();
+      transitionSkipped = true;
+      stopWaitingForHolds?.();
+    }
   },
   { capture: true },
 );
@@ -156,6 +199,7 @@ export const startViewTransition = (transitionType, updateContent) => {
           resolve(undefined);
         });
       });
+      await waitForTransitionHolds();
     },
   };
 
@@ -166,6 +210,7 @@ export const startViewTransition = (transitionType, updateContent) => {
     const transition = document.startViewTransition(options);
 
     activeTransition = transition;
+    transitionSkipped = false;
 
     // The browser skips a transition it can’t animate — most often because the document is hidden,
     // e.g. the user switched to another tab while a save was in flight — and says so by rejecting
@@ -183,6 +228,8 @@ export const startViewTransition = (transitionType, updateContent) => {
       })
       .finally(() => {
         activeTransition = null;
+        // A hold added once the new state had been captured has nothing left to delay
+        transitionHolds.clear();
       });
   } catch {
     // A browser that throws while the transition is being set up leaves nothing to wait for, so
@@ -262,7 +309,7 @@ export const updateContentFromHashChange = (event, updateContent, routeRegex) =>
   const { isTrusted, oldURL, newURL } = event;
 
   // If `isTrusted` is `true`, it’s the browser’s back/forward navigation, so we need to start
-  // transitioning. If `false`, the event is trigged by the `goto` method below and transition has
+  // transitioning. If `false`, the event is triggered by the `goto` method below and transition has
   // already started; in that case, just finish updating the content.
   if (!isTrusted) {
     updateContent();
@@ -279,7 +326,9 @@ export const updateContentFromHashChange = (event, updateContent, routeRegex) =>
  * Navigate to a different URL or replace the current URL. This is similar to SvelteKit’s `goto`
  * method but assumes hash-based SPA routing.
  * @param {string} path URL path. It will appear in th URL hash but omit the leading `#` sign here.
- * Encode any entry or asset path in it with {@link encodeRoutePath}.
+ * Encode any entry or asset path in it with {@link encodePathSegments}, so a file or folder name
+ * containing a `%`, `#` or `?` sign makes it through the URL hash intact and is decoded back to the
+ * same name by {@link parseLocation}.
  * @param {GoToMethodOptions} [options] Options.
  */
 export const goto = async (
@@ -290,13 +339,18 @@ export const goto = async (
 
   // If we’re already on this page AND not updating state, don’t navigate or trigger a transition.
   // The given path is encoded, while the current one is decoded
-  if (currentPath === decodeRoutePath(path) && !Object.keys(state).length && !replaceState) {
+  if (
+    currentPath === decodeURIComponentSafely(path) &&
+    !Object.keys(state).length &&
+    !replaceState
+  ) {
     return;
   }
 
-  const { origin, pathname, hash } = window.location;
-  const oldURL = `${origin}${pathname}${hash}`;
-  const newURL = `${origin}${pathname}#${path}`;
+  // Keep the query string, which the page may have been opened with, as a hash change would
+  const { origin, pathname, search, hash } = window.location;
+  const oldURL = `${origin}${pathname}${search}${hash}`;
+  const newURL = `${origin}${pathname}${search}#${path}`;
   // `from` is the URL of the previous history entry, which {@link goBack} relies on. Replacing the
   // current entry doesn’t change what the previous entry is, so carry the value over; the entry
   // being replaced is gone and must not become `from`, or a direct link followed by an in-place
@@ -345,12 +399,9 @@ export const redirectLegacyEntryLink = () => {
   // Carry any query string over, so the editor locale and dynamic default values survive
   const query = new URLSearchParams(params).toString();
 
-  goto(
-    `${encodeRoutePath(`/collections/${collectionName}/entries/${subPath}`)}${query ? `?${query}` : ''}`,
-    {
-      replaceState: true,
-    },
-  );
+  goto(`${getEntryEditorPath(collectionName, subPath)}${query ? `?${query}` : ''}`, {
+    replaceState: true,
+  });
 
   return true;
 };
@@ -423,7 +474,7 @@ export const goBack = (path, { returnTo, ...options } = {}) => {
     if (
       sameDocument &&
       previousPath !== undefined &&
-      (previousPath === decodeRoutePath(path) || returnTo?.(previousPath))
+      (previousPath === decodeURIComponentSafely(path) || returnTo?.(previousPath))
     ) {
       startViewTransition(transitionType, () => {
         window.navigation.back();
@@ -442,6 +493,25 @@ export const goBack = (path, { returnTo, ...options } = {}) => {
   } else {
     goto(path, { ...options, transitionType });
   }
+};
+
+/**
+ * Get the path the entry editor goes back to: the collections list for a singleton file, or the
+ * collection entries list otherwise — the folder being browsed for a collection with nested
+ * entries, so the user lands where they opened the entry from.
+ * @param {object} args Arguments.
+ * @param {string | undefined} args.collectionName Name of the entry’s collection.
+ * @param {string} [args.dirPath] Folder being browsed in a collection with nested entries, if any.
+ * @returns {string} Route path.
+ */
+export const getEntryEditorBackPath = ({ collectionName, dirPath = '' }) => {
+  if (collectionName === '_singletons') {
+    return '/collections';
+  }
+
+  return dirPath
+    ? encodePathSegments(`/collections/${collectionName}/filter/${dirPath}`)
+    : `/collections/${collectionName}`;
 };
 
 /**

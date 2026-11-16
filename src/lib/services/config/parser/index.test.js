@@ -1,14 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { createCollectors } from '$lib/test/config-parser';
+
 import { parseCmsConfig } from '.';
 
-/**
- * @import { ConfigParserCollectors } from '$lib/types/private';
- */
-
 // Mock @sveltia/i18n
-/** @type {Record<string, string>} */
-const mockI18nStrings = {
+const mockI18nStrings = vi.hoisted(() => ({
   'config.error.missing_backend': 'Missing backend configuration',
   'config.error.missing_backend_name': 'Backend name is required',
   'config.error.unsupported_backend': 'Unsupported backend: {name}',
@@ -25,32 +22,14 @@ const mockI18nStrings = {
   'config.error_locator.collection': 'Collection: {collection}',
   'config.error_locator.file': 'File: {file}',
   'config.error_locator.field': 'Field: {field}',
-};
-
-/**
- * Mock translation function.
- * @param {string} key Message key.
- * @param {object & { values?: Record<string, string> }} [options] Options.
- * @returns {string} Translated string.
- */
-function mockTranslate(key, options) {
-  let message = mockI18nStrings[key] || key;
-
-  if (options?.values) {
-    Object.entries(options.values).forEach(([k, v]) => {
-      message = message.replace(`{${k}}`, v);
-    });
-  }
-
-  return message;
-}
-
-vi.mock('@sveltia/i18n', () => ({
-  _: mockTranslate,
-  locale: { current: 'en-US', set: vi.fn() },
+  'config.error_locator.component': 'Component: {component}',
+  'config.error.invalid_inline_component_fields': 'Invalid inline fields',
 }));
 
-const mockGetStore = vi.fn();
+vi.mock('@sveltia/i18n', async () =>
+  (await import('$lib/test/i18n')).createI18nMock({ strings: mockI18nStrings, locale: 'en-US' }),
+);
+
 const mockIsObject = vi.hoisted(() => vi.fn());
 
 vi.mock('@sveltia/utils/object', () => ({
@@ -107,26 +86,11 @@ vi.mock('$lib/services/integrations/media-libraries/cloud', () => ({
   CLOUD_MEDIA_LIBRARY_NAMES: [],
 }));
 
-/**
- * Create a fresh collectors object for testing.
- * @returns {ConfigParserCollectors} Collectors instance.
- */
-function createCollectors() {
-  return {
-    errors: new Set(),
-    warnings: new Set(),
-    mediaFields: new Set(),
-    relationFields: new Set(),
-  };
-}
-
 describe('Config Parser', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockCustomComponentRegistry.clear();
     mockParseFields.mockReset();
-
-    mockGetStore.mockImplementation((store) => store);
 
     mockIsObject.mockImplementation(
       /**
@@ -207,6 +171,13 @@ describe('Config Parser', () => {
 
       // A relative `display_url` opens fine in a new tab, so only `site_url` is checked
       expect([...collectors.errors]).toEqual(['Invalid URL in site_url: example.com']);
+
+      // A host with a port parses as a URL with the host as its scheme, which isn’t one either
+      const moreCollectors = createCollectors();
+
+      parseCmsConfig({ ...config, site_url: 'localhost:4321' }, moreCollectors);
+
+      expect([...moreCollectors.errors]).toEqual(['Invalid URL in site_url: localhost:4321']);
     });
 
     it('should warn about the deprecated `logo_url` option', () => {
@@ -307,6 +278,67 @@ describe('Config Parser', () => {
         { cmsConfig: config, componentName: 'custom-component' },
         collectors,
       );
+    });
+
+    it('should not parse fields for a pattern-based inline component', () => {
+      const collectors = createCollectors();
+
+      /** @type {any} */
+      const config = {
+        backend: { name: 'github', repo: 'user/repo' },
+        media_folder: '/media',
+        collections: [
+          {
+            name: 'posts',
+            label: 'Posts',
+            folder: 'content/posts',
+            fields: [{ name: 'title', widget: 'string' }],
+          },
+        ],
+      };
+
+      mockCustomComponentRegistry.set('wikilink', {
+        type: 'inline',
+        pattern: /\[\[(.+?)\]\]/,
+        // eslint-disable-next-line jsdoc/require-jsdoc
+        toInline: () => '',
+      });
+
+      parseCmsConfig(config, collectors);
+
+      expect(
+        mockParseFields.mock.calls.filter(([, context]) => context?.componentName === 'wikilink'),
+      ).toEqual([]);
+      expect([...collectors.errors]).toEqual([]);
+    });
+
+    it('should check the options of custom editor components', () => {
+      const collectors = createCollectors();
+
+      /** @type {any} */
+      const config = {
+        backend: { name: 'github', repo: 'user/repo' },
+        media_folder: '/media',
+        collections: [
+          {
+            name: 'posts',
+            label: 'Posts',
+            folder: 'content/posts',
+            fields: [{ name: 'title', widget: 'string' }],
+          },
+        ],
+      };
+
+      mockCustomComponentRegistry.set('inline-component', {
+        mode: 'inline',
+        fields: [{ name: 'body', widget: 'text' }],
+      });
+
+      parseCmsConfig(config, collectors);
+
+      expect([...collectors.errors]).toEqual([
+        'Component: inline-component: Invalid inline fields',
+      ]);
     });
 
     it('should collect errors for missing backend', () => {

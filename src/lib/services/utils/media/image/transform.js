@@ -1,6 +1,7 @@
 import { loadModule } from '$lib/services/app/dependencies';
 import { exportCanvasAsBlob } from '$lib/services/utils/media/image/encode';
 import { decodeHEIC } from '$lib/services/utils/media/image/heic';
+import { resolveTransformOptions } from '$lib/services/utils/media/image/options';
 import { resizeCanvas } from '$lib/services/utils/media/image/resize';
 import { sniffRasterImageFormat } from '$lib/services/utils/media/image/sniff';
 
@@ -10,7 +11,7 @@ import { sniffRasterImageFormat } from '$lib/services/utils/media/image/sniff';
 
 /**
  * Options for transforming an image to a thumbnail, which is a WebP image with a maximum width and
- * height of 512 pixels, and a quality of 85.
+ * height of 512 pixels, and a quality of 85, or a JPEG or PNG image where WebP can’t be encoded.
  * @type {InternalImageTransformationOptions}
  */
 export const THUMBNAIL_TRANSFORM_OPTIONS = {
@@ -19,6 +20,9 @@ export const THUMBNAIL_TRANSFORM_OPTIONS = {
   width: 512,
   height: 512,
   fit: 'contain',
+  // A thumbnail is only shown in the CMS, so where WebP can’t be encoded natively, another format
+  // will do, rather than loading an encoder for every thumbnail
+  nativeOnly: true,
 };
 
 /**
@@ -162,10 +166,16 @@ const createFallbackImageBitmap = async (blob) => {
  * @see https://developer.mozilla.org/en-US/docs/Web/API/HTMLCanvasElement/toBlob
  * @see https://stackoverflow.com/q/62909538
  */
-export const transformImage = async (
-  blob,
-  { format = 'png', quality = 85, width = undefined, height = undefined, fit = 'scale-down' } = {},
-) => {
+export const transformImage = async (blob, options = {}) => {
+  const {
+    format,
+    quality,
+    width: requestedWidth,
+    height: requestedHeight,
+    fit,
+    nativeOnly,
+  } = resolveTransformOptions(options);
+
   /** @type {CanvasImageSource | undefined} */
   let source;
   /** @type {number} */
@@ -187,9 +197,8 @@ export const transformImage = async (
     ({ source, naturalWidth, naturalHeight } = await createSource(blob));
   }
 
-  width ??= naturalWidth;
-  height ??= naturalHeight;
-
+  const width = requestedWidth ?? naturalWidth;
+  const height = requestedHeight ?? naturalHeight;
   const canvas = new OffscreenCanvas(512, 512);
   const context = /** @type {OffscreenCanvasRenderingContext2D} */ (canvas.getContext('2d'));
 
@@ -205,7 +214,7 @@ export const transformImage = async (
     source.close();
   }
 
-  return exportCanvasAsBlob(canvas, { format, quality });
+  return exportCanvasAsBlob(canvas, { format, quality, nativeOnly });
 };
 
 /**

@@ -98,12 +98,59 @@ describe('createDragSorter()', () => {
     expect(sorter.displayOrder).toEqual([0, 1, 2]);
   });
 
+  test('keeps the same display order while the item count is the same', () => {
+    // The items are rebuilt whenever a value in them changes, e.g. on every keystroke
+    const items = createRawState(['a', 'b', 'c']);
+
+    const itemSorter = createDragSorter({
+      /**
+       * Get the item count.
+       * @returns {number} Count.
+       */
+      getItemCount: () => items.current.length,
+      /**
+       * Get the list element.
+       * @returns {HTMLElement} Element.
+       */
+      getListElement: () => list.listElement,
+      onMove,
+    });
+
+    const order = itemSorter.displayOrder;
+
+    items.current = ['a', 'b', 'c!'];
+    expect(itemSorter.displayOrder).toBe(order);
+
+    items.current = ['a', 'b', 'c', 'd'];
+    expect(itemSorter.displayOrder).toEqual([0, 1, 2, 3]);
+  });
+
   test('tracks the grabbed item', () => {
     sorter.grab(1);
     expect(sorter.grabbedIndex).toBe(1);
 
     sorter.release();
     expect(sorter.grabbedIndex).toBeUndefined();
+  });
+
+  test('gives the reorder controls of an item handlers bound to it', async () => {
+    const { onGrab, onRelease, onMove: moveItem } = sorter.reorderControlProps(2);
+
+    onGrab();
+    expect(sorter.grabbedIndex).toBe(2);
+
+    onRelease();
+    expect(sorter.grabbedIndex).toBeUndefined();
+
+    await moveItem(0, 'move-up');
+    expect(onMove).toHaveBeenCalledWith(2, 0);
+  });
+
+  test('gives the list element its capture-phase drag handlers', () => {
+    expect(sorter.listProps).toEqual({
+      ondragovercapture: sorter.onDragOver,
+      ondropcapture: sorter.onDrop,
+    });
   });
 
   test('starts a drag with auto-scroll and drag data', () => {
@@ -137,6 +184,54 @@ describe('createDragSorter()', () => {
     expect(() => sorter.onDragStart(1, createEvent({ withDataTransfer: false }))).not.toThrow();
   });
 
+  test('gives the props of a draggable item element', () => {
+    const event = createEvent();
+
+    expect(sorter.itemProps(1).draggable).toBe(false);
+    sorter.grab(1);
+    expect(sorter.itemProps(1).draggable).toBe(true);
+    expect(sorter.itemProps(0).draggable).toBe(false);
+
+    sorter.itemProps(1).ondragstart(event);
+    expect(sorter.dragIndex).toBe(1);
+    expect(event.dataTransfer.setData).toHaveBeenCalledWith('text/plain', '');
+
+    sorter.itemProps(1).ondragend(createEvent());
+    expect(sorter.dragIndex).toBeUndefined();
+    expect(sorter.grabbedIndex).toBeUndefined();
+  });
+
+  test('attaches the item data to a drag started on the item element', () => {
+    const event = createEvent();
+
+    const dataSorter = createDragSorter({
+      getItemCount: vi.fn(() => 3),
+      getListElement: vi.fn(() => list.listElement),
+      onMove,
+      getItemData: vi.fn((index) => `item ${index}`),
+    });
+
+    dataSorter.itemProps(2).ondragstart(event);
+    expect(event.dataTransfer.setData).toHaveBeenCalledWith('text/plain', 'item 2');
+  });
+
+  test('ignores the drag events bubbling up from a nested list if asked', () => {
+    const { ondragstart, ondragend } = sorter.itemProps(1, { ownEventsOnly: true });
+    const item = list.items[1];
+
+    ondragstart(/** @type {any} */ ({ ...createEvent(), target: null, currentTarget: item }));
+    expect(sorter.dragIndex).toBeUndefined();
+
+    ondragstart(/** @type {any} */ ({ ...createEvent(), target: item, currentTarget: item }));
+    expect(sorter.dragIndex).toBe(1);
+
+    ondragend(/** @type {any} */ ({ target: null, currentTarget: item }));
+    expect(sorter.dragIndex).toBe(1);
+
+    ondragend(/** @type {any} */ ({ target: item, currentTarget: item }));
+    expect(sorter.dragIndex).toBeUndefined();
+  });
+
   test('passes `dragover` through while nothing is being dragged', () => {
     const event = createEvent({ target: list.items[0] });
 
@@ -162,6 +257,37 @@ describe('createDragSorter()', () => {
     // The rendered order follows the preview; the sorter still refers to the original index
     expect(sorter.dragIndex).toBe(0);
     expect(onMove).not.toHaveBeenCalled();
+  });
+
+  test('measures the item with the given function', () => {
+    // The item under the pointer holds more than the item itself, which only takes its lower half
+    const getItemRect = vi.fn(() => /** @type {DOMRect} */ ({ top: 60, height: 20, bottom: 80 }));
+
+    const rectSorter = createDragSorter({
+      /**
+       * Get the item count.
+       * @returns {number} Count.
+       */
+      getItemCount: () => itemCount.current,
+      /**
+       * Get the list element.
+       * @returns {HTMLElement} Element.
+       */
+      getListElement: () => list.listElement,
+      onMove,
+      getItemRect,
+    });
+
+    rectSorter.onDragStart(0);
+    // The lower half of the whole element, but the upper half of the item itself
+    rectSorter.onDragOver(createEvent({ target: list.items[1], clientY: 65 }));
+    expect(getItemRect).toHaveBeenCalledWith(list.items[1]);
+    expect(rectSorter.displayOrder).toEqual([0, 1, 2]);
+
+    // The default measurement would move the item
+    sorter.onDragStart(0);
+    sorter.onDragOver(createEvent({ target: list.items[1], clientY: 65 }));
+    expect(sorter.displayOrder).toEqual([1, 0, 2]);
   });
 
   test('keeps the preview while the pointer is over a gap between items', () => {

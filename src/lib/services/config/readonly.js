@@ -2,7 +2,8 @@ import { _ } from '@sveltia/i18n';
 
 import { lockedBranch } from '$lib/services/backends/branch-access';
 import { cmsConfig } from '$lib/services/config/state';
-import { getPublishMode } from '$lib/services/workflow/config';
+import { getPublishMode, isWorkflowMode } from '$lib/services/workflow/config';
+import { isLockedForkEntry } from '$lib/services/workflow/forks';
 
 /**
  * @import { AssetFolderInfo, EntryDraft, InternalCmsConfig } from '$lib/types/private';
@@ -26,14 +27,14 @@ export const isConfigReadonly = ({ config = cmsConfig.current, collection, colle
 /**
  * Check whether a collection is read-only because the signed-in user can’t push to the configured
  * branch. A collection with the simple publish mode commits to the branch directly, while one with
- * Editorial Workflow commits to a branch of its own and still works.
+ * Editorial Workflow or Preview Workflow commits to a branch of its own and still works.
  * @param {Collection} [collection] Collection.
  * @returns {boolean} Result.
  */
 export const isLockedByBranch = (collection) =>
   !!lockedBranch.current &&
   !!collection &&
-  getPublishMode({ cmsConfig: cmsConfig.current, collection }) !== 'editorial_workflow';
+  !isWorkflowMode(getPublishMode({ cmsConfig: cmsConfig.current, collection }));
 
 /**
  * Check whether a collection, a collection file or the whole CMS is read-only, either with the
@@ -48,13 +49,26 @@ export const isReadonly = ({ collection, collectionFile } = {}) =>
   isConfigReadonly({ collection, collectionFile }) || isLockedByBranch(collection);
 
 /**
+ * Check whether an entry draft is read-only because its collection or collection file is, or the
+ * whole CMS is.
+ * @param {EntryDraft | null | undefined} draft Entry draft.
+ * @returns {boolean} Result.
+ */
+export const isDraftConfigReadonly = (draft) =>
+  !!draft && isReadonly({ collection: draft.collection, collectionFile: draft.collectionFile });
+
+/**
  * Check whether an entry draft is read-only, which is when its collection or collection file is,
- * or the whole CMS is. The draft can be viewed but not changed or saved.
+ * or the whole CMS is (see {@link isDraftConfigReadonly}), while the user is being asked whether to
+ * restore a backup of it, or when it comes from a contributor’s pull request that doesn’t let
+ * maintainers push to its branch. The draft can be viewed but not changed or saved.
  * @param {EntryDraft | null | undefined} draft Entry draft.
  * @returns {boolean} Result.
  */
 export const isDraftReadonly = (draft) =>
-  !!draft && isReadonly({ collection: draft.collection, collectionFile: draft.collectionFile });
+  !!draft?.restorePending ||
+  isDraftConfigReadonly(draft) ||
+  isLockedForkEntry(draft?.originalEntry);
 
 /**
  * Get the message that says something is read-only. The whole CMS being read-only is what users

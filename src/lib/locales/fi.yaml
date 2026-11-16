@@ -1091,7 +1091,7 @@ edit_slug_error:
   invalid: Slug ei voi sisältää erikoismerkkejä, mukaan lukien kauttaviivoja ja välilyöntejä.
   duplicate: Tämä slug on käytössä toisella merkinnällä.
 
-# Entry path editing in a nested collection
+# Entry path editing for nested entries
 # Heading for the parent folder picker shown when the `meta.path` option is enabled
 entry_parent_folder: Yläkansio
 new_parent_folder: Uusi kansio
@@ -1488,6 +1488,10 @@ cloud_storage:
       requested: Kirjaudutaan sisään…
       error: Käyttäjätunnus tai salasana on virheellinen. Tarkista tiedot ja yritä uudelleen.
 
+  # Shared by the S3-compatible services, unless overridden below
+  s3:
+    auth_key_label: Salainen pääsyavain
+
   # Service-specific configurations
   cloudinary:
     iframe_title: Cloudinary-mediakirjasto
@@ -1499,15 +1503,6 @@ cloud_storage:
 
   uploadcare:
     auth_key_label: Salainen API-avain
-
-  aws_s3:
-    auth_key_label: Salainen pääsyavain
-
-  cloudflare_r2:
-    auth_key_label: Salainen pääsyavain
-
-  digitalocean_spaces:
-    auth_key_label: Salainen pääsyavain
 
 # ==============================================================================
 # Configuration Validation
@@ -1565,7 +1560,7 @@ config:
     oauth_implicit_flow: Määritettyä todennustapaa (implicit flow) ei tueta Sveltia CMS:ssä. Käytä toista <a>todennustapaa</a>.
     github_pkce_unsupported: PKCE-valtuutusta ei vielä tueta GitHubin rajoitusten vuoksi. Käytä toista <a>todennustapaa</a>.
     oauth_no_app_id: OAuth-sovelluksen application ID:tä ei ole määritetty.
-    # Don’t localize `open_authoring` and `editorial_workflow`
+    # Don’t localize `open_authoring`, `editorial_workflow` and `preview`
     open_authoring_no_workflow: Asetus `open_authoring` edellyttää julkaisutilaa `editorial_workflow`. Katso lisätietoja <a>dokumentaatiosta</a>.
     # Don’t localize `auth_methods`
     no_auth_methods: Asetuksen `auth_methods` on sisällettävä vähintään yksi metodi.
@@ -1979,13 +1974,23 @@ prefs:
       description: Näytä alleviivaus linkeille sisällön esikatselussa ja käyttöliittymän teksteissä.
       switch_label: Alleviivaa linkit aina
 
-  # Advanced panel
-  advanced:
-    title: Lisäasetukset
-    beta:
-      title: Beta-ominaisuudet
-      description: Ota käyttöön beta-ominaisuuksia, jotka voivat olla epävakaita tai kääntämättömiä.
-      switch_label: Liity beta-ohjelmaan
+  # Data Management panel
+  data:
+    clear_data:
+      title: Tyhjennä tiedot
+      # Clear File Cache button
+      file_cache:
+        description: Poista paikallisesti välimuistiin tallennettu tiedostosisältö ja kuvien pikkukuvat vapauttaaksesi tallennustilaa tai ratkaistaksesi vanhentuneista tiedoista johtuvia ongelmia.
+        button_label: Tyhjennä tiedostovälimuisti
+        confirmation: Paikallisesti välimuistiin tallennettu tiedostosisältö ja kuvien pikkukuvat poistetaan. Tallentamattomat luonnoksesi ja asetuksesi säilytetään, ja poistetut tiedot ladataan tai luodaan tarvittaessa uudelleen. CMS ladataan uudelleen, kun toiminto on valmis.
+      # Erase All Data button
+      all_data:
+        description: Poista kaikki, mitä CMS säilyttää tässä selaimessa, mukaan lukien välimuistiin tallennetut tiedostot, tallentamattomat luonnokset ja asetukset. Tämä ei vaikuta repositorioosi jo tallennettuihin tietoihin.
+        button_label: Poista kaikki tiedot
+        confirmation: Kaikki tähän selaimeen tallennetut tiedot poistetaan, mukaan lukien välimuistiin tallennettu tiedostosisältö, kuvien pikkukuvat, tallentamattomat luonnokset, asetukset ja kirjautumistila. Tämä ei vaikuta repositorioosi, mutta kaikki tallentamattomat muutokset menetetään, ja sinun on kirjauduttava uudelleen sisään. CMS ladataan uudelleen, kun toiminto on valmis.
+
+  # Developer panel
+  developer:
     developer_mode:
       title: Kehittäjätila
       description: Ota käyttöön kehittäjille suunnattuja ominaisuuksia, kuten yksityiskohtaiset konsolilokit ja natiivit kontekstivalikot.
@@ -2003,18 +2008,6 @@ prefs:
         field_label: Authorization-otsikko (esim. Bearer <token>) (valinnainen)
         saved: Authorization-otsikko tallennettu.
         removed: Authorization-otsikko poistettu.
-    clear_data:
-      title: Tyhjennä tiedot
-      # Clear File Cache button
-      file_cache:
-        description: Poista paikallisesti välimuistiin tallennettu tiedostosisältö ja kuvien pikkukuvat vapauttaaksesi tallennustilaa tai ratkaistaksesi vanhentuneista tiedoista johtuvia ongelmia.
-        button_label: Tyhjennä tiedostovälimuisti
-        confirmation: Paikallisesti välimuistiin tallennettu tiedostosisältö ja kuvien pikkukuvat poistetaan. Tallentamattomat luonnoksesi ja asetuksesi säilytetään, ja poistetut tiedot ladataan tai luodaan tarvittaessa uudelleen. CMS ladataan uudelleen, kun toiminto on valmis.
-      # Erase All Data button
-      all_data:
-        description: Poista kaikki, mitä CMS säilyttää tässä selaimessa, mukaan lukien välimuistiin tallennetut tiedostot, tallentamattomat luonnokset ja asetukset. Tämä ei vaikuta repositorioosi jo tallennettuihin tietoihin.
-        button_label: Poista kaikki tiedot
-        confirmation: Kaikki tähän selaimeen tallennetut tiedot poistetaan, mukaan lukien välimuistiin tallennettu tiedostosisältö, kuvien pikkukuvat, tallentamattomat luonnokset, asetukset ja kirjautumistila. Tämä ei vaikuta repositorioosi, mutta kaikki tallentamattomat muutokset menetetään, ja sinun on kirjauduttava uudelleen sisään. CMS ladataan uudelleen, kun toiminto on valmis.
 
 # ==============================================================================
 # Keyboard Shortcuts

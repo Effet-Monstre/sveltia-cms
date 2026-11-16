@@ -4,10 +4,20 @@ import { render } from 'vitest-browser-svelte';
 
 import { mergeLockedBranch } from '$lib/services/backends/branch-access';
 import { deployments, productionSHA } from '$lib/services/deployments';
+import { openNewTab } from '$lib/services/utils/window';
 import { forkedRepository } from '$lib/services/workflow/open-authoring';
-import { createMockEntry, initTestConfig, setEntries, TEST_IMAGE_URL } from '$lib/test/config';
+import {
+  createMockEntry,
+  createMockForkPullRequest,
+  createMockWorkflowEntry,
+  initTestConfig,
+  setEntries,
+  TEST_IMAGE_URL,
+} from '$lib/test/config';
 
 import WorkflowEntryCard from './workflow-entry-card.svelte';
+
+vi.mock('$lib/services/utils/window', () => ({ openNewTab: vi.fn() }));
 
 const fields = [{ name: 'title', widget: 'string' }];
 
@@ -17,22 +27,17 @@ const fields = [{ name: 'title', widget: 'string' }];
  * @param {Record<string, any>} [entry] Entry properties to override.
  * @returns {any} Entry.
  */
-const createEntry = (workflow = {}, entry = {}) => ({
-  ...createMockEntry({ slug: 'hello', content: { _default: { title: 'Hello' } } }),
-  ...entry,
-  workflow: {
-    status: 'draft',
-    collectionName: 'posts',
+const createEntry = (workflow = {}, entry = {}) =>
+  createMockWorkflowEntry({
+    content: { _default: { title: 'Hello' } },
     pullRequest: {
-      number: 1,
-      branch: 'cms/posts/hello',
       headSHA: 'abc',
       author: { name: 'Melvin' },
       updatedDate: new Date('2024-01-15T10:00:00Z'),
     },
-    ...workflow,
-  },
-});
+    workflow,
+    entry,
+  });
 
 describe('WorkflowEntryCard', () => {
   beforeEach(async () => {
@@ -88,6 +93,59 @@ describe('WorkflowEntryCard', () => {
 
     await card.getByRole('button', { name: 'Hello' }).click();
     await expect.poll(() => window.location.hash).toBe('#/collections/posts/entries/hello');
+  });
+
+  test('stands for a contributor’s pull request, linked from the card', async () => {
+    const entry = createMockWorkflowEntry({
+      status: 'pending_publish',
+      content: { _default: { title: 'Hello' } },
+      pullRequest: createMockForkPullRequest({
+        pullRequest: { updatedDate: new Date('2024-01-15T10:00:00Z') },
+      }),
+    });
+
+    const { container } = await render(WorkflowEntryCard, { entry });
+    const card = page.getByRole('listitem');
+
+    expect(container.querySelector('.note')).toHaveTextContent('From a fork');
+    // It’s reviewed and merged on the Git service, rather than published here
+    expect(card.getByRole('button', { name: 'Publish Entry' }).elements()).toHaveLength(0);
+    await card.getByRole('button', { name: /^Review on/ }).click();
+    expect(openNewTab).toHaveBeenCalledWith('https://github.com/owner/repo/pull/7');
+    // The editor is told which pull request to open the entry from
+    await card.getByRole('button', { name: 'Hello' }).click();
+    await expect.poll(() => window.location.hash).toBe('#/collections/posts/entries/hello?_pr=7');
+  });
+
+  test('lists the entries riding along in the pull request', async () => {
+    // @see https://github.com/sveltia/sveltia-cms/issues/1112
+    const { container } = await render(WorkflowEntryCard, {
+      entry: createEntry({
+        companions: [
+          {
+            collectionName: 'posts',
+            entry: createMockEntry({ slug: 'guides', content: { _default: { title: 'Guides' } } }),
+          },
+          // An existing entry edited along with the entry
+          // @see https://github.com/sveltia/sveltia-cms/issues/1129
+          {
+            collectionName: 'posts',
+            entry: createMockEntry({ slug: 'about', content: { _default: { title: 'About' } } }),
+            edited: true,
+          },
+        ],
+      }),
+    });
+
+    const notes = container.querySelectorAll('.companions');
+
+    expect(notes).toHaveLength(2);
+    expect(notes[0]).toHaveTextContent(
+      'Also adds \u2068\u2068Post\u2069: \u2068Guides\u2069\u2069',
+    );
+    expect(notes[1]).toHaveTextContent(
+      'Also changes \u2068\u2068Post\u2069: \u2068About\u2069\u2069',
+    );
   });
 
   test('offers to publish an entry that is ready', async () => {

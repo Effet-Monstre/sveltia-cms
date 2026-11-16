@@ -1063,7 +1063,7 @@ edit_slug_error:
   invalid: Slug bölü çizgisi ve boşluk dahil özel karakterler içeremez.
   duplicate: Bu slug başka bir içerik için kullanılıyor.
 
-# Entry path editing in a nested collection
+# Entry path editing for nested entries
 # Heading for the parent folder picker shown when the `meta.path` option is enabled
 entry_parent_folder: Üst Klasör
 new_parent_folder: Yeni Klasör
@@ -1449,6 +1449,10 @@ cloud_storage:
       requested: Giriş yapılıyor…
       error: Kullanıcı adı veya şifre yanlış. Lütfen kontrol edip tekrar deneyin.
 
+  # Shared by the S3-compatible services, unless overridden below
+  s3:
+    auth_key_label: Secret Access Key
+
   # Service-specific configurations
   cloudinary:
     iframe_title: Cloudinary medya kütüphanesi
@@ -1460,15 +1464,6 @@ cloud_storage:
 
   uploadcare:
     auth_key_label: API Secret Key
-
-  aws_s3:
-    auth_key_label: Secret Access Key
-
-  cloudflare_r2:
-    auth_key_label: Secret Access Key
-
-  digitalocean_spaces:
-    auth_key_label: Secret Access Key
 
 # ==============================================================================
 # Configuration Validation
@@ -1526,7 +1521,7 @@ config:
     oauth_implicit_flow: Yapılandırılan kimlik doğrulama yöntemi (implicit flow) Sveltia CMS’te desteklenmiyor. Bunun yerine farklı bir <a>kimlik doğrulama yöntemi</a> kullanın.
     github_pkce_unsupported: GitHub kısıtlamaları nedeniyle PKCE yetkilendirmesi henüz desteklenmiyor. Bunun yerine farklı bir <a>kimlik doğrulama yöntemi</a> kullanın.
     oauth_no_app_id: OAuth uygulama kimliği (App ID) tanımlanmamış.
-    # Don’t localize `open_authoring` and `editorial_workflow`
+    # Don’t localize `open_authoring`, `editorial_workflow` and `preview`
     open_authoring_no_workflow: '`open_authoring` seçeneği `editorial_workflow` yayın modunu gerektirir. Ayrıntılar için <a>belgelere</a> bakın.'
     # Don’t localize `auth_methods`
     no_auth_methods: '`auth_methods` seçeneği en az bir yöntem içermelidir.'
@@ -1940,13 +1935,23 @@ prefs:
       description: İçerik önizlemesinde ve kullanıcı arayüzü etiketlerinde bağlantıların altını göster.
       switch_label: Bağlantıların Altını Her Zaman Çiz
 
-  # Advanced panel
-  advanced:
-    title: Gelişmiş
-    beta:
-      title: Beta Özellikleri
-      description: Kararsız veya henüz yerelleştirilmemiş bazı beta özelliklerini etkinleştirin.
-      switch_label: Beta Programına Katıl
+  # Data Management panel
+  data:
+    clear_data:
+      title: Verileri Temizle
+      # Clear File Cache button
+      file_cache:
+        description: Depolama alanı boşaltmak veya eski verilerin neden olduğu sorunları çözmek için yerel olarak önbelleğe alınan dosya içeriklerini ve görsel küçük resimlerini silin.
+        button_label: Dosya Önbelleğini Temizle
+        confirmation: Yerel olarak önbelleğe alınan dosya içerikleri ve görsel küçük resimleri silinecek. Kaydedilmemiş taslaklarınız ve ayarlarınız korunacak, silinen veriler ise gerektiğinde yeniden indirilecek veya oluşturulacak. İşlem tamamlandığında CMS yeniden yüklenecek.
+      # Erase All Data button
+      all_data:
+        description: Önbelleğe alınan dosyalar, kaydedilmemiş taslaklar ve ayarlar dahil CMS’in bu tarayıcıda tuttuğu her şeyi silin. Reponuza zaten kaydedilmiş olanlar etkilenmez.
+        button_label: Tüm Verileri Sil
+        confirmation: Önbelleğe alınan dosya içerikleri, görsel küçük resimleri, kaydedilmemiş taslaklar, ayarlar ve giriş durumu dahil bu tarayıcıda depolanan tüm veriler silinecek. Reponuz etkilenmeyecek, ancak kaydetmediğiniz tüm değişiklikler kaybolacak ve yeniden giriş yapmanız gerekecek. İşlem tamamlandığında CMS yeniden yüklenecek.
+
+  # Developer panel
+  developer:
     developer_mode:
       title: Geliştirici Modu
       description: Ayrıntılı konsol günlükleri ve yerel bağlam menüleri dahil geliştiricilere yönelik bazı özellikleri etkinleştirin.
@@ -1964,18 +1969,6 @@ prefs:
         field_label: Yetkilendirme Başlığı (ör. Bearer <token>) (isteğe bağlı)
         saved: Yetkilendirme başlığı kaydedildi.
         removed: Yetkilendirme başlığı kaldırıldı.
-    clear_data:
-      title: Verileri Temizle
-      # Clear File Cache button
-      file_cache:
-        description: Depolama alanı boşaltmak veya eski verilerin neden olduğu sorunları çözmek için yerel olarak önbelleğe alınan dosya içeriklerini ve görsel küçük resimlerini silin.
-        button_label: Dosya Önbelleğini Temizle
-        confirmation: Yerel olarak önbelleğe alınan dosya içerikleri ve görsel küçük resimleri silinecek. Kaydedilmemiş taslaklarınız ve ayarlarınız korunacak, silinen veriler ise gerektiğinde yeniden indirilecek veya oluşturulacak. İşlem tamamlandığında CMS yeniden yüklenecek.
-      # Erase All Data button
-      all_data:
-        description: Önbelleğe alınan dosyalar, kaydedilmemiş taslaklar ve ayarlar dahil CMS’in bu tarayıcıda tuttuğu her şeyi silin. Reponuza zaten kaydedilmiş olanlar etkilenmez.
-        button_label: Tüm Verileri Sil
-        confirmation: Önbelleğe alınan dosya içerikleri, görsel küçük resimleri, kaydedilmemiş taslaklar, ayarlar ve giriş durumu dahil bu tarayıcıda depolanan tüm veriler silinecek. Reponuz etkilenmeyecek, ancak kaydetmediğiniz tüm değişiklikler kaybolacak ve yeniden giriş yapmanız gerekecek. İşlem tamamlandığında CMS yeniden yüklenecek.
 
 # ==============================================================================
 # Keyboard Shortcuts

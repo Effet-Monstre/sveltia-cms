@@ -1,5 +1,6 @@
 import { isObject } from '@sveltia/utils/object';
 
+import { splitTemplateTags } from '$lib/services/common/template/tags';
 import { warnDeprecation } from '$lib/services/config/deprecations';
 import { addMessage, checkRegex } from '$lib/services/config/parser/utils/validator';
 import {
@@ -45,9 +46,11 @@ export const checkSlugOptions = ({ collection, context, collectors }) => {
     warnDeprecation('slug_editor_tag');
   }
 
-  // Validate slug template: should not contain slashes to avoid confusion with `path` option.
+  // Validate slug template: should not contain slashes to avoid confusion with `path` option. Only
+  // the literal text counts: a slash in a transformation argument, as in `date('DD/MM/YYYY')`,
+  // never makes it into the slug, because a tag value is slugified
   // @see https://github.com/decaporg/decap-cms/issues/513
-  if (template?.includes('/')) {
+  if (template && splitTemplateTags(template).literals.some((literal) => literal.includes('/'))) {
     addMessage({
       strKey: 'invalid_slug_slash',
       values: { slug: template },
@@ -60,7 +63,16 @@ export const checkSlugOptions = ({ collection, context, collectors }) => {
     return;
   }
 
-  const { pattern, i18n } = /** @type {CollectionSlugOptions} */ (slug);
+  const {
+    pattern,
+    i18n,
+    auto_increment: autoIncrement,
+  } = /** @type {CollectionSlugOptions} */ (slug);
+
+  // A numbered slug isn’t made from a template
+  if (autoIncrement === true && template !== undefined) {
+    addMessage({ type: 'warning', strKey: 'slug_template_ignored', context, collectors });
+  }
 
   // The `pattern` option is a `[regex, message]` pair; anything else is reported against the JSON
   // schema

@@ -1,8 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { createMockAssetFolder } from '$lib/test/factories';
+
 import {
   getAssetLibraryFolderMap,
   getDefaultAssetFolder,
+  getFieldAssetFolder,
   getFileDisplayPath,
   getTargetFolderPath,
   getUnsavedFileDisplayPath,
@@ -35,6 +38,7 @@ vi.mock('$lib/services/assets/folders', () => ({
 vi.mock('$lib/services/assets/name', () => ({
   getPendingFileName: vi.fn(() => 'filled.png'),
 }));
+vi.mock('$lib/services/contents/collection', () => ({ getCollection: vi.fn() }));
 vi.mock('$lib/services/contents/draft/slugs', () => ({
   getSlugs: vi.fn(),
 }));
@@ -46,7 +50,7 @@ vi.mock('$lib/services/contents/draft/save/assets', async (importOriginal) => ({
 const { getAssetFolder } = await import('$lib/services/assets/folders');
 const { allAssetFolders } = await import('$lib/services/assets/folders');
 const { getHash } = await import('@sveltia/utils/crypto');
-const { getPathInfo } = await import('@sveltia/utils/file');
+const { getPathInfo, isValidFileType } = await import('@sveltia/utils/file');
 const { default: equal } = await import('fast-deep-equal');
 const { fillInternalPathTemplate } = await import('$lib/services/assets');
 const { allAssets } = await import('$lib/services/assets/state');
@@ -54,9 +58,8 @@ const { getSlugs } = await import('$lib/services/contents/draft/slugs');
 const { getPendingFileName } = await import('$lib/services/assets/name');
 const { getAssetFolderPaths } = await import('$lib/services/contents/draft/save/assets');
 
-const { getPathInfo: getActualPathInfo } = /** @type {any} */ (
-  await vi.importActual('@sveltia/utils/file')
-);
+const { getPathInfo: getActualPathInfo, isValidFileType: isActualValidFileType } =
+  /** @type {any} */ (await vi.importActual('@sveltia/utils/file'));
 
 describe('contents/fields/file/helpers', () => {
   beforeEach(() => {
@@ -71,13 +74,11 @@ describe('contents/fields/file/helpers', () => {
   describe('getAssetLibraryFolderMap', () => {
     describe('with minimal parameters', () => {
       it('should return folder map with only collection name', () => {
-        const mockCollectionFolder = {
+        const mockCollectionFolder = createMockAssetFolder({
           collectionName: 'posts',
           internalPath: 'content/posts/media',
           publicPath: '/media',
-          entryRelative: false,
-          hasTemplateTags: false,
-        };
+        });
 
         vi.mocked(getAssetFolder).mockReturnValue(mockCollectionFolder);
 
@@ -238,13 +239,11 @@ describe('contents/fields/file/helpers', () => {
       });
 
       it('should disable file folder when fileName is not provided', () => {
-        const mockCollectionFolder = {
+        const mockCollectionFolder = createMockAssetFolder({
           collectionName: 'posts',
           internalPath: 'content/posts/media',
           publicPath: '/media',
-          entryRelative: false,
-          hasTemplateTags: false,
-        };
+        });
 
         vi.mocked(getAssetFolder).mockReturnValue(mockCollectionFolder);
 
@@ -313,13 +312,11 @@ describe('contents/fields/file/helpers', () => {
       });
 
       it('should use collectionAssetFolder as entry folder when fileAssetFolder is undefined', () => {
-        const mockCollectionFolder = {
+        const mockCollectionFolder = createMockAssetFolder({
           collectionName: 'posts',
           internalPath: 'content/posts/media',
           publicPath: '/media',
-          entryRelative: false,
-          hasTemplateTags: false,
-        };
+        });
 
         vi.mocked(getAssetFolder).mockReturnValue(mockCollectionFolder);
 
@@ -331,13 +328,11 @@ describe('contents/fields/file/helpers', () => {
       });
 
       it('should disable entry folder when entry folder exists but is not entry-relative and has no template tags', () => {
-        const mockCollectionFolder = {
+        const mockCollectionFolder = createMockAssetFolder({
           collectionName: 'posts',
           internalPath: 'content/posts/media',
           publicPath: '/media',
-          entryRelative: false,
-          hasTemplateTags: false,
-        };
+        });
 
         vi.mocked(getAssetFolder).mockReturnValue(mockCollectionFolder);
 
@@ -362,13 +357,11 @@ describe('contents/fields/file/helpers', () => {
 
     describe('collection folder', () => {
       it('should enable collection folder when it exists and is not entry-relative and has no template tags', () => {
-        const mockCollectionFolder = {
+        const mockCollectionFolder = createMockAssetFolder({
           collectionName: 'posts',
           internalPath: 'content/posts/media',
           publicPath: '/media',
-          entryRelative: false,
-          hasTemplateTags: false,
-        };
+        });
 
         vi.mocked(getAssetFolder).mockReturnValue(mockCollectionFolder);
 
@@ -460,13 +453,11 @@ describe('contents/fields/file/helpers', () => {
           hasTemplateTags: false,
         };
 
-        const mockCollectionFolder = {
+        const mockCollectionFolder = createMockAssetFolder({
           collectionName: 'posts',
           internalPath: 'content/posts/media',
           publicPath: '/media',
-          entryRelative: false,
-          hasTemplateTags: false,
-        };
+        });
 
         vi.mocked(getAssetFolder).mockImplementation((args) => {
           if ('typedKeyPath' in args && 'isIndexFile' in args) {
@@ -528,13 +519,11 @@ describe('contents/fields/file/helpers', () => {
 
     describe('asset collection folders', () => {
       it('should add asset collection folders to the map', () => {
-        const mockCollectionFolder = {
+        const mockCollectionFolder = createMockAssetFolder({
           collectionName: 'posts',
           internalPath: 'content/posts/media',
           publicPath: '/media',
-          entryRelative: false,
-          hasTemplateTags: false,
-        };
+        });
 
         const mockAssetCollection1 = {
           collectionName: 'assets:icons',
@@ -572,13 +561,11 @@ describe('contents/fields/file/helpers', () => {
       });
 
       it('should not add asset collection folders without collectionName', () => {
-        const mockCollectionFolder = {
+        const mockCollectionFolder = createMockAssetFolder({
           collectionName: 'posts',
           internalPath: 'content/posts/media',
           publicPath: '/media',
-          entryRelative: false,
-          hasTemplateTags: false,
-        };
+        });
 
         const mockAssetCollectionWithoutName = {
           collectionName: undefined,
@@ -603,13 +590,11 @@ describe('contents/fields/file/helpers', () => {
       });
 
       it('should not add folders where isAssetCollection is false', () => {
-        const mockCollectionFolder = {
+        const mockCollectionFolder = createMockAssetFolder({
           collectionName: 'posts',
           internalPath: 'content/posts/media',
           publicPath: '/media',
-          entryRelative: false,
-          hasTemplateTags: false,
-        };
+        });
 
         const mockRegularFolder = {
           collectionName: 'regular',
@@ -632,13 +617,11 @@ describe('contents/fields/file/helpers', () => {
       });
 
       it('should handle mixed asset collections and regular folders', () => {
-        const mockCollectionFolder = {
+        const mockCollectionFolder = createMockAssetFolder({
           collectionName: 'posts',
           internalPath: 'content/posts/media',
           publicPath: '/media',
-          entryRelative: false,
-          hasTemplateTags: false,
-        };
+        });
 
         const mockAssetCollection = {
           collectionName: 'assets:icons',
@@ -730,13 +713,13 @@ describe('contents/fields/file/helpers', () => {
 
   describe('getDefaultAssetFolder', () => {
     it('should return the first enabled folder from the folder map', () => {
-      const enabledFolder = /** @type {import('$lib/types/private').AssetFolderInfo} */ ({
-        collectionName: 'posts',
-        internalPath: 'content/posts/media',
-        publicPath: '/media',
-        entryRelative: false,
-        hasTemplateTags: false,
-      });
+      const enabledFolder = /** @type {import('$lib/types/private').AssetFolderInfo} */ (
+        createMockAssetFolder({
+          collectionName: 'posts',
+          internalPath: 'content/posts/media',
+          publicPath: '/media',
+        })
+      );
 
       const result = getDefaultAssetFolder({
         field: { folder: undefined, enabled: false },
@@ -759,6 +742,29 @@ describe('contents/fields/file/helpers', () => {
       });
 
       expect(result).toBeUndefined();
+    });
+  });
+
+  describe('getFieldAssetFolder', () => {
+    it('should return the default folder of the library folder map for the field', () => {
+      const fieldFolder = createMockAssetFolder({
+        collectionName: 'posts',
+        internalPath: 'content/posts/images/banner',
+        publicPath: '/images/banner',
+      });
+
+      vi.mocked(getAssetFolder).mockImplementation((args) =>
+        'typedKeyPath' in args && 'isIndexFile' in args ? fieldFolder : undefined,
+      );
+
+      const result = getFieldAssetFolder({
+        collectionName: 'posts',
+        fileName: undefined,
+        typedKeyPath: 'banner',
+        isIndexFile: false,
+      });
+
+      expect(result).toBe(fieldFolder);
     });
   });
 
@@ -810,6 +816,29 @@ describe('contents/fields/file/helpers', () => {
         });
       });
 
+      it('should resolve template tags against the given locale', () => {
+        const entry = /** @type {any} */ ({ slug: 'my-post' });
+
+        vi.mocked(fillInternalPathTemplate).mockReturnValue('content/posts/fr/my-post');
+
+        getTargetFolderPath({
+          entry,
+          folder: /** @type {any} */ ({
+            collectionName: 'posts',
+            entryRelative: false,
+            internalPath: 'content/posts/{{slug}}',
+          }),
+          locale: 'fr',
+        });
+
+        expect(fillInternalPathTemplate).toHaveBeenCalledWith({
+          internalPath: 'content/posts/{{slug}}',
+          collectionName: 'posts',
+          entry,
+          locale: 'fr',
+        });
+      });
+
       it('should replace all the template tags with a dash placeholder when they cannot be resolved', () => {
         vi.mocked(fillInternalPathTemplate).mockReturnValue(undefined);
 
@@ -858,6 +887,30 @@ describe('contents/fields/file/helpers', () => {
         expect(getPathInfo).toHaveBeenCalledWith('content/posts/my-post.md');
       });
 
+      it('should return the directory of the given locale’s entry file', () => {
+        vi.mocked(getPathInfo).mockReturnValue(
+          /** @type {any} */ ({ dirname: 'content/posts/fr/hello' }),
+        );
+
+        const result = getTargetFolderPath({
+          entry: /** @type {any} */ ({
+            locales: {
+              en: { path: 'content/posts/en/hello/index.md' },
+              fr: { path: 'content/posts/fr/hello/index.md' },
+            },
+          }),
+          folder: /** @type {any} */ ({
+            entryRelative: true,
+            internalPath: 'content/posts',
+            internalSubPath: '',
+          }),
+          locale: 'fr',
+        });
+
+        expect(result).toBe('content/posts/fr/hello');
+        expect(getPathInfo).toHaveBeenCalledWith('content/posts/fr/hello/index.md');
+      });
+
       it('should return entry directory with subPath when internalSubPath is set', () => {
         vi.mocked(getPathInfo).mockReturnValue(/** @type {any} */ ({ dirname: 'content/posts' }));
 
@@ -873,6 +926,65 @@ describe('contents/fields/file/helpers', () => {
         });
 
         expect(result).toBe('content/posts/images');
+      });
+
+      it('should return the folder named after an entry in subfolders', async () => {
+        const { getCollection } = await import('$lib/services/contents/collection');
+
+        vi.mocked(getPathInfo).mockImplementation(
+          (path) => /** @type {any} */ ({ dirname: path.slice(0, path.lastIndexOf('/')) }),
+        );
+        // The `path` option puts the entry in subfolders, so its relative assets are saved to a
+        // folder named after it, next to the entry file
+        vi.mocked(getCollection).mockReturnValue(
+          /** @type {any} */ ({
+            name: 'posts',
+            _type: 'entry',
+            _file: { basePath: 'content/posts', subPath: '{{year}}/{{month}}/{{slug}}' },
+          }),
+        );
+
+        const result = getTargetFolderPath({
+          entry: /** @type {any} */ ({
+            locales: { _default: { path: 'content/posts/2025/06/my-post.md' } },
+          }),
+          folder: /** @type {any} */ ({
+            collectionName: 'posts',
+            entryRelative: true,
+            internalPath: 'content/posts',
+            internalSubPath: '',
+          }),
+        });
+
+        expect(result).toBe('content/posts/2025/06/my-post');
+        expect(getCollection).toHaveBeenCalledWith('posts');
+      });
+
+      it('should resolve against the repository root for an entry at the root', () => {
+        vi.mocked(getPathInfo).mockReturnValue(/** @type {any} */ ({ dirname: undefined }));
+
+        const entry = /** @type {any} */ ({ locales: { en: { path: 'my-post.md' } } });
+
+        expect(
+          getTargetFolderPath({
+            entry,
+            folder: /** @type {any} */ ({
+              entryRelative: true,
+              internalPath: '',
+              internalSubPath: 'images',
+            }),
+          }),
+        ).toBe('images');
+        expect(
+          getTargetFolderPath({
+            entry,
+            folder: /** @type {any} */ ({
+              entryRelative: true,
+              internalPath: '',
+              internalSubPath: '',
+            }),
+          }),
+        ).toBe('');
       });
 
       it('should return internalPath/-  when no entry and no internalSubPath', () => {
@@ -1101,6 +1213,7 @@ describe('contents/fields/file/helpers', () => {
 
     it('should return an empty string for an empty value', () => {
       expect(getFileDisplayPath({ draft, value: '' })).toBe('');
+      expect(getFileDisplayPath({ draft, value: /** @type {any} */ (123) })).toBe('');
     });
 
     it('should return the path an unsaved file will be stored at, with the name decoded', () => {
@@ -1119,6 +1232,15 @@ describe('contents/fields/file/helpers', () => {
       );
     });
 
+    it('should not throw on a path or file name with a literal `%` sign', () => {
+      expect(getFileDisplayPath({ draft, value: '/images/50%off%20sale.jpg' })).toBe(
+        '/images/50%off sale.jpg',
+      );
+      expect(getFileDisplayPath({ draft, value: 'blob:test', unsavedFileName: '50%off.png' })).toBe(
+        '/images/uploads/50%off.png',
+      );
+    });
+
     it('should return a URL without a query string as is', () => {
       expect(getFileDisplayPath({ draft, value: 'https://example.com/photo.png' })).toBe(
         'https://example.com/photo.png',
@@ -1134,13 +1256,11 @@ describe('contents/fields/file/helpers', () => {
 
   describe('isAssetInSelectedFolder', () => {
     /** @type {import('$lib/types/private').AssetFolderInfo} */
-    const folder = {
+    const folder = createMockAssetFolder({
       collectionName: 'posts',
       internalPath: 'content/posts/images',
       publicPath: '/images',
-      entryRelative: false,
-      hasTemplateTags: false,
-    };
+    });
 
     /** @type {import('$lib/types/private').Asset} */
     const asset = {
@@ -1150,14 +1270,24 @@ describe('contents/fields/file/helpers', () => {
       size: 1024,
       text: '',
       sha: 'abc123',
-      folder: {
+      folder: createMockAssetFolder({
         collectionName: 'posts',
         internalPath: 'content/posts/images',
         publicPath: '/images',
-        entryRelative: false,
-        hasTemplateTags: false,
-      },
+      }),
     };
+
+    it('should return true for any asset in a root folder when the target folder is the root', () => {
+      const rootFolder = { ...folder, internalPath: '' };
+
+      expect(
+        isAssetInSelectedFolder({
+          asset: { ...asset, folder: rootFolder },
+          folder: rootFolder,
+          folderPath: '',
+        }),
+      ).toBe(true);
+    });
 
     describe('returns false for mismatching folder info', () => {
       it('should return false when folder is undefined', () => {
@@ -1178,13 +1308,13 @@ describe('contents/fields/file/helpers', () => {
         ).toBe(false);
       });
 
-      it('should return false when asset folder entryRelative differs', () => {
-        const relativeFolder = { ...folder, entryRelative: true };
+      it('should return false when only the asset folder is entry-relative', () => {
+        const relativeAsset = { ...asset, folder: { ...asset.folder, entryRelative: true } };
 
         expect(
           isAssetInSelectedFolder({
-            asset,
-            folder: relativeFolder,
+            asset: relativeAsset,
+            folder,
             folderPath: 'content/posts/images',
           }),
         ).toBe(false);
@@ -1276,7 +1406,7 @@ describe('contents/fields/file/helpers', () => {
         ).toBe(true);
       });
 
-      it('should return false when dirname is undefined', () => {
+      it('should return false for an asset at the root when the target folder is not', () => {
         vi.mocked(getPathInfo).mockReturnValue(/** @type {any} */ ({ dirname: undefined }));
 
         expect(
@@ -1286,6 +1416,22 @@ describe('contents/fields/file/helpers', () => {
             folderPath: 'content/posts/my-post',
           }),
         ).toBe(false);
+      });
+
+      it('should return true for an asset at the root when the target folder is the root', () => {
+        vi.mocked(getPathInfo).mockReturnValue(/** @type {any} */ ({ dirname: undefined }));
+
+        expect(
+          isAssetInSelectedFolder({ asset: relativeAsset, folder: relativeFolder, folderPath: '' }),
+        ).toBe(true);
+      });
+
+      it('should return true for any asset when the target folder is the root', () => {
+        vi.mocked(getPathInfo).mockReturnValue(/** @type {any} */ ({ dirname: 'images/2024' }));
+
+        expect(
+          isAssetInSelectedFolder({ asset: relativeAsset, folder: relativeFolder, folderPath: '' }),
+        ).toBe(true);
       });
 
       it('should return false when dirname does not match folderPath', () => {
@@ -1316,17 +1462,79 @@ describe('contents/fields/file/helpers', () => {
         ).toBe(false);
       });
     });
+
+    describe('when folder is in an editor component outside any collection', () => {
+      // A relative `media_folder` in a component registered with `CMS.registerEditorComponent()`
+      // has no base folder, while the asset next to the entry is filed under another folder
+      /** @type {import('$lib/types/private').AssetFolderInfo} */
+      const componentFolder = {
+        collectionName: undefined,
+        componentName: 'figure',
+        typedKeyPath: 'image',
+        internalPath: '',
+        internalSubPath: 'medias',
+        publicPath: 'medias',
+        entryRelative: true,
+        hasTemplateTags: false,
+      };
+
+      const entryAsset = {
+        ...asset,
+        path: 'content/posts/my-post/medias/photo.jpg',
+        folder: { ...asset.folder, internalPath: 'content/posts', entryRelative: true },
+      };
+
+      it('should return true when asset dirname matches folderPath', () => {
+        vi.mocked(getPathInfo).mockReturnValue(
+          /** @type {any} */ ({ dirname: 'content/posts/my-post/medias' }),
+        );
+
+        expect(
+          isAssetInSelectedFolder({
+            asset: entryAsset,
+            folder: componentFolder,
+            folderPath: 'content/posts/my-post/medias',
+          }),
+        ).toBe(true);
+      });
+
+      it('should return false when asset dirname is in another entry', () => {
+        vi.mocked(getPathInfo).mockReturnValue(
+          /** @type {any} */ ({ dirname: 'content/posts/other-post/medias' }),
+        );
+
+        expect(
+          isAssetInSelectedFolder({
+            asset: { ...entryAsset, path: 'content/posts/other-post/medias/photo.jpg' },
+            folder: componentFolder,
+            folderPath: 'content/posts/my-post/medias',
+          }),
+        ).toBe(false);
+      });
+
+      it('should return true when the asset is filed under an enclosing global folder', () => {
+        vi.mocked(getPathInfo).mockReturnValue(
+          /** @type {any} */ ({ dirname: 'content/posts/my-post/medias' }),
+        );
+
+        expect(
+          isAssetInSelectedFolder({
+            asset: { ...entryAsset, folder: { ...asset.folder, internalPath: 'content' } },
+            folder: componentFolder,
+            folderPath: 'content/posts/my-post/medias',
+          }),
+        ).toBe(true);
+      });
+    });
   });
 
   describe('listAssets', () => {
     /** @type {import('$lib/types/private').AssetFolderInfo} */
-    const folder = {
+    const folder = createMockAssetFolder({
       collectionName: 'posts',
       internalPath: 'content/posts/images',
       publicPath: '/images',
-      entryRelative: false,
-      hasTemplateTags: false,
-    };
+    });
 
     /**
      * Create a minimal asset in the shared folder.
@@ -1348,6 +1556,7 @@ describe('contents/fields/file/helpers', () => {
       allAssets.current = [];
       // `listAssets` resolves unsaved asset paths, which needs the real path parser
       vi.mocked(getPathInfo).mockImplementation(getActualPathInfo);
+      vi.mocked(isValidFileType).mockImplementation(isActualValidFileType);
     });
 
     it('should return empty array when there are no assets', () => {
@@ -1359,6 +1568,22 @@ describe('contents/fields/file/helpers', () => {
       });
 
       expect(result).toEqual([]);
+    });
+
+    it('should leave out the assets of a contributor’s pull request', () => {
+      allAssets.current = [
+        { ...makeAsset('own.jpg'), workflow: { branch: 'cms/posts/hello' } },
+        { ...makeAsset('fork.jpg'), workflow: { branch: 'alice/website:cms/posts/hello' } },
+      ];
+
+      const result = listAssets({
+        kind: undefined,
+        folder,
+        folderPath: 'content/posts/images',
+        unsavedAssets: [],
+      });
+
+      expect(result.map(({ name }) => name)).toEqual(['own.jpg']);
     });
 
     it('should include matching assets from the allAssets store', () => {
@@ -1425,6 +1650,58 @@ describe('contents/fields/file/helpers', () => {
       });
 
       expect(result).toHaveLength(2);
+    });
+
+    it('should only include the assets of the accepted file types', () => {
+      allAssets.current = [
+        makeAsset('guide.PDF', 'document'),
+        makeAsset('readme.txt', 'document'),
+        // A scanned asset has a `type` that isn’t a MIME type
+        /** @type {any} */ ({ ...makeAsset('sunset.png'), type: 'asset' }),
+        makeAsset('logo.svg'),
+      ];
+
+      /**
+       * List the asset names.
+       * @param {string | undefined} accept Accepted file types.
+       * @param {'image'} [kind] Asset kind.
+       * @returns {string[]} Names.
+       */
+      const list = (accept, kind) =>
+        listAssets({
+          kind,
+          accept,
+          folder,
+          folderPath: 'content/posts/images',
+          unsavedAssets: [makeAsset('draft.png')],
+        }).map(({ name }) => name);
+
+      // Matched by extension in any case, or by the MIME type of the extension
+      expect(list('.pdf, .txt')).toEqual(['guide.PDF', 'readme.txt']);
+      expect(list('image/png', 'image')).toEqual(['draft.png', 'sunset.png']);
+      expect(list('image/*')).toEqual(['draft.png', 'logo.svg', 'sunset.png']);
+      expect(list(undefined)).toHaveLength(5);
+    });
+
+    it('should list the unchecked files whatever their kind and type', () => {
+      const dropped = makeAsset('kite.png');
+      const droppedText = makeAsset('notes.txt', 'document');
+      const pending = makeAsset('draft.png');
+
+      dropped.file = new File([''], 'kite.png');
+      droppedText.file = new File([''], 'notes.txt');
+      pending.file = new File([''], 'draft.png');
+
+      const result = listAssets({
+        kind: 'image',
+        accept: 'image/webp',
+        folder,
+        folderPath: 'content/posts/images',
+        unsavedAssets: [dropped, droppedText, pending],
+        uncheckedFiles: [dropped.file, droppedText.file],
+      });
+
+      expect(result.map(({ name }) => name)).toEqual(['kite.png', 'notes.txt']);
     });
 
     it('should sort assets alphabetically by name', () => {
@@ -1656,13 +1933,11 @@ describe('contents/fields/file/helpers', () => {
 
   describe('hasSameAsset', () => {
     /** @type {import('$lib/types/private').AssetFolderInfo} */
-    const folder = {
+    const folder = createMockAssetFolder({
       collectionName: 'posts',
       internalPath: 'content/posts/images',
       publicPath: '/images',
-      entryRelative: false,
-      hasTemplateTags: false,
-    };
+    });
 
     it('should return false when unsavedAssets is empty', () => {
       expect(hasSameAsset({ sha: 'abc123', folder, unsavedAssets: [] })).toBe(false);

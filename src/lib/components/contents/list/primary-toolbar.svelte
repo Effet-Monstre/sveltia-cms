@@ -8,20 +8,25 @@
     Toolbar,
     TruncatedText,
   } from '@sveltia/ui';
+  import { tick } from 'svelte';
 
   import BackButton from '$lib/components/common/page-toolbar/back-button.svelte';
+  import BulkEditControls from '$lib/components/contents/list/bulk-edit-controls.svelte';
   import ReorderControls from '$lib/components/contents/list/reorder-controls.svelte';
   import DeleteEntriesDialog from '$lib/components/contents/shared/delete-entries-dialog.svelte';
   import CreateEntryButton from '$lib/components/contents/toolbar/create-entry-button.svelte';
+  import { focusList } from '$lib/services/app/focus';
   import { goBack } from '$lib/services/app/navigation';
   import { getReadonlyMessage } from '$lib/services/config/readonly';
   import { getCollectionLabel, selectedCollection } from '$lib/services/contents/collection';
   import { selectedEntries } from '$lib/services/contents/collection/entries';
   import {
+    bulkEditing,
     collectionState,
     listedEntries,
     listedUnpublishedEntries,
     reordering,
+    setBulkEditMode,
     setReorderMode,
   } from '$lib/services/contents/collection/view';
   import { env } from '$lib/services/user/env.svelte';
@@ -29,6 +34,16 @@
   import { openAuthoring } from '$lib/services/workflow/open-authoring';
 
   let showDeleteDialog = $state(false);
+  /** @type {HTMLButtonElement | undefined} */
+  let deleteButton = $state();
+  /** @type {HTMLButtonElement | undefined} */
+  let reorderButton = $state();
+  /** @type {ReorderControls | undefined} */
+  let reorderControls = $state();
+  /** @type {HTMLButtonElement | undefined} */
+  let bulkEditButton = $state();
+  /** @type {BulkEditControls | undefined} */
+  let bulkEditControls = $state();
 
   /* v8 ignore start -- only read while a collection is selected, once the app locale is loaded */
   const name = $derived(selectedCollection.current?.name ?? '');
@@ -46,6 +61,7 @@
     canCreate,
     canDelete,
     canReorder,
+    canBulkEdit,
     quota,
     remaining,
     nearingQuota,
@@ -57,6 +73,15 @@
   const hasEntries = $derived(
     !!(listedEntries.current.length || listedUnpublishedEntries.current.length),
   );
+
+  // The Delete button is disabled once the selected entries are deleted, which would drop its focus
+  // on `<body>`, so move it to the entry list. This runs before the button is updated, while it
+  // still has the focus
+  $effect.pre(() => {
+    if (deleteDisabled && document.activeElement === deleteButton) {
+      tick().then(() => focusList());
+    }
+  });
 </script>
 
 {#if selectedCollection.current}
@@ -104,12 +129,29 @@
       </div>
     {/if}
     {#if isEntryCollection && reordering.current}
-      <ReorderControls />
+      <ReorderControls
+        bind:this={reorderControls}
+        onExit={async () => {
+          // The Reorder button takes the place of the focused button
+          await tick();
+          /** @type {HTMLButtonElement} */ (reorderButton).focus();
+        }}
+      />
+    {:else if isEntryCollection && bulkEditing.current}
+      <BulkEditControls
+        bind:this={bulkEditControls}
+        onExit={async () => {
+          // The Edit button takes the place of the focused button
+          await tick();
+          /** @type {HTMLButtonElement} */ (bulkEditButton).focus();
+        }}
+      />
     {:else if isEntryCollection}
       <!-- Taking a published entry off the site is a maintainer’s call, and the entry list has no
       other bulk action, so a contributor has nothing to select entries for -->
       {#if !env.isSmallScreen && !openAuthoring.current}
         <Button
+          bind:element={deleteButton}
           variant="ghost"
           label={_('delete')}
           aria-label={_('delete_selected_entries', {
@@ -121,14 +163,34 @@
           }}
         />
       {/if}
+      <!-- A table of controls doesn’t fit on a small screen -->
+      {#if canBulkEdit && !env.isSmallScreen}
+        <Button
+          bind:element={bulkEditButton}
+          variant="ghost"
+          label={_('edit')}
+          aria-label={_('bulk_edit_entries')}
+          disabled={!listedEntries.current.length}
+          onclick={async () => {
+            setBulkEditMode(true);
+            // The Save and Cancel buttons take the place of this one
+            await tick();
+            /** @type {BulkEditControls} */ (bulkEditControls).focus();
+          }}
+        />
+      {/if}
       {#if canReorder}
         <Button
+          bind:element={reorderButton}
           variant="ghost"
           label={_('reorder')}
           aria-label={_('reorder_entries')}
           disabled={!listedEntries.current.length}
-          onclick={() => {
+          onclick={async () => {
             setReorderMode(true);
+            // The Done and Cancel buttons take the place of this one
+            await tick();
+            /** @type {ReorderControls} */ (reorderControls).focus();
           }}
         />
       {/if}

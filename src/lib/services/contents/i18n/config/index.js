@@ -1,12 +1,14 @@
 import { cmsConfig } from '$lib/services/config';
-import { warnDeprecation } from '$lib/services/config/deprecations';
 import {
   DEFAULT_CANONICAL_SLUG,
   DEFAULT_LOCALE_KEY,
   I18N_STRUCTURES,
 } from '$lib/services/contents/i18n/config/constants';
 import { mergeI18nConfigs } from '$lib/services/contents/i18n/config/merge';
-import { hasLocalePlaceholder } from '$lib/services/contents/i18n/placeholder';
+import {
+  canOmitLocalePlaceholder,
+  hasLocalePlaceholder,
+} from '$lib/services/contents/i18n/placeholder';
 
 /**
  * @import {
@@ -101,6 +103,26 @@ export const createStructureMap = (i18nEnabled, structure) => ({
 });
 
 /**
+ * Check if the given i18n structure stores all the locales of an entry in one file: the
+ * `single_file` or `single_file_default_root` structure.
+ * @param {Partial<I18nFileStructureMap>} structureMap Structure map of the normalized i18n
+ * configuration.
+ * @returns {boolean} Result.
+ */
+export const usesSingleFileStructure = ({ i18nSingleFile, i18nSingleFileDefaultRoot }) =>
+  !!i18nSingleFile || !!i18nSingleFileDefaultRoot;
+
+/**
+ * Check if the given i18n structure stores each locale of an entry in a file of its own: the
+ * `multiple_files`, `multiple_folders` or `multiple_root_folders` structure.
+ * @param {Partial<I18nFileStructureMap>} structureMap Structure map of the normalized i18n
+ * configuration.
+ * @returns {boolean} Result.
+ */
+export const usesMultiFileStructure = ({ i18nMultiFile, i18nMultiFolder, i18nMultiRootFolder }) =>
+  !!i18nMultiFile || !!i18nMultiFolder || !!i18nMultiRootFolder;
+
+/**
  * Determines the default locale from the available locales.
  * @param {boolean} i18nEnabled Whether i18n is enabled.
  * @param {string[]} allLocales All available locales.
@@ -153,13 +175,13 @@ export const determineOmitDefaultLocale = (omitDefaultLocale, structureMap, file
     return false;
   }
 
+  // The placeholder has to be where it can be removed without breaking the rest of the path. In any
+  // other position the locale is kept, which the config parser warns about
   if (file) {
-    return /{{locale}}[./]/.test(file.file);
+    return canOmitLocalePlaceholder(file.file);
   }
 
-  return (
-    structureMap.i18nMultiFile || structureMap.i18nMultiFolder || structureMap.i18nMultiRootFolder
-  );
+  return usesMultiFileStructure(structureMap);
 };
 
 /**
@@ -189,15 +211,6 @@ export const normalizeI18nConfig = (collection, file) => {
     omit_default_locale_from_preview_path: omitDefaultLocaleFromPreviewPath = false,
   } = config ?? {};
 
-  // @todo Remove the option prior to the 1.0 release.
-  if (config?.save_all_locales !== undefined) {
-    warnDeprecation('save_all_locales');
-  }
-
-  if (omitDefaultLocaleLegacy !== undefined) {
-    warnDeprecation('omit_default_locale_from_filename');
-  }
-
   const {
     key: canonicalSlugKey = DEFAULT_CANONICAL_SLUG.key,
     value: canonicalSlugTemplate = DEFAULT_CANONICAL_SLUG.value,
@@ -221,10 +234,6 @@ export const normalizeI18nConfig = (collection, file) => {
     structureMap,
     file,
   );
-
-  if (structure === 'multiple_folders_i18n_root') {
-    warnDeprecation('multiple_folders_i18n_root');
-  }
 
   return {
     i18nEnabled,

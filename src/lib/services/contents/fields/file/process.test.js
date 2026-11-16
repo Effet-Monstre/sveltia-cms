@@ -24,9 +24,10 @@ vi.mock('$lib/services/assets/info', () => ({
   hasCachedThumbnail: vi.fn(async () => false),
 }));
 
-vi.mock('$lib/services/integrations/media-libraries/default', () => ({
+vi.mock('$lib/services/integrations/media-libraries/default', async (importOriginal) => ({
   canConvertHEIC: vi.fn(() => false),
   transformFile: vi.fn(),
+  isAcceptedFile: /** @type {any} */ (await importOriginal()).isAcceptedFile,
 }));
 
 vi.mock('$lib/services/utils/file', () => ({
@@ -43,6 +44,12 @@ vi.mock('$lib/services/utils/file', () => ({
    * @returns {string} Path.
    */
   sanitizePath: (path) => path,
+  /**
+   * Get the last segment of a path, as the real function does.
+   * @param {string} path Path.
+   * @returns {string} Last segment.
+   */
+  getBaseName: (path) => path.slice(path.lastIndexOf('/') + 1),
 }));
 
 vi.mock('$lib/services/assets/file-name', () => ({
@@ -52,6 +59,13 @@ vi.mock('$lib/services/assets/file-name', () => ({
    * @returns {string} File name.
    */
   formatFileName: (name) => name.replace(/[:/]/g, ''),
+  /**
+   * Compare two file names, ignoring case, as the real function does.
+   * @param {string} name1 File name.
+   * @param {string} name2 Another file name.
+   * @returns {boolean} Result.
+   */
+  isSameFileName: (name1, name2) => name1.toLowerCase() === name2.toLowerCase(),
 }));
 
 vi.mock('$lib/services/utils/media/image/validate', () => ({
@@ -339,6 +353,88 @@ describe('Test processResource()', () => {
     expect(result.value).toBeUndefined();
     // The file isn’t queued for upload
     expect(draft.files).toEqual({});
+  });
+
+  test('should reject a file that is not one of the accepted types', async () => {
+    const mockFile = new File(['png'], 'kite.png', { type: 'image/png' });
+    /** @type {any} */
+    const draft = { files: {} };
+    const resource = { file: mockFile, folder: { name: 'uploads' } };
+
+    getGitHashMock.mockResolvedValue('git-hash');
+
+    // @ts-ignore - Test with simplified types
+    const result = await processResource({ draft, resource, libraryConfig: {}, accept: '.pdf' });
+
+    expect(result).toEqual({
+      value: undefined,
+      credit: '',
+      oversizedFileName: undefined,
+      invalidFileName: undefined,
+      mismatchedFileName: 'kite.png',
+    });
+    // The file isn’t queued for upload
+    expect(draft.files).toEqual({});
+  });
+
+  test('should check the type of a file once it is transformed', async () => {
+    const mockFile = new File(['png'], 'kite.png', { type: 'image/png' });
+    const webpFile = new File(['webp'], 'kite.webp', { type: 'image/webp' });
+    /** @type {any} */
+    const draft = { files: {} };
+    const resource = { file: mockFile, folder: { name: 'uploads' } };
+    const libraryConfig = { transformations: { png: { format: 'webp' } } };
+
+    getGitHashMock.mockResolvedValue('git-hash');
+    transformFileMock.mockResolvedValue(webpFile);
+
+    // A PNG image converted to WebP fits a field only taking WebP images
+    // @ts-ignore - Test with simplified types
+    const result = await processResource({ draft, resource, libraryConfig, accept: 'image/webp' });
+
+    expect(result.value).toBe('blob:mock-url');
+    expect(result.mismatchedFileName).toBeUndefined();
+    expect(draft.files['blob:mock-url'].file).toBe(webpFile);
+  });
+
+  test('should name the original file if it still does not fit once transformed', async () => {
+    const mockFile = new File(['png'], 'kite.png', { type: 'image/png' });
+    /** @type {any} */
+    const draft = { files: {} };
+    const resource = { file: mockFile, folder: { name: 'uploads' } };
+    const libraryConfig = { transformations: { png: { format: 'webp' } } };
+
+    getGitHashMock.mockResolvedValue('git-hash');
+    transformFileMock.mockResolvedValue(new File(['webp'], 'kite.webp', { type: 'image/webp' }));
+
+    // @ts-ignore - Test with simplified types
+    const result = await processResource({ draft, resource, libraryConfig, accept: 'image/png' });
+
+    expect(result.mismatchedFileName).toBe('kite.png');
+    expect(result.value).toBeUndefined();
+    expect(draft.files).toEqual({});
+  });
+
+  test('should reject a pending file that is not one of the accepted types', async () => {
+    const mockFile = new File(['png'], 'kite.png', { type: 'image/png' });
+    /** @type {any} */
+    const draft = { files: { 'blob:pending': { file: mockFile, folder: { name: 'uploads' } } } };
+    const resource = { file: mockFile, folder: { name: 'uploads' } };
+
+    // The same file is already pending, as added to a field taking images
+    getGitHashMock.mockResolvedValue('git-hash');
+
+    // @ts-ignore - Test with simplified types
+    const rejected = await processResource({ draft, resource, libraryConfig: {}, accept: '.pdf' });
+
+    expect(rejected.mismatchedFileName).toBe('kite.png');
+    expect(rejected.value).toBeUndefined();
+
+    // @ts-ignore - Test with simplified types
+    const taken = await processResource({ draft, resource, libraryConfig: {}, accept: 'image/*' });
+
+    expect(taken.value).toBe('blob:pending');
+    expect(taken.mismatchedFileName).toBeUndefined();
   });
 
   test('should reject a file that cannot be read', async () => {
@@ -821,6 +917,87 @@ describe('Test processResource()', () => {
     expect(Object.keys(draft.files)).toHaveLength(0);
   });
 
+  test('should only deduplicate a file saved beside the given locale’s entry file', async () => {
+    const mockFile = new File(['content'], 'photo.jpg', { type: 'image/jpeg' });
+
+    Object.defineProperty(mockFile, 'size', { value: 50000 });
+
+    const folder = {
+      entryRelative: true,
+      internalPath: 'src/content/people',
+      internalSubPath: '',
+      publicPath: '',
+      hasTemplateTags: false,
+      collectionName: 'people',
+    };
+
+    // With the `multiple_folders` i18n structure, each locale’s entry file has a folder of its own
+    /**
+     * Create a draft of the entry.
+     * @returns {any} Draft.
+     */
+    const createDraft = () => ({
+      files: {},
+      defaultLocale: 'en',
+      originalEntry: {
+        locales: {
+          en: { path: 'src/content/people/en/person-b/index.md' },
+          fr: { path: 'src/content/people/fr/person-b/index.md' },
+        },
+      },
+      collection: {
+        _type: 'entry',
+        _file: { subPath: '{{slug}}/index' },
+      },
+    });
+
+    // @ts-ignore - Simplified config for testing
+    const libraryConfig = { max_file_size: 1000000 };
+
+    const enAsset = {
+      sha: 'git-hash',
+      folder,
+      path: 'src/content/people/en/person-b/photo.jpg',
+      unsaved: false,
+    };
+
+    getGitHashMock.mockResolvedValue('git-hash');
+    allAssets.current = /** @type {any} */ ([enAsset]);
+    equalMock.mockReturnValue(true);
+    getAssetPublicURLMock.mockReturnValue('photo.jpg');
+
+    // The default locale’s folder has the file
+    let draft = createDraft();
+
+    let result = await processResource({
+      draft,
+      resource: /** @type {any} */ ({ file: mockFile, folder, credit: '' }),
+      libraryConfig,
+      locale: 'en',
+    });
+
+    expect(result.value).toBe('photo.jpg');
+    expect(getAssetPublicURLMock).toHaveBeenCalledWith(enAsset, {
+      pathOnly: true,
+      allowSpecial: true,
+      entry: draft.originalEntry,
+      locale: 'en',
+    });
+
+    // The French folder doesn’t, so the file is uploaded there rather than referenced in the
+    // English folder, which a path relative to the French entry file can’t reach
+    draft = createDraft();
+    result = await processResource({
+      draft,
+      resource: /** @type {any} */ ({ file: mockFile, folder, credit: '' }),
+      libraryConfig,
+      locale: 'fr',
+    });
+
+    expect(result.value).toBe('blob:mock-url');
+    expect(Object.keys(draft.files)).toHaveLength(1);
+  });
+
   test('should allow upload for new entry (no originalEntry) with entry-relative folder', async () => {
     const mockFile = new File(['content'], 'photo.jpg', { type: 'image/jpeg' });
 
@@ -984,7 +1161,7 @@ describe('Test processResource()', () => {
     expect(Object.keys(draft.files)).toHaveLength(0);
   });
 
-  test('should deduplicate a file saved beside the index file of a nested collection entry', async () => {
+  test('should deduplicate a file saved beside the index file of a nested entry', async () => {
     const mockFile = new File(['content'], 'photo.jpg', { type: 'image/jpeg' });
 
     Object.defineProperty(mockFile, 'size', { value: 50000 });
@@ -1109,6 +1286,87 @@ describe('Test processResource()', () => {
       file: mockFile,
       folder: { name: 'uploads' },
       replace: true,
+    });
+  });
+
+  describe('with a replacing file', () => {
+    const folder = { name: 'uploads' };
+
+    test('should not reuse an identical asset saved under another name', async () => {
+      const mockFile = new File(['content'], 'thumb.webp', { type: 'image/webp' });
+      /** @type {any} */
+      const draft = { files: {} };
+
+      getGitHashMock.mockResolvedValue('git-hash');
+      allAssets.current = /** @type {any} */ ([
+        { sha: 'git-hash', folder, name: 'other.webp', path: 'uploads/other.webp' },
+      ]);
+      equalMock.mockReturnValue(true);
+
+      const result = await processResource({
+        draft,
+        resource: /** @type {any} */ ({ file: mockFile, folder, replace: true }),
+        libraryConfig: {},
+      });
+
+      // The file keeps its own name, so it’s saved rather than pointing to the other asset
+      expect(result.value).toBe('blob:mock-url');
+      expect(draft.files['blob:mock-url']).toEqual({ file: mockFile, folder, replace: true });
+    });
+
+    test('should reuse an identical asset saved under the same name', async () => {
+      const mockFile = new File(['content'], 'thumb.webp', { type: 'image/webp' });
+      /** @type {any} */
+      const draft = { files: {} };
+
+      getGitHashMock.mockResolvedValue('git-hash');
+      allAssets.current = /** @type {any} */ ([
+        { sha: 'git-hash', folder, name: 'Thumb.webp', path: 'uploads/Thumb.webp' },
+      ]);
+      equalMock.mockReturnValue(true);
+      getAssetPublicURLMock.mockReturnValue('/uploads/Thumb.webp');
+
+      const result = await processResource({
+        draft,
+        resource: /** @type {any} */ ({ file: mockFile, folder, replace: true }),
+        libraryConfig: {},
+      });
+
+      // Nothing has changed, so there’s nothing to save
+      expect(result.value).toBe('/uploads/Thumb.webp');
+      expect(Object.keys(draft.files)).toHaveLength(0);
+    });
+
+    test('should only reuse an identical pending file replacing one under the same name', async () => {
+      const mockFile = new File(['content'], 'thumb.webp', { type: 'image/webp' });
+
+      /** @type {any} */
+      const draft = {
+        files: {
+          // Would be saved with a unique name, e.g. `thumb-1.webp`
+          'blob:plain': { file: new File(['content'], 'thumb.webp'), folder, replace: false },
+          'blob:other': { file: new File(['content'], 'other.webp'), folder, replace: true },
+        },
+      };
+
+      getGitHashMock.mockResolvedValue('git-hash');
+      allAssets.current = /** @type {any} */ ([]);
+      equalMock.mockReturnValue(true);
+
+      const resource = /** @type {any} */ ({ file: mockFile, folder, replace: true });
+
+      await expect(processResource({ draft, resource, libraryConfig: {} })).resolves.toEqual(
+        expect.objectContaining({ value: 'blob:mock-url' }),
+      );
+
+      draft.files = {
+        'blob:same': { file: new File(['content'], 'Thumb.webp'), folder, replace: true },
+      };
+
+      await expect(processResource({ draft, resource, libraryConfig: {} })).resolves.toEqual(
+        expect.objectContaining({ value: 'blob:same' }),
+      );
+      expect(Object.keys(draft.files)).toEqual(['blob:same']);
     });
   });
 });

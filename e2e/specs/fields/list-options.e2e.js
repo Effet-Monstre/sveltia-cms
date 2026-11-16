@@ -1,5 +1,6 @@
 import { expandAll } from '../../fixtures/expanders.js';
 import { expect, test } from '../../fixtures/test.js';
+import { getEditor, getField } from '../../fixtures/ui.js';
 
 /**
  * A page whose List fields each turn off or change one of the list controls: adding, removing,
@@ -187,31 +188,15 @@ test.beforeEach(async ({ cms, page }) => {
   await cms.seed({ [HOME_PATH]: HOME });
   await cms.signIn();
   await page.getByRole('row', { name: /Home/ }).click();
-  await expect(
-    page.getByRole('group', { name: 'Content Editor' }).getByRole('group', { name: /Address/ }),
-  ).toBeVisible();
+  await expect(getEditor(page).getByRole('group', { name: /Address/ })).toBeVisible();
 });
-
-/**
- * Get the group of a field in the editor.
- * @param {import('@playwright/test').Page} page Page.
- * @param {string} label Field label.
- * @returns {import('@playwright/test').Locator} Field group.
- */
-const getField = (page, label) =>
-  page
-    .getByRole('group', { name: 'Content Editor' })
-    .getByRole('group', { name: new RegExp(`${label}.*Field`) });
 
 /**
  * Save the entry.
  * @param {import('@playwright/test').Page} page Page.
  */
 const save = async (page) => {
-  await page
-    .getByRole('group', { name: 'Content Editor' })
-    .getByRole('button', { name: 'Save' })
-    .click();
+  await getEditor(page).getByRole('button', { name: 'Save' }).click();
 };
 
 /**
@@ -246,8 +231,10 @@ test('hides the Add buttons and the item options of a list that doesn’t allow 
   await expandAll(links);
   await expect(links.getByRole('textbox', { name: 'Text' })).toHaveCount(2);
   await expect(links.getByRole('button', { name: /Add/ })).toHaveCount(0);
-  // The item options only add items: duplicate, add above and add below
-  await expect(links.getByRole('button', { name: 'List Item Options' })).toHaveCount(0);
+  // The item options only offer to copy an item, not to add one
+  await links.getByRole('button', { name: 'List Item Options' }).first().click();
+  await expect(page.getByRole('menuitem')).toHaveText(['Copy']);
+  await page.keyboard.press('Escape');
   // The items can still be removed and reordered
   await expect(links.getByRole('button', { name: 'Reorder Item' })).toHaveCount(2);
   await links.getByRole('button', { name: 'Remove' }).nth(1).click();
@@ -372,7 +359,10 @@ test('keeps the items of a list with types that allows no changes to them', asyn
   await expandAll(cards);
   await expect(cards.getByText('2 Cards')).toBeVisible();
   await expect(cards.getByRole('button', { name: /Add/ })).toHaveCount(0);
-  await expect(cards.getByRole('button', { name: 'List Item Options' })).toHaveCount(0);
+  // An item can only be copied
+  await cards.getByRole('button', { name: 'List Item Options' }).first().click();
+  await expect(page.getByRole('menuitem')).toHaveText(['Copy']);
+  await page.keyboard.press('Escape');
   await expect(cards.getByRole('button', { name: 'Remove' })).toHaveCount(0);
   await expect(cards.getByRole('button', { name: 'Reorder Item' })).toHaveCount(0);
   // The items are still collapsible and editable

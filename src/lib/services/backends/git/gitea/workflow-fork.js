@@ -1,26 +1,33 @@
+import { fetchAllPages } from '$lib/services/backends/git/gitea/api';
 import { getWorkflowRepository } from '$lib/services/backends/git/gitea/fork';
 import {
   createPullRequest,
   deleteBranch,
-  fetchAllPages,
   fetchBranchHead,
   fetchPullRequestFileContents,
   fetchPullRequestFileList,
   fetchPullRequestHeadRef,
-  stripWipPrefix,
   updateDraftState,
+  wipTitle,
 } from '$lib/services/backends/git/gitea/pull-requests';
 import { repository } from '$lib/services/backends/git/gitea/repository';
 import { fetchAPI } from '$lib/services/backends/git/shared/api';
 import { runConcurrently } from '$lib/services/backends/git/shared/concurrency';
-import { checkMergedBranch, checkStatusAllowed } from '$lib/services/backends/git/shared/fork';
-import { encodePath } from '$lib/services/backends/git/shared/url';
+import { pruneForkBranches, updateForkStatusWith } from '$lib/services/backends/git/shared/fork';
+import {
+  getPullRequestPath,
+  getRepositoryPath,
+  isSameRepository,
+} from '$lib/services/backends/git/shared/repository';
+import { applyForkPullRequestStatus } from '$lib/services/backends/git/shared/workflow';
 import { user } from '$lib/services/user/account.svelte';
-import { getBranchPrefix } from '$lib/services/workflow/branch';
+import { encodePathSegments } from '$lib/services/utils/url';
+import { getBranchListPrefix } from '$lib/services/workflow/branch';
 import { forkedRepository } from '$lib/services/workflow/open-authoring';
 
 /**
  * @import {
+ * ForkRequestState,
  * WorkflowFile,
  * WorkflowPullRequest,
  * WorkflowStatus,
@@ -35,11 +42,10 @@ import { forkedRepository } from '$lib/services/workflow/open-authoring';
  * @see https://docs.gitea.com/api/next/#tag/repository/operation/repoListBranches
  */
 export const fetchForkBranchList = async () => {
-  const { owner, repo } = getWorkflowRepository();
-  const prefix = getBranchPrefix();
+  const prefix = getBranchListPrefix();
   // The instance can’t filter by prefix, so every branch is listed. A fork holds few besides the
   // workflow ones, so it’s a page or two in practice
-  const branches = await fetchAllPages(`/repos/${owner}/${repo}/branches`);
+  const branches = await fetchAllPages(`${getRepositoryPath(getWorkflowRepository())}/branches`);
 
   return branches.filter(({ name }) => name.startsWith(prefix));
 };
@@ -63,7 +69,7 @@ export const isForkPullRequest = (item) => {
 
   return (
     !!fork &&
-    item.head?.repo?.full_name?.toLowerCase() === `${fork.owner}/${fork.repo}`.toLowerCase() &&
+    isSameRepository(item.head?.repo?.full_name, fork) &&
     item.base?.ref === repository.branch &&
     userId !== undefined &&
     item.user?.id === userId
@@ -81,11 +87,11 @@ export const isForkPullRequest = (item) => {
  * @see https://docs.gitea.com/api/next/#tag/repository/operation/repoListPullRequests
  */
 export const fetchForkPullRequestMap = async () => {
-  const { owner, repo } = repository;
   const login = /** @type {string} */ (user.account?.login);
 
   const items = await fetchAllPages(
-    `/repos/${owner}/${repo}/pulls?state=all&sort=recentupdate&poster=${encodeURIComponent(login)}`,
+    `${getRepositoryPath(repository)}/pulls` +
+      `?state=all&sort=recentupdate&poster=${encodeURIComponent(login)}`,
   );
 
   /** @type {Map<string, Record<string, any>>} */
@@ -133,7 +139,7 @@ export const parseForkBranch = (node, pullRequest) => {
     // the message the pull request would be opened with anyway. The prefix that marks a work in
     // progress is dropped, because it’s written back when the entry returns to the drafting stage —
     // keeping it would leave the pull request a work in progress on the way out of that stage
-    title: stripWipPrefix(current?.title ?? message ?? ''),
+    title: wipTitle.strip(current?.title ?? message ?? ''),
     url: current?.html_url,
     branch,
     headSHA,
@@ -166,12 +172,11 @@ export const parseForkBranch = (node, pullRequest) => {
  * @see https://docs.gitea.com/api/next/#tag/repository/operation/repoCompareDiff
  */
 export const fetchForkBranchFileList = async (pullRequest) => {
-  const { owner, repo } = getWorkflowRepository();
-  const base = encodePath(/** @type {string} */ (repository.branch));
-  const head = encodePath(pullRequest.headSHA ?? pullRequest.branch);
+  const base = encodePathSegments(/** @type {string} */ (repository.branch));
+  const head = encodePathSegments(pullRequest.headSHA ?? pullRequest.branch);
 
   const { commits = [] } = /** @type {{ commits?: Record<string, any>[] }} */ (
-    await fetchAPI(`/repos/${owner}/${repo}/compare/${base}...${head}`)
+    await fetchAPI(`${getRepositoryPath(getWorkflowRepository())}/compare/${base}...${head}`)
   );
 
   /** @type {Map<string, WorkflowFile>} */
@@ -198,10 +203,6 @@ export const fetchForkPullRequests = async () => {
   }
 
   const pullRequests = await fetchForkPullRequestMap();
-  /** @type {string[]} */
-  const leftover = [];
-  /** @type {WorkflowPullRequest[]} */
-  const pending = [];
   /** @type {Map<number, string | undefined>} */
   const mergedHeads = new Map();
 
@@ -216,24 +217,17 @@ export const fetchForkPullRequests = async () => {
     },
   );
 
-  nodes.forEach((node) => {
-    const pullRequest = pullRequests.get(node.name);
+  const pending = await pruneForkBranches(
+    nodes,
+    (node) => {
+      const pullRequest = pullRequests.get(node.name);
 
-    // A merged pull request whose head the branch still points at has nothing left on it. Tidying
-    // it up keeps the fork from collecting a branch per published entry, and saves comparing each
-    // one with the configured branch on every load just to find out it holds nothing. A branch the
-    // contributor has committed to since the merge has a different head, so it survives and shows
-    // up as a fresh draft
-    if (pullRequest?.merged && mergedHeads.get(pullRequest.number) === node.commit?.id) {
-      leftover.push(node.name);
-    } else {
-      pending.push(parseForkBranch(node, pullRequest));
-    }
-  });
-
-  // Deleting a branch is best effort: `deleteBranch` logs a failure rather than raising it, and a
-  // branch that outlives this is picked up on the next load
-  await runConcurrently(leftover, deleteBranch);
+      return pullRequest?.merged && mergedHeads.get(pullRequest.number) === node.commit?.id
+        ? { leftover: node.name }
+        : { pending: parseForkBranch(node, pullRequest) };
+    },
+    deleteBranch,
+  );
 
   // An open pull request already reports the files it changes, which is cheaper than comparing the
   // branch with the configured branch. A closed pull request is left to the comparison as well:
@@ -254,19 +248,38 @@ export const fetchForkPullRequests = async () => {
 };
 
 /**
- * Reopen a pull request that was closed earlier. The author of a pull request is allowed to do
- * this, so a contributor doesn’t need write access to the configured repository for it.
+ * Read the current state of the pull request an Open Authoring entry has, for
+ * {@link updateForkStatusWith}.
  * @param {WorkflowPullRequest} pullRequest Pull request.
- * @see https://docs.gitea.com/api/next/#tag/repository/operation/repoEditPullRequest
+ * @returns {Promise<ForkRequestState>} State.
+ * @see https://docs.gitea.com/api/next/#tag/repository/operation/repoGetPullRequest
  */
-export const reopenPullRequest = async (pullRequest) => {
-  const { owner, repo } = repository;
+const fetchForkRequestState = async ({ number }) => {
+  const item = /** @type {Record<string, any>} */ (
+    await fetchAPI(getPullRequestPath(repository, number))
+  );
 
-  await fetchAPI(`/repos/${owner}/${repo}/pulls/${pullRequest.number}`, {
-    method: 'PATCH',
-    body: { state: 'open' },
-  });
+  return {
+    merged: !!item.merged,
+    isEntryRequest: isForkPullRequest(item),
+    /**
+     * Read the head commit the pull request was merged at. It’s read from the pull request’s
+     * reference, because the head the pull request reports follows the branch.
+     * @returns {Promise<string>} Commit SHA.
+     */
+    getMergedSHA: async () => (await fetchPullRequestHeadRef(/** @type {number} */ (number))) ?? '',
+    state: item.state,
+    draft: item.draft,
+  };
 };
+
+/**
+ * Bring a pull request in line with the given status, for {@link updateForkStatusWith}.
+ * @param {Parameters<typeof applyForkPullRequestStatus>[0]} args Arguments.
+ * @returns {Promise<void>}
+ */
+const applyForkStatus = (args) =>
+  applyForkPullRequestStatus(args, { repository, updateDraftState });
 
 /**
  * Move an Open Authoring entry between the drafting and review stages. A contributor can’t label a
@@ -278,75 +291,16 @@ export const reopenPullRequest = async (pullRequest) => {
  * @returns {Promise<WorkflowPullRequest>} Updated pull request, or a new one if the known one is
  * no longer the entry’s.
  * @throws {Error} When the entry is being marked ready to publish, which a contributor can’t do, or
- * has been published since the board was loaded: see {@link checkMergedBranch}.
- * @see https://docs.gitea.com/api/next/#tag/repository/operation/repoGetPullRequest
+ * has been published since the board was loaded: see {@link updateForkStatusWith}.
  */
-export const updateForkStatus = async (pullRequest, status) => {
-  checkStatusAllowed(status);
-
-  const { number, branch, title } = pullRequest;
-
-  // Nothing has been opened yet, so moving out of the drafting stage is what creates the pull
-  // request. Moving within the drafting stage leaves the branch as it is
-  if (number === undefined) {
-    return status === 'draft'
-      ? { ...pullRequest, status, updatedDate: new Date() }
-      : createPullRequest({ branch, title, status });
-  }
-
-  const { owner, repo } = repository;
-
-  // The pull request may have been closed, reopened or merged outside the CMS, so read the current
-  // state rather than inferring it from the status the entry was last seen with
-  const item = /** @type {Record<string, any>} */ (
-    await fetchAPI(`/repos/${owner}/${repo}/pulls/${number}`)
-  );
-
-  const isEntryRequest = isForkPullRequest(item);
-
-  // It may have been merged into the configured branch since the board was loaded. With nothing
-  // committed to the branch since, the entry is published and has nothing left to review
-  if (item.merged && isEntryRequest) {
-    await checkMergedBranch({
-      branch,
-      mergedSHA: (await fetchPullRequestHeadRef(number)) ?? '',
-      fetchBranchHead,
-      deleteBranch,
-    });
-  }
-
-  // Otherwise a merged pull request, or one aimed at another branch since the board was loaded, is
-  // no longer the entry’s review, which is how the next load would see it too: reopening or taking
-  // it out of the work-in-progress state would put a request for that other branch in front of the
-  // maintainers, or claim a merged one is in review — and the instance refuses to reopen a merged
-  // one anyway. So the entry carries on without it, as a fresh draft. The instance allows one open
-  // pull request per head and base, so one aimed elsewhere doesn’t stand in the way of a new one to
-  // the configured branch
-  // @see https://github.com/sveltia/sveltia-cms/security/advisories/GHSA-8h97-74c4-g246
-  if (item.merged || !isEntryRequest) {
-    return updateForkStatus(
-      { ...pullRequest, number: undefined, nodeId: undefined, url: undefined },
-      status,
-    );
-  }
-
-  const { state, draft } = item;
-
-  if (status === 'draft') {
-    // Converting the pull request to a work in progress keeps it — and the discussion on it — in
-    // place while taking it out of the maintainers’ review queue
-    if (state === 'open' && !draft) {
-      await updateDraftState(pullRequest, true);
-    }
-  } else {
-    if (state === 'closed') {
-      await reopenPullRequest(pullRequest);
-    }
-
-    if (draft) {
-      await updateDraftState(pullRequest, false);
-    }
-  }
-
-  return { ...pullRequest, status, updatedDate: new Date() };
-};
+export const updateForkStatus = async (pullRequest, status) =>
+  updateForkStatusWith({
+    pullRequest,
+    status,
+    requestKey: 'number',
+    createRequest: createPullRequest,
+    fetchRequest: fetchForkRequestState,
+    applyStatus: applyForkStatus,
+    fetchBranchHead,
+    deleteBranch,
+  });

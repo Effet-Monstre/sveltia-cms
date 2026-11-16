@@ -1,7 +1,8 @@
 import { expandAll } from '../../fixtures/expanders.js';
 import { expect, test } from '../../fixtures/test.js';
+import { getEditor } from '../../fixtures/ui.js';
 
-import { getEditor, getEditPane, showLocale } from './helpers.js';
+import { getEditPane, showLocale } from './helpers.js';
 
 /**
  * A multilingual blog whose posts have fields duplicated from English to French, on their own or

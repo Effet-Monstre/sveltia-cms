@@ -1,12 +1,17 @@
 import { _ } from '@sveltia/i18n';
 
 import { slugify } from '$lib/services/common/slug';
-import { getEntriesByCollection } from '$lib/services/contents/collection/entries';
-import { getSharedEntryFileName } from '$lib/services/contents/collection/nested';
+import { cmsConfig } from '$lib/services/config';
+import {
+  getEntriesByCollection,
+  getEntriesInCollectionFolder,
+} from '$lib/services/contents/collection/entries';
+import { getNameInFolder, getSharedEntryFileName } from '$lib/services/contents/collection/nested';
 import { getSlugOptions } from '$lib/services/contents/collection/slug';
+import { getSlugDirPath } from '$lib/services/contents/draft/slugs';
 import { getEntryPaths } from '$lib/services/contents/entry/paths';
 import { getRegex } from '$lib/services/utils/regex';
-import { getUnpublishedEntriesByCollection } from '$lib/services/workflow';
+import { getPullRequestEntries } from '$lib/services/workflow';
 
 /**
  * @import {
@@ -20,23 +25,32 @@ import { getUnpublishedEntriesByCollection } from '$lib/services/workflow';
  */
 
 /**
- * What stops a slug from being used: it’s empty, contains a slash or whitespace, doesn’t match the
- * collection’s `pattern` slug option, or is taken by another entry.
+ * What stops a slug from being used: it’s empty, contains a slash or whitespace (other than a plain
+ * space, if the slug is meant to have them) or starts with a dot, doesn’t match the collection’s
+ * `pattern` slug option, or is taken by another entry.
  * @typedef {'empty' | 'invalid' | 'pattern' | 'duplicate'} SlugValidationError
  */
 
 /**
  * Get the other entries of the collection the draft belongs to: the published ones and the
- * unpublished ones, leaving out any version of the entry being edited. With Editorial Workflow, a
+ * unpublished ones, leaving out any version of the entry being edited. The published ones include
+ * every entry stored in the collection folder, even those the collection’s `filter` option leaves
+ * out: they can belong to another collection sharing the folder, and their files can’t be
+ * overwritten either. With Editorial Workflow, a
  * draft that has already renamed the entry leaves the published version behind under the old slug,
  * so that version has to be recognized as the same entry — otherwise reverting the slug looks like
  * a conflict. The unpublished entries are concatenated rather than swapped over their published
  * versions, because a draft that renamed an entry leaves the published file behind, so both slugs
- * are still in use.
+ * are still in use. The new entries riding along in the pull request of an entry of another
+ * collection count too.
  * @param {EntryDraft} draft Entry draft.
+ * @param {object} [options] Options.
+ * @param {boolean} [options.inFolder] Whether to include every published entry stored in the
+ * collection folder. When `false`, only the published entries the collection lists, which pass its
+ * `filter` option, are included.
  * @returns {(Entry | UnpublishedEntry)[]} Entries.
  */
-export const getOtherEntries = (draft) => {
+export const getOtherEntries = (draft, { inFolder = true } = {}) => {
   // An entry in the Editorial Workflow has previous paths
   const { collectionName, originalEntry } =
     /** @type {EntryDraft & { originalEntry?: UnpublishedEntry }} */ (draft);
@@ -47,15 +61,20 @@ export const getOtherEntries = (draft) => {
   );
 
   return [
-    ...getEntriesByCollection(collectionName),
-    ...getUnpublishedEntriesByCollection(collectionName),
+    ...(inFolder ? getEntriesInCollectionFolder : getEntriesByCollection)(collectionName),
+    ...getPullRequestEntries(collectionName),
   ].filter((entry) => !Object.values(entry.locales).some(({ path }) => ownPaths.has(path)));
 };
 
 /**
  * Get the slugs taken by the other entries of the collection, for each locale of the draft’s slugs.
  * A locale-agnostic slug, under the `_` key, can collide with another entry’s slug in any locale.
- * The entry’s own original slugs never count as taken.
+ * The entry’s own original slug in a locale never counts as taken in that locale; in another
+ * locale, it can be another entry’s slug, which would be overwritten. For a new entry placed with
+ * the path editor of a collection with nested entries, or a locale just enabled for an existing
+ * one, only the entries in the chosen folder count, by their file names, because the slug of an
+ * entry there is otherwise its sub path. With localized slugs, that’s the folder’s localized
+ * counterpart in each locale but the default one. See {@link getSlugDirPath}.
  * @param {EntryDraft} draft Entry draft.
  * @param {InternalLocaleCode[]} [locales] Locales to get the taken slugs for. Default: the locales
  * of the draft’s slugs.
@@ -64,21 +83,43 @@ export const getOtherEntries = (draft) => {
 export const getTakenSlugs = (draft, locales = Object.keys(draft.currentSlugs)) => {
   const { originalSlugs } = draft;
   const otherEntries = getOtherEntries(draft);
-  const ownSlugs = new Set(Object.values(originalSlugs));
 
   return Object.fromEntries(
-    locales.map((locale) => [
-      locale,
-      otherEntries
-        .flatMap((entry) =>
-          locale === '_'
-            ? Object.values(entry.locales).map(({ slug }) => slug)
-            : [entry.locales[locale]?.slug],
-        )
-        .filter((slug) => typeof slug === 'string' && !ownSlugs.has(slug)),
-    ]),
+    locales.map((locale) => {
+      const ownSlug = originalSlugs[locale] ?? originalSlugs._;
+      // A locale-agnostic slug is stored in the folder chosen in the default locale
+      const dirPath = getSlugDirPath(draft, locale === '_' ? undefined : locale);
+
+      return [
+        locale,
+        otherEntries
+          .flatMap((entry) =>
+            locale === '_'
+              ? Object.values(entry.locales).map(({ slug }) => slug)
+              : [entry.locales[locale]?.slug],
+          )
+          .flatMap((slug) => {
+            if (typeof slug !== 'string' || slug === ownSlug) {
+              return [];
+            }
+
+            const name = dirPath === undefined ? slug : getNameInFolder(slug, dirPath);
+
+            return name === undefined ? [] : [name];
+          }),
+      ];
+    }),
   );
 };
+
+/**
+ * Check whether a slug is meant to contain spaces, because the global `sanitize_replacement` slug
+ * option contains one.
+ * @returns {boolean} Result.
+ * @see https://github.com/sveltia/sveltia-cms/issues/1093
+ */
+const slugCanHaveSpaces = () =>
+  cmsConfig.current?.slug?.sanitize_replacement?.includes(' ') ?? false;
 
 /**
  * Check whether the given slug can be used.
@@ -87,21 +128,38 @@ export const getTakenSlugs = (draft, locales = Object.keys(draft.currentSlugs)) 
  * @param {boolean} [args.required] Whether the slug must be given. An empty slug that isn’t
  * required is valid, as the slug template fills it instead.
  * @param {[string | RegExp, string]} [args.pattern] The collection’s `pattern` slug option.
+ * @param {boolean} [args.allowSpaces] Whether the slug can contain plain spaces. Defaults to
+ * whether the global `sanitize_replacement` slug option contains one.
  * @param {string[]} [args.takenSlugs] Slugs taken by the other entries.
  * @param {InternalLocaleCode} [args.locale] Locale of the slug, used to slugify it the same way it
  * will be saved.
  * @returns {SlugValidationError | undefined} What stops the slug from being used, or `undefined` if
  * it can be used.
  */
-export const validateSlug = ({ slug, required = true, pattern, takenSlugs = [], locale }) => {
+export const validateSlug = ({
+  slug,
+  required = true,
+  pattern,
+  allowSpaces = slugCanHaveSpaces(),
+  takenSlugs = [],
+  locale,
+}) => {
   const trimmedSlug = slug?.trim() ?? '';
 
   if (!trimmedSlug) {
     return required ? 'empty' : undefined;
   }
 
-  // A slash or whitespace would break the file path and URL structure
-  if (/[/\s]/.test(/** @type {string} */ (slug))) {
+  // A slash or whitespace would break the file path and URL structure. A plain space is fine if the
+  // slug is meant to have them; `slugify` turns any run of them into the replacement on save
+  if ((allowSpaces ? /[/]|[^\S ]/ : /[/\s]/).test(/** @type {string} */ (slug))) {
+    return 'invalid';
+  }
+
+  // A file name starting with a dot makes a dot file, which is hidden and skipped when the
+  // repository files are listed, so the entry would be lost once saved. `slugify` removes the dot,
+  // but a slug meant to be hidden is rejected rather than silently saved under another one
+  if (trimmedSlug.startsWith('.')) {
     return 'invalid';
   }
 
@@ -184,6 +242,7 @@ export const validateSlugs = (draft) => {
   // An existing entry’s slug is edited as a whole. A new entry’s value can be only a part of the
   // slug, in which case it can’t be told whether the slug is taken
   const isWholeSlug = !isNew || editorValueIsSlug;
+  const allowSpaces = slugCanHaveSpaces();
   // A slug editor that has never been shown, e.g. in a closed sidebar panel, hasn’t set its slug
   // yet, and the slug must still be given
   const locales = new Set([...Object.keys(currentSlugs), ...Object.keys(slugEditor)]);
@@ -198,6 +257,7 @@ export const validateSlugs = (draft) => {
           // template
           required: !isNew || editorRequired,
           pattern,
+          allowSpaces,
           // Only look for other entries when the slug could collide with one
           takenSlugs:
             isWholeSlug && slug?.trim() ? (takenSlugs ??= getTakenSlugs(draft))[locale] : [],

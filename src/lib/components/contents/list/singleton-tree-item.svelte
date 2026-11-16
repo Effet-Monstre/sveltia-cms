@@ -2,7 +2,8 @@
   import { _ } from '@sveltia/i18n';
   import { Icon, TreeItem } from '@sveltia/ui';
 
-  import { announcedPageStatus, encodeRoutePath, goto } from '$lib/services/app/navigation';
+  import { announcedPageStatus, goto } from '$lib/services/app/navigation';
+  import { getEntryEditorPath } from '$lib/services/contents/editor/route';
 
   /**
    * @import { CollectionFile } from '$lib/types/public';
@@ -14,11 +15,7 @@
    */
 
   /** @type {Props} */
-  let {
-    /* eslint-disable prefer-const */
-    file,
-    /* eslint-enable prefer-const */
-  } = $props();
+  let { file } = $props();
 
   const { name, icon } = $derived(file);
   const label = $derived(file.label || name);
@@ -41,7 +38,7 @@
       });
     }}
     onclick={() => {
-      goto(encodeRoutePath(`/collections/_singletons/entries/${name}`), {
+      goto(getEntryEditorPath('_singletons', name), {
         transitionType: 'forwards',
       });
       // Reset the selected state and remove the focused class from the option

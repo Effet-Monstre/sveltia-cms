@@ -1,7 +1,15 @@
-import { getDirectoryHandle, readFile } from '$lib/services/backends/fs/shared/handles';
+import { _ } from '@sveltia/i18n';
+
+import { seedTestRepository } from '$lib/services/backends/fs/seed';
+import {
+  getDirectoryHandle,
+  getScopedRootDirHandle,
+  readFile,
+} from '$lib/services/backends/fs/shared/handles';
 import { loadFiles } from '$lib/services/backends/fs/shared/load';
 import { saveChanges } from '$lib/services/backends/fs/shared/save';
 import { dataLoaded } from '$lib/services/contents';
+import { env } from '$lib/services/user/env.svelte';
 
 /**
  * @import { Asset, BackendService, CommitResults, FileChange, User } from '$lib/types/private';
@@ -16,6 +24,22 @@ export const TEST_BACKEND_ROOT_DIR_NAME = 'sveltia-cms-test';
  * Name of the test backend.
  */
 export const TEST_BACKEND_NAME = 'test-repo';
+/**
+ * Name of the IndexedDB database holding the test backend’s draft backups. The backend has no
+ * repository, which would otherwise give the database its name.
+ */
+export const TEST_BACKEND_DATABASE_NAME = `${TEST_BACKEND_NAME}:${TEST_BACKEND_ROOT_DIR_NAME}`;
+
+/**
+ * Get the name of the IndexedDB database holding the draft backups of the given backend.
+ * @param {BackendService | null | undefined} backend Backend service.
+ * @returns {string | undefined} Repository database name, {@link TEST_BACKEND_DATABASE_NAME} for
+ * the test backend, which has no repository, or an empty value if the backend has no database.
+ */
+export const getBackupDatabaseName = (backend) =>
+  backend?.name === TEST_BACKEND_NAME
+    ? TEST_BACKEND_DATABASE_NAME
+    : backend?.repository?.databaseName;
 
 const label = 'Test';
 /**
@@ -30,17 +54,30 @@ const init = () => undefined;
 
 /**
  * Sign in with the test backend. There is no actual sign-in; just get the root directory handle in
- * the origin private file system (OPFS), so we can read/write files.
+ * the origin private file system (OPFS), so we can read/write files. On the first sign-in, the
+ * repository is seeded with the files listed in the `<link rel="cms-seed-url">` manifest, if any.
  * @returns {Promise<User>} User info. Since we don’t have any details for the local user, just
  * return the backend name.
+ * @throws {Error} If the browser can’t write files to the OPFS. The sign-in page disables the
+ * option then, but a user cached from an earlier session would still be signed in automatically.
  * @see https://web.dev/articles/origin-private-file-system
- * @todo Preload entry files on the demo site.
  */
 const signIn = async () => {
+  if (!env.isTestBackendSupported) {
+    throw new Error('Unsupported browser', {
+      cause: { message: _('test_repo_unsupported_browser') },
+    });
+  }
+
   try {
-    rootDirHandle = await getDirectoryHandle(
-      await navigator.storage.getDirectory(),
-      TEST_BACKEND_ROOT_DIR_NAME,
+    const storageDirHandle = await navigator.storage.getDirectory();
+
+    await seedTestRepository(storageDirHandle, TEST_BACKEND_ROOT_DIR_NAME);
+
+    // The configured root directory is created if needed, like the backend’s own directory
+    rootDirHandle = await getScopedRootDirHandle(
+      await getDirectoryHandle(storageDirHandle, TEST_BACKEND_ROOT_DIR_NAME),
+      { create: true },
     );
   } catch {
     // Directory handle could not be acquired for security reasons, but we can ignore the error

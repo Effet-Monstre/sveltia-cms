@@ -2,8 +2,15 @@
 
 import { beforeEach, describe, expect, test, vi } from 'vitest';
 
-import { collectScanningPaths, getPathRegex, scanDir } from '$lib/services/backends/fs/shared/scan';
+import {
+  collectScanningPaths,
+  getPathPrefixRegex,
+  getPathRegex,
+  scanDir,
+} from '$lib/services/backends/fs/shared/scan';
+import { createMockAssetFolder } from '$lib/test/factories';
 import { createMockDirectoryHandle, createMockFileHandle } from '$lib/test/fs-handles';
+import { createMemoryDirectoryHandle, writeMemoryFile } from '$lib/test/memory-fs-handles';
 
 vi.mock('@sveltia/utils/misc', () => ({
   sleep: vi.fn(async () => {}),
@@ -96,6 +103,46 @@ describe('getPathRegex', () => {
     expect(regex.test('hello.txt')).toBe(true);
     // Should not match empty path
     expect(regex.test('')).toBe(false);
+  });
+});
+
+describe('getPathPrefixRegex', () => {
+  test('should match the path and each folder leading to it', () => {
+    const regex = getPathPrefixRegex('static/images/uploads');
+
+    expect(regex.test('static')).toBe(true);
+    expect(regex.test('static/images')).toBe(true);
+    expect(regex.test('static/images/uploads')).toBe(true);
+    expect(regex.test('static/images/uploads/2024')).toBe(false);
+    expect(regex.test('static/img')).toBe(false);
+    expect(regex.test('stat')).toBe(false);
+    expect(regex.test('other')).toBe(false);
+  });
+
+  test('should match the folders leading to a path with a template tag in the middle', () => {
+    const regex = getPathPrefixRegex('static/{{dirname}}/images');
+
+    expect(regex.test('static')).toBe(true);
+    expect(regex.test('static/posts')).toBe(true);
+    expect(regex.test('static/posts/images')).toBe(true);
+    // A tag can stand for more than one segment
+    expect(regex.test('static/blog/2024')).toBe(true);
+    expect(regex.test('other/posts')).toBe(false);
+  });
+
+  test('should match the literal part of a segment with a template tag', () => {
+    const regex = getPathPrefixRegex('static/img-{{year}}/uploads');
+
+    expect(regex.test('static/img-2024')).toBe(true);
+    expect(regex.test('static/img-2024/uploads')).toBe(true);
+    expect(regex.test('static/other')).toBe(false);
+  });
+
+  test('should escape special characters', () => {
+    const regex = getPathPrefixRegex('app/(pages)/{{slug}}');
+
+    expect(regex.test('app/(pages)')).toBe(true);
+    expect(regex.test('app/pages')).toBe(false);
   });
 });
 
@@ -238,6 +285,65 @@ describe('scanDir', () => {
     expect(fileHandles).toHaveLength(0);
   });
 
+  test('should scan the subdirectories at the same time, keeping the files in order', async () => {
+    const dirHandle = createMockDirectoryHandle('site');
+    const firstDirHandle = createMockDirectoryHandle('a');
+    const secondDirHandle = createMockDirectoryHandle('b');
+    const rootFile = createMockFileHandle('root.md');
+    const firstFile = createMockFileHandle('1.md');
+    const secondFile = createMockFileHandle('2.md');
+    const lastFile = createMockFileHandle('z.md');
+    /**
+     * Let the first directory be listed.
+     * @type {(value?: any) => void}
+     */
+    let releaseFirstDir = () => {};
+    let secondDirScanned = false;
+
+    // @ts-ignore - Mock async iterator
+    dirHandle.entries = vi.fn(() => ({
+      [Symbol.asyncIterator]: async function* () {
+        yield ['root.md', rootFile];
+        yield ['a', firstDirHandle];
+        yield ['b', secondDirHandle];
+        yield ['z.md', lastFile];
+      },
+    }));
+
+    // @ts-ignore - Mock async iterator, which takes a while to list the first directory
+    firstDirHandle.entries = vi.fn(() => ({
+      [Symbol.asyncIterator]: async function* () {
+        await new Promise((resolve) => {
+          releaseFirstDir = resolve;
+        });
+        yield ['1.md', firstFile];
+      },
+    }));
+
+    // @ts-ignore - Mock async iterator
+    secondDirHandle.entries = vi.fn(() => ({
+      [Symbol.asyncIterator]: async function* () {
+        yield ['2.md', secondFile];
+        secondDirScanned = true;
+      },
+    }));
+
+    const scanned = scanDir(dirHandle, {
+      rootDirHandle,
+      scanningPaths: ['root.md', 'a', 'b', 'z.md'],
+      scanningPathsRegEx: [/^(?:root\.md|a|b|z\.md)(?:\/.+)?$/],
+      fileHandles,
+      pathRegexCache: new Map(),
+    });
+
+    // The second directory is scanned while the first one is still being listed
+    await vi.waitFor(() => expect(secondDirScanned).toBe(true));
+    releaseFirstDir();
+    await scanned;
+
+    expect(fileHandles.map(({ path }) => path)).toEqual(['root.md', 'a/1.md', 'b/2.md', 'z.md']);
+  });
+
   test('should handle directory matching scanning path', async () => {
     const nestedDirHandle = createMockDirectoryHandle('nested');
     const fileHandle = createMockFileHandle('file.txt');
@@ -287,9 +393,8 @@ describe('scanDir', () => {
   });
 
   test('should use cached regex when pathRegexCache already has an entry for the path (L168 false)', async () => {
-    // When scanDir is called with currentPath='parent', the directory entry 'nested' becomes
-    // path='parent/nested'. Pre-populate the cache with that full path key so the cache-hit
-    // branch fires: !regex === false → L168 false covered.
+    // The cache is keyed by the scanning path. Pre-populate it with 'parent/nested' so the
+    // cache-hit branch fires: !regex === false → L168 false covered.
     const cachedRegex = /nested/;
     const prePopulatedCache = new Map([['parent/nested', cachedRegex]]);
     const nestedDirHandle = createMockDirectoryHandle('nested');
@@ -369,27 +474,21 @@ describe('collectScanningPaths', () => {
     ];
 
     allAssetFolders.current = [
-      {
+      createMockAssetFolder({
         collectionName: 'images',
         internalPath: 'static/images',
         publicPath: '/images',
-        entryRelative: false,
-        hasTemplateTags: false,
-      },
-      {
+      }),
+      createMockAssetFolder({
         collectionName: 'videos',
         internalPath: 'static/videos',
         publicPath: '/videos',
-        entryRelative: false,
-        hasTemplateTags: false,
-      },
-      {
+      }),
+      createMockAssetFolder({
         collectionName: 'other',
         internalPath: undefined,
         publicPath: undefined,
-        entryRelative: false,
-        hasTemplateTags: false,
-      }, // Should be filtered out
+      }), // Should be filtered out
     ];
 
     const paths = collectScanningPaths();
@@ -421,13 +520,11 @@ describe('collectScanningPaths', () => {
     ];
 
     allAssetFolders.current = [
-      {
+      createMockAssetFolder({
         collectionName: 'images',
         internalPath: '/static/images/',
         publicPath: '/images',
-        entryRelative: false,
-        hasTemplateTags: false,
-      },
+      }),
     ];
 
     const paths = collectScanningPaths();
@@ -580,6 +677,57 @@ describe('getAllFiles', () => {
 
     expect(result).toEqual([]);
   });
+  test('finds files and folders whose names are spelled in normalization form D', async () => {
+    const decomposed = 'cafe\u0301';
+    const composed = decomposed.normalize();
+
+    allEntryFolders.current = [
+      /** @type {any} */ ({ collectionName: 'posts', folderPathMap: { _: `${composed}/posts` } }),
+      /** @type {any} */ ({ collectionName: 'pages', filePathMap: { _: `pages/${composed}.md` } }),
+    ];
+    // A configured path in form D is matched too
+    allAssetFolders.current = [
+      createMockAssetFolder({ collectionName: undefined, internalPath: `media/${decomposed}` }),
+    ];
+
+    const rootDirHandle = createMemoryDirectoryHandle();
+
+    await writeMemoryFile(rootDirHandle, `${decomposed}/posts/${decomposed}.md`, '');
+    await writeMemoryFile(rootDirHandle, `pages/${decomposed}.md`, '');
+    await writeMemoryFile(rootDirHandle, `media/${composed}/${decomposed}.png`, '');
+    await writeMemoryFile(rootDirHandle, 'pages/other.md', '');
+
+    const { getAllFiles } = await import('$lib/services/backends/fs/shared/scan');
+    const result = await getAllFiles(rootDirHandle);
+
+    // The paths and names are in form C, while the handles keep the names on the disk
+    expect(result.map(({ path, name, handle }) => [path, name, handle?.name])).toEqual([
+      [`${composed}/posts/${composed}.md`, `${composed}.md`, `${decomposed}.md`],
+      [`pages/${composed}.md`, `${composed}.md`, `${decomposed}.md`],
+      [`media/${composed}/${composed}.png`, `${composed}.png`, `${decomposed}.png`],
+    ]);
+  });
+
+  test('finds files in a folder with a template tag in the middle of its path', async () => {
+    allAssetFolders.current = [
+      createMockAssetFolder({ collectionName: 'posts', internalPath: 'static/{{dirname}}/images' }),
+    ];
+
+    const rootDirHandle = createMemoryDirectoryHandle();
+
+    await writeMemoryFile(rootDirHandle, 'static/posts/images/a.png', '');
+    await writeMemoryFile(rootDirHandle, 'static/blog/2024/images/b.png', '');
+    await writeMemoryFile(rootDirHandle, 'static/posts/other/c.png', '');
+    await writeMemoryFile(rootDirHandle, 'src/posts/images/d.png', '');
+
+    const { getAllFiles } = await import('$lib/services/backends/fs/shared/scan');
+    const result = await getAllFiles(rootDirHandle);
+
+    expect(result.map(({ path }) => path)).toEqual([
+      'static/posts/images/a.png',
+      'static/blog/2024/images/b.png',
+    ]);
+  });
 });
 
 describe('scanDir - directory recursion scenarios', () => {
@@ -670,14 +818,16 @@ describe('scanDir - directory recursion scenarios', () => {
     expect(fileHandles.length).toBeGreaterThanOrEqual(0);
   });
 
-  test('should skip hidden directories', async () => {
+  test('should skip hidden directories that no scanning path names', async () => {
     const hiddenDir = createMockDirectoryHandle('.hidden');
+    const gitDir = createMockDirectoryHandle('.git');
     const parentDirHandle = createMockDirectoryHandle('parent');
 
     // @ts-ignore - Mock async iterator
     parentDirHandle.entries = vi.fn(() => ({
       [Symbol.asyncIterator]: async function* parentAsyncIterator2() {
         yield ['.hidden', hiddenDir];
+        yield ['.git', gitDir];
       },
     }));
 
@@ -685,16 +835,50 @@ describe('scanDir - directory recursion scenarios', () => {
       parentDirHandle,
       {
         rootDirHandle,
-        scanningPaths: ['parent/.hidden/file.txt'],
-        scanningPathsRegEx: [/parent\/\.hidden\/file\.txt/],
+        scanningPaths: ['parent'],
+        scanningPathsRegEx: [/^parent(?:\/|$)/],
         fileHandles,
         pathRegexCache: new Map(),
       },
       'parent',
     );
 
-    // Hidden directory should be skipped
+    // Hidden directories should be skipped, even within a scanning path
     expect(hiddenDir.entries).not.toHaveBeenCalled();
+    expect(gitDir.entries).not.toHaveBeenCalled();
+  });
+
+  test('should scan a hidden directory a scanning path names', async () => {
+    const imageHandle = createMockFileHandle('photo.png');
+    const hiddenDir = createMockDirectoryHandle('.vuepress');
+    const parentDirHandle = createMockDirectoryHandle('docs');
+
+    // @ts-ignore - Mock async iterator
+    hiddenDir.entries = vi.fn(() => ({
+      [Symbol.asyncIterator]: async function* hiddenAsyncIterator() {
+        yield ['photo.png', imageHandle];
+      },
+    }));
+    // @ts-ignore - Mock async iterator
+    parentDirHandle.entries = vi.fn(() => ({
+      [Symbol.asyncIterator]: async function* parentAsyncIterator3() {
+        yield ['.vuepress', hiddenDir];
+      },
+    }));
+
+    await scanDir(
+      parentDirHandle,
+      {
+        rootDirHandle,
+        scanningPaths: ['docs/.vuepress'],
+        scanningPathsRegEx: [/^docs\/\.vuepress(?:\/|$)/],
+        fileHandles,
+        pathRegexCache: new Map(),
+      },
+      'docs',
+    );
+
+    expect(fileHandles).toEqual([{ handle: imageHandle, path: 'docs/.vuepress/photo.png' }]);
   });
 
   test('should handle resolve returning null for directory entries', async () => {

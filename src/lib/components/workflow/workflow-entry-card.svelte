@@ -12,16 +12,16 @@
   import PreviewLinkButton from '$lib/components/contents/details/preview-link-button.svelte';
   import EntryThumbnail from '$lib/components/contents/shared/entry-thumbnail.svelte';
   import DeployStatusBadge from '$lib/components/workflow/deploy-status-badge.svelte';
-  import { encodeRoutePath, goto } from '$lib/services/app/navigation';
+  import ExternalReviewButton from '$lib/components/workflow/external-review-button.svelte';
+  import { goto } from '$lib/services/app/navigation';
   import { isReadonly } from '$lib/services/config/readonly';
   import { getCollection, getCollectionLabel } from '$lib/services/contents/collection';
-  import {
-    getCollectionFile,
-    getCollectionFileLabel,
-  } from '$lib/services/contents/collection/files';
-  import { getEntrySummary } from '$lib/services/contents/entry/summary';
+  import { getCollectionFile } from '$lib/services/contents/collection/files';
+  import { getUnpublishedEntryEditorPath } from '$lib/services/contents/editor/route';
   import { deployments, productionSHA } from '$lib/services/deployments';
-  import { checkPublishedVersion, isPublishAllowed } from '$lib/services/workflow';
+  import { checkPublishedVersion, getPublishAction } from '$lib/services/workflow';
+  import { getCompanionNotes, getUnpublishedEntryLabel } from '$lib/services/workflow/board';
+  import { getWorkflowStages } from '$lib/services/workflow/stages';
 
   /**
    * @import { UnpublishedEntry } from '$lib/types/private';
@@ -44,7 +44,6 @@
 
   /** @type {Props} */
   let {
-    /* eslint-disable prefer-const */
     entry,
     dragging = false,
     busy = false,
@@ -53,7 +52,6 @@
     onDragEnd = undefined,
     onDelete = undefined,
     onPublish = undefined,
-    /* eslint-enable prefer-const */
   } = $props();
 
   const { collectionName, fileName, status, pullRequest } = $derived(entry.workflow);
@@ -65,6 +63,10 @@
   // A read-only entry can be opened and viewed, but not moved through the stages, published or
   // discarded
   const readonly = $derived(isReadonly({ collection, collectionFile }));
+  // With Preview Workflow, the drafting stage is the only one, so there’s nowhere to move the entry
+  const movable = $derived(
+    !deletion && !deploying && !readonly && getWorkflowStages(collection).length > 1,
+  );
   // The card has no locale of its own, so the link points at the entry’s default one
   const defaultLocale = $derived((collectionFile ?? collection)?._i18n?.defaultLocale);
   // A merged change goes out with the production build, which is a different commit from the pull
@@ -73,21 +75,21 @@
   const deployState = $derived(
     (deploySHA ? deployments.current[deploySHA]?.state : undefined) ?? 'unknown',
   );
-  const summary = $derived.by(() => {
-    // `appLocale.current` is a key, because the labels can be localized
-    if (!appLocale.current || !collection) {
-      return entry.slug;
-    }
-
-    return collectionFile
-      ? getCollectionFileLabel(collectionFile)
-      : getEntrySummary(collection, entry);
-  });
+  /* v8 ignore start -- the app locale is always set once the UI strings are loaded */
+  // `appLocale.current` is a key, because the labels can be localized
+  const summary = $derived(appLocale.current ? getUnpublishedEntryLabel(entry) : entry.slug);
+  /* v8 ignore stop */
+  // The entries created or edited from a Relation field of the entry are published along with it
+  const companionNotes = $derived(getCompanionNotes(entry, appLocale.current));
   const collectionLabel = $derived(
     appLocale.current && collection ? getCollectionLabel(collection, { useSingular: true }) : '',
   );
-  // The entry can only be published from the last column, and only by a user who can merge it
-  const canPublish = $derived(!deploying && !readonly && isPublishAllowed(entry, collection));
+  // The entry can only be published from the last column, and only by a user who can merge it. A
+  // pull request a contributor has opened from their fork is reviewed and merged on the Git service
+  // instead, so the card links to it from the same place
+  const publishAction = $derived(
+    !deploying && !readonly ? getPublishAction(entry, collection) : undefined,
+  );
   // Deleting an entry that has a published version only throws away the pending changes.
   // The entry can be published from another view, so the check depends on `allEntries`
   const publishedVersionExists = $derived(checkPublishedVersion(entry));
@@ -109,13 +111,13 @@
 </script>
 
 <!-- A pending deletion has no stages to move through, so its card doesn’t drag, and neither does
-a merged or read-only one -->
+a merged or read-only one, or one with no other stage to move to -->
 <div
   role="listitem"
   class="card"
   class:dragging
-  class:static={deletion || deploying || readonly}
-  draggable={!busy && !deletion && !deploying && !readonly}
+  class:static={!movable}
+  draggable={!busy && movable}
   ondragstart={(/** @type {DragEvent} */ event) => {
     if (event.dataTransfer) {
       event.dataTransfer.effectAllowed = 'move';
@@ -135,10 +137,7 @@ a merged or read-only one -->
     aria-label={summary}
     disabled={gone}
     onclick={() => {
-      // A collection file is addressed by its name, while its `subPath` is the whole file path
-      goto(encodeRoutePath(`/collections/${collectionName}/entries/${fileName ?? entry.subPath}`), {
-        transitionType: 'forwards',
-      });
+      goto(getUnpublishedEntryEditorPath(entry), { transitionType: 'forwards' });
     }}
   >
     {#if collection?._type === 'entry'}
@@ -149,6 +148,9 @@ a merged or read-only one -->
       <span role="none" class="title"><bdi>{summary}</bdi></span>
     </span>
   </button>
+  {#each companionNotes as note (note)}
+    <p class="companions">{note}</p>
+  {/each}
   <footer role="none">
     <div role="none" class="meta">
       {#if pullRequest.author?.name}
@@ -160,6 +162,9 @@ a merged or read-only one -->
           day: 'numeric',
         })}
       </span>
+      {#if pullRequest.fork}
+        <span role="none" class="note">{_('workflow.from_fork')}</span>
+      {/if}
       {#if gone}
         <span role="none" class="note">{_('workflow.deploying_deletion')}</span>
       {/if}
@@ -198,7 +203,7 @@ a merged or read-only one -->
           {/snippet}
         </Button>
       {/if}
-      {#if canPublish}
+      {#if publishAction === 'publish'}
         <Button
           variant="primary"
           size="small"
@@ -215,6 +220,8 @@ a merged or read-only one -->
             <Icon name={deletion ? 'delete' : 'publish'} />
           {/snippet}
         </Button>
+      {:else if publishAction === 'review'}
+        <ExternalReviewButton {entry} size="small" iconic disabled={busy} />
       {/if}
     </div>
   </footer>
@@ -273,6 +280,13 @@ a merged or read-only one -->
   .title {
     font-size: var(--sui-font-size-default);
     line-height: 1.4;
+    overflow-wrap: anywhere;
+  }
+
+  .companions {
+    margin: 0;
+    color: var(--sui-secondary-foreground-color);
+    font-size: var(--sui-font-size-small);
     overflow-wrap: anywhere;
   }
 

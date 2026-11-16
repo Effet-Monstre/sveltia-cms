@@ -3,7 +3,7 @@ import { afterEach, beforeAll, describe, expect, test, vi } from 'vitest';
 import { page } from 'vitest/browser';
 import { render } from 'vitest-browser-svelte';
 
-import { getAssetDetails } from '$lib/services/assets/details';
+import { getAssetDetails, getAssetUsedEntries } from '$lib/services/assets/details';
 import { backendName } from '$lib/services/backends';
 import { repository } from '$lib/services/backends/git/github/repository';
 import { createMockAsset, createMockImageFile, initTestConfig, setEntries } from '$lib/test/config';
@@ -13,7 +13,11 @@ import InfoPanel from './info-panel.svelte';
 vi.mock('$lib/services/assets/details', async (importOriginal) => {
   const actual = /** @type {any} */ (await importOriginal());
 
-  return { ...actual, getAssetDetails: vi.fn(actual.getAssetDetails) };
+  return {
+    ...actual,
+    getAssetDetails: vi.fn(actual.getAssetDetails),
+    getAssetUsedEntries: vi.fn(actual.getAssetUsedEntries),
+  };
 });
 
 /**
@@ -81,6 +85,17 @@ describe('InfoPanel', () => {
     await expect.poll(() => container.querySelector('img')?.getAttribute('src')).toMatch(/^blob:/);
   });
 
+  test('treats a PDF document as previewable, whatever the case of its extension', async () => {
+    const asset = createMockAsset({
+      name: 'Brochure.PDF',
+      file: new File(['%PDF-1.4'], 'Brochure.PDF', { type: 'application/pdf' }),
+    });
+
+    const { container } = await render(InfoPanel, { asset, showPreview: true });
+
+    await expect.poll(() => getSections(container).Dimensions).toBeDefined();
+  });
+
   test('shows the duration, creation date and location of a video', async () => {
     backendName.current = 'github';
     Object.assign(repository, { blobBaseURL: 'https://github.com/owner/repo/blob/main' });
@@ -131,11 +146,29 @@ describe('InfoPanel', () => {
 
     await expect.poll(() => getSections(container)['Used in']).toBe('None');
     expect(getSections(container)).toEqual(
-      expect.objectContaining({ Duration: '–', Dimensions: '–', 'Updated by': 'melvin' }),
+      expect.objectContaining({
+        Duration: '–',
+        Dimensions: '–',
+        // The URL doesn’t need the file
+        'Public URL': 'https://example.com/uploads/song.mp3',
+        'Updated by': 'melvin',
+      }),
     );
     expect(error).toHaveBeenCalledWith(
       expect.objectContaining({ message: 'Failed to retrieve blob' }),
     );
+  });
+
+  test('keeps the details when the used entries can’t be looked up', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    vi.mocked(getAssetUsedEntries).mockRejectedValueOnce(new Error('Failed'));
+
+    const { container } = await render(InfoPanel, { asset: createMockAsset({ name: 'a.txt' }) });
+
+    await expect.poll(() => getSections(container)['Used in']).toBe('None');
+    expect(getSections(container)['Public URL']).toBe('https://example.com/uploads/a.txt');
+    expect(error).toHaveBeenCalledWith(expect.objectContaining({ message: 'Failed' }));
   });
 
   test('ignores the details of an asset focused earlier that arrive late', async () => {
@@ -153,6 +186,53 @@ describe('InfoPanel', () => {
     resolve({ ...(await getAssetDetails(first)), publicURL: 'https://example.com/first.txt' });
     await sleep(50);
 
+    expect(getSections(container)['Public URL']).toMatch(/second\.txt$/);
+  });
+
+  test('clears the details of the previous asset while the next one loads, or fails to', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const first = createMockAsset({ name: 'first.txt' });
+    const second = createMockAsset({ name: 'second.txt' });
+    const { container, rerender } = await render(InfoPanel, { asset: first });
+
+    await expect.poll(() => getSections(container)['Public URL']).toMatch(/first\.txt$/);
+    await expect.poll(() => getSections(container)['Used in']).toBe('None');
+
+    const { promise, reject } = Promise.withResolvers();
+
+    vi.mocked(getAssetDetails).mockReturnValueOnce(/** @type {any} */ (promise));
+    await rerender({ asset: second });
+
+    // The first asset’s details are gone while the second one’s are loading
+    await expect.poll(() => getSections(container)['Public URL']).toBe('–');
+    expect(getSections(container)['Used in']).toBe('Loading…');
+
+    // The details can’t be retrieved, so only the basic info is shown
+    reject(new Error('Failed'));
+    await expect.poll(() => getSections(container)['Used in']).toBe('None');
+    expect(getSections(container)['Public URL']).toBe('–');
+    expect(getSections(container)['File Path']).toBe('/static/uploads/second.txt');
+    expect(error).toHaveBeenCalledWith(expect.objectContaining({ message: 'Failed' }));
+  });
+
+  test('ignores a late failure to get the details of an asset focused earlier', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const { promise, reject } = Promise.withResolvers();
+
+    vi.mocked(getAssetDetails).mockReturnValueOnce(/** @type {any} */ (promise));
+
+    const first = createMockAsset({ name: 'first.txt' });
+    const second = createMockAsset({ name: 'second.txt' });
+    const { container, rerender } = await render(InfoPanel, { asset: first });
+
+    await rerender({ asset: second });
+    await expect.poll(() => getSections(container)['Public URL']).toMatch(/second\.txt$/);
+
+    reject(new Error('Failed'));
+    await vi.waitFor(() =>
+      expect(error).toHaveBeenCalledWith(expect.objectContaining({ message: 'Failed' })),
+    );
+    await expect.poll(() => getSections(container)['Used in']).toBe('None');
     expect(getSections(container)['Public URL']).toMatch(/second\.txt$/);
   });
 

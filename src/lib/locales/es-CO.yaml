@@ -1091,7 +1091,7 @@ edit_slug_error:
   invalid: El slug no puede contener caracteres especiales, incluidas las barras y los espacios.
   duplicate: Este slug ya se usa para otra entrada.
 
-# Entry path editing in a nested collection
+# Entry path editing for nested entries
 # Heading for the parent folder picker shown when the `meta.path` option is enabled
 entry_parent_folder: Carpeta principal
 new_parent_folder: Nueva carpeta
@@ -1488,6 +1488,10 @@ cloud_storage:
       requested: Iniciando sesión…
       error: El nombre de usuario o la contraseña son incorrectos. Verifícalos e inténtalo de nuevo.
 
+  # Shared by the S3-compatible services, unless overridden below
+  s3:
+    auth_key_label: Clave de acceso secreta
+
   # Service-specific configurations
   cloudinary:
     iframe_title: Biblioteca multimedia de Cloudinary
@@ -1499,15 +1503,6 @@ cloud_storage:
 
   uploadcare:
     auth_key_label: Clave secreta de API
-
-  aws_s3:
-    auth_key_label: Clave de acceso secreta
-
-  cloudflare_r2:
-    auth_key_label: Clave de acceso secreta
-
-  digitalocean_spaces:
-    auth_key_label: Clave de acceso secreta
 
 # ==============================================================================
 # Configuration Validation
@@ -1565,7 +1560,7 @@ config:
     oauth_implicit_flow: El método de autenticación configurado (flujo implícito) no es compatible con Sveltia CMS. Usa un <a>método de autenticación</a> diferente en su lugar.
     github_pkce_unsupported: La autorización PKCE aún no es compatible debido a las limitaciones de GitHub. Usa un <a>método de autenticación</a> diferente en su lugar.
     oauth_no_app_id: No se ha definido el ID de la aplicación OAuth.
-    # Don’t localize `open_authoring` and `editorial_workflow`
+    # Don’t localize `open_authoring`, `editorial_workflow` and `preview`
     open_authoring_no_workflow: La opción `open_authoring` requiere el modo de publicación `editorial_workflow`. Consulta la <a>documentación</a> para más detalles.
     # Don’t localize `auth_methods`
     no_auth_methods: La opción `auth_methods` debe contener al menos un método.
@@ -1979,13 +1974,23 @@ prefs:
       description: Mostrar el subrayado de los enlaces en la vista previa de la entrada y en las etiquetas de la interfaz de usuario.
       switch_label: Subrayar siempre los enlaces
 
-  # Advanced panel
-  advanced:
-    title: Avanzado
-    beta:
-      title: Funciones beta
-      description: Habilitar algunas funciones beta que pueden ser inestables o no estar traducidas.
-      switch_label: Unirse al programa beta
+  # Data Management panel
+  data:
+    clear_data:
+      title: Borrar datos
+      # Clear File Cache button
+      file_cache:
+        description: Elimina el contenido de los archivos y las miniaturas de imágenes almacenados en la caché local para liberar espacio o resolver problemas causados por datos obsoletos.
+        button_label: Limpiar la caché de archivos
+        confirmation: Se eliminarán el contenido de los archivos y las miniaturas de imágenes almacenados en la caché local. Tus borradores sin guardar y tu configuración se conservarán, y los datos eliminados se volverán a descargar o generar cuando sea necesario. El CMS se recargará al terminar.
+      # Erase All Data button
+      all_data:
+        description: Elimina todo lo que el CMS guarda en este navegador, incluidos los archivos en caché, los borradores sin guardar y la configuración. Lo que ya esté guardado en tu repositorio no se verá afectado.
+        button_label: Borrar todos los datos
+        confirmation: Se eliminarán todos los datos almacenados en este navegador, incluidos el contenido de los archivos en caché, las miniaturas de imágenes, los borradores sin guardar, la configuración y el estado de inicio de sesión. Tu repositorio no se verá afectado, pero se perderá cualquier cambio que no hayas guardado y tendrás que iniciar sesión de nuevo. El CMS se recargará al terminar.
+
+  # Developer panel
+  developer:
     developer_mode:
       title: Modo de desarrollador
       description: Habilitar algunas funciones orientadas a desarrolladores, incluidos registros detallados en la consola y menús contextuales nativos.
@@ -2003,18 +2008,6 @@ prefs:
         field_label: Encabezado de autorización (p. ej., Bearer <token>) (opcional)
         saved: Encabezado de autorización guardado.
         removed: Encabezado de autorización eliminado.
-    clear_data:
-      title: Borrar datos
-      # Clear File Cache button
-      file_cache:
-        description: Elimina el contenido de los archivos y las miniaturas de imágenes almacenados en la caché local para liberar espacio o resolver problemas causados por datos obsoletos.
-        button_label: Limpiar la caché de archivos
-        confirmation: Se eliminarán el contenido de los archivos y las miniaturas de imágenes almacenados en la caché local. Tus borradores sin guardar y tu configuración se conservarán, y los datos eliminados se volverán a descargar o generar cuando sea necesario. El CMS se recargará al terminar.
-      # Erase All Data button
-      all_data:
-        description: Elimina todo lo que el CMS guarda en este navegador, incluidos los archivos en caché, los borradores sin guardar y la configuración. Lo que ya esté guardado en tu repositorio no se verá afectado.
-        button_label: Borrar todos los datos
-        confirmation: Se eliminarán todos los datos almacenados en este navegador, incluidos el contenido de los archivos en caché, las miniaturas de imágenes, los borradores sin guardar, la configuración y el estado de inicio de sesión. Tu repositorio no se verá afectado, pero se perderá cualquier cambio que no hayas guardado y tendrás que iniciar sesión de nuevo. El CMS se recargará al terminar.
 
 # ==============================================================================
 # Keyboard Shortcuts

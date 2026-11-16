@@ -174,6 +174,70 @@ describe('events module', () => {
       consoleError.mockRestore();
     });
 
+    it.each(['postSave', 'postPublish', 'postUnpublish'])(
+      'should not throw if %s event hooks fail',
+      async (type) => {
+        const error = new Error('Event hook error');
+        const failingHandler = vi.fn().mockRejectedValue(error);
+        const nextHandler = vi.fn();
+        const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+        eventHookRegistry.add(/** @type {any} */ ({ name: type, handler: failingHandler }));
+        eventHookRegistry.add(/** @type {any} */ ({ name: type, handler: nextHandler }));
+
+        // The change has already been made by the time a `post*` hook runs, so its failure is only
+        // reported: a rejection would make a successful save or publish look like it failed
+        await expect(
+          callEventHooks(
+            /** @type {any} */ ({
+              type,
+              entry: { slug: 'test-post', locales: { en: { content: {}, path: 'posts/a.md' } } },
+              collection: { name: 'posts', _i18n: { defaultLocale: 'en' } },
+              collectionFile: null,
+              isNew: false,
+            }),
+          ),
+        ).resolves.toBeUndefined();
+
+        expect(consoleError).toHaveBeenCalledWith(`The ${type} event hook failed`, error);
+        // The other hooks still run
+        expect(nextHandler).toHaveBeenCalledOnce();
+
+        consoleError.mockRestore();
+      },
+    );
+
+    it.each(['preSave', 'prePublish', 'preUnpublish'])(
+      'should throw if %s event hooks fail, which stops the operation',
+      async (type) => {
+        const nextHandler = vi.fn();
+
+        eventHookRegistry.add(
+          /** @type {any} */ ({
+            name: type,
+            handler: vi.fn(async () => {
+              throw new Error('Event hook error');
+            }),
+          }),
+        );
+        eventHookRegistry.add(/** @type {any} */ ({ name: type, handler: nextHandler }));
+
+        await expect(
+          callEventHooks(
+            /** @type {any} */ ({
+              type,
+              entry: { slug: 'test-post', locales: { en: { content: {}, path: 'posts/a.md' } } },
+              collection: { name: 'posts', _i18n: { defaultLocale: 'en' } },
+              collectionFile: null,
+              isNew: false,
+            }),
+          ),
+        ).rejects.toThrow('Event hook error');
+
+        expect(nextHandler).not.toHaveBeenCalled();
+      },
+    );
+
     it('should fall back to another locale when the default one has no file', async () => {
       const handler = vi.fn();
 
@@ -193,6 +257,67 @@ describe('events module', () => {
       );
 
       expect(handler).toHaveBeenCalledWith(expect.objectContaining({ entry: expect.any(Object) }));
+    });
+
+    it('should write the data updated by a preSave hook back to the locale standing in for the default one', async () => {
+      // A Decap-style handler returning the updated data rather than the whole entry
+      const handler = vi.fn(({ entry }) => entry.get('data').set('title', 'Updated'));
+
+      eventHookRegistry.add(/** @type {any} */ ({ name: 'preSave', handler }));
+
+      const entry = {
+        slug: 'hello',
+        locales: { fr: { content: { title: 'Bonjour' }, path: 'posts/hello.fr.md' } },
+      };
+
+      await callEventHooks(
+        /** @type {any} */ ({
+          type: 'preSave',
+          entry,
+          collection: { name: 'posts', _i18n: { defaultLocale: 'en' } },
+        }),
+      );
+
+      expect(entry.locales).toEqual({
+        fr: { content: { title: 'Updated' }, path: 'posts/hello.fr.md' },
+      });
+    });
+
+    it('should leave the locale standing in for the default one out of the other locales', async () => {
+      /** @type {any} */
+      let receivedI18n;
+
+      const handler = vi.fn(({ entry }) => {
+        receivedI18n = entry.get('i18n').toJS();
+
+        return entry
+          .setIn(['data', 'title'], 'Updated')
+          .setIn(['i18n', 'ja', 'data', 'title'], '更新');
+      });
+
+      eventHookRegistry.add(/** @type {any} */ ({ name: 'preSave', handler }));
+
+      const entry = {
+        slug: 'hello',
+        locales: {
+          fr: { content: { title: 'Bonjour' }, path: 'posts/hello.fr.md' },
+          ja: { content: { title: 'こんにちは' }, path: 'posts/hello.ja.md' },
+        },
+      };
+
+      await callEventHooks(
+        /** @type {any} */ ({
+          type: 'preSave',
+          entry,
+          collection: { name: 'posts', _i18n: { defaultLocale: 'en' } },
+        }),
+      );
+
+      expect(receivedI18n).toEqual({ ja: { data: { title: 'こんにちは' } } });
+      expect(entry.locales).toEqual({
+        fr: { content: { title: 'Updated' }, path: 'posts/hello.fr.md' },
+        ja: { content: { title: '更新' }, path: 'posts/hello.ja.md' },
+      });
     });
 
     it('should handle an entry with no locale at all', async () => {
@@ -682,6 +807,47 @@ describe('events module', () => {
       expect(savingEntry.locales.en.content).toEqual({
         title: 'Modified Title',
         body: 'Modified Body',
+      });
+    });
+
+    it('should keep the dotted keys in the data a preSave handler sees and returns', async () => {
+      /** @type {any} */
+      let receivedData;
+
+      const handler = vi.fn(({ entry }) => {
+        receivedData = entry.get('data').toJS();
+
+        return entry.setIn(['data', 'redirects', 'new.example.com'], 'c');
+      });
+
+      eventHookRegistry.add({ name: 'preSave', handler });
+
+      const savingEntry = {
+        slug: 'test-post',
+        locales: {
+          en: {
+            content: { 'redirects.example\uE000com': 'a', 'nav\uE000home': 'Home' },
+            path: 'posts/test-post.md',
+          },
+        },
+      };
+
+      await callEventHooks(
+        /** @type {any} */ ({
+          type: 'preSave',
+          entry: savingEntry,
+          collection: { name: 'posts', _i18n: { defaultLocale: 'en' } },
+          collectionFile: null,
+          isNew: true,
+        }),
+      );
+
+      expect(receivedData).toEqual({ redirects: { 'example.com': 'a' }, 'nav.home': 'Home' });
+      // The content is flattened again with the dots escaped
+      expect(savingEntry.locales.en.content).toEqual({
+        'redirects.example\uE000com': 'a',
+        'redirects.new\uE000example\uE000com': 'c',
+        'nav\uE000home': 'Home',
       });
     });
 

@@ -119,6 +119,7 @@ welcome_message: Welcome to {$name}
 powered_by: Powered by {$name}
 
 # Shown during initial configuration and data loading
+unsupported_browser_error: Your browser is not supported. Please update it to the latest version or use another browser.
 loading_cms_config: Loading CMS Configuration…
 loading_site_data: Loading Site Data…
 loading_site_data_error: There was an error while loading site data.
@@ -151,6 +152,11 @@ work_with_local_repo_description: Once prompted, select the root directory of th
 work_with_local_repo_description_no_repo: Once prompted, select the root directory of your Git repository.
 # Button label for demo/test repository
 work_with_test_repo: Work with Test Repository
+# Button label for the test repository when sample content is seeded, e.g. on a demo site
+start_demo: Start Demo
+# Shown below the disabled test repository option in a browser that can’t save files to its
+# storage, e.g. Safari before version 26
+test_repo_unsupported_browser: Your browser can’t save the files of the test repository. Please update it to the latest version or use another browser.
 
 # Authentication errors
 # Error messages shown during sign-in failures
@@ -175,14 +181,28 @@ sign_in_error:
 backend_unsupported_version: The {$name} backend requires {$name} {$version} or later.
 # {$repo} is the repository identifier, typically in owner/repo format
 repository_no_access: You don’t have access to the “{$repo}” repository.
+# {$repo} is the repository identifier, typically in owner/repo format
+repository_no_write_access: You don’t have write access to the “{$repo}” repository.
 repository_not_found: The “{$repo}” repository doesn’t exist.
 repository_empty: The “{$repo}” repository has no branches.
 # {$repo} is the repository identifier, and {$branch} is the configured branch name
 branch_not_found: The “{$repo}” repository doesn’t have the “{$branch}” branch.
+# {$repo} is the repository identifier, and {$dir} is the configured root directory
+root_dir_not_found: The root directory “{$dir}” doesn’t exist in the “{$repo}” repository.
 
 # General errors
 # Fallback error dialog title for unexpected errors
 unexpected_error: Unexpected Error
+# Shown in place of the page when an unexpected error stops it from being displayed
+# {$message} is the error message
+page_crashed: Something went wrong, and this page can’t be displayed. {$message}
+# Shown in place of a field editor or preview when an unexpected error stops it from being displayed
+# {$message} is the error message
+field_crashed: Something went wrong, and this field can’t be displayed. {$message}
+# Button label for displaying a part of the page again after an unexpected error
+try_again: Try Again
+# Button label for reloading the CMS after an unexpected error
+reload_cms: Reload CMS
 
 # Entry file parsing errors
 # Toast notification when entry files fail to parse on initial load
@@ -222,6 +242,15 @@ sign_in_with_link_confirmation: This link signs you in as {$account} on {$servic
 signed_in_as_x: Signed In as {$name}
 working_with_local_repo: Working with Local Repository
 working_with_test_repo: Working with Test Repository
+working_in_demo_mode: Demo Mode
+
+# Demo welcome dialog: shown once after signing in to a demo site, where the test repository is
+# seeded with sample content and the changes are only stored in the browser
+demo_welcome:
+  title: Welcome to Sveltia CMS Demo
+  description: Feel free to explore the CMS and edit the sample content. Your changes are only saved in this browser. Nothing is published online, and no one else can see them.
+  reset_hint: To start over with the original content, select Erase All Data under Settings > Data Management.
+  button_label: Get Started
 
 # Account menu: action items for sign-out and app installation
 sign_out: Sign Out
@@ -237,9 +266,14 @@ install_as_app: Install as App
 contents: Contents
 assets: Assets
 editorial_workflow: Editorial Workflow
+# Name of the Editorial Workflow page when all the content uses Preview Workflow, which has no
+# review stages, so the page only lists the drafts
+drafts: Drafts
 cms_config: CMS Configuration
 # Mobile menu page title (shown only on small screens)
 menu: Menu
+# Mobile menu page section heading listing the custom pages registered by the site
+custom_pages: Pages
 
 # Mobile promo infobar: encouraging users to try the mobile version
 mobile_promo_title: Sveltia CMS is now available on mobile!
@@ -250,10 +284,36 @@ mobile_promo_button: Give it a try
 new_language_available: Sveltia CMS is now available in {$locale}!
 change_language: Change Language
 
+# Live reload infobar: shown when the CMS runs on a page that a framework’s development server (e.g.
+# Astro) reloads on every file change, instead of a static HTML file
+live_reload_warning: Your development server reloads this page whenever a file changes, which can interrupt saving and leave your files broken. Serve the CMS from a static HTML file instead. <a>Learn more</a>
+
 # Toast notification shown while the translation for the selected language is being downloaded
 # {$locale} is the localized language name, e.g., “French”
 switching_language: Switching to {$locale}…
 locale_load_failed: Couldn’t load the {$locale} translation. Please try again later.
+
+# Toast notification shown when changes saved with the local backend couldn’t be committed to Git
+# {$reason} is one of the `local_git_skip_reasons` strings below
+local_git_not_committed: Your changes have been saved but not committed to Git. {$reason} To only save the files, turn off Git commits under Settings > Developer.
+local_git_skip_reasons:
+  unsupported_repository: Your repository uses a Git feature the CMS doesn’t support, such as a linked worktree, SHA-256 object names, the reftable format, a sparse index, or an index in version 3 or 4, which the feature.manyFiles option and git add -N use.
+  missing_identity: Your name and email address aren’t set in the repository’s Git configuration, and the CMS can’t read your global one. Set them in the repository with git config --local user.name "Your Name" and git config --local user.email "you@example.com".
+  locked: Another Git process is using the repository. If none is running, delete the .git/index.lock file.
+  # The operation in progress, with how to finish or cancel it
+  operation_in_progress:
+    merge: A merge is in progress. Finish it with git commit, or cancel it with git merge --abort.
+    rebase: A rebase is in progress. Finish it with git rebase --continue, or cancel it with git rebase --abort. If you’ve moved on, git rebase --quit drops it without changing your files.
+    cherry_pick: A cherry-pick is in progress. Finish it with git cherry-pick --continue, or cancel it with git cherry-pick --abort.
+    revert: A revert is in progress. Finish it with git revert --continue, or cancel it with git revert --abort.
+    am: Applying patches with git am is in progress. Finish it with git am --continue, or cancel it with git am --abort.
+    conflict: Some files have conflicts. Resolve them and stage the results first.
+  detached_head: No branch is checked out.
+  staged_changes: You have other changes staged for commit. Commit or unstage them first.
+  # {$path} is the file path
+  lfs: '{$path} is tracked with Git LFS, which the CMS can’t commit to.'
+  # {$message} is the error message
+  error: An unexpected error occurred. {$message}
 
 # Site and page navigation
 # Toolbar button aria-label for visiting the live site
@@ -399,6 +459,7 @@ x_of_x_selected: '{$selected} of {$total} selected'
 
 # View switcher: toggle between list and grid views
 switch_view: Switch View
+table_view: Table View
 list_view: List View
 grid_view: Grid View
 switch_to_list_view: Switch to List View
@@ -412,6 +473,16 @@ switch_to_grid_view: Switch to Grid View
 # Sort menu: button labels and options
 sort: Sort
 sorting_options: Sorting Options
+# Table view column labels for the entry metadata used as `{{…}}` template tags
+table_column_keys:
+  # The folder containing the entry file
+  dirname: Folder
+  # The entry file name without the extension
+  filename: File Name
+  # The entry file extension
+  extension: Extension
+  # The enabled locales of the entry
+  locales: Languages
 # Sort key option labels
 sort_keys:
   # No sorting; entries appear in their natural repository order
@@ -617,14 +688,6 @@ enter_new_name_for_folder: |
     0   {{ Enter a new name below. }}
     one {{ Enter a new name below. The asset in the folder will be moved along, and any entry using it will be updated. }}
     *   {{ Enter a new name below. The {$count} assets in the folder will be moved along, and any entries using them will be updated. }}
-# Rename Folder dialog body text for a cloud storage service, whose files are hotlinked from the
-# entries, so a move changes the URLs and the entries aren’t updated
-enter_new_name_for_external_folder: |
-  .input {$count :integer}
-  .match $count
-    0   {{ Enter a new name below. }}
-    one {{ Enter a new name below. The file in the folder will be moved along, and its URL will change, so update any entry using it. }}
-    *   {{ Enter a new name below. The {$count} files in the folder will be moved along, and their URLs will change, so update any entries using them. }}
 # Delete Folder confirmation
 # {$name} is the folder name and {$count} is the number of assets in the folder
 confirm_deleting_folder: |
@@ -638,6 +701,9 @@ renaming_folder: Renaming the folder…
 renaming_folder_failed: Couldn’t rename the folder.
 deleting_folder: Deleting the folder…
 deleting_folder_failed: Couldn’t delete the folder.
+# Asset Library and asset picker: notice shown when a cloud storage service holds more files than
+# are listed at once
+external_assets_truncated: There are too many files on the service to list them all, so some of them are left out.
 
 # Edit options menu: button and item labels
 edit_options: Edit Options
@@ -651,6 +717,47 @@ edit_x: Edit {$name}
 
 # Asset text editor: switch for line wrapping
 wrap_long_lines: Wrap Long Lines
+
+# Move assets: dialog for moving assets to another folder in the repository
+move: Move
+move_asset: Move Asset
+# Dialog title. {$name} is the asset name when a single asset is moved, and {$count} is the number of
+# assets being moved
+move_assets_title: |
+  .input {$count :integer}
+  .match $count
+    one {{ Move {$name} }}
+    *   {{ Move {$count} Assets }}
+# Dialog body text. {$count} is the number of entries that currently use the assets
+select_asset_move_destination: |
+  .input {$count :integer}
+  .match $count
+    0   {{ Select the folder to move to. }}
+    one {{ Select the folder to move to. An entry using the assets will also be updated. }}
+    *   {{ Select the folder to move to. {$count} entries using the assets will also be updated. }}
+# Accessible label of the folder tree in the Move dialog
+asset_move_destination: Destination Folder
+# Shown when the assets being moved are all in the selected folder already
+assets_already_in_folder: |
+  .input {$count :integer}
+  .match $count
+    one {{ The asset is already in this folder. }}
+    *   {{ The assets are already in this folder. }}
+# Shown when files with the same names exist in the selected folder. {$names} is a comma-separated
+# list of file names
+asset_move_conflict: 'The following files already exist in this folder: {$names}.'
+moving_assets: Moving the assets…
+moving_assets_failed: Couldn’t move the assets.
+# Warning shown when files have been moved off a cloud storage service, but the originals couldn’t
+# be deleted from it
+asset_move_cleanup_failed: The files have been moved, but the originals couldn’t be deleted from the storage service.
+# Shown when files on a cloud storage service can’t be renamed or moved, because the entries using
+# them can’t be updated, e.g. for an Open Authoring contributor. {$count} is the number of files
+cannot_change_used_external_files: |
+  .input {$count :integer}
+  .match $count
+    one {{ This file can’t be renamed or moved, because the entries using it can’t be updated. }}
+    *   {{ These files can’t be renamed or moved, because the entries using them can’t be updated. }}
 
 # Rename asset: dialog and validation
 rename_asset: Rename Asset
@@ -669,6 +776,12 @@ enter_new_name_for_asset_error:
   empty: File name cannot be empty.
   character: File name cannot contain special characters.
   duplicate: This file name is used for another asset.
+  # A name starting with a dot hides the file, which the CMS wouldn’t list any more
+  leading_dot: File name cannot start with a dot.
+  # The name of a file next to the asset that isn’t an asset, like an entry file
+  file_duplicate: Another file with this name already exists here.
+  # The name of a folder next to the file
+  folder_duplicate: A folder with this name already exists here.
 # Shown while renaming a file whose name will be changed on saving, e.g. by the `slugify_filename`
 # media library option
 file_will_be_saved_as: The file will be saved as “{$name}”.
@@ -795,6 +908,13 @@ cannot_delete_referenced_assets: |
   .match $count
     one {{ This asset can’t be deleted, because the following fields in the entries using it would no longer be valid without it. Update those entries first. }}
     *   {{ These assets can’t be deleted, because the following fields in the entries using them would no longer be valid without them. Update those entries first. }}
+# Error shown in the asset deletion dialog when the entries using the assets couldn’t be looked up,
+# so the deletion can’t go ahead. {$count} is the number of assets being deleted
+checking_asset_references_failed: |
+  .input {$count :integer}
+  .match $count
+    one {{ Couldn’t check which entries use this asset. Close this dialog and try again. }}
+    *   {{ Couldn’t check which entries use these assets. Close this dialog and try again. }}
 
 # Delete entries: dialog titles and confirmation messages
 # {$count} is the number of entries targeted by the action
@@ -859,6 +979,40 @@ cancel_reordering_entries: Cancel Reordering Entries
 saving_reorder_failed: Failed to save new entry order. Please try again.
 
 # ==============================================================================
+# Bulk Entry Editing
+# ==============================================================================
+# Strings for editing the fields of many entries at once in a table.
+
+# Bulk edit mode: toggle buttons
+bulk_edit_entries: Edit Entries in Bulk
+save_bulk_edits: Save Bulk Edits
+cancel_bulk_edits: Cancel Bulk Edits
+
+# Bulk edit table: column header of the entry titles
+bulk_edit_entry: Entry
+
+# Bulk edit table: label of the table
+bulk_edit_table: Bulk Editor
+
+# Bulk edit table: label of a cell input; {$field} is the field label, {$entry} is the entry title
+bulk_edit_cell: '{$field} of {$entry}'
+
+# Bulk edit status: number of changed fields
+bulk_edit_count: |
+  .input {$count :integer}
+  .match $count
+    0   {{ No changes }}
+    one {{ 1 change }}
+    *   {{ {$count} changes }}
+
+# Bulk edit error messages
+bulk_edit_invalid: Some of the values aren’t valid. Fix the highlighted fields and try again.
+saving_bulk_edits_failed: Failed to save the changes. Please try again.
+
+# Bulk edit: confirmation shown when leaving the mode with unsaved changes
+discard_bulk_edits_confirm: Discard the changes made to the entries?
+
+# ==============================================================================
 # File Upload and Processing
 # ==============================================================================
 # Strings for file upload dialogs, progress indicators, and validation.
@@ -906,6 +1060,20 @@ warning_invalid_files: |
   .match $count
     one {{ This file cannot be uploaded because it’s damaged, or its content doesn’t match its file extension. This often happens when a photo is renamed rather than converted, such as a HEIC image saved as a JPEG file. Please convert the file and try again. }}
     *   {{ These files cannot be uploaded because they’re damaged, or their content doesn’t match their file extensions. This often happens when photos are renamed rather than converted, such as HEIC images saved as JPEG files. Please convert the files and try again. }}
+# {$count} is the number of files that are not of a type the field accepts, even once transformed
+# {$types} is the list of accepted file types, such as “.pdf or .txt”
+warning_unsupported_files: |
+  .input {$count :integer}
+  .match $count
+    one {{ This file cannot be uploaded because it’s not one of the following types: {$types}. }}
+    *   {{ These files cannot be uploaded because they’re not one of the following types: {$types}. }}
+# {$count} is the number of files that are not of an image type the field accepts
+# {$types} is the list of accepted image formats, such as “PNG or WebP”
+warning_unsupported_image_files: |
+  .input {$count :integer}
+  .match $count
+    one {{ This file cannot be uploaded because only an image of the following types is accepted: {$types}. }}
+    *   {{ These files cannot be uploaded because only images of the following types are accepted: {$types}. }}
 
 # File format validation when replacing an asset
 # Warning section for replacement files that are in a different format
@@ -941,6 +1109,8 @@ uploading_files_failed: Upload failed.
 # Errors shown when a file on a cloud storage service could not be deleted or renamed
 deleting_assets_failed: Delete failed.
 renaming_asset_failed: Rename failed.
+# Error shown when an edited text file in the Asset Library could not be saved
+saving_asset_failed: Save failed.
 
 # File metadata display
 # Appended when a file was auto-converted (e.g., HEIF to JPEG)
@@ -1109,6 +1279,9 @@ edit_singleton_announcement: You’re now editing the “{$file}” file.
 # Shown when CI skip is enabled/disabled
 save_and_publish: Save and Publish
 save_without_publishing: Save without Publishing
+# Shown disabled in place of `save_and_publish` while entries created or edited from a Relation
+# field are in a collection whose review can’t be skipped with the `direct_publish` option
+save_and_publish_needs_review: Save and Publish (Related Entries Need Review)
 
 # Editor options menu
 show_editor_options: Show Editor Options
@@ -1246,7 +1419,7 @@ edit_slug_error:
   invalid: The slug cannot contain special characters, including slashes and spaces.
   duplicate: This slug is used for another entry.
 
-# Entry path editing in a nested collection
+# Entry path editing for nested entries
 # Heading for the parent folder picker shown when the `meta.path` option is enabled
 entry_parent_folder: Parent Folder
 new_parent_folder: New Folder
@@ -1358,6 +1531,13 @@ validation:
     email: Please enter a valid email.
     url: Please enter a valid URL.
 
+  # Value used for the same field in another entry of the collection
+  value_not_unique: This value is used for another entry.
+  # Key of a keyed List field item used for another item of the same list
+  key_not_unique: This key is used for another item.
+  # Key of a keyed List field item that is a whole number, which doesn’t keep its order in a map
+  key_numeric: The key can’t be a whole number, as the items would lose their order.
+
   # Custom field validation error
   invalid_value: Invalid value.
   unexpected_error: Unexpected error occurred.
@@ -1395,6 +1575,13 @@ entry_sidebar:
   backlinks:
     title: Backlinks
     no_entries: No entries are referencing this entry.
+
+# Status shown next to the Save button while an entry with many new files is being saved
+# {$done} and {$total} are the number of files prepared and to prepare, or the number of commits
+# made and the estimated number of commits in all
+save_progress:
+  preparing: 'Preparing files: {$done} of {$total}'
+  committing: 'Saving to GitHub: {$done} of about {$total} commits'
 
 # Entry save error dialog
 saving_entry:
@@ -1508,12 +1695,27 @@ map_lat_lng: Map showing latitude {$latitude}, longitude {$longitude}
 remove_this_item: Remove This Item
 move_up: Move Up
 move_down: Move Down
+# Menu of a list item or file with the extra reorder actions, shown in a list of 3 or more items
+reorder_options: Reorder Options
+move_to_top: Move to Top
+move_to_bottom: Move to Bottom
+# Opens a dialog asking for the position to move a list item to
+move_to: Move to…
+# Dialog asking for the new position of an item. {$count} is the number of items in the list
+move_to_description: Enter a position from 1 to {$count}.
+move_to_position: Position
 # aria-label for the drag handle that reorders a list item. The item can be dragged with a pointer,
 # or moved with the arrow keys while the handle has focus
 reorder_item: Reorder Item
 # aria-label for the text input holding one item of a simple List field, which has no subfield to
 # take a label from
 list_item_value: Item Value
+# aria-label for each item of a List field, giving its position in the list
+# {$position} is the 1-based position of the item, {$count} is the number of items
+list_item_position: Item {$position} of {$count}
+# Message shown in place of a removed List field item or Object field, next to a Restore button
+# that puts it back
+item_removed: Item removed.
 
 # Add item button label, also used by the Relation field to create a new entry in the referenced
 # collection, with the collection’s singular label
@@ -1526,6 +1728,30 @@ add_x: Add {$name}
 list_item_options: List Item Options
 add_item_above: Add Item Above
 add_item_below: Add Item Below
+paste_item_above: Paste Item Above
+paste_item_below: Paste Item Below
+paste_item_to_replace: Paste to Replace
+
+# List item clipboard
+# Button in the list toolbar to paste a copied item, from any list in any entry, at the end of the
+# list, or at the start with the `add_to_top` option
+paste_item: Paste Item
+list_item_copied: Item copied.
+# ⋮ stands for the icon of the item menu button; keep it, along with the button’s aria-label
+no_list_item_to_paste: There’s no copied item to paste. To copy one, open an item’s ⋮ (List Item Options) menu and select Copy.
+list_item_not_compatible: The copied item doesn’t fit in this list.
+# {$count} is the number of the values left out, as the list doesn’t have the fields
+list_item_pasted_without_values: |
+  .input {$count :integer}
+  .match $count
+    one {{ Item pasted. A value this list doesn’t take was left out. }}
+    *   {{ Item pasted. {$count} values this list doesn’t take were left out. }}
+# {$count} is the number of the files the pasted item references that couldn’t be found
+list_item_pasted_without_files: |
+  .input {$count :integer}
+  .match $count
+    one {{ Item pasted, but a file it uses couldn’t be found. Check the file fields in the item. }}
+    *   {{ Item pasted, but {$count} files it uses couldn’t be found. Check the file fields in the item. }}
 
 # Variable-type list selector
 select_list_type: Select List Type
@@ -1544,12 +1770,37 @@ opacity: Opacity
 # Select field: empty option placeholder
 unselected_option: (None)
 
-# Relation field: creating a referenced entry without leaving the editor
+# Relation field: creating or editing a referenced entry without leaving the editor
 relation_field:
   # Note shown in the dialog. {$name} is the singular label of the referenced collection
   save_together_hint: The new {$name} will be saved along with the entry you’re editing.
   # Error shown when the entry couldn’t be prepared. {$name} is the singular label of the collection
   add_failed: The {$name} couldn’t be added. Check the browser console for details.
+  # Title of the dialog to edit an entry selected in the field. {$name} is the singular label of the
+  # referenced collection
+  edit_entry_title: Editing {$name}
+  # Note shown in the dialog. {$name} is the singular label of the referenced collection
+  edit_together_hint: Your changes to the {$name} will be saved along with the entry you’re editing.
+  # Error shown when the changes couldn’t be prepared. {$name} is the singular label of the collection
+  edit_failed: The changes to the {$name} couldn’t be applied. Check the browser console for details.
+  # Error shown when the changes would move the entry to another file path, e.g. through a path
+  # template using a field. {$name} is the singular label of the collection
+  move_unsupported: These changes would move the {$name} to another location, which can only be done by editing it on its own.
+  # Error shown when saving, if someone else has changed an entry edited from the field since. {$name}
+  # is the summary of that entry
+  edit_conflict: “{$name}” has been changed by someone else since you edited it. Open it again from the field to review your changes against the latest version.
+  # Error shown when saving, if someone else has deleted an entry edited from the field since.
+  # {$name} is the summary of that entry
+  edit_deleted: “{$name}” has been deleted by someone else since you edited it. Remove it from the field to save the entry.
+  # Accessible label of the menu listing the selected entries that can be edited
+  select_entry_to_edit: Select an Entry to Edit
+  # Warning shown in the editor of an entry that has been edited from a Relation field of another
+  # entry, while the changes wait in that entry’s pull request. {$name} is the summary of that
+  # entry
+  edited_with_entry: Changes to this entry are waiting to be published along with “{$name}”. If you save it now, the two sets of changes will be combined when that entry is published, which may fail if they overlap.
+  # Warning shown in the dialog when an entry edited from the field has been changed by someone else
+  # since. {$name} is the singular label of the collection
+  changed_since_edit: This {$name} has been changed by someone else since you edited it. Your changes are shown on top of the latest version. Review them before updating.
 
 # Select Assets dialog
 assets_dialog:
@@ -1575,6 +1826,8 @@ assets_dialog:
       one {{ {$count} folder selected }}
       *   {{ {$count} folders selected }}
   no_subfolders: This folder has no subfolders.
+  # Shown for a cloud storage service whose `prefix` option depends on fields of the entry
+  prefix_unresolved: Fill in the fields this location depends on to browse and upload its files.
 
   # Asset folder options
   folder:
@@ -1615,6 +1868,9 @@ assets_dialog:
   photo_credit:
     title: Photo Credit
     description: 'Use the following credit if possible:'
+    # {$field} is the label of the Markdown field the credit is added to
+    insert_to_field: Insert to {$field}
+    copy_as_markdown: Copy as Markdown
 
   # Unsaved asset badge
   unsaved: Unsaved
@@ -1650,19 +1906,14 @@ youtube_video_player: YouTube video player
 today: Today
 now: Now
 
-# Rich-text editor: table insertion dialog
-insert_table: Insert Table
-table_rows: Rows
-table_cols: Columns
-
 # Rich-text editor: component field labels
 editor_components:
   image: Image
-  table: Table
   src: Source
   alt: Alt Text
   title: Title
   link: Link
+  caption: Caption
 
 # Key-Value field: column headers and validation
 key_value:
@@ -1711,6 +1962,10 @@ cloud_storage:
       requested: Signing in…
       error: Username or password is incorrect. Please double-check and try again.
 
+  # Shared by the S3-compatible services, unless overridden below
+  s3:
+    auth_key_label: Secret Access Key
+
   # Service-specific configurations
   cloudinary:
     iframe_title: Cloudinary media library
@@ -1723,17 +1978,14 @@ cloud_storage:
   uploadcare:
     auth_key_label: API Secret Key
 
-  aws_s3:
-    auth_key_label: Secret Access Key
+  azure_blob_storage:
+    auth_key_label: SAS Token
+
+  backblaze_b2:
+    auth_key_label: Application Key
 
   bunny_storage:
     auth_key_label: Storage Zone Password
-
-  cloudflare_r2:
-    auth_key_label: Secret Access Key
-
-  digitalocean_spaces:
-    auth_key_label: Secret Access Key
 
 # ==============================================================================
 # Configuration Validation
@@ -1788,20 +2040,33 @@ config:
     unsupported_backend_suggestion: Use one of the <a>supported backends</a> instead.
     missing_repository: The repository is not defined.
     invalid_repository: The configured repository is invalid. It must be in “owner/repo” format.
+    # Don’t localize `api_root`
+    missing_api_root: The `api_root` option is not defined. It’s required for the Forgejo backend.
+    invalid_root_dir: The root directory is invalid. It must be a path within the repository, without “..”.
+    invalid_root_dir_branch: The root directory can’t be used in the branch names of the `editorial_workflow` and `preview` publish modes. No part of its path can start with a dot, end with “.lock” or contain a space or a special character such as a colon or an asterisk.
+    path_outside_root_dir: The path “{$path}” leads outside the root directory, where the CMS can’t list files.
     oauth_implicit_flow: The configured authentication method (implicit flow) is not supported in Sveltia CMS. Use a different <a>authentication method</a> instead.
     github_pkce_unsupported: PKCE authorization is not yet supported due to GitHub’s limitations. Use a different <a>authentication method</a> instead.
     oauth_no_app_id: OAuth application ID is not defined.
-    # Don’t localize `open_authoring` and `editorial_workflow`
-    open_authoring_no_workflow: The `open_authoring` option requires the `editorial_workflow` publish mode. See the <a>documentation</a> for details.
+    # Don’t localize `open_authoring`, `editorial_workflow` and `preview`
+    open_authoring_no_workflow: The `open_authoring` option requires the `editorial_workflow` or `preview` publish mode. See the <a>documentation</a> for details.
     # Don’t localize `auth_methods`
     no_auth_methods: The `auth_methods` option must contain at least one method.
+    # Don’t localize `auth_scope`, `repo` and `public_repo`
+    auth_scope_no_repo: The `auth_scope` option must include `repo` or `public_repo`.
     missing_media_folder: The media folder is not defined.
     public_folder_relative_path: The configured public folder is invalid. It must be an absolute path starting with “/”.
     public_folder_absolute_url: An absolute URL for the public folder option is not supported in Sveltia CMS.
+    # {$option} is `media_folder` or `public_folder` and {$tag} is the template tag from the configuration; Don’t localize the template tags. The curly brackets are escaped with backslashes for MessageFormat 2
+    unsupported_folder_template_tag: The `{$option}` option contains the `{$tag}` template tag, which isn’t supported there. Only the slug template tags, such as `\{\{slug\}\}` and `\{\{year\}\}`, and the `\{\{dirname\}\}`, `\{\{filename\}\}`, `\{\{extension\}\}`, `\{\{media_folder\}\}` and `\{\{public_folder\}\}` tags can be used.
+    # {$option} is `media_folder` or `public_folder` and {$tag} is the template tag from the configuration; Don’t localize the template tags. The curly brackets are escaped with backslashes for MessageFormat 2
+    global_folder_template_tag: The `{$option}` option contains the `{$tag}` template tag, which can only be used in the option of a collection, a collection file or a field, where there is an entry to fill it in with.
     # {$replacement} is the configured replacement string; Don’t localize `sanitize_replacement`
     invalid_sanitize_replacement: The `sanitize_replacement` option is set to `{$replacement}`, but it contains a character that can’t be used in a slug, so it can’t stand in for one.
     # {$option} is the option name (`site_url` or `display_url`) and {$url} is the configured value
     invalid_url_option: The `{$option}` option is set to `{$url}`, but it must be an absolute URL starting with `https://` or `http://`.
+    # Don’t localize `publish_mode`, `stages`, `draft`, `pending_review` and `pending_publish`
+    invalid_publish_mode_stages: The `stages` option of `publish_mode` must start with `draft` and list the stages in the order `draft`, `pending_review`, `pending_publish`, without repeating any.
     # Don’t localize `i18n` and `locales`
     i18n_no_locales: The `i18n.locales` option must list at least one locale.
     # {$locale} is the locale code from the configuration; Don’t localize `default_locale` and `locales`
@@ -1828,13 +2093,15 @@ config:
     invalid_collection_multiple_options: The collection cannot have more than one of the `folder`, `file`, `files` and `divider` options.
     # {$extension} is the file extension and {$format} is the configured content format
     file_format_mismatch: The `{$extension}` extension doesn’t match the `{$format}` format.
+    # {$name} is the field name from the configuration and {$widget} is its field type
+    front_matter_body_field_not_text: The `{$name}` field is saved as the body below the front matter, which can only hold text, not a number, a boolean, a list or an object as a `{$widget}` field does. Use a field type holding text, or rename the field.
     # {$file} is the file path from the configuration; Don’t localize `file` and `locale`. The curly
     # brackets are escaped with backslashes for MessageFormat 2
     invalid_collection_data_file: The `file` option `{$file}` is invalid. It must be the path to a JSON file, without the `\{\{locale\}\}` placeholder.
     # {$prop} is the option name; Don’t localize `file`
     unsupported_collection_data_file_option: The `{$prop}` option is not supported in a collection with the `file` option.
     # Don’t localize `file`, `publish_mode` and `simple`
-    collection_data_file_workflow: Editorial Workflow, including Open Authoring, is not supported in a collection with the `file` option. Set the collection’s `publish_mode` option to `simple`.
+    collection_data_file_workflow: Editorial Workflow and Preview Workflow, including Open Authoring, are not supported in a collection with the `file` option. Set the collection’s `publish_mode` option to `simple`.
     # {$prop} is the option name; Don’t localize `file` and `slug`. The curly brackets are escaped
     # with backslashes for MessageFormat 2
     collection_data_file_slug_tag: The `{$prop}` option can’t contain the `\{\{slug\}\}` tag in a collection with the `file` option, as an entry’s slug is its position, which changes when the entries are reordered or deleted. Use a field with a unique value instead.
@@ -1850,12 +2117,22 @@ config:
     option_field_not_found: The `{$option}` option refers to `{$name}`, but no such field is defined.
     # {$name} is the field name from the configuration and {$widget} is its field type; Don’t localize `thumbnail`
     thumbnail_field_not_media: The `thumbnail` option refers to `{$name}`, but it must be an Image or File field, not a `{$widget}` field.
+    # Don’t localize `inline` or `multiple`
+    invalid_inline_component_fields: The `inline` mode requires a single Boolean, Color, DateTime, Number, Relation, Select or String field. A Relation or Select field can’t have the `multiple` option enabled.
     # {$option} is an option name such as `pattern` or `filter` and {$pattern} is the configured pattern
     invalid_regex: The `{$option}` option contains an invalid regular expression `{$pattern}`, which is ignored.
     # {$name} is the group name from the configuration; Don’t localize `reorder`, `group` and `view_groups`
     invalid_reorder_group: The `reorder` option refers to a view group named `{$name}`, but no such group is defined in the `view_groups` option.
+    # {$name} is the field name from the configuration; Don’t localize `bulk_edit` and `fields`
+    invalid_bulk_edit_field: The `fields` list of the `bulk_edit` option refers to a field named `{$name}`, but no such top-level field is defined in the collection.
+    # {$name} is the field name from the configuration; Don’t localize `bulk_edit`, `fields` and `multiple`
+    unsupported_bulk_edit_field: The `{$name}` field in the `fields` list of the `bulk_edit` option can’t be edited in bulk. Only a Boolean, Color, DateTime, Number, Relation, Select or String field that isn’t read-only, doesn’t have the `multiple` option enabled and isn’t set automatically on save is supported.
     # {$name} is the field name from the configuration; Don’t localize `sortable_fields`
     invalid_sortable_field: The `sortable_fields` option refers to a field named `{$name}`, but no such field is defined in the collection.
+    # Don’t localize `sortable_fields` and `default_sort`
+    multiple_sortable_field_defaults: Only one item in the `sortable_fields` option can have the `default_sort` option.
+    # {$option} is `table_columns` or `summary_fields`, and {$name} is the field name from the configuration
+    invalid_table_column_field: The `{$option}` option refers to a field named `{$name}`, but no such field is defined in the collection.
     # {$name} is the field name from the configuration; Don’t localize `view_groups`
     invalid_view_group_field: The `view_groups` option refers to a field named `{$name}`, but no such field is defined in the collection.
     # {$name} is the field name from the configuration; Don’t localize `view_filters`
@@ -1931,7 +2208,7 @@ config:
     # {$min} and {$max} are option names such as `min` and `max` or `minlength` and `maxlength`
     invalid_range_options: The `{$min}` option must not be greater than the `{$max}` option.
     # {$step} is the configured value; Don’t localize `step`
-    invalid_step: The `step` option is set to `{$step}`, but it must be greater than zero.
+    invalid_step: The `step` option is set to `{$step}`, but it must be greater than zero, or `-1` to turn stepping off.
     # Don’t localize `options`
     select_field_no_options: The Select field must have at least one item in the `options` option.
     # {$value} is the option value from the configuration; Don’t localize `options`
@@ -1950,6 +2227,24 @@ config:
     list_field_default_missing_type: The List field’s `default` option contains an item without the `{$typeKey}` property, which identifies one of the `types`.
     # {$typeKey} is the configured type key, `type` by default, and {$value} is its value in the default item; Don’t localize `default` and `types`
     list_field_invalid_default_type: The List field’s `default` option contains an item whose `{$typeKey}` property is `{$value}`, but it’s not one of the `types`.
+    # Don’t localize `map_key_field`, `fields` and `types`
+    list_field_map_key_no_subfields: The List field’s `map_key_field` option requires the `fields` or `types` option, as each key is taken from a subfield.
+    # {$name} is the subfield name; Don’t localize `map_key_field`
+    list_field_map_key_not_found: The List field’s `map_key_field` option refers to `{$name}`, but no subfield has that name.
+    # {$name} is the subfield name, and {$type} is the variable type name; Don’t localize `map_key_field`
+    list_field_map_key_missing_in_type: The List field’s `map_key_field` option refers to `{$name}`, but the `{$type}` type has no subfield with that name.
+    # {$name} is the subfield name, and {$widget} is its field type; Don’t localize `map_key_field`
+    list_field_map_key_invalid_type: The List field’s `map_key_field` option refers to `{$name}`, but it must be a String, Relation or Select field, not a `{$widget}` field.
+    # {$name} is the subfield name; Don’t localize `map_key_field` and `multiple`
+    list_field_map_key_multiple: The List field’s `map_key_field` option refers to `{$name}`, but the subfield can’t take multiple values, as each item needs a single key. Remove its `multiple` option.
+    # {$name} is the subfield name; Don’t localize `map_key_field`
+    list_field_map_key_option_not_string: The List field’s `map_key_field` option refers to `{$name}`, but the subfield’s options must have string values, as each key is stored as a string.
+    # {$name} is the subfield name; Don’t localize `map_key_field` and `required`
+    list_field_map_key_not_required: The List field’s `map_key_field` option refers to `{$name}`, but the subfield can’t be optional, as each item needs a key. Remove its `required` option.
+    # {$name} is the subfield name; Don’t localize `map_key_field`, `i18n: false` and `i18n: duplicate`
+    list_field_map_key_not_localized: 'The List field’s `map_key_field` option refers to `{$name}`, but the subfield can’t have `i18n: false`, as the items need a key in every locale. Use `i18n: duplicate` or remove the option.'
+    # Don’t localize `i18n`, `duplicate_if_empty`, `multiple` and `true`
+    duplicate_if_empty_multiple: 'The `i18n: duplicate_if_empty` option is not supported for a field with the `multiple` option, so the field works like one with `i18n: true`.'
     # Don’t localize `default` and `multiple`
     invalid_default_multiple: The `default` option must be an array because the `multiple` option is `true`.
     invalid_default_single: The `default` option must be a single value, not an array, because the `multiple` option is not `true`.
@@ -1963,6 +2258,10 @@ config:
     code_field_invalid_default_object: The Code field’s `default` option must be a string because the `output_code_only` option is `true`.
     # {$key} is a property name of the default object, {$code} and {$lang} are the configured property names; Don’t localize `default` and `keys`
     code_field_invalid_default_key: The Code field’s `default` option has the `{$key}` property, but the `keys` option only allows `{$code}` and `{$lang}`.
+    # {$valueType} is the configured value type; Don’t localize `value` and `value_type`
+    compute_field_invalid_expression: The Compute field’s `value` option must be a valid arithmetic expression, like `\{\{fields.price\}\} * \{\{fields.quantity\}\}`, because the `value_type` option is `{$valueType}`.
+    # {$valueType} is the configured value type; Don’t localize `value` and `value_type`
+    compute_field_uuid_in_expression: The Compute field’s `value` option can’t use a UUID tag like `\{\{uuid\}\}` because the `value_type` option is `{$valueType}`, which makes it an arithmetic expression.
     # {$value} is the default value and {$valueType} is the configured value type; Don’t localize `default` and `value_type`
     number_field_default_not_integer: The Number field’s `default` option is set to `{$value}`, but it must be an integer because the `value_type` option is `{$valueType}`.
     number_field_default_not_number: The Number field’s `default` option is set to `{$value}`, but it must be a number because the `value_type` option is `{$valueType}`.
@@ -1978,10 +2277,13 @@ config:
     # The curly brackets are escaped with backslashes for MessageFormat 2
     relation_field_array_file_slug: The relation to the `{$collection}` collection can’t store the `\{\{slug\}\}` value, as an entry’s slug in a collection with the `file` option is its position, which changes when the entries are reordered or deleted. Set the `value_field` option to a field with a unique value instead.
     # {$collection} is the referenced collection name; Don’t localize `file`
-    relation_field_array_file_workflow: A collection with the `file` option can’t have a relation to the `{$collection}` collection, which uses Editorial Workflow, as the references to an entry renamed or deleted there can’t be updated in the file.
+    relation_field_array_file_workflow: A collection with the `file` option can’t have a relation to the `{$collection}` collection, which uses Editorial Workflow or Preview Workflow, as the references to an entry renamed or deleted there can’t be updated in the file.
     relation_field_invalid_display_field: The referenced display field `{$field}` is invalid or not defined.
     relation_field_invalid_search_field: The referenced search field `{$field}` is invalid or not defined.
     relation_field_invalid_filter_field: The referenced filter field `{$field}` is invalid or not defined.
+    relation_field_invalid_sort_field: The referenced sort field `{$field}` is invalid or not defined.
+    # Don’t localize `sort_by` and `file`
+    relation_field_sort_by_file_ignored: The `sort_by` option doesn’t apply to a relation to a file, whose options follow the order of the list items. It will be ignored.
     unexpected: Unexpected error
 
     # Schema validation errors, reported when the configuration doesn’t match the published JSON
@@ -2014,10 +2316,30 @@ config:
   # Warning messages (logged to console)
   warning:
     oauth_no_app_id: OAuth application ID is not defined. Users are required to provide an access token to sign in.
+    # Don’t localize `prefix`
+    site_library_prefix_template: The `prefix` option of a media library contains template tags, which are only supported at the field level, as there is no entry to fill them with at the top level.
     # {$prop} is the unsupported option name that will be ignored
     unsupported_ignored_option: The `{$prop}` option is not supported in Sveltia CMS. It will be ignored.
+    # Don’t localize `stages`, `publish_mode`, `editorial_workflow` and {$type}, which is `preview` or `simple`
+    publish_mode_stages_ignored: The `stages` option of `publish_mode` only applies to the `editorial_workflow` publish mode, so it’s ignored with `{$type}`.
+    # Don’t localize `pattern`, `m` and `s`
+    inline_component_multiline_pattern: The `pattern` of this inline component has the `m` or `s` flag or matches line breaks, but an inline component is only matched within a paragraph.
+    # {$name} is a button or component name and {$option} is `buttons` or `editor_components`; Don’t localize them and `multiline: false`
+    single_line_block_item: 'The `{$name}` item of the `{$option}` option is ignored, as a field with `multiline: false` can only hold inline content.'
     # Don’t localize `picker_utc`, `input_timezone`, and `output_utc`
     conflicting_timezone_options: Both `picker_utc` and newer timezone options (`input_timezone` or `output_utc`) are set. The new options take precedence. Consider removing `picker_utc` from your configuration.
+    # Don’t localize `localize_format` and `format`
+    localize_format_without_format: The `localize_format` option has no effect, because the field has no `format` option and its value is stored in the ISO 8601 format.
+    # {$name} is a template tag like `fields.lines.*.price`; Don’t localize `value`, `*` and `sum()`
+    compute_field_wildcard_without_item: The Compute field’s `value` option refers to `{$name}`, but the field isn’t in an item of the list that `*` stands for, so it resolves to nothing. Only an aggregate function like `sum()` can use every item of a list.
+    # {$name} is a template tag like `fields.lines.*.amount`; Don’t localize `value`
+    compute_field_self_reference: The Compute field’s `value` option refers to the field itself as `{$name}`, so its value changes every time it’s computed and never settles.
+    # {$name} is a template tag like `fields.total`; Don’t localize `value`
+    compute_field_reference_cycle: The Compute field’s `value` option refers to `{$name}`, another Compute field that refers back to this field, directly or through other fields, so their values never settle.
+    # Don’t localize `localize_format`, `true` and `de`
+    localize_format_without_i18n: The `localize_format` option is `true`, but i18n isn’t enabled for the collection, so the value is written in English. Set the option to a locale code like `de` instead.
+    # {$locale} is the locale code from the configuration; Don’t localize `localize_format`
+    localize_format_unsupported_locale: The `localize_format` option is set to `{$locale}`, which isn’t a supported locale, so the value is written in English.
     # Don’t localize `preview_path`
     preview_path_no_date_field: The `preview_path` option uses date and time tags, but the collection has no DateTime field to read them from, so the preview link won’t be shown.
     # {$name} is the field name from the configuration; Don’t localize `preview_path_date_field`
@@ -2028,12 +2350,22 @@ config:
     missing_identifier_field: The collection has no `{$name}` field to name new entries with, so each new entry gets a random slug. Add a `{$name}` field, or set the `identifier_field` or `slug` option.
     # Don’t localize `slug`, `i18n`, `multiple_files`, `multiple_folders` and `multiple_root_folders`
     slug_i18n_ineffective: The `i18n` option of `slug` has no effect, because the collection doesn’t use the `multiple_files`, `multiple_folders` or `multiple_root_folders` i18n structure, where each locale has a file of its own.
+    # Don’t localize `slug`, `template` and `auto_increment`
+    slug_template_ignored: The `template` option of `slug` is ignored, because the `auto_increment` option numbers the slugs instead.
+    # {$file} is the file path; Don’t localize `file`, `locale`, `i18n`, `false`,
+    # `omit_default_locale_from_file_path` and the example paths. The curly brackets in the examples
+    # are escaped with backslashes for MessageFormat 2
+    locale_not_omitted_from_file_path: The `locale` placeholder can’t be removed from the `file` path `{$file}`, so the default locale is kept in it despite the `omit_default_locale_from_file_path` i18n option. To leave the locale out, use the placeholder as a whole folder name, like `\{\{locale\}\}/about.md`, or between the file name and the extension, like `about.\{\{locale\}\}.md`. To keep it, set the option to `false` in the file’s `i18n` option.
     # Don’t localize `i18n`
     i18n_not_configured: The `i18n` option is enabled, but i18n is not configured at the top level of the configuration or in the collection, so the option has no effect.
     # Don’t localize `public_folder` and `media_folder`
     empty_public_folder: The `public_folder` option is an empty string, so the `media_folder` path is used for the asset paths saved in entries instead. Remove the option, or set it to the path you want to use, such as `/images`.
     # {$option} is an option path from the configuration, such as `filter.Regulation`
     schema_unknown_option: The `{$option}` option is not defined in the Sveltia CMS configuration schema. It will be ignored. Check for a typo or a syntax mistake.
+    # Don’t localize `default_localized`, `default` and `i18n`
+    default_localized_without_i18n: The `default_localized` option has no effect, because i18n isn’t enabled for the collection. Use the `default` option instead.
+    # {$locale} is a locale code from the configuration; Don’t localize `default_localized`
+    default_localized_unknown_locale: The `default_localized` option has a value for `{$locale}`, which isn’t one of the collection’s locales, so the value is never used.
 
   # Compatibility link appended to unsupported feature messages
   compatibility_link: 'See the compatibility notes for details: {$link}'
@@ -2066,6 +2398,11 @@ viewing_editorial_workflow: 'You’re now viewing the Editorial Workflow board. 
 # Same as above, for an Open Authoring contributor: their board has no Ready column, because only
 # a maintainer can publish
 viewing_open_authoring_workflow: 'You’re now viewing the Editorial Workflow board. Drafts: {$draft}. In Review: {$review}. Pending Deletion: {$deletion}.'
+# Same as above, when the In Review stage is left out with the `stages` publish mode option
+viewing_editorial_workflow_without_review: 'You’re now viewing the Editorial Workflow board. Drafts: {$draft}. Ready: {$ready}. Pending Deletion: {$deletion}.'
+# Same as above, when all the content uses Preview Workflow, which has no review stages, so the
+# page only lists the drafts
+viewing_preview_workflow: 'You’re now viewing the Drafts page. Drafts: {$draft}. Pending Deletion: {$deletion}.'
 
 # Workflow status names. `drafts` is the plural form used as a column heading,
 # while `draft` is the singular form used in the editor’s status button.
@@ -2124,6 +2461,14 @@ workflow:
   status_updated: Status updated.
   # Error notification when the status could not be changed
   status_change_failed: Couldn’t change the status. Please try again.
+  # Workflow page: toolbar button that reads the pull requests again, to pick up the changes made
+  # by anyone else since the board was loaded, and the toast notifications shown while doing so and
+  # once done
+  refresh: Refresh
+  refreshing: Refreshing…
+  refreshed: The board is up to date.
+  # Error notification when the board could not be refreshed
+  refresh_failed: Couldn’t refresh the board. Please try again.
   # Error notification when the status can’t be changed because the entry is incomplete. Required
   # fields can be left empty while the entry is a draft, but not once it moves on from there
   status_change_blocked: The entry has errors. Please correct them before changing the status.
@@ -2134,6 +2479,10 @@ workflow:
   # Used as both the dialog title and its OK button; the Cancel button reuses the `later` string
   send_for_review: Send for Review
   confirm_sending_for_review: Your changes have been saved as a draft. Send the entry for review so someone can look at it and publish it?
+  # Same as above, when the In Review stage is left out with the `stages` publish mode option, so
+  # the next step is to mark the entry as ready to be published
+  mark_as_ready: Mark as Ready
+  confirm_marking_as_ready: Your changes have been saved as a draft. Mark the entry as ready so it can be published?
   # Editor toolbar: button shown when the entry is ready to be published
   publish_entry: Publish Entry
   # Editor toolbar button label and confirmation dialog title, used instead of “Delete” when the
@@ -2185,6 +2534,12 @@ workflow:
   # Error notification when an entry can’t be published because its branch has been committed to
   # since the entry was opened, so what would be published isn’t what was reviewed
   publish_refused_entry_changed: The entry has been changed since you opened it. Reload the page to review the latest version before publishing it.
+  review_on_x: Review on {$service}
+  from_fork: From a fork
+  fork_entry_editable: This entry comes from a contributor’s pull request opened from “{$fork}”. Your changes are saved to their branch. Review and merge the pull request on the Git service.
+  fork_entry_locked: This entry comes from a contributor’s pull request opened from “{$fork}”. The contributor doesn’t allow maintainers to edit it, so it can only be viewed here.
+  fork_not_editable: The contributor doesn’t allow maintainers to edit this pull request.
+  fork_entry_gone: The contributor’s pull request is no longer open, so the changes can’t be saved to it.
   # Error shown in the save error dialog when an entry can’t be saved for review, because a request
   # the CMS doesn’t show is already open from the branch the entry would be saved to. `{$number}` is
   # the request number, e.g. `#12` on GitHub or `!12` on GitLab. Keep the wording free of Git jargon
@@ -2196,6 +2551,31 @@ workflow:
   # Workflow page: note on a card in the Deploying tray, marking an entry that’s being removed from
   # the site rather than published to it
   deploying_deletion: Deletion
+  # Workflow page: note on a card listing the new entries that were created from a Relation field
+  # of the entry and are published along with it, e.g. “Also adds Section: Getting Started”
+  companion_entries: Also adds {$entries}
+  # Workflow page: note on a card listing the existing entries that were edited from a Relation
+  # field of the entry and are published along with it, e.g. “Also changes Author: Ada Lovelace”
+  edited_companion_entries: Also changes {$entries}
+  # Workflow page: one of the entries listed by `companion_entries` or `edited_companion_entries`,
+  # named by its collection’s singular label and its title
+  companion_entry: '{$collection}: {$title}'
+
+# Dialog asking the user for a commit message every time changes are saved, when the site is
+# configured to. The message is recorded in the repository’s history along with the changes
+commit_message:
+  # Dialog title
+  title: Commit Message
+  # Description when the user writes the whole message, which the text box is filled in with
+  description_replace: Describe your changes. The message is recorded in the history along with them.
+  # Description when the text the user enters is added before or after a message the CMS writes
+  description_addition: Add a note to the message recorded in the history along with your changes, such as an issue number. It can be left empty.
+  # Accessible name of the text box when the user writes the whole message
+  message: Commit message
+  # Accessible name of the text box when the text is added before or after the message
+  addition: Note
+  # Preview of the message as it will be recorded. {$message} is the message
+  preview: 'Message: {$message}'
 
 # Open Authoring: a contributor without write access to the configured repository works in a fork
 # of it, and their changes reach the site through a pull request a maintainer merges
@@ -2300,7 +2680,7 @@ prefs:
         select_service: Select Service
       api_keys:
         title: Translation Service API Keys
-        description: Manage API keys for <a>translation services</a>.
+        description: Manage API keys for <a>translation services</a>. API keys for generic AI services can be managed in the AI settings.
       # API key input label, e.g., “DeepL Key”
       # {$service} is the translation service name
       field_label: '{$service} Key'
@@ -2334,6 +2714,16 @@ prefs:
       field_label: '{$service} API Key'
       no_services: No <a>cloud storage services</a> are configured.
 
+  # AI panel
+  ai:
+    title: AI
+    api_keys:
+      title: AI Service API Keys
+      description: Manage API keys for AI services.
+    # API key input label, e.g., “OpenAI GPT API Key”
+    # {$service} is the AI service name
+    field_label: '{$service} API Key'
+
   # Accessibility panel
   accessibility:
     title: Accessibility
@@ -2342,30 +2732,9 @@ prefs:
       description: Show underline for links in the entry preview and user interface labels.
       switch_label: Always Underline Links
 
-  # Advanced panel
-  advanced:
-    title: Advanced
-    beta:
-      title: Beta Features
-      description: Enable some beta features that may be unstable or unlocalized.
-      switch_label: Join Beta Program
-    developer_mode:
-      title: Developer Mode
-      description: Enable some developer-oriented features, including detailed console logs and native context menus.
-      switch_label: Enable Developer Mode
-    deploy_hook:
-      title: Deploy Hook
-      description: Enter a webhook URL to be called when you manually trigger a deployment by selecting Publish Changes. This can be left blank if you’re using GitHub Actions.
-      # Hook URL input
-      url:
-        field_label: Hook URL
-        saved: Hook URL saved.
-        removed: Hook URL removed.
-      # Authorization header input
-      auth:
-        field_label: Authorization header (e.g., Bearer <token>) (optional)
-        saved: Authorization header saved.
-        removed: Authorization header removed.
+  # Data Management panel
+  data:
+    title: Data Management
     clear_data:
       title: Clear Data
       # Clear File Cache button
@@ -2378,6 +2747,36 @@ prefs:
         description: Delete everything the CMS keeps in this browser, including the cached files, unsaved drafts and settings. Anything already saved to your repository won’t be affected.
         button_label: Erase All Data
         confirmation: All the data stored in this browser will be deleted, including the cached file contents, image thumbnails, unsaved drafts, settings and sign-in state. Your repository won’t be affected, but any change you haven’t saved will be lost, and you’ll have to sign in again. The CMS will be reloaded once done.
+
+  # Developer panel
+  developer:
+    title: Developer
+    developer_mode:
+      title: Developer Mode
+      description: Enable some developer-oriented features, including detailed console logs and native context menus.
+      switch_label: Enable Developer Mode
+    local_git:
+      title: Git Commits
+      description: Commit your changes to the current branch of your local repository whenever you save them, as the CMS does when you work with a remote repository. You can then review and push the commits with your usual Git tools.
+      switch_label: Commit Changes to Git
+      checking: Checking the repository…
+      # {$branch} is the branch name, {$name} and {$email} are the commit author’s name and email address
+      ready: Changes will be committed to the {$branch} branch as {$name} ({$email}).
+      # {$reason} is one of the `local_git_skip_reasons` strings
+      not_ready: Changes can’t be committed right now. {$reason}
+    deploy_hook:
+      title: Deploy Hook
+      description: Enter a webhook URL to be called when you manually trigger a deployment by selecting Publish Changes. This can be left blank if you’re using GitHub Actions or GitLab CI/CD.
+      # Hook URL input
+      url:
+        field_label: Hook URL
+        saved: Hook URL saved.
+        removed: Hook URL removed.
+      # Authorization header input
+      auth:
+        field_label: Authorization header (e.g., Bearer <token>) (optional)
+        saved: Authorization header saved.
+        removed: Authorization header removed.
 
 # ==============================================================================
 # Keyboard Shortcuts

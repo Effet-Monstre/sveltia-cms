@@ -1,6 +1,7 @@
+import { validateItemCount } from '$lib/services/contents/draft/validate/validity';
 import { getField } from '$lib/services/contents/entry/fields';
 import { getPairsFromContent } from '$lib/services/contents/fields/key-value/pairs';
-import { COMPONENT_NAME_PREFIX_REGEX } from '$lib/services/contents/fields/rich-text';
+import { stripComponentNamePrefix } from '$lib/services/contents/fields/rich-text';
 
 /**
  * @import {
@@ -44,7 +45,7 @@ export const validateKeyValueField = ({
   const isKeyValueField = (_keyPath) =>
     getField({
       ...getFieldArgs,
-      keyPath: _keyPath.replace(COMPONENT_NAME_PREFIX_REGEX, ''), // Remove component name prefix
+      keyPath: stripComponentNamePrefix(_keyPath),
     })?.widget === 'keyvalue';
 
   // Given that values for a KeyValue field are flatten into `field.key1`, `field.key2` ...
@@ -70,13 +71,7 @@ export const validateKeyValueField = ({
     ([key, value]) => key.trim() || value,
   );
 
-  if (required && !pairs.length) {
-    validity.valueMissing = true;
-  } else if (typeof min === 'number' && pairs.length < min) {
-    validity.rangeUnderflow = true;
-  } else if (typeof max === 'number' && pairs.length > max) {
-    validity.rangeOverflow = true;
-  }
+  validateItemCount(validity, { count: pairs.length, required, min, max });
 
   return { skip: false, keyPath: _keyPath, empty: !pairs.length };
 };

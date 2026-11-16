@@ -2,25 +2,27 @@ import { getWorkflowRepository, projectIds } from '$lib/services/backends/git/gi
 import {
   createPullRequest,
   deleteBranch,
-  DRAFT_TITLE_PREFIX,
+  draftTitle,
   fetchBranchHead,
   fetchMergeRequest,
   fetchMergeRequestFileContents,
+  fetchOpenMergeRequests,
+  getMergeRequestPath,
   MAX_ITEMS,
+  parseAuthor,
   parseDiff,
-  stripDraftPrefix,
   toMergeRequest,
 } from '$lib/services/backends/git/gitlab/merge-requests';
 import { getProjectId, repository } from '$lib/services/backends/git/gitlab/repository';
 import { fetchAPI } from '$lib/services/backends/git/shared/api';
 import { runConcurrently } from '$lib/services/backends/git/shared/concurrency';
 import { createLocalizedError } from '$lib/services/backends/git/shared/errors';
-import { checkMergedBranch, checkStatusAllowed } from '$lib/services/backends/git/shared/fork';
+import { pruneForkBranches, updateForkStatusWith } from '$lib/services/backends/git/shared/fork';
 import { user } from '$lib/services/user/account.svelte';
-import { getBranchPrefix } from '$lib/services/workflow/branch';
+import { getBranchListPrefix } from '$lib/services/workflow/branch';
 
 /**
- * @import { WorkflowPullRequest, WorkflowStatus } from '$lib/types/private';
+ * @import { ForkRequestState, WorkflowPullRequest, WorkflowStatus } from '$lib/types/private';
  */
 
 /**
@@ -31,7 +33,7 @@ import { getBranchPrefix } from '$lib/services/workflow/branch';
  * @see https://docs.gitlab.com/api/branches/#list-repository-branches
  */
 export const fetchForkBranchList = async () => {
-  const prefix = getBranchPrefix();
+  const prefix = getBranchListPrefix();
 
   const branches = /** @type {Record<string, any>[]} */ (
     await fetchAPI(
@@ -155,20 +157,18 @@ export const parseForkBranch = (branchInfo, mergeRequest) => {
   // A closed merge request is treated the same as none at all: the contributor took the entry back
   // to the drafting stage, and moving it forward again reopens the request
   const inReview = isOpen && !current.draft;
-  const { name, username, id } = current?.author ?? {};
 
   // A merge request names its author, while a branch on its own only carries the identity Git
   // recorded with the head commit
-  const author = username
-    ? { name: name ?? username, email: '', id, login: username }
-    : authorName && { name: authorName, email: authorEmail ?? '' };
+  const author =
+    parseAuthor(current?.author) ?? (authorName && { name: authorName, email: authorEmail ?? '' });
 
   return {
     number: current?.iid,
     nodeId: current ? String(current.id) : undefined,
     // Without a merge request there’s no title to show, so the head commit’s message stands in.
     // It’s the message the merge request would be opened with anyway
-    title: current ? stripDraftPrefix(current.title) : (message ?? ''),
+    title: current ? draftTitle.strip(current.title) : (message ?? ''),
     url: current?.web_url,
     branch,
     // The branch head, rather than the merge request’s: a save compares it with the branch to find
@@ -216,29 +216,19 @@ export const fetchForkBranchFileList = async (pullRequest) => {
 export const fetchForkPullRequests = async () => {
   const branchList = await fetchForkBranchList();
   const mergeRequests = await fetchForkBranchMergeRequests(branchList.map(({ name }) => name));
-  /** @type {string[]} */
-  const leftover = [];
-  /** @type {WorkflowPullRequest[]} */
-  const pending = [];
 
-  branchList.forEach((branchInfo) => {
-    const mergeRequest = mergeRequests.get(branchInfo.name);
+  const pending = await pruneForkBranches(
+    branchList,
+    (branchInfo) => {
+      const mergeRequest = mergeRequests.get(branchInfo.name);
 
-    // A merged merge request whose head the branch still points at has nothing left on it. Tidying
-    // it up keeps the fork from collecting a branch per published entry, and saves comparing each
-    // one with the configured branch on every load just to find out it holds nothing. A branch the
-    // contributor has committed to since the merge has a different head, so it survives and shows
-    // up as a fresh draft
-    if (mergeRequest?.state === 'merged' && mergeRequest.sha === branchInfo.commit?.id) {
-      leftover.push(branchInfo.name);
-    } else {
-      pending.push(parseForkBranch(branchInfo, mergeRequest));
-    }
-  });
+      return mergeRequest?.state === 'merged' && mergeRequest.sha === branchInfo.commit?.id
+        ? { leftover: branchInfo.name }
+        : { pending: parseForkBranch(branchInfo, mergeRequest) };
+    },
+    deleteBranch,
+  );
 
-  // Deleting a branch is best effort: `deleteBranch` logs a failure rather than raising it, and a
-  // branch that outlives this is picked up on the next load
-  await runConcurrently(leftover, deleteBranch);
   await runConcurrently(pending, fetchForkBranchFileList);
 
   // A branch that no longer differs from the configured branch holds nothing to publish. That’s
@@ -266,7 +256,7 @@ const getStatusChange = ({ status, title, state, draft }) => {
   if (status === 'draft') {
     // Marking the merge request as a draft keeps it — and the discussion on it — in place while
     // taking it out of the maintainers’ review queue
-    return state === 'opened' && !draft ? { title: `${DRAFT_TITLE_PREFIX}${title}` } : {};
+    return state === 'opened' && !draft ? { title: draftTitle.format(title, true) } : {};
   }
 
   return {
@@ -285,7 +275,7 @@ const getStatusChange = ({ status, title, state, draft }) => {
  */
 const applyStatusChange = async (number, body) => {
   if (Object.keys(body).length) {
-    await fetchAPI(`/projects/${getProjectId()}/merge_requests/${number}`, { method: 'PUT', body });
+    await fetchAPI(getMergeRequestPath(number), { method: 'PUT', body });
   }
 };
 
@@ -297,32 +287,6 @@ const applyStatusChange = async (number, body) => {
 const MERGE_REQUEST_EXISTS_STATUS = 409;
 
 /**
- * Fetch the open merge request from the given branch in the contributor’s fork to the configured
- * branch, if any. This is only asked about a branch the CMS found no merge request for, so one
- * found here either sits beyond the page {@link fetchForkBranchMergeRequests} reads — a contributor
- * with a long history in the project can have more merge requests than fit in it — or isn’t the
- * contributor’s own.
- * @param {string} branch Branch name.
- * @returns {Promise<Record<string, any> | undefined>} Merge request returned by the REST API, or
- * `undefined` if none is open from the branch.
- * @see https://docs.gitlab.com/api/merge_requests/#list-project-merge-requests
- */
-const fetchOpenForkMergeRequest = async (branch) => {
-  const items = /** @type {Record<string, any>[]} */ (
-    await fetchAPI(
-      `/projects/${getProjectId()}/merge_requests` +
-        `?state=opened&source_branch=${encodeURIComponent(branch)}` +
-        `&per_page=${MAX_ITEMS.mergeRequests}`,
-    )
-  );
-
-  // A merge request from some other project of the contributor’s that happens to have a branch of
-  // the same name, or one to another branch, isn’t the one GitLab refused to open another of
-  // @see https://github.com/sveltia/sveltia-cms/security/advisories/GHSA-p8qh-54q9-2qjx
-  return items.find(isFromForkToBranch);
-};
-
-/**
  * Open the merge request that hands an Open Authoring draft over for review. GitLab refuses a
  * second merge request from a branch that already has one open to the same branch, which is what
  * happens when the entry’s own merge request sat beyond the page the load read and the entry was
@@ -332,19 +296,26 @@ const fetchOpenForkMergeRequest = async (branch) => {
  * @param {string} args.branch Workflow branch name.
  * @param {string} args.title Merge request title.
  * @param {WorkflowStatus} args.status Status to open the merge request with.
+ * @param {string} args.description Description to open the merge request with.
  * @returns {Promise<WorkflowPullRequest>} New or adopted merge request.
  * @throws {Error} When the merge request could not be created, including when the one standing in
  * the way is someone else’s.
  */
-export const createForkMergeRequest = async ({ branch, title, status }) => {
+export const createForkMergeRequest = async ({ branch, title, status, description }) => {
   try {
-    return await createPullRequest({ branch, title, status });
+    return await createPullRequest({ branch, title, status, description });
   } catch (/** @type {any} */ ex) {
     if (ex.cause?.status !== MERGE_REQUEST_EXISTS_STATUS) {
       throw ex;
     }
 
-    const item = await fetchOpenForkMergeRequest(branch);
+    // The branch had no merge request the CMS found, so one open here either sits beyond the page
+    // {@link fetchForkBranchMergeRequests} reads — a contributor with a long history in the project
+    // can have more merge requests than fit in it — or isn’t the contributor’s own. A merge request
+    // from some other project of the contributor’s that happens to have a branch of the same name,
+    // or one to another branch, isn’t the one GitLab refused to open another of
+    // @see https://github.com/sveltia/sveltia-cms/security/advisories/GHSA-p8qh-54q9-2qjx
+    const [item] = await fetchOpenMergeRequests(branch, isFromForkToBranch);
 
     // Nothing the CMS can make sense of stands in the way, so let GitLab’s own refusal stand
     // rather than claiming the entry is in review
@@ -375,6 +346,44 @@ export const createForkMergeRequest = async ({ branch, title, status }) => {
 };
 
 /**
+ * Read the current state of the merge request an Open Authoring entry has, for
+ * {@link updateForkStatusWith}.
+ * @param {WorkflowPullRequest} pullRequest Merge request.
+ * @returns {Promise<ForkRequestState>} State.
+ */
+const fetchForkRequestState = async (pullRequest) => {
+  const item = await fetchMergeRequest(pullRequest);
+
+  return {
+    merged: item.state === 'merged',
+    isEntryRequest: isForkMergeRequest(item),
+    /**
+     * Read the head commit the merge request was merged at.
+     * @returns {Promise<string>} Commit SHA.
+     */
+    getMergedSHA: async () => item.sha,
+    state: item.state,
+    draft: item.draft,
+  };
+};
+
+/**
+ * Bring a merge request in line with the given status, for {@link updateForkStatusWith}. Unlike on
+ * the other services, the whole transition is made with a single request.
+ * @param {object} args Arguments.
+ * @param {WorkflowPullRequest} args.pullRequest Merge request.
+ * @param {WorkflowStatus} args.status New status.
+ * @param {string} [args.state] Merge request state, e.g. `opened`.
+ * @param {boolean} [args.draft] Whether GitLab considers the merge request a draft.
+ */
+const applyForkStatus = async ({ pullRequest: { number, title }, status, state, draft }) => {
+  await applyStatusChange(
+    /** @type {number} */ (number),
+    getStatusChange({ status, title, state, draft }),
+  );
+};
+
+/**
  * Move an Open Authoring entry between the drafting and review stages, which is recorded in its
  * merge request: see {@link getStatusChange}.
  * @param {WorkflowPullRequest} pullRequest Merge request.
@@ -382,47 +391,16 @@ export const createForkMergeRequest = async ({ branch, title, status }) => {
  * @returns {Promise<WorkflowPullRequest>} Updated merge request, or a new one if the known one is
  * no longer the entry’s.
  * @throws {Error} When the entry is being marked ready to publish, which a contributor can’t do, or
- * has been published since the board was loaded: see {@link checkMergedBranch}.
+ * has been published since the board was loaded: see {@link updateForkStatusWith}.
  */
-export const updateForkStatus = async (pullRequest, status) => {
-  checkStatusAllowed(status);
-
-  const { number, branch, title } = pullRequest;
-
-  // Nothing has been opened yet, so moving out of the drafting stage is what creates the merge
-  // request. Moving within the drafting stage leaves the branch as it is
-  if (number === undefined) {
-    return status === 'draft'
-      ? { ...pullRequest, status, updatedDate: new Date() }
-      : createForkMergeRequest({ branch, title, status });
-  }
-
-  // The merge request may have been closed or reopened outside the CMS, so read the current state
-  // rather than inferring it from the status the entry was last seen with
-  const item = await fetchMergeRequest(pullRequest);
-  const isEntryRequest = isForkMergeRequest(item);
-
-  // It may have been merged into the configured branch since the board was loaded. With nothing
-  // committed to the branch since, the entry is published and has nothing left to review
-  if (item.state === 'merged' && isEntryRequest) {
-    await checkMergedBranch({ branch, mergedSHA: item.sha, fetchBranchHead, deleteBranch });
-  }
-
-  // Otherwise a merged merge request, or one aimed at another branch since the board was loaded,
-  // is no longer the entry’s review, which is how the next load would see it too: reopening or
-  // taking it out of draft would put a request for that other branch in front of the maintainers,
-  // or claim a merged one is in review. So the entry carries on without it, as a fresh draft
-  // @see https://github.com/sveltia/sveltia-cms/security/advisories/GHSA-8h97-74c4-g246
-  if (item.state === 'merged' || !isEntryRequest) {
-    return updateForkStatus(
-      { ...pullRequest, number: undefined, nodeId: undefined, url: undefined },
-      status,
-    );
-  }
-
-  const { state, draft } = item;
-
-  await applyStatusChange(number, getStatusChange({ status, title, state, draft }));
-
-  return { ...pullRequest, status, updatedDate: new Date() };
-};
+export const updateForkStatus = async (pullRequest, status) =>
+  updateForkStatusWith({
+    pullRequest,
+    status,
+    requestKey: 'number',
+    createRequest: createForkMergeRequest,
+    fetchRequest: fetchForkRequestState,
+    applyStatus: applyForkStatus,
+    fetchBranchHead,
+    deleteBranch,
+  });

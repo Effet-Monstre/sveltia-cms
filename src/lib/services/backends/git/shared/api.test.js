@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { apiConfig, graphqlVars, refreshAccessToken } from './api';
+import { apiConfig, graphqlVars, isRefreshedElsewhere, refreshAccessToken } from './api';
 import * as apiModule from './api';
 
 // Mock @sveltia/i18n
@@ -198,6 +198,43 @@ describe('api.js', () => {
           refreshToken: 'old-refresh-token',
         }),
       ).rejects.toThrow('Token refresh failed');
+    });
+
+    it('should keep the session when a failed refresh comes back with 200 OK', async () => {
+      mockUserState.account = { token: 'old-token', refreshToken: 'old-refresh' };
+
+      await Promise.all(
+        [JSON.stringify({ error: 'bad_refresh_token' }), '<html></html>'].map(async (body) => {
+          vi.mocked(fetch).mockResolvedValueOnce(new Response(body, { status: 200 }));
+
+          await expect(
+            refreshAccessToken({
+              clientId: 'test-client-id',
+              tokenURL: 'https://api.github.com/oauth/token',
+              refreshToken: `old-refresh-${body.length}`,
+            }),
+          ).rejects.toThrow('Token refresh failed');
+        }),
+      );
+
+      expect(mockUserState.account).toEqual({ token: 'old-token', refreshToken: 'old-refresh' });
+    });
+
+    it('should keep the refresh token when the service doesn’t return a new one', async () => {
+      mockUserState.account = { token: 'old-token', refreshToken: 'old-refresh' };
+
+      vi.mocked(fetch).mockResolvedValue(
+        new Response(JSON.stringify({ access_token: 'new-access-token' }), { status: 200 }),
+      );
+
+      const result = await refreshAccessToken({
+        clientId: 'test-client-id',
+        tokenURL: 'https://api.github.com/oauth/token',
+        refreshToken: 'old-refresh',
+      });
+
+      expect(result).toEqual({ token: 'new-access-token', refreshToken: 'old-refresh' });
+      expect(mockUserState.account).toEqual(result);
     });
 
     it('should reject insecure token refresh URLs', async () => {
@@ -1069,5 +1106,29 @@ describe('api.js', () => {
 
       expect(bodyObj.variables).toEqual({});
     });
+  });
+});
+
+describe('isRefreshedElsewhere', () => {
+  const sent = { token: 'old-token', refreshToken: 'old-refresh' };
+
+  it('should take tokens that both differ from the ones sent as refreshed', () => {
+    expect(isRefreshedElsewhere({ token: 'new-token', refreshToken: 'new-refresh' }, sent)).toBe(
+      true,
+    );
+  });
+
+  it('should not take tokens of which only one differs as refreshed', () => {
+    expect(isRefreshedElsewhere({ token: 'new-token', refreshToken: 'old-refresh' }, sent)).toBe(
+      false,
+    );
+    expect(isRefreshedElsewhere({ token: 'old-token', refreshToken: 'new-refresh' }, sent)).toBe(
+      false,
+    );
+  });
+
+  it('should not take missing tokens, or ones without an access token, as refreshed', () => {
+    expect(isRefreshedElsewhere(undefined, sent)).toBe(false);
+    expect(isRefreshedElsewhere({ refreshToken: 'new-refresh' }, sent)).toBe(false);
   });
 });

@@ -2,6 +2,8 @@
 
 import { beforeEach, describe, expect, test, vi } from 'vitest';
 
+import { createMockEntry } from '$lib/test/factories';
+
 /**
  * @import { Entry } from '$lib/types/private';
  */
@@ -50,6 +52,14 @@ const sectionTagField = {
   collection: 'tags',
 };
 
+/** Key of an item of a List field stored as a map. */
+const noteTagField = {
+  name: 'tag',
+  label: 'Note Tag',
+  widget: 'relation',
+  collection: 'tags',
+};
+
 const postsCollection = {
   name: 'posts',
   label: 'Posts',
@@ -64,12 +74,21 @@ const postsCollection = {
       required: false,
       fields: [{ name: 'heading', widget: 'string' }, sectionTagField],
     },
+    {
+      name: 'notes',
+      widget: 'list',
+      required: false,
+      map_key_field: 'tag',
+      fields: [noteTagField, { name: 'text', widget: 'string', required: false }],
+    },
   ],
   _i18n: i18n,
   _file: { format: 'yaml-frontmatter', extension: 'md' },
 };
 
-vi.mock('@sveltia/i18n', () => ({ _: vi.fn((key) => key), locale: { current: 'en' } }));
+vi.mock('@sveltia/i18n', async () =>
+  (await import('$lib/test/i18n')).createI18nMock({ locale: 'en' }),
+);
 
 vi.mock('$lib/services/config', () => ({
   cmsConfig: { current: {} },
@@ -107,12 +126,8 @@ const { planCascadeDelete } = await import('$lib/services/contents/entry/relatio
  * @param {Record<string, any>} content Flattened content.
  * @returns {Entry} Entry.
  */
-const createEntry = ({ folder }, slug, content) => ({
-  id: `${folder}/${slug}`,
-  slug,
-  subPath: slug,
-  locales: { _default: { slug, path: `${folder}/${slug}.md`, content } },
-});
+const createEntry = ({ folder }, slug, content) =>
+  createMockEntry({ slug, folder, content: { _default: content } });
 
 /**
  * Build a post entry.
@@ -151,6 +166,10 @@ describe('planCascadeDelete() (integration)', () => {
       {
         fieldConfig: sectionTagField,
         context: { collection: postsCollection, typedKeyPath: 'sections.*.tag' },
+      },
+      {
+        fieldConfig: noteTagField,
+        context: { collection: postsCollection, typedKeyPath: 'notes.*.tag' },
       },
     ]);
   });
@@ -271,6 +290,29 @@ describe('planCascadeDelete() (integration)', () => {
 
     expect(blockers).toEqual([
       expect.objectContaining({ fieldLabel: 'Section Tag', keyPath: 'sections.1.tag' }),
+    ]);
+  });
+
+  test('blocks the deletion when the key of a keyed list item would be left empty', () => {
+    setPosts([
+      createPost('my-trip', {
+        title: 'My Trip',
+        category: 'food',
+        'notes.0.tag': 'food',
+        'notes.0.text': 'Yum',
+        'notes.1.tag': 'travel',
+        'notes.1.text': 'Far',
+      }),
+    ]);
+
+    const { blockers } = planCascadeDelete({ collection: tagsCollection, entries: [travelTag] });
+
+    expect(blockers).toEqual([
+      expect.objectContaining({
+        fieldLabel: 'Note Tag',
+        keyPath: 'notes.1.tag',
+        messages: ['validation.value_missing'],
+      }),
     ]);
   });
 

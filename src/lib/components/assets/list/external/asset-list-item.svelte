@@ -2,6 +2,7 @@
   import AssetListItem from '$lib/components/assets/list/asset-list-item.svelte';
   import UnavailableBadge from '$lib/components/assets/list/external/unavailable-badge.svelte';
   import { goto } from '$lib/services/app/navigation';
+  import { createAssetDragSource } from '$lib/services/assets/drag';
   import {
     canPreviewExternalAsset,
     focusedExternalAsset,
@@ -14,7 +15,11 @@
   } from '$lib/services/assets/external';
   import { externalAssetAvailability } from '$lib/services/assets/external/availability';
   import { LINKED_FILES_SERVICE_ID } from '$lib/services/assets/external/linked';
-  import { browsingExternalFolders } from '$lib/services/assets/external/view';
+  import {
+    browsingExternalFolders,
+    listedExternalAssetIndexMap,
+  } from '$lib/services/assets/external/view';
+  import { canMoveExternalAssets, getDraggedExternalAssets } from '$lib/services/assets/movable';
   import { toggleListItem } from '$lib/services/utils/array';
 
   /**
@@ -24,18 +29,11 @@
   /**
    * @typedef {object} Props
    * @property {ExternalAsset} asset Asset.
-   * @property {number} index Index of the asset in the list.
    * @property {ViewType} viewType View type.
    */
 
   /** @type {Props} */
-  let {
-    /* eslint-disable prefer-const */
-    asset,
-    index,
-    viewType,
-    /* eslint-enable prefer-const */
-  } = $props();
+  let { asset, viewType } = $props();
 
   const selected = $derived(selectedExternalAssetIdSet.current.has(asset.id));
   /**
@@ -46,6 +44,17 @@
     selectedCloudService.current?.serviceId === LINKED_FILES_SERVICE_ID,
   );
   const unavailable = $derived(externalAssetAvailability.current[asset.id] === false);
+  /** The service the file is on, which the list is only shown for. */
+  const service = $derived(selectedCloudService.current);
+  /**
+   * Attachment that lets the row be dragged onto a folder, when the file can be moved: not a file
+   * linked from an entry, which isn’t on a service the CMS manages.
+   */
+  const dragSource = $derived(
+    service && !isLinkedFile && canMoveExternalAssets(service, [asset])
+      ? createAssetDragSource(() => getDraggedExternalAssets(asset, service))
+      : undefined,
+  );
   /**
    * The name shown: the file name while the service is browsed folder by folder, or the path when
    * a search lists the matches from every folder at once, so they can be told apart.
@@ -60,8 +69,6 @@
    * Show the details of the asset.
    */
   const showDetails = () => {
-    const service = selectedCloudService.current;
-
     /* v8 ignore next 3 -- the list is only shown while a service is selected */
     if (service) {
       goto(getExternalAssetPath(service, asset), { transitionType: 'forwards' });
@@ -92,7 +99,7 @@
   {name}
   kind={asset.kind}
   src={asset.previewURL}
-  rowIndex={index}
+  rowIndex={listedExternalAssetIndexMap.current.get(asset.id) ?? -1}
   {viewType}
   {selected}
   canPreview={canPreviewExternalAsset(asset)}
@@ -105,4 +112,5 @@
     showDetails();
   }}
   status={isLinkedFile ? status : undefined}
+  {dragSource}
 />

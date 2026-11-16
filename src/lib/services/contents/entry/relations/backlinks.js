@@ -1,12 +1,14 @@
 import { compare } from '@sveltia/utils/string';
 
 import { getEntriesByCollection } from '$lib/services/contents/collection/entries';
+import { getEntryLocaleFile } from '$lib/services/contents/entry/paths';
 import {
   getEntryRelationValues,
   getReferencingRelationFields,
   getRelationValues,
 } from '$lib/services/contents/entry/relations';
 import { getEntrySummary } from '$lib/services/contents/entry/summary';
+import { getFieldLabel } from '$lib/services/contents/i18n/options';
 
 /**
  * @import { Entry, EntryBacklink } from '$lib/types/private';
@@ -52,8 +54,7 @@ export const getBacklinks = ({ collectionName, fileName, entry }) => {
             (!sourceFileName || sourceEntry.slug === sourceFileName),
         )
         .map((sourceEntry) => {
-          const content =
-            sourceEntry.locales[locale]?.content ?? Object.values(sourceEntry.locales)[0]?.content;
+          const content = getEntryLocaleFile(sourceEntry, { locale })?.content;
 
           if (
             !content ||
@@ -69,9 +70,11 @@ export const getBacklinks = ({ collectionName, fileName, entry }) => {
           return /** @type {EntryBacklink} */ ({
             collectionName: sourceCollectionName,
             collectionLabel: sourceCollection.label || sourceCollectionName,
-            fieldLabel: fieldConfig.label || fieldConfig.name,
+            fileName: sourceFileName,
+            fieldLabel: getFieldLabel({ config: fieldConfig }),
             entry: sourceEntry,
-            summary: getEntrySummary(sourceCollection, sourceEntry),
+            // A collection file is listed by its label, as in the file list
+            summary: getEntrySummary(sourceCollection, sourceEntry, { fileName: sourceFileName }),
           });
         })
         .filter((backlink) => !!backlink);

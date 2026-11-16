@@ -1,9 +1,11 @@
 <!--
   @component
-  Implement the dialog to create a new entry in the collection a Relation field refers to, without
-  leaving the entry being edited. The new entry is not saved on its own: it’s added to the parent
-  draft as a pending entry, selected in the field, and committed together with the parent entry.
+  Implement the dialog to create a new entry in the collection a Relation field refers to, or edit
+  one selected in the field, without leaving the entry being edited. The entry is not saved on its
+  own: it’s added to the parent draft as a pending entry, selected in the field, and committed
+  together with the parent entry. A pending entry can be opened again and changed until then.
   @see https://github.com/sveltia/sveltia-cms/issues/493
+  @see https://github.com/sveltia/sveltia-cms/issues/1129
 -->
 <script>
   import { _, locale as appLocale } from '@sveltia/i18n';
@@ -12,10 +14,10 @@
 
   import EntryEditor from '$lib/components/contents/details/editor/entry-editor.svelte';
   import SlugEditor from '$lib/components/contents/details/editor/slug-editor.svelte';
+  import ValidationErrorsToast from '$lib/components/contents/details/editor/validation-errors-toast.svelte';
   import LocaleSwitcher from '$lib/components/contents/details/locale-switcher.svelte';
   import { getCollectionLabel } from '$lib/services/contents/collection';
   import { revokeDraftFileURLs } from '$lib/services/contents/draft';
-  import { buildDraft } from '$lib/services/contents/draft/create';
   import { initEntryDraftEditor } from '$lib/services/contents/draft/editor.svelte';
   import {
     EntryDraftState,
@@ -26,43 +28,57 @@
     countInvalidFields,
     validateAndRevealErrors,
   } from '$lib/services/contents/draft/validate/reveal';
+  import { setFieldEditorContext } from '$lib/services/contents/editor/field-context';
+  import { awaitPendingFieldUpdates } from '$lib/services/contents/editor/pending';
   import { needsSlugInput } from '$lib/services/contents/editor/slug';
   import {
+    addPendingEntries,
+    buildQuickAddDraft,
     createPendingEntry,
     getNestedPendingEntries,
+    isEditUnchanged,
+    isPendingEntryMoved,
+    revertSaveTimeValues,
   } from '$lib/services/contents/fields/relation/quick-add';
   import { createRawState } from '$lib/services/utils/state.svelte';
 
   /**
-   * @import { EntryDraft, EntryEditorPane, InternalEntryCollection, PendingEntry }
-   * from '$lib/types/private';
+   * @import {
+   * Entry,
+   * EntryDraft,
+   * EntryEditorPane,
+   * FieldEditorContext,
+   * InternalEntryCollection,
+   * PendingEntry,
+   * } from '$lib/types/private';
    * @import { RelationField } from '$lib/types/public';
    */
 
   /**
    * @typedef {object} Props
    * @property {boolean} [open] Whether the dialog is open.
-   * @property {InternalEntryCollection} collection Collection to create an entry in.
+   * @property {InternalEntryCollection} collection Collection to create or edit an entry in.
    * @property {RelationField} fieldConfig Configuration of the Relation field the entry is created
-   * from.
-   * @property {(pendingEntry: PendingEntry) => void} onAdd Called with the new entry once it’s
-   * been added to the parent draft.
+   * or edited from.
+   * @property {Entry} [entry] Entry to edit, as the field offers it: an existing entry, or one
+   * pending on the parent draft. A new entry is created without it.
+   * @property {(pendingEntry: PendingEntry, previousEntry?: Entry) => void} onAdd Called with the
+   * entry once it’s been added to the parent draft, along with the entry as it was before when it
+   * has been edited.
    */
 
   /** @type {Props} */
-  let {
-    /* eslint-disable prefer-const */
-    open = $bindable(false),
-    collection,
-    fieldConfig,
-    onAdd,
-    /* eslint-enable prefer-const */
-  } = $props();
+  let { open = $bindable(false), collection, fieldConfig, entry = undefined, onAdd } = $props();
 
   // The parent draft is the one provided by the editor this dialog is opened from. The new entry’s
   // draft is provided to the field editors below in its place, so they edit the new entry
   const parentDraft = getEntryDraftContext();
   const entryDraft = setEntryDraftContext(new EntryDraftState());
+
+  // The fields of the entry are rendered at the top level of its draft, like in the entry editor,
+  // not as the subfields of the Relation field, which may be in a rich text editor component whose
+  // values are stored in `extraValues` instead of `currentValues`
+  setFieldEditorContext(/** @type {FieldEditorContext} */ ({}));
 
   /**
    * Locale being edited. The dialog has a single pane, so the locale switcher is the only way to
@@ -81,6 +97,13 @@
   let showValidationToast = $state(false);
   let errorCount = $state(0);
   let showErrorToast = $state(false);
+  let showMoveToast = $state(false);
+  /** Whether the entry being edited has been changed by someone else since it was edited. */
+  let changedSince = $state(false);
+  /** Entry being edited, as it was when the dialog was opened. */
+  let previousEntry = $state.raw(/** @type {Entry | undefined} */ (undefined));
+  /** Incremented each time a draft is started, so a draft started earlier can tell it’s stale. */
+  let draftCount = 0;
 
   /* v8 ignore start -- the app locale is always set once the UI strings are loaded */
   // `appLocale.current` is a key, because `getCollectionLabel` can return a localized label
@@ -90,21 +113,48 @@
   /* v8 ignore stop */
   const { i18nEnabled, allLocales, defaultLocale } = $derived(collection._i18n);
   const hasMultipleLocales = $derived(i18nEnabled && allLocales.length > 1);
+  const editing = $derived(!!previousEntry);
 
   /**
-   * Start a new draft for the dialog.
+   * Show the error toast for an unexpected error, and log the error.
+   * @param {unknown} ex Error.
    */
-  const startDraft = () => {
-    // Start at the root of the collection folder. The default is the folder being browsed, which
-    // belongs to the parent entry’s collection
-    const draft = buildDraft({ collection, initialPath: '' });
+  const reportError = (ex) => {
+    showErrorToast = true;
+    // eslint-disable-next-line no-console
+    console.error(ex);
+  };
 
-    // The entries pending on the parent draft are offered to the Relation fields of the new entry
-    // as well, and a nested quick-add takes them into account when it names and counts entries
-    /* v8 ignore next -- the dialog is only opened from a field editor while the draft is there */
-    draft.pendingEntries = [...(parentDraft.current?.pendingEntries ?? [])];
+  /**
+   * Start a draft for the dialog: a new entry, or the entry to edit. See
+   * {@link buildQuickAddDraft}.
+   */
+  const startDraft = async () => {
+    draftCount += 1;
+
+    const count = draftCount;
+    const editingEntry = entry;
+
+    previousEntry = editingEntry;
+    changedSince = false;
+
+    // The dialog is only opened from a field editor while the draft is there
+    const { draft, changedSince: changedSinceEdited } = await buildQuickAddDraft({
+      collection,
+      parentDraft: /** @type {EntryDraft} */ (parentDraft.current),
+      entry: editingEntry,
+    });
+
+    // The dialog may have been closed, or opened again for another entry, in the meantime
+    if (count !== draftCount || !open) {
+      revokeDraftFileURLs(draft);
+
+      return;
+    }
+
     entryDraft.current = draft;
     pane.current = { mode: 'edit', locale: defaultLocale };
+    changedSince = changedSinceEdited;
     added = false;
   };
 
@@ -117,8 +167,11 @@
       revokeDraftFileURLs(entryDraft.current);
     }
 
+    // A draft still being started is not to be shown
+    draftCount += 1;
     entryDraft.current = undefined;
     pane.current = null;
+    previousEntry = undefined;
   };
 
   /**
@@ -135,9 +188,27 @@
     adding = true;
 
     try {
-      // The entry is committed along with the parent, so it has to be complete. Wait for what was
-      // just typed and for custom validators to report, the same way a save does
-      if (!(await validateAndRevealErrors({ draft, enforceRequired: true }))) {
+      // Wait for what was just typed to reach the draft first, e.g. in a rich text editor, which
+      // converts its content with a short delay, or the change would be taken for no change at all
+      await awaitPendingFieldUpdates();
+
+      // The dialog can be closed with the Escape key in the meantime
+      if (!open || entryDraft.current !== draft) {
+        return;
+      }
+
+      // Nothing to save for an entry opened only to have a look
+      if (isEditUnchanged({ draft, parentDraft: parentDraft.current })) {
+        open = false;
+
+        return;
+      }
+
+      // The entry is committed along with the parent, so it has to be complete. Wait for custom
+      // validators to report, the same way a save does
+      if (
+        !(await validateAndRevealErrors({ draft, enforceRequired: true, awaitFieldUpdates: false }))
+      ) {
         errorCount = countInvalidFields(draft.validities);
         showValidationToast = true;
 
@@ -156,18 +227,23 @@
         return;
       }
 
-      // The entries created from the new entry’s own Relation fields come along with it
-      parentDraft.current.pendingEntries.push(
+      if (isPendingEntryMoved(pendingEntry)) {
+        revertSaveTimeValues({ draft, pendingEntry });
+        showMoveToast = true;
+
+        return;
+      }
+
+      // The entries created or edited from the entry’s own Relation fields come along with it
+      addPendingEntries(parentDraft.current, [
         ...getNestedPendingEntries({ draft, parentDraft: parentDraft.current }),
         pendingEntry,
-      );
-      onAdd(pendingEntry);
+      ]);
+      onAdd(pendingEntry, previousEntry);
       added = true;
       open = false;
     } catch (ex) {
-      showErrorToast = true;
-      // eslint-disable-next-line no-console
-      console.error(ex);
+      reportError(ex);
     } finally {
       adding = false;
     }
@@ -175,7 +251,9 @@
 
   $effect(() => {
     if (open) {
-      untrack(() => startDraft());
+      untrack(() => {
+        startDraft().catch(reportError);
+      });
     }
   });
 
@@ -188,7 +266,9 @@
 
 <Dialog
   bind:open
-  title={_('create_entry_title', { values: { name } })}
+  title={_(editing ? 'relation_field.edit_entry_title' : 'create_entry_title', {
+    values: { name },
+  })}
   size="large"
   showOk={false}
   showCancel={false}
@@ -202,10 +282,21 @@
     {/if}
   {/snippet}
   <div role="none" class="wrapper" bind:this={wrapper}>
-    <p class="hint">{_('relation_field.save_together_hint', { values: { name } })}</p>
+    <p class="hint">
+      {_(editing ? 'relation_field.edit_together_hint' : 'relation_field.save_together_hint', {
+        values: { name },
+      })}
+    </p>
+    {#if changedSince}
+      <Alert status="warning">
+        {_('relation_field.changed_since_edit', { values: { name } })}
+      </Alert>
+    {/if}
     {#if entryDraft.current && pane.current}
       {@const { locale } = pane.current}
-      <div role="none" id="{componentId}-body" class="fields">
+      <!-- A rich text editor component, mounted outside the component tree, reads the locale from
+        `data-locale` through the DOM, like in the entry editor’s pane -->
+      <div role="none" id="{componentId}-body" class="fields" data-locale={locale}>
         <!-- There’s no sidebar with the Slug panel in the dialog, so a slug that has to be typed
           in is edited here. Otherwise, the slug template fills it -->
         {#if needsSlugInput(entryDraft.current) && entryDraft.current.slugEditor[locale]}
@@ -221,7 +312,7 @@
     <Spacer flex={true} />
     <Button
       variant="primary"
-      label={_('add')}
+      label={_(editing ? 'update' : 'add')}
       disabled={adding}
       onclick={() => {
         add();
@@ -238,15 +329,19 @@
   {/snippet}
 </Dialog>
 
-<Toast bind:show={showValidationToast}>
-  <Alert status="error">
-    {_('entry_validation_errors', { values: { count: errorCount } })}
-  </Alert>
-</Toast>
+<ValidationErrorsToast bind:show={showValidationToast} count={errorCount} />
 
 <Toast bind:show={showErrorToast}>
   <Alert status="error">
-    {_('relation_field.add_failed', { values: { name } })}
+    {_(editing ? 'relation_field.edit_failed' : 'relation_field.add_failed', {
+      values: { name },
+    })}
+  </Alert>
+</Toast>
+
+<Toast bind:show={showMoveToast}>
+  <Alert status="error">
+    {_('relation_field.move_unsupported', { values: { name } })}
   </Alert>
 </Toast>
 

@@ -1,6 +1,7 @@
 import { MEDIA_CONFIG, MEDIA_FILES } from '../../fixtures/configs/media.js';
 import { createPNG } from '../../fixtures/files.js';
 import { expect, test } from '../../fixtures/test.js';
+import { getEditor } from '../../fixtures/ui.js';
 
 /**
  * @import { Locator, Page } from '@playwright/test';
@@ -51,6 +52,27 @@ test.describe('after signing in', () => {
     await expect(page.getByRole('radio', { name: 'Assets' })).toBeChecked();
   });
 
+  test('goes back from the Asset Library with the browser’s Back button', async ({ cms, page }) => {
+    await expect(page.getByRole('main', { name: /Notes.*Collection/ })).toBeVisible();
+
+    const collectionURL = page.url();
+
+    // The Create menu opens the Asset Library, which redirects to All Assets. The redirect takes
+    // the place of the library’s own URL in the history, so going back doesn’t land on it again
+    await cms.chooseMenuItem(
+      page.getByRole('button', { name: 'Create Entry or Assets' }),
+      page.getByRole('menuitem', { name: 'Assets' }),
+    );
+    await expect(page).toHaveURL(/#\/assets\/-\/all$/);
+    await page
+      .getByRole('dialog', { name: 'Upload New Assets' })
+      .getByRole('button', { name: 'Cancel' })
+      .click();
+    await page.goBack();
+    await expect(page).toHaveURL(collectionURL);
+    await expect(page.getByRole('radio', { name: 'Contents' })).toBeChecked();
+  });
+
   test('creates an entry in the collection chosen from the Create menu', async ({ cms, page }) => {
     const button = page.getByRole('button', { name: 'Create Entry or Assets' });
     const menu = page.getByRole('menu', { name: 'Create Entry or Assets' });
@@ -61,7 +83,7 @@ test.describe('after signing in', () => {
 
     await expect(page).toHaveURL(/#\/collections\/projects\/new$/);
 
-    const editor = page.getByRole('group', { name: 'Content Editor' });
+    const editor = getEditor(page);
 
     await editor.getByRole('textbox', { name: 'Title' }).fill('Tower');
     await editor.getByRole('button', { name: 'Save' }).click();
@@ -116,9 +138,7 @@ test.describe('with file names containing URL characters', () => {
   test('opens an entry whose file name has a percent sign', async ({ page }) => {
     await page.getByRole('row', { name: /Clearance/ }).click();
     await expect(page).toHaveURL(/#\/collections\/notes\/entries\/100%25-off$/);
-    await expect(
-      page.getByRole('group', { name: 'Content Editor' }).getByRole('textbox', { name: 'Title' }),
-    ).toHaveValue('Clearance');
+    await expect(getEditor(page).getByRole('textbox', { name: 'Title' })).toHaveValue('Clearance');
   });
 
   test('previews an asset whose file name has a percent and a hash sign', async ({ cms, page }) => {
@@ -142,7 +162,7 @@ test.describe('with file names containing URL characters', () => {
   test('tells an entry is not found for a malformed escape sequence', async ({ cms, page }) => {
     await page.goto(`${cms.adminPath}#/collections/notes/entries/%E0%A4%A`);
 
-    const editor = page.getByRole('group', { name: 'Content Editor' });
+    const editor = getEditor(page);
 
     await expect(editor).toContainText('Entry not found.');
     await editor.getByRole('button', { name: 'Back to Collection' }).click();

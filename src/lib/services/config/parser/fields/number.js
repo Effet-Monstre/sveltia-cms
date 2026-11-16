@@ -1,4 +1,5 @@
 import { addMessage, checkUnsupportedOptions } from '$lib/services/config/parser/utils/validator';
+import { parseNumber } from '$lib/services/contents/fields/number/helpers';
 
 /**
  * @import { FieldParserArgs, UnsupportedOption } from '$lib/types/private';
@@ -44,11 +45,8 @@ const checkDefaultValue = ({ config, context, collectors }) => {
     return;
   }
 
-  // Parse a string the same way the runtime does
-  const value =
-    typeof defaultValue === 'string'
-      ? (isInteger ? Number.parseInt : Number.parseFloat)(defaultValue)
-      : defaultValue;
+  // Parse a string the same way the runtime does: as a whole, so a default like `10px` is reported
+  const value = parseNumber(defaultValue);
 
   if (isInteger ? !Number.isInteger(value) : !Number.isFinite(value)) {
     addMessage({
@@ -70,9 +68,9 @@ export const parseNumberFieldConfig = (args) => {
 
   checkDefaultValue(args);
 
-  // A step of zero or less leaves the arrow keys and buttons with nowhere to go. A value of another
-  // type is reported against the JSON schema
-  if (typeof step === 'number' && step <= 0) {
+  // A step of zero or less leaves the arrow keys and buttons with nowhere to go, except `-1`, which
+  // turns them off. A value of another type is reported against the JSON schema
+  if (typeof step === 'number' && step <= 0 && step !== -1) {
     addMessage({ strKey: 'invalid_step', values: { step: String(step) }, context, collectors });
   }
 

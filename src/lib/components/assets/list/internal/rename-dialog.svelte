@@ -1,45 +1,50 @@
 <script>
-  import { _ } from '@sveltia/i18n';
   import { getPathInfo } from '@sveltia/utils/file';
 
   import RenameDialog from '$lib/components/assets/list/rename-dialog.svelte';
-  import { encodeRoutePath, goto, parseLocation } from '$lib/services/app/navigation';
   import { getAssetsByDirName } from '$lib/services/assets';
-  import { moveAssets } from '$lib/services/assets/data/move';
+  import { runAssetCommit } from '$lib/services/assets/data/commit';
+  import { getMoveBlockedMessage, moveAssets } from '$lib/services/assets/data/move';
   import { getAssetUsedEntries } from '$lib/services/assets/details';
+  import { replaceShownAssetPath } from '$lib/services/assets/navigation';
   import { renamingAsset } from '$lib/services/assets/state';
-  import { getReadonlyEntryLabel, isEntryReadonly } from '$lib/services/contents/entry/readonly';
+  import { getFolderNamesInDir, getNonAssetFileNamesInDir } from '$lib/services/assets/subfolders';
+  import { createUsedEntriesState } from '$lib/services/assets/used-entries.svelte';
   import { getDefaultMediaLibraryOptions } from '$lib/services/integrations/media-libraries/default';
-  import { watchAsync } from '$lib/services/utils/state.svelte';
-
-  /**
-   * @import { Entry } from '$lib/types/private';
-   */
+  import { createPath } from '$lib/services/utils/file';
 
   let open = $state(false);
-  /** @type {Entry[]} */
-  let usedEntries = $state([]);
 
   const asset = $derived(renamingAsset.current);
+  /**
+   * Entries using the asset, which are updated along with the rename. The dialog opens once they
+   * have been found. Another asset can be renamed before then, which the state takes care of.
+   */
+  const usedEntries = createUsedEntriesState(
+    () => (asset ? getAssetUsedEntries(asset) : undefined),
+    () => {
+      open = true;
+    },
+  );
   // A read-only entry using the asset can’t be updated along with the rename, so the rename is
   // refused up front rather than when it’s about to be committed
-  const readonlyEntries = $derived(usedEntries.filter((entry) => isEntryReadonly(entry)));
-  const blockedMessage = $derived(
-    readonlyEntries.length
-      ? _('cannot_move_referenced_asset', {
-          values: {
-            entries: readonlyEntries.map((entry) => getReadonlyEntryLabel(entry)).join(', '),
-          },
-        })
-      : undefined,
-  );
+  const blockedMessage = $derived(getMoveBlockedMessage(usedEntries.entries ?? []));
   const { dirname = '', basename = '' } = $derived(getPathInfo(asset?.path ?? ''));
-  const otherNames = $derived(
+  /**
+   * Names of the other files next to the asset, and those of the subfolders there, which a file
+   * can’t take either.
+   */
+  const { otherNames, fileNames, folderNames } = $derived(
     asset
-      ? getAssetsByDirName(dirname)
-          .map((a) => a.name)
-          .filter((n) => n !== asset.name)
-      : [],
+      ? {
+          otherNames: getAssetsByDirName(dirname)
+            .map((a) => a.name)
+            .filter((n) => n !== asset.name),
+          // An entry file next to the asset would be overwritten
+          fileNames: getNonAssetFileNamesInDir(dirname),
+          folderNames: getFolderNamesInDir(dirname),
+        }
+      : { otherNames: [], fileNames: [], folderNames: [] },
   );
 
   /**
@@ -54,34 +59,26 @@
     }
 
     const oldPath = asset.path;
-    const newPath = `${dirname}/${newName}`;
+    // An asset in a root media folder has no directory
+    const newPath = createPath([dirname, newName]);
 
-    await moveAssets('rename', [{ asset, path: newPath }]);
+    const { ok } = await runAssetCommit(() => moveAssets('rename', [{ asset, path: newPath }]), {
+      failure: 'renaming_asset_failed',
+    });
 
-    if (parseLocation().path === `/assets/${oldPath}`) {
-      await goto(encodeRoutePath(`/assets/${newPath}`), {
-        replaceState: true,
-        notifyChange: false,
-      });
+    if (ok) {
+      await replaceShownAssetPath(oldPath, newPath);
     }
   };
-
-  // Another asset can be renamed before the entries using this one are found, which `watchAsync`
-  // takes care of
-  watchAsync(
-    () => (asset ? getAssetUsedEntries(asset) : undefined),
-    (entries) => {
-      usedEntries = entries;
-      open = true;
-    },
-  );
 </script>
 
 <RenameDialog
   bind:open
   name={basename}
   {otherNames}
-  usedEntryCount={usedEntries.length}
+  {fileNames}
+  {folderNames}
+  usedEntryCount={usedEntries.entries?.length}
   {blockedMessage}
   slugificationEnabled={getDefaultMediaLibraryOptions().config.slugify_filename}
   onRename={renameAsset}

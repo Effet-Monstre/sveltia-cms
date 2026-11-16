@@ -3,6 +3,7 @@ import { Map as ImmutableMap, isMap } from 'immutable';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { ExternalAssetProxy } from '$lib/services/api/external-asset-proxy';
+import { warnDeprecation } from '$lib/services/config/deprecations';
 
 import {
   buildEntry,
@@ -12,6 +13,7 @@ import {
   createGetAsset,
   getAssociatedPreviewAssets,
   getMetaData,
+  getMetaDataPath,
 } from './preview-data';
 
 // Mock dependencies using vi.hoisted()
@@ -24,7 +26,10 @@ const {
   mockGetAssetFolder,
   mockIsAssetInFolder,
   mockAllAssets,
+  mockGetEntryOptions,
+  mockGetCollection,
 } = vi.hoisted(() => ({
+  mockGetCollection: vi.fn(),
   mockGetField: vi.fn(() => ({ widget: 'text' })),
   mockGetMediaFieldSource: vi.fn(),
   mockGetRichTextMediaSource: vi.fn(),
@@ -33,8 +38,18 @@ const {
   mockGetAssetFolder: vi.fn(),
   mockIsAssetInFolder: vi.fn(),
   mockAllAssets: { current: /** @type {any[]} */ ([]) },
+  // Resolve a `{{slug}}` or bare field name `value_field` like the Relation field does
+  mockGetEntryOptions: vi.fn(({ locale, fieldConfig, refEntry }) => {
+    const { value_field: valueField = '{{slug}}' } = fieldConfig;
+
+    const value =
+      valueField === '{{slug}}' ? refEntry.slug : refEntry.locales[locale]?.content?.[valueField];
+
+    return [{ label: value, value, searchValue: value }];
+  }),
 }));
 
+vi.mock('$lib/services/config/deprecations');
 vi.mock('$lib/services/assets', () => ({
   isAssetInFolder: mockIsAssetInFolder,
 }));
@@ -77,6 +92,10 @@ vi.mock('$lib/services/api/unsaved-asset-proxy', () => ({
   ),
 }));
 
+vi.mock('$lib/services/contents/collection', () => ({
+  getCollection: mockGetCollection,
+}));
+
 vi.mock('$lib/services/contents/collection/entries', () => ({
   getEntriesByCollection: mockGetEntriesByCollection,
 }));
@@ -87,6 +106,10 @@ vi.mock('$lib/services/contents/collection/files', () => ({
 
 vi.mock('$lib/services/contents/entry/fields', () => ({
   getField: mockGetField,
+}));
+
+vi.mock('$lib/services/contents/fields/relation/helpers', () => ({
+  getEntryOptions: mockGetEntryOptions,
 }));
 
 vi.mock('$lib/services/assets/folders', () => ({
@@ -598,6 +621,14 @@ describe('React Helpers', () => {
       expect(mockGetRichTextMediaSource).not.toHaveBeenCalled();
     });
 
+    it('should look up the asset for the locale being previewed', () => {
+      createGetAsset({ entry: mockEntry, collectionName: 'posts', locale: 'fr' })('photo.jpg');
+
+      expect(mockGetMediaFieldSource).toHaveBeenCalledWith(
+        expect.objectContaining({ value: 'photo.jpg', entry: mockEntry, locale: 'fr' }),
+      );
+    });
+
     it('should also search the editor component folders for a RichText field', () => {
       mockGetRichTextMediaSource.mockReturnValueOnce({ asset: { name: 'figure.jpg' } });
 
@@ -621,6 +652,23 @@ describe('React Helpers', () => {
     });
   });
 
+  describe('getMetaDataPath', () => {
+    it('should drop the index of a missing or non-List parent field', () => {
+      mockGetField.mockReturnValue(undefined);
+
+      expect(
+        getMetaDataPath({ getFieldArgs: { collectionName: 'posts' }, keyPath: 'unknown.0.name' }),
+      ).toEqual(['unknown', 'name']);
+    });
+
+    it('should keep a numeric top-level field name', () => {
+      expect(
+        getMetaDataPath({ getFieldArgs: { collectionName: 'posts' }, keyPath: '2024.author' }),
+      ).toEqual(['2024', 'author']);
+      expect(mockGetField).not.toHaveBeenCalled();
+    });
+  });
+
   describe('getMetaData', () => {
     it('should return empty metadata when no relation fields', () => {
       mockGetField.mockReturnValueOnce({ widget: 'text' });
@@ -636,6 +684,42 @@ describe('React Helpers', () => {
       });
 
       expect(result instanceof ImmutableMap).toBe(true);
+    });
+
+    it.each([
+      ['the default locale of the referenced collection', { en: { content: { name: 'Jane' } } }],
+      ['the content without i18n', { _default: { content: { name: 'Jane' } } }],
+    ])('should fall back to %s for an entry without content in the locale', (_label, locales) => {
+      mockGetField.mockReturnValueOnce({
+        widget: 'relation',
+        collection: 'authors',
+        value_field: '{{slug}}',
+      });
+      mockGetEntriesByCollection.mockReturnValueOnce([{ slug: 'jane', locales }]);
+      mockGetCollection.mockReturnValueOnce({ _i18n: { defaultLocale: 'en' } });
+
+      const result = getMetaData({
+        locale: 'fr',
+        getFieldArgs: { collectionName: 'posts', valueMap: { author: 'jane' } },
+      });
+
+      expect(result.toJS()).toEqual({ author: { authors: { jane: { name: 'Jane' } } } });
+    });
+
+    it('should leave the metadata empty for an entry without content in any locale', () => {
+      mockGetField.mockReturnValueOnce({
+        widget: 'relation',
+        collection: 'authors',
+        value_field: '{{slug}}',
+      });
+      mockGetEntriesByCollection.mockReturnValueOnce([{ slug: 'jane', locales: { de: {} } }]);
+
+      const result = getMetaData({
+        locale: 'fr',
+        getFieldArgs: { collectionName: 'posts', valueMap: { author: 'jane' } },
+      });
+
+      expect(result.toJS()).toEqual({ author: { authors: { jane: undefined } } });
     });
 
     it('should ignore missing field definitions when building metadata', () => {
@@ -714,6 +798,71 @@ describe('React Helpers', () => {
       expect(build().relatedPost.posts.dup.title).toBe('First');
       // Answered from the lookup table cached with the entry list
       expect(build().relatedPost.posts.dup.title).toBe('First');
+    });
+
+    it('should key referenced entries by the values the `value_field` template resolves to', () => {
+      const alice = {
+        slug: 'alice',
+        locales: { en: { content: { 'name.first': 'Alice', 'tags.0': 'a', 'tags.1': 'b' } } },
+      };
+
+      const bob = { slug: 'bob', locales: { en: { content: { 'name.first': 'Bob' } } } };
+
+      const field = {
+        widget: 'relation',
+        collection: 'authors',
+        value_field: '{{locale}}/{{fields.name.first}}-{{tags.*}}',
+      };
+
+      // The parent key path `authors` of a value resolves to the Relation field too
+      mockGetField.mockReturnValue(field);
+      mockGetEntriesByCollection.mockReturnValueOnce([alice, bob]);
+      // What the Relation field stores, including one value per list item
+      mockGetEntryOptions
+        .mockReturnValueOnce([{ value: 'en/Alice-a' }, { value: 'en/Alice-b' }])
+        .mockReturnValueOnce([{ value: 'en/Bob-' }]);
+
+      const result = getMetaData({
+        locale: 'en',
+        getFieldArgs: {
+          collectionName: 'posts',
+          fileName: undefined,
+          valueMap: { 'authors.0': 'en/Alice-b', 'authors.1': 'en/Bob-', 'authors.2': 'missing' },
+          isIndexFile: false,
+        },
+      }).toJS();
+
+      expect(mockGetEntryOptions).toHaveBeenCalledWith({
+        locale: 'en',
+        fieldConfig: field,
+        refEntry: alice,
+      });
+      // The referenced entry’s data is nested, not flattened
+      expect(result.authors.authors['en/Alice-b'].name.first).toBe('Alice');
+      expect(result.authors.authors['en/Bob-'].name.first).toBe('Bob');
+      expect(result.authors.authors['en/Bob-']).not.toHaveProperty(['name.first']);
+      expect(result.authors.authors.missing).toBeUndefined();
+    });
+
+    it('should match a numeric stored value against the string option value', () => {
+      const entry = { slug: 'one', locales: { en: { content: { id: 1, title: 'One' } } } };
+      const field = { widget: 'relation', collection: 'items', value_field: 'id' };
+
+      mockGetField.mockReturnValueOnce(field);
+      mockGetEntriesByCollection.mockReturnValueOnce([entry]);
+      mockGetEntryOptions.mockReturnValueOnce([{ value: '1' }]);
+
+      const result = getMetaData({
+        locale: 'en',
+        getFieldArgs: {
+          collectionName: 'posts',
+          fileName: undefined,
+          valueMap: { item: 1 },
+          isIndexFile: false,
+        },
+      }).toJS();
+
+      expect(result.item.items[1].title).toBe('One');
     });
 
     it('should handle multiple relation fields', () => {
@@ -910,6 +1059,216 @@ describe('React Helpers', () => {
 
       expect(result instanceof ImmutableMap).toBe(true);
     });
+
+    describe('nests the metadata of a field like Decap CMS', () => {
+      const relation = { widget: 'relation', collection: 'authors', value_field: '{{slug}}' };
+
+      /** @type {Record<string, any>} */
+      const fields = {
+        author: relation,
+        authors: { ...relation, multiple: true },
+        'authors.*': { ...relation, multiple: true },
+        info: { widget: 'object', fields: [{ ...relation, name: 'author' }] },
+        'info.author': relation,
+        books: { widget: 'list', fields: [{ ...relation, name: 'author' }] },
+        'books.*.author': relation,
+        tags: { widget: 'list', field: { ...relation, name: 'tag' } },
+        'tags.*': relation,
+        items: { widget: 'list', field: { widget: 'object', name: 'item', fields: [] } },
+        'items.*.author': relation,
+      };
+
+      const jane = { slug: 'jane', locales: { en: { content: { name: 'Jane' } } } };
+      const john = { slug: 'john', locales: { en: { content: { name: 'John' } } } };
+
+      /**
+       * Build the metadata of the given content.
+       * @param {Record<string, string>} valueMap Flattened content.
+       * @returns {any} Metadata as a plain object.
+       */
+      const build = (valueMap) => {
+        mockGetField.mockImplementation(({ keyPath }) => fields[keyPath.replace(/\.\d+/g, '.*')]);
+        mockGetEntriesByCollection.mockReturnValue([jane, john]);
+
+        return getMetaData({
+          locale: 'en',
+          getFieldArgs: { collectionName: 'posts', valueMap },
+        }).toJS();
+      };
+
+      it('for a top-level Relation field', () => {
+        expect(build({ author: 'jane' })).toEqual({
+          author: { authors: { jane: { name: 'Jane' } } },
+        });
+      });
+
+      it('for a Relation field with the `multiple` option', () => {
+        expect(build({ 'authors.0': 'jane', 'authors.1': 'john' })).toEqual({
+          authors: { authors: { jane: { name: 'Jane' }, john: { name: 'John' } } },
+        });
+      });
+
+      it('for a Relation field in an Object field, also keeping the flattened key path', () => {
+        const metadata = { authors: { jane: { name: 'Jane' } } };
+
+        expect(build({ 'info.author': 'jane' })).toEqual({
+          info: { author: metadata },
+          'info.author': metadata,
+        });
+      });
+
+      it('for a Relation field in List items, merging the items', () => {
+        expect(build({ 'books.0.author': 'jane', 'books.1.author': 'john' })).toEqual({
+          books: { author: { authors: { jane: { name: 'Jane' }, john: { name: 'John' } } } },
+          'books.0.author': { authors: { jane: { name: 'Jane' } } },
+          'books.1.author': { authors: { john: { name: 'John' } } },
+        });
+      });
+
+      it('for the single Relation subfield of a List field, under the subfield’s name', () => {
+        const metadata = { authors: { jane: { name: 'Jane' }, john: { name: 'John' } } };
+
+        // The List field’s own name holds the legacy metadata too
+        expect(build({ 'tags.0': 'jane', 'tags.1': 'john' })).toEqual({
+          tags: { tag: metadata, ...metadata },
+        });
+      });
+
+      it('for a Relation field in an Object field with a numeric name', () => {
+        const metadata = { authors: { jane: { name: 'Jane' } } };
+
+        fields.years = { widget: 'object', fields: [{ ...relation, name: '2024' }] };
+        // The mock looks a numeric segment up as `*`
+        fields['years.*'] = relation;
+
+        try {
+          expect(build({ 'years.2024': 'jane' })).toEqual({
+            years: { 2024: metadata },
+            'years.2024': metadata,
+          });
+        } finally {
+          delete fields.years;
+          delete fields['years.*'];
+        }
+      });
+
+      describe('deprecation warning', () => {
+        /**
+         * Build the metadata of the given content as an Immutable Map.
+         * @param {Record<string, string>} valueMap Flattened content.
+         * @returns {any} Metadata.
+         */
+        const buildMap = (valueMap) => {
+          build(valueMap);
+
+          return getMetaData({
+            locale: 'en',
+            getFieldArgs: { collectionName: 'posts', valueMap },
+          });
+        };
+
+        it.each([
+          ['get', (map) => map.get('info.author')],
+          ['getIn', (map) => map.getIn(['info.author', 'authors', 'jane'])],
+        ])('warns about a flat key path read with `%s()`', (_method, read) => {
+          const result = read(buildMap({ 'info.author': 'jane' }));
+
+          expect(result.toJS()).toBeTruthy();
+          expect(warnDeprecation).toHaveBeenCalledExactlyOnceWith('flat_metadata_keys');
+        });
+
+        it('warns about a List item’s flat key path', () => {
+          const map = buildMap({ 'books.0.author': 'jane' });
+
+          expect(map.getIn(['books.0.author', 'authors', 'jane', 'name'])).toBe('Jane');
+          expect(warnDeprecation).toHaveBeenCalledWith('flat_metadata_keys');
+        });
+
+        it('warns about the single subfield’s metadata under the List field’s name', () => {
+          const map = buildMap({ 'tags.0': 'jane' });
+
+          expect(map.getIn(['tags', 'authors', 'jane', 'name'])).toBe('Jane');
+          expect(warnDeprecation).toHaveBeenCalledWith('flat_metadata_keys');
+        });
+
+        it('leaves a Map without deprecated keys alone, like the shared empty Map', () => {
+          expect(Object.hasOwn(buildMap({}), 'get')).toBe(false);
+          expect(Object.hasOwn(ImmutableMap(), 'get')).toBe(false);
+          expect(Object.hasOwn(buildMap({ author: 'jane' }), 'get')).toBe(false);
+        });
+
+        it('keeps the not-set value of a read', () => {
+          const map = buildMap({ 'info.author': 'jane' });
+
+          expect(map.get('unknown', 'fallback')).toBe('fallback');
+          expect(map.getIn(['tags', 'authors'], 'fallback')).toBe('fallback');
+        });
+
+        it('stays quiet about the current paths and about building the Map', () => {
+          const map = buildMap({
+            author: 'jane',
+            'info.author': 'jane',
+            'books.0.author': 'jane',
+            'tags.0': 'jane',
+          });
+
+          expect(map.getIn(['author', 'authors', 'jane', 'name'])).toBe('Jane');
+          expect(map.getIn(['info', 'author', 'authors', 'jane', 'name'])).toBe('Jane');
+          expect(map.getIn(['books', 'author', 'authors', 'jane', 'name'])).toBe('Jane');
+          expect(map.getIn(['tags', 'tag', 'authors', 'jane', 'name'])).toBe('Jane');
+          map.toJS();
+          expect(warnDeprecation).not.toHaveBeenCalled();
+        });
+
+        it('stays quiet about a single subfield named after the referenced collection', () => {
+          fields.writers = { widget: 'list', field: { ...relation, name: 'authors' } };
+          fields['writers.*'] = relation;
+
+          try {
+            const map = buildMap({ 'writers.0': 'jane' });
+
+            expect(map.getIn(['writers', 'authors', 'authors', 'jane', 'name'])).toBe('Jane');
+            expect(warnDeprecation).not.toHaveBeenCalled();
+          } finally {
+            delete fields.writers;
+            delete fields['writers.*'];
+          }
+        });
+      });
+
+      it('for a field name and value that are also `Object.prototype` members', () => {
+        fields.constructor = relation;
+        jane.slug = '__proto__';
+
+        try {
+          build({ constructor: '__proto__' });
+
+          // Read the Immutable Map, as `toJS()` would turn `__proto__` back into the prototype
+          const result = getMetaData({
+            locale: 'en',
+            getFieldArgs: { collectionName: 'posts', valueMap: { constructor: '__proto__' } },
+          });
+
+          expect(result.keySeq().toArray()).toEqual(['constructor']);
+          expect(result.getIn(['constructor', 'authors', '__proto__']).toJS()).toEqual({
+            name: 'Jane',
+          });
+          expect(Object.hasOwn(Object, 'authors')).toBe(false);
+        } finally {
+          delete fields.constructor;
+          jane.slug = 'jane';
+        }
+      });
+
+      it('for a Relation field in the single Object subfield of a List field', () => {
+        const metadata = { authors: { jane: { name: 'Jane' } } };
+
+        expect(build({ 'items.0.author': 'jane' })).toEqual({
+          items: { item: { author: metadata } },
+          'items.0.author': metadata,
+        });
+      });
+    });
   });
 
   describe('getAssociatedPreviewAssets', () => {
@@ -998,7 +1357,6 @@ describe('React Helpers', () => {
       expect(result[0].name).toBe('image1.jpg');
     });
   });
-
   describe('buildPreviewData', () => {
     beforeEach(() => {
       mockGetField.mockReset();
@@ -1035,6 +1393,30 @@ describe('React Helpers', () => {
       // The result is kept, so several previews reading it in the same tick share the computation
       expect(result.fieldsMetaData).toBe(fieldsMetaData);
       expect(mockGetField).toHaveBeenCalledOnce();
+    });
+
+    it('should leave the internal list item properties out of the data', () => {
+      const values = {
+        title: 'Hello',
+        'items.0.name': 'A',
+        'items.0.__sc_item_id': 'id-1',
+        'items.0.__sc_item_original_key_path': 'items.0',
+      };
+
+      const mockDraft = {
+        collectionName: 'posts',
+        fileName: undefined,
+        isIndexFile: false,
+        originalEntry: undefined,
+        currentValues: { en: values, ja: values },
+      };
+
+      const { entryMap, valueMap } = buildPreviewData({ draft: mockDraft, locale: 'en' });
+      const expected = { title: 'Hello', items: [{ name: 'A' }] };
+
+      expect(valueMap).toEqual({ title: 'Hello', 'items.0.name': 'A' });
+      expect(entryMap.get('data').toJS()).toEqual(expected);
+      expect(entryMap.getIn(['i18n', 'ja', 'data']).toJS()).toEqual(expected);
     });
 
     it('should build preview data with all required properties', () => {

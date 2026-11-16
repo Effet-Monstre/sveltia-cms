@@ -113,6 +113,12 @@ export class MockGitRepository {
   unhandled = [];
 
   /**
+   * The signed-in user’s fork of the repository, once {@link createFork} has made it.
+   * @type {{ owner: string, repo: string } | undefined}
+   */
+  fork = undefined;
+
+  /**
    * Create a repository with an empty initial commit on the default branch.
    */
   constructor() {
@@ -125,6 +131,78 @@ export class MockGitRepository {
    */
   get head() {
     return this.getHead(this.branch);
+  }
+
+  /**
+   * Fork the repository onto the signed-in user’s account, with a copy of the default branch. Like
+   * a fork on the hosting service, it shares the commits and blobs of the repository, and only its
+   * branches are its own.
+   * @param {object} [options] Options.
+   * @param {string} [options.repo] Name of the fork, the repository’s own by default. A fork has
+   * another name when it was renamed, or when the user already had a repository of that name.
+   * @returns {{ owner: string, repo: string }} Fork.
+   */
+  createFork({ repo = this.repo } = {}) {
+    this.fork = { owner: this.user.login, repo };
+    this.refs.set(this.forkBranch(this.branch), this.head.oid);
+
+    return this.fork;
+  }
+
+  /**
+   * Get the key of a branch in the fork, for {@link refs}, {@link commit}, {@link readFile} and
+   * the head of a pull request.
+   * @param {string} branch Branch name.
+   * @returns {string} Key, e.g. `mona:main`.
+   */
+  forkBranch(branch) {
+    return `${this.forkOwner}:${branch}`;
+  }
+
+  /**
+   * Commit a post to a branch in the colleague’s fork, the way the CMS does for an Open Authoring
+   * contributor: on a `cms/{owner}/{repo}/posts/{slug}` branch. It’s what a maintainer reviews once
+   * the contributor opens a request for it, which each service’s mock does with a method of its
+   * own.
+   * @param {object} args Arguments.
+   * @param {string} args.slug Entry slug.
+   * @param {Record<string, string | null>} args.files Files to commit to the branch.
+   * @returns {{ headBranch: string, branchKey: string, title: string }} Branch name in the fork,
+   * its key in {@link refs}, e.g. `alex:cms/alex/e2e-site/posts/{slug}`, and the title the request
+   * is opened with.
+   */
+  commitContributorPost({ slug, files }) {
+    const { login } = this.colleague;
+    const headBranch = `cms/${login}/${this.repo}/posts/${slug}`;
+    const branchKey = `${login}:${headBranch}`;
+    const title = `Create Post “${slug}”`;
+
+    this.createBranch(branchKey, this.head.oid);
+    this.commit(files, { branch: branchKey, author: this.colleague, message: title });
+
+    return { headBranch, branchKey, title };
+  }
+
+  /**
+   * The owner of {@link fork}: the signed-in user’s, unless a test has given the fork to someone
+   * else, such as a contributor whose pull request a maintainer reviews.
+   * @type {string}
+   */
+  get forkOwner() {
+    return this.fork?.owner ?? this.user.login;
+  }
+
+  /**
+   * Get the branches holding Editorial Workflow entries, in the repository and, with
+   * `includeFork`, in the fork.
+   * @param {object} [options] Options.
+   * @param {boolean} [options.includeFork] Whether to include the fork’s branches.
+   * @returns {string[]} Branch keys, as {@link refs} has them.
+   */
+  getWorkflowBranches({ includeFork = false } = {}) {
+    const pattern = includeFork ? /^(\w+:)?cms\// : /^cms\//;
+
+    return [...this.refs.keys()].filter((key) => pattern.test(key));
   }
 
   /**
@@ -227,6 +305,24 @@ export class MockGitRepository {
     this.refs.set(branch, commit.oid);
 
     return commit;
+  }
+
+  /**
+   * Get a tree SHA for a directory of a file tree. Like Git’s, it’s made from the files in the
+   * directory, so it stays the same across commits that leave the directory alone.
+   * @param {Map<string, string>} tree File tree.
+   * @param {string} dir Directory path, without a trailing slash.
+   * @returns {string | undefined} SHA, or `undefined` if the tree has no file in the directory.
+   */
+  static getDirSHA(tree, dir) {
+    const prefix = `${dir}/`;
+    const files = [...tree].filter(([path]) => path.startsWith(prefix)).sort();
+
+    return files.length
+      ? createHash('sha1')
+          .update(`tree ${JSON.stringify(files)}`)
+          .digest('hex')
+      : undefined;
   }
 
   /**

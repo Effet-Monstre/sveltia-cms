@@ -5,9 +5,11 @@ import { allAssets } from '$lib/services/assets/state';
 import { getAllFiles } from '$lib/services/backends/fs/shared/scan';
 import { mapConcurrently } from '$lib/services/backends/git/shared/concurrency';
 import { gitConfigFiles } from '$lib/services/backends/git/shared/config';
+import { deferRejection } from '$lib/services/backends/git/shared/defer';
 import { createFileList, describeFileList } from '$lib/services/backends/process';
 import { allEntries, dataLoaded, entryParseErrors } from '$lib/services/contents';
 import { prepareEntries } from '$lib/services/contents/file/process';
+import { readCacheEntries, updateCacheEntries } from '$lib/services/utils/database';
 import { getGitHash } from '$lib/services/utils/file';
 import { createDebugLogger } from '$lib/services/utils/logging';
 
@@ -120,55 +122,6 @@ export const parseAssetFileInfo = async (fileInfo, { cachedHashes, newHashes } =
 };
 
 /**
- * Read the asset hashes cached by a previous load.
- * @param {IndexedDB | null | undefined} hashCacheDB Cache store.
- * @returns {Promise<Map<string, AssetHashCacheRecord>>} Cached hashes keyed by file path. Empty if
- * there is no store or it can’t be read; every file is then hashed as usual.
- */
-const readCachedHashes = async (hashCacheDB) => {
-  try {
-    return new Map((await hashCacheDB?.entries()) ?? []);
-  } catch (ex) {
-    // eslint-disable-next-line no-console
-    console.error(ex);
-
-    return new Map();
-  }
-};
-
-/**
- * Update the asset hash cache once the assets have been hashed: save the hashes computed in this
- * load, and drop the records of files that are gone. The records of unchanged files stay as they
- * are, so a load that reused every hash writes nothing.
- * @param {IndexedDB | null | undefined} hashCacheDB Cache store.
- * @param {object} hashes Hashes.
- * @param {Map<string, AssetHashCacheRecord>} hashes.cachedHashes Hashes read from the store.
- * @param {Map<string, AssetHashCacheRecord>} hashes.newHashes Hashes computed in this load.
- * @param {Set<string>} hashes.currentPaths Paths of the asset files found in this load.
- */
-const updateCachedHashes = async (hashCacheDB, { cachedHashes, newHashes, currentPaths }) => {
-  if (!hashCacheDB) {
-    return;
-  }
-
-  const stalePaths = [...cachedHashes.keys()].filter((path) => !currentPaths.has(path));
-
-  try {
-    if (newHashes.size) {
-      await hashCacheDB.saveEntries([...newHashes]);
-    }
-
-    if (stalePaths.length) {
-      await hashCacheDB.deleteEntries(stalePaths);
-    }
-  } catch (ex) {
-    // The cache is a nicety; the next load hashes the files again
-    // eslint-disable-next-line no-console
-    console.error(ex);
-  }
-};
-
-/**
  * Load file list and all the entry files from the file system, then cache them in the stores.
  * @param {FileSystemDirectoryHandle} rootDirHandle Root directory handle.
  * @param {object} [options] Options.
@@ -182,11 +135,28 @@ export const loadFiles = async (rootDirHandle, { hashCacheDB = null } = {}) => {
   log(`Started: local repository ${rootDirHandle.name}`);
 
   // Start reading the cache right away, as it’s only needed once the directory has been scanned
-  const cachedHashesPromise = readCachedHashes(hashCacheDB);
+  /** @type {Promise<Map<string, AssetHashCacheRecord>>} */
+  const cachedHashesPromise = readCacheEntries(hashCacheDB);
   const fileList = createFileList(await getAllFiles(rootDirHandle));
   const { entryFiles, assetFiles, configFiles } = fileList;
 
   log(`Scanned the directory: ${describeFileList(fileList)}`);
+
+  /** @type {Map<string, AssetHashCacheRecord>} */
+  const newHashes = new Map();
+
+  // Each asset file is read in full to hash it, so this can take a while with large media, unless
+  // the hash is still cached from a previous load. It’s started now, so it goes on while the entry
+  // files are read and parsed rather than after
+  const assetsPromise = deferRejection(
+    cachedHashesPromise.then((cachedHashes) =>
+      mapConcurrently(
+        assetFiles,
+        (fileInfo) => parseAssetFileInfo(fileInfo, { cachedHashes, newHashes }),
+        { concurrency: FILE_PROCESS_CONCURRENCY },
+      ),
+    ),
+  );
 
   const entryFileItems = /** @type {BaseEntryListItem[]} */ (
     await mapConcurrently(entryFiles, parseTextFileInfo, { concurrency: FILE_PROCESS_CONCURRENCY })
@@ -204,19 +174,10 @@ export const loadFiles = async (rootDirHandle, { hashCacheDB = null } = {}) => {
 
   log(`Parsed ${entries.length} entries (${errors.length} errors)`);
 
-  const cachedHashes = await cachedHashesPromise;
-  /** @type {Map<string, AssetHashCacheRecord>} */
-  const newHashes = new Map();
-
   /** @type {Asset[]} */
-  const assets = await mapConcurrently(
-    assetFiles,
-    (fileInfo) => parseAssetFileInfo(fileInfo, { cachedHashes, newHashes }),
-    { concurrency: FILE_PROCESS_CONCURRENCY },
-  );
+  const assets = await assetsPromise;
+  const cachedHashes = await cachedHashesPromise;
 
-  // Each asset file is read in full to hash it, so this can take a while with large media, unless
-  // the hash is still cached from a previous load
   log(`Hashed ${newHashes.size} of ${assets.length} asset files (${cachedHashes.size} cached)`);
 
   allEntries.current = entries;
@@ -228,9 +189,13 @@ export const loadFiles = async (rootDirHandle, { hashCacheDB = null } = {}) => {
   log('The site data is ready');
 
   // The app is usable at this point, so the cache is updated afterwards
-  await updateCachedHashes(hashCacheDB, {
-    cachedHashes,
+  // Save the hashes computed in this load, and drop the records of files that are gone. The records
+  // of unchanged files stay as they are, so a load that reused every hash writes nothing.
+  const currentPaths = new Set(assetFiles.map(({ path }) => path));
+
+  await updateCacheEntries(
+    hashCacheDB,
     newHashes,
-    currentPaths: new Set(assetFiles.map(({ path }) => path)),
-  });
+    [...cachedHashes.keys()].filter((path) => !currentPaths.has(path)),
+  );
 };

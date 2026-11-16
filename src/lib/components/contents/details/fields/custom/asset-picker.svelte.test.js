@@ -5,6 +5,7 @@ import { globalAssetFolder } from '$lib/services/assets/folders';
 import { showContentOverlay } from '$lib/services/contents/editor';
 import { createMockAsset, createMockImageFile, initTestConfig, setAssets } from '$lib/test/config';
 import { createMockDraft, renderWithDraft } from '$lib/test/draft';
+import { createFileDropEvent } from '$lib/test/drop';
 
 import AssetPicker from './asset-picker.svelte';
 
@@ -27,35 +28,13 @@ const renderPicker = async () => {
 };
 
 /**
- * Drop the given files onto the dialog.
+ * Drop the given files onto the drop target.
  * @param {File[]} files Files.
  */
 const dropFiles = (files) => {
-  const event = new Event('drop', { bubbles: true, cancelable: true });
-
-  Object.defineProperty(event, 'dataTransfer', {
-    value: {
-      dropEffect: '',
-      items: files.map((file) => ({
-        /**
-         * Get the entry.
-         * @returns {any} File entry.
-         */
-        webkitGetAsEntry: () => ({
-          name: file.name,
-          isFile: true,
-          /**
-           * Read the file.
-           * @param {(file: File) => void} callback Callback.
-           * @returns {void} Nothing.
-           */
-          file: (callback) => callback(file),
-        }),
-      })),
-    },
-  });
-
-  /** @type {HTMLElement} */ (document.querySelector('.drop-target')).dispatchEvent(event);
+  /** @type {HTMLElement} */ (document.querySelector('.drop-target')).dispatchEvent(
+    createFileDropEvent(files),
+  );
 };
 
 describe('AssetPicker', () => {
@@ -173,6 +152,30 @@ describe('AssetPicker', () => {
       .toHaveTextContent(
         'Large File This file cannot be uploaded because it exceeds the maximum size of ' +
           '\u2068\u206810\u2069 bytes\u2069. Please reduce the size or select a different file. big.png OK',
+      );
+    await alert.getByRole('button', { name: 'OK' }).click();
+    await expect.poll(() => document.querySelector('[role="alertdialog"]')).toBeNull();
+  });
+
+  test('refuses a file of another type once it is processed', async () => {
+    const { component, draft } = await renderPicker();
+    const promise = component.pick({ accept: '.pdf' });
+    const dialog = page.getByRole('dialog', { name: 'Select File' });
+
+    await expect.element(dialog).toBeInTheDocument();
+    dropFiles([await createMockImageFile({ name: 'kite.png' })]);
+    await expect.element(dialog.getByRole('button', { name: 'Insert' })).toBeEnabled();
+    await dialog.getByRole('button', { name: 'Insert' }).click();
+
+    expect(await promise).toBeNull();
+    expect(draft.files).toEqual({});
+
+    const alert = page.getByRole('alertdialog', { name: 'Unsupported File Type' });
+
+    await expect
+      .element(alert)
+      .toMatchTextContent(
+        'This file cannot be uploaded because it’s not one of the following types: \u2068.pdf\u2069.',
       );
     await alert.getByRole('button', { name: 'OK' }).click();
     await expect.poll(() => document.querySelector('[role="alertdialog"]')).toBeNull();

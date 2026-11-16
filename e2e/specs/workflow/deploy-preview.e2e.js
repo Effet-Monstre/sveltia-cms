@@ -1,5 +1,6 @@
 import { openEntryPullRequest, post, WORKFLOW_CONFIG } from '../../fixtures/configs/workflow.js';
-import { expect, GITLAB_CONFIG, test } from '../../fixtures/test.js';
+import { expect, GITEA_CONFIG, GITLAB_CONFIG, test } from '../../fixtures/test.js';
+import { getEditor, getOpenedURL } from '../../fixtures/ui.js';
 
 /**
  * @import { Locator, Page } from '@playwright/test';
@@ -44,27 +45,12 @@ const openSecondPostPullRequest = (github) => {
  * @returns {Promise<Locator>} Editor.
  */
 const openSecondPost = async (page) => {
-  const editor = page.getByRole('group', { name: 'Content Editor' });
+  const editor = getEditor(page);
 
   await page.getByRole('row', { name: /Second Post/ }).click();
   await expect(editor.getByRole('textbox', { name: 'Title' })).toHaveValue('Second Post');
 
   return editor;
-};
-
-/**
- * Click a control and get the URL of the tab it opens.
- * @param {Page} page Page.
- * @param {Locator} control Control.
- * @returns {Promise<string>} URL.
- */
-const getOpenedURL = async (page, control) => {
-  const [popup] = await Promise.all([page.waitForEvent('popup'), control.click()]);
-  const url = popup.url();
-
-  await popup.close();
-
-  return url;
 };
 
 test('opens the entry on the deploy preview of its pull request', async ({ cms, github, page }) => {
@@ -205,6 +191,50 @@ test('opens the deploy preview from the card on the Editorial Workflow page', as
   );
 });
 
+test.describe('with `show_preview_links: false`', () => {
+  test.use({ config: { ...CONFIG, show_preview_links: false } });
+
+  test('offers neither the deploy preview nor the live site', async ({ cms, github, page }) => {
+    github.reportBuild(openSecondPostPullRequest(github), {
+      deployments: [
+        {
+          environment: 'Preview',
+          state: 'SUCCESS',
+          environmentUrl: 'https://pr-1.preview.example.com',
+        },
+      ],
+    });
+
+    // A missing link alone passes before a lookup could have shown one, so check that the CMS
+    // never asks for the deployments either
+    /** @type {string[]} */
+    const lookups = [];
+
+    page.on('request', (request) => {
+      if (request.postData()?.includes('deployments(')) {
+        lookups.push(request.url());
+      }
+    });
+
+    await cms.open();
+    await page.getByRole('radio', { name: 'Editorial Workflow' }).click();
+
+    const card = page.getByRole('listitem').filter({ hasText: 'Second Post' });
+
+    await expect(card).toBeVisible();
+    await expect(card.getByRole('button', { name: 'View Preview' })).toHaveCount(0);
+    await card.click();
+
+    const editor = getEditor(page);
+
+    await expect(editor.getByRole('textbox', { name: 'Title' })).toHaveValue('Second Post');
+    await expect(
+      editor.getByRole('button', { name: /View Preview|View on Live Site/ }),
+    ).toHaveCount(0);
+    expect(lookups).toEqual([]);
+  });
+});
+
 test.describe('on GitLab', () => {
   test.use({
     config: {
@@ -244,6 +274,76 @@ test.describe('on GitLab', () => {
 
     expect(await getOpenedURL(page, editor.getByRole('button', { name: 'View Preview' }))).toBe(
       'https://second-post.review.example.com/posts/second-post',
+    );
+  });
+});
+
+test.describe('on Forgejo', () => {
+  test.use({
+    config: {
+      ...CONFIG,
+      backend: GITEA_CONFIG.backend,
+    },
+  });
+
+  test('opens the entry on the deploy preview a workflow reports with a commit status', async ({
+    cms,
+    gitea,
+    page,
+  }) => {
+    // A Forgejo Actions workflow builds each pull request, publishes it to a static site server,
+    // then posts the address as a commit status of its own
+    // @see https://github.com/sveltia/sveltia-cms/issues/1058
+    gitea.version = '16.0.5+gitea-1.22.0';
+    gitea.createBranch('cms/posts/second-post', gitea.head.oid);
+
+    const { oid: sha } = gitea.commit(
+      { 'content/posts/second-post.md': post('Second Post', 'Coming soon.') },
+      { branch: 'cms/posts/second-post', author: gitea.user },
+    );
+
+    gitea.openPullRequest(
+      { title: 'Create Post “second-post”', headBranch: 'cms/posts/second-post' },
+      { labels: ['sveltia-cms/pending_review'], author: gitea.user },
+    );
+
+    /**
+     * The status Forgejo Actions posts for the workflow job, linked to the job log.
+     * @param {string} status Job status.
+     * @returns {{ context: string, status: string, target_url: string }} Commit status.
+     */
+    const jobStatus = (status) => ({
+      context: 'Preview / preview (pull_request)',
+      status,
+      target_url: 'https://gitea.com/sveltia/e2e-site/actions/runs/1/jobs/0',
+    });
+
+    gitea.reportBuild(sha, { statuses: [jobStatus('pending')] });
+    await page.clock.install();
+    await cms.open();
+
+    const editor = await openSecondPost(page);
+    const waiting = editor.getByRole('button', { name: 'Checking for Preview' });
+
+    await expect(waiting).toBeDisabled();
+    await expect(waiting).toHaveAccessibleDescription('The preview is still being built.');
+
+    // The job posts the preview address, then finishes. The job log is never taken for the site
+    gitea.reportBuild(sha, {
+      statuses: [
+        {
+          context: 'pages/preview',
+          status: 'success',
+          target_url: 'https://sveltia.pr.example.com/e2e-site@1/',
+          description: 'Preview',
+        },
+        jobStatus('success'),
+      ],
+    });
+    await page.clock.fastForward('00:06');
+
+    expect(await getOpenedURL(page, editor.getByRole('button', { name: 'View Preview' }))).toBe(
+      'https://sveltia.pr.example.com/e2e-site@1/posts/second-post',
     );
   });
 });

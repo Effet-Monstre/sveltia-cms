@@ -46,6 +46,37 @@ describe('buildSingleFileContent()', () => {
     expect(serializeContent).toHaveBeenCalledTimes(2);
   });
 
+  test('passes the format of the saved file on', () => {
+    const draft = {};
+    const format = 'toml-frontmatter';
+
+    buildSingleFileContent({
+      config: { _i18n: { i18nEnabled: false, defaultLocale: 'en' } },
+      entry,
+      draft,
+      format,
+    });
+    expect(serializeContent).toHaveBeenCalledWith({
+      draft,
+      locale: '_default',
+      valueMap: { title: 'Hello' },
+      format,
+    });
+
+    buildSingleFileContent({
+      config: { _i18n: { i18nEnabled: true, defaultLocale: 'en' } },
+      entry,
+      draft,
+      format,
+    });
+    expect(serializeContent).toHaveBeenCalledWith({
+      draft,
+      locale: 'fr',
+      valueMap: { title: 'Bonjour' },
+      format,
+    });
+  });
+
   test('puts the default locale at the root for `single_file_default_root`', () => {
     const config = {
       _i18n: {
@@ -100,6 +131,27 @@ describe('buildSingleFileContent()', () => {
 });
 
 describe('getFieldComments()', () => {
+  test('leaves out the comment of a top-level List or KeyValue field, which has no key', () => {
+    expect(
+      getFieldComments([{ name: 'references', widget: 'list', root: true, comment: 'References' }]),
+    ).toEqual({});
+    expect(
+      getFieldComments([
+        { name: 'redirects', widget: 'keyvalue', root: true, comment: 'Redirects' },
+      ]),
+    ).toEqual({});
+    // The option means nothing below the top level
+    expect(
+      getFieldComments([
+        {
+          name: 'seo',
+          widget: 'object',
+          fields: [{ name: 'tags', widget: 'list', root: true, comment: 'Tags' }],
+        },
+      ]),
+    ).toEqual({ 'seo.tags': 'Tags' });
+  });
+
   test('collects the comments of the fields and the subfields of Object fields', () => {
     expect(
       getFieldComments([

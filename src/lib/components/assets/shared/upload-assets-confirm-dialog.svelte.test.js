@@ -2,6 +2,7 @@ import { beforeAll, beforeEach, describe, expect, test, vi } from 'vitest';
 import { page } from 'vitest/browser';
 import { render } from 'vitest-browser-svelte';
 
+import AssetUpdatesToast from '$lib/components/assets/shared/asset-updates-toast.svelte';
 import { saveAssets } from '$lib/services/assets/data/create';
 import { globalAssetFolder } from '$lib/services/assets/folders';
 import { processedAssets } from '$lib/services/assets/process';
@@ -106,14 +107,15 @@ describe('UploadAssetsConfirmDialog', () => {
     }
   });
 
-  test('is worded as a replacement when replacing an asset', async () => {
+  test('is worded as a replacement when replacing an asset, then replaces it', async () => {
+    vi.mocked(saveAssets).mockResolvedValue(undefined);
+
     await render(UploadAssetsConfirmDialog, {});
 
-    uploadingAssets.current = {
-      folder: globalAssetFolder.current,
-      files: [image],
-      originalAssets: [/** @type {any} */ ({ name: 'old.png', folder: globalAssetFolder.current })],
-    };
+    const folder = globalAssetFolder.current;
+    const originalAssets = [/** @type {any} */ ({ name: 'old.png', folder })];
+
+    uploadingAssets.current = { folder, files: [image], originalAssets };
 
     const dialog = page.getByRole('alertdialog', { name: 'Replace Asset' });
 
@@ -124,6 +126,16 @@ describe('UploadAssetsConfirmDialog', () => {
         '“\u2068old.png\u2069” will be replaced with this file: photo.png PNG image · \u206870\u2069 bytes close',
       );
     await expect.element(dialog.getByRole('button', { name: 'Replace' })).toBeVisible();
+
+    await dialog.getByRole('button', { name: 'Replace' }).click();
+
+    await vi.waitFor(() =>
+      expect(saveAssets).toHaveBeenCalledWith(
+        { files: [image], folder, originalAssets },
+        { commitType: 'uploadMedia' },
+      ),
+    );
+    await expect.poll(() => uploadingAssets.current.files).toEqual([]);
   });
 
   test('clears the selection when cancelled', async () => {
@@ -271,6 +283,9 @@ describe('UploadAssetsConfirmDialog', () => {
   });
 
   test('reports a failure to upload', async () => {
+    // The toasts reporting the commit are rendered by the shared component
+    await render(AssetUpdatesToast, {});
+
     vi.spyOn(console, 'error').mockImplementation(() => {});
     vi.mocked(saveAssets).mockRejectedValue(new Error('Boom'));
 
@@ -287,6 +302,65 @@ describe('UploadAssetsConfirmDialog', () => {
       .toBe('error Error Upload failed.');
     await expect.poll(() => uploadingAssets.current.files).toEqual([]);
     await waitForToastsToHide();
+  });
+
+  test('says nothing when the commit is cancelled', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    vi.mocked(saveAssets).mockRejectedValue(new Error('commit_cancelled'));
+
+    await render(UploadAssetsConfirmDialog, {});
+
+    uploadingAssets.current = { folder: globalAssetFolder.current, files: [image] };
+
+    await page.getByRole('alertdialog').getByRole('button', { name: 'Upload' }).click();
+
+    await vi.waitFor(() => expect(saveAssets).toHaveBeenCalled());
+    await expect
+      .poll(() => document.querySelector('.sui.toast:not([aria-hidden="true"]) .sui.alert'))
+      .toBeNull();
+    expect(
+      document.querySelector('.sui.toast:not([aria-hidden="true"]) .sui.alert.error'),
+    ).toBeNull();
+    expect(error).not.toHaveBeenCalled();
+  });
+
+  test('asks about files dropped while an upload is in flight, and keeps them', async () => {
+    const { promise, resolve } = Promise.withResolvers();
+    const folder = globalAssetFolder.current;
+
+    vi.mocked(saveAssets).mockReturnValueOnce(/** @type {any} */ (promise));
+    await render(UploadAssetsConfirmDialog, {});
+    uploadingAssets.current = { folder, files: [image] };
+
+    const dialog = page.getByRole('alertdialog', { name: 'Upload New Assets' });
+
+    await dialog.getByRole('button', { name: 'Upload' }).click();
+    await vi.waitFor(() => expect(saveAssets).toHaveBeenCalledOnce());
+    await expect.poll(() => dialog.elements().length).toBe(0);
+
+    // Another file is dropped while the first one is being committed
+    uploadingAssets.current = { folder, files: [doc] };
+    await expect.element(dialog).toBeVisible();
+    await expect.element(dialog.getByRole('listitem')).toMatchTextContent(/notes\.txt/);
+
+    // The first upload finishing leaves the new selection alone
+    resolve(undefined);
+    await promise;
+    // Let the upload’s `finally` block run
+    await new Promise((r) => {
+      setTimeout(r, 0);
+    });
+    expect(uploadingAssets.current.files).toEqual([doc]);
+    await expect.element(dialog).toBeVisible();
+
+    await dialog.getByRole('button', { name: 'Upload' }).click();
+    await vi.waitFor(() =>
+      expect(saveAssets).toHaveBeenLastCalledWith(
+        { files: [doc], folder, replaceDuplicates: true },
+        { commitType: 'uploadMedia' },
+      ),
+    );
   });
 
   test('closes along with the asset details overlay', async () => {

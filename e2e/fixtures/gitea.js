@@ -11,10 +11,13 @@ import { getBlobSHA, MockGitRepository } from './git.js';
  * @property {number} number Pull request index, which the API paths use.
  * @property {number} id Internal ID, unique across the instance.
  * @property {string} title Title. A work in progress carries a `WIP: ` prefix.
+ * @property {string} [body] Description.
  * @property {string} headBranch Head branch name.
  * @property {number} headRepoId ID of the repository the head branch is in: the repository’s own,
  * or the fork’s for a pull request from a fork.
  * @property {string} baseBranch Base branch name.
+ * @property {boolean} allowMaintainerEdit Whether the author of a pull request from a fork lets
+ * the repository’s maintainers push to its branch.
  * @property {string[]} labels Label names.
  * @property {'open' | 'closed'} state State.
  * @property {boolean} merged Whether the pull request has been merged.
@@ -26,6 +29,8 @@ import { getBlobSHA, MockGitRepository } from './git.js';
  * @property {string} [mergeBaseSHA] Commit the pull request shared with the configured branch when
  * it was merged, which the instance stores and lists its files from afterwards.
  * @property {MockUser} author Author.
+ * @property {{ id: number, login: string, commitId?: string }[]} [approvals] Approvals the pull
+ * request has been given and that still stand, not deleted.
  */
 
 /**
@@ -66,6 +71,11 @@ export class MockGitea extends MockGitRepository {
   forgejo = undefined;
 
   /**
+   * Number of reviews submitted so far, which gives each one its ID.
+   */
+  reviewCount = 0;
+
+  /**
    * Version the instance reports. A Forgejo version carries the Gitea version it’s based on, e.g.
    * `13.0.3+gitea-1.22.0`, which makes the CMS read the files with the Forgejo API.
    */
@@ -89,6 +99,13 @@ export class MockGitea extends MockGitRepository {
   treePageSize = 1000;
 
   /**
+   * Directories listed by the contents endpoint, keyed with the made-up SHA it gave each, which
+   * the trees endpoint lists in turn.
+   * @type {Map<string, { tree: Map<string, string>, prefix: string }>}
+   */
+  subtrees = new Map();
+
+  /**
    * Maximum number of items the instance returns in a page of a list, which it applies whatever
    * the request asks for. The CMS reads it from the settings endpoint and pages through.
    */
@@ -108,12 +125,6 @@ export class MockGitea extends MockGitRepository {
   labels = [];
 
   /**
-   * The signed-in user’s fork of the repository, once {@link createFork} has made it.
-   * @type {{ owner: string, repo: string } | undefined}
-   */
-  fork = undefined;
-
-  /**
    * Whether the fork request fails because the user already has a repository of that name, which
    * makes the CMS ask for the fork under another name.
    */
@@ -125,20 +136,57 @@ export class MockGitea extends MockGitRepository {
   forksDisabled = false;
 
   /**
+   * Commit statuses reported for each commit with {@link reportBuild}, keyed by commit SHA.
+   * @type {Map<string, Record<string, any>[]>}
+   */
+  builds = new Map();
+
+  /**
+   * Open a pull request for a post from the colleague’s fork, the way the CMS does for an Open
+   * Authoring contributor who sends their entry for review: without a label, which the contributor
+   * can’t add. The fork becomes the colleague’s rather than the signed-in user’s. See
+   * {@link commitContributorPost}.
+   * @param {object} args Arguments.
+   * @param {string} args.slug Entry slug.
+   * @param {Record<string, string | null>} args.files Files to commit to the branch.
+   * @param {boolean} [args.editable] Whether the contributor lets maintainers push to the branch.
+   * @returns {MockPullRequest} Pull request.
+   */
+  openContributorRequest({ slug, files, editable = true }) {
+    this.fork = { owner: this.colleague.login, repo: this.repo };
+
+    const { headBranch, title } = this.commitContributorPost({ slug, files });
+
+    return this.openPullRequest(
+      { title, headBranch },
+      { headRepoId: FORK_REPO_ID, author: this.colleague, allowMaintainerEdit: editable },
+    );
+  }
+
+  /**
    * Open a pull request the way the instance does.
    * @param {object} args Arguments.
    * @param {string} args.title Title.
    * @param {string} args.headBranch Head branch name.
+   * @param {string} [args.body] Description.
    * @param {object} [options] Options.
    * @param {number} [options.headRepoId] ID of the repository holding the head branch.
    * @param {string} [options.baseBranch] Base branch name, the configured one by default.
    * @param {string[]} [options.labels] Label names.
    * @param {MockUser} [options.author] Author.
+   * @param {boolean} [options.allowMaintainerEdit] Whether the author of a pull request from a
+   * fork lets the repository’s maintainers push to its branch.
    * @returns {MockPullRequest} Pull request.
    */
   openPullRequest(
-    { title, headBranch },
-    { headRepoId = REPO_ID, baseBranch = this.branch, labels = [], author } = {},
+    { title, headBranch, body = '' },
+    {
+      headRepoId = REPO_ID,
+      baseBranch = this.branch,
+      labels = [],
+      author,
+      allowMaintainerEdit = false,
+    } = {},
   ) {
     labels.forEach((name) => this.createLabel(name));
 
@@ -147,9 +195,11 @@ export class MockGitea extends MockGitRepository {
       number: this.pullRequests.length + 1,
       id: 900 + this.pullRequests.length + 1,
       title,
+      body,
       headBranch,
       headRepoId,
       baseBranch,
+      allowMaintainerEdit,
       labels: [...labels],
       state: 'open',
       merged: false,
@@ -159,6 +209,28 @@ export class MockGitea extends MockGitRepository {
     this.pullRequests.push(pullRequest);
 
     return pullRequest;
+  }
+
+  /**
+   * Report the builds of a commit with commit statuses, which is all Gitea/Forgejo has for them: an
+   * external CI/CD service posts one, and Gitea/Forgejo Actions posts one for every job, linked to
+   * the job log. A later report replaces the earlier ones.
+   * @param {string} sha Commit SHA.
+   * @param {object} builds Builds.
+   * @param {{ context: string, status: string, target_url?: string, description?: string }[]}
+   * builds.statuses Latest status of each context, with a status like `pending` or `success`.
+   */
+  reportBuild(sha, { statuses }) {
+    this.builds.set(
+      sha,
+      statuses.map((status, index) => ({
+        id: index + 1,
+        description: '',
+        target_url: '',
+        updated_at: new Date(Date.UTC(2026, 0, 1, 0, index)).toISOString(),
+        ...status,
+      })),
+    );
   }
 
   /**
@@ -179,30 +251,6 @@ export class MockGitea extends MockGitRepository {
     this.labels.push(label);
 
     return label;
-  }
-
-  /**
-   * Fork the repository onto the signed-in user’s account, with a copy of the configured branch.
-   * Like a fork on the instance, it shares the commits and blobs of the repository, and only its
-   * branches are its own.
-   * @param {object} [options] Options.
-   * @param {string} [options.repo] Name of the fork, the repository’s own by default.
-   * @returns {{ owner: string, repo: string }} Fork.
-   */
-  createFork({ repo = this.repo } = {}) {
-    this.fork = { owner: this.user.login, repo };
-    this.refs.set(this.forkBranch(this.branch), this.head.oid);
-
-    return this.fork;
-  }
-
-  /**
-   * Get the key of a branch in the fork, for {@link refs}, {@link commit} and {@link readFile}.
-   * @param {string} branch Branch name.
-   * @returns {string} Key, e.g. `mona:cms/posts/hello`.
-   */
-  forkBranch(branch) {
-    return `${this.user.login}:${branch}`;
   }
 
   /**
@@ -398,13 +446,14 @@ export class MockGitea extends MockGitRepository {
       return this.handleTreeRequest(filePath.replace(/^trees\//, ''), searchParams);
     }
 
-    // Gitea reads several files at once with this endpoint, which Forgejo doesn’t have
+    // Gitea reads several files at once with this endpoint, which Forgejo doesn’t have. Like the
+    // other endpoints, it takes a commit SHA as well as a branch name as the ref
     if (method === 'POST' && resource === 'file-contents' && !this.isForgejo) {
-      const { tree } = this.getHead(searchParams.get('ref') ?? this.branch);
+      const ref = searchParams.get('ref') ?? this.branch;
 
       return {
         json: /** @type {string[]} */ (body?.files ?? []).map((filePath_) => {
-          const sha = tree.get(filePath_);
+          const sha = this.getFileSHA(ref, filePath_);
 
           return sha ? this.toContentsItem(sha, { path: filePath_ }) : null;
         }),
@@ -497,6 +546,19 @@ export class MockGitea extends MockGitRepository {
 
     if (method === 'POST' && path === 'contents') {
       return this.handleCommit(/** @type {Record<string, any>} */ (body));
+    }
+
+    // The combined status of a commit, which only has the latest status of each context
+    if (method === 'GET' && resource === 'commits' && rest[1] === 'status') {
+      const statuses = this.builds.get(rest[0]) ?? [];
+
+      return {
+        json: {
+          sha: rest[0],
+          total_count: statuses.length,
+          statuses,
+        },
+      };
     }
 
     if (method === 'GET' && path === 'commits') {
@@ -604,7 +666,7 @@ export class MockGitea extends MockGitRepository {
 
     if (resource === 'branches') {
       if (method === 'GET' && !name) {
-        const prefix = `${this.user.login}:`;
+        const prefix = `${this.forkOwner}:`;
 
         const branches = [...this.refs.keys()]
           .filter((key) => key.startsWith(prefix))
@@ -715,9 +777,10 @@ export class MockGitea extends MockGitRepository {
    * @returns {Record<string, any>} Item.
    */
   toPullRequestItem(pullRequest, { list = false } = {}) {
-    const { number, id, title, headBranch, headRepoId, baseBranch, labels, state, merged, author } =
+    const { number, id, title, body, headBranch, headRepoId, baseBranch, labels, state } =
       pullRequest;
 
+    const { merged, author } = pullRequest;
     const fromFork = headRepoId !== REPO_ID;
     const branchKey = fromFork ? this.forkBranch(headBranch) : headBranch;
     const liveHeadSHA = this.refs.has(branchKey) ? this.getHead(branchKey).oid : '';
@@ -727,6 +790,7 @@ export class MockGitea extends MockGitRepository {
       number,
       id,
       title,
+      body,
       html_url: `https://gitea.com/${this.owner}/${this.repo}/pulls/${number}`,
       state,
       merged,
@@ -742,12 +806,19 @@ export class MockGitea extends MockGitRepository {
         // current head instead for as long as the branch exists, whatever the state
         sha: (list && !this.isForgejo) || !liveHeadSHA ? refHeadSHA : liveHeadSHA,
         repo_id: headRepoId,
-        repo: {
-          full_name: fromFork
-            ? `${this.user.login}/${this.fork?.repo ?? this.repo}`
-            : `${this.owner}/${this.repo}`,
-        },
+        repo: fromFork
+          ? {
+              full_name: `${this.forkOwner}/${this.fork?.repo ?? this.repo}`,
+              name: this.fork?.repo ?? this.repo,
+              owner: { login: this.forkOwner },
+            }
+          : {
+              full_name: `${this.owner}/${this.repo}`,
+              name: this.repo,
+              owner: { login: this.owner },
+            },
       },
+      allow_maintainer_edit: pullRequest.allowMaintainerEdit,
       base: {
         ref: baseBranch,
         repo_id: REPO_ID,
@@ -824,12 +895,15 @@ export class MockGitea extends MockGitRepository {
       if (method === 'GET') {
         const state = searchParams.get('state') ?? 'open';
         const poster = searchParams.get('poster');
+        const baseBranch = searchParams.get('base_branch');
         const labelIds = searchParams.getAll('labels').map(Number);
 
         const items = this.pullRequests
           .filter(
             (pr) =>
-              (state === 'all' || pr.state === state) && (!poster || pr.author.login === poster),
+              (state === 'all' || pr.state === state) &&
+              (!poster || pr.author.login === poster) &&
+              (!baseBranch || pr.baseBranch === baseBranch),
           )
           // The label IDs are matched with a join, so an item carrying any of them is listed, once
           // for each of them it carries
@@ -852,7 +926,14 @@ export class MockGitea extends MockGitRepository {
       }
 
       if (method === 'POST') {
-        const { title, head, base } = /** @type {Record<string, string>} */ (body);
+        const {
+          title,
+          head,
+          base,
+          body: description,
+          allow_maintainer_edit: allowMaintainerEdit,
+        } = /** @type {Record<string, any>} */ (body);
+
         // A cross-repository head is named `owner:branch`
         const [owner, forkRef] = head.includes(':') ? head.split(':') : [undefined, undefined];
 
@@ -860,11 +941,12 @@ export class MockGitea extends MockGitRepository {
           status: 201,
           json: this.toPullRequestItem(
             this.openPullRequest(
-              { title, headBranch: forkRef ?? head },
+              { title, headBranch: forkRef ?? head, body: description },
               {
                 headRepoId: owner ? FORK_REPO_ID : REPO_ID,
                 author: this.user,
                 baseBranch: base,
+                allowMaintainerEdit: !!allowMaintainerEdit,
               },
             ),
           ),
@@ -894,6 +976,10 @@ export class MockGitea extends MockGitRepository {
         pullRequest.title = body.title;
       }
 
+      if (typeof body?.body === 'string') {
+        pullRequest.body = body.body;
+      }
+
       if (body?.state === 'closed' || body?.state === 'open') {
         pullRequest.state = body.state;
         pullRequest.closedHeadSHA =
@@ -901,6 +987,57 @@ export class MockGitea extends MockGitRepository {
       }
 
       return { json: this.toPullRequestItem(pullRequest) };
+    }
+
+    if (method === 'GET' && segments[1] === 'reviews' && !segments[2]) {
+      return {
+        json: this.paginate(pullRequest.approvals ?? [], searchParams).map(
+          ({ id, login, commitId }) => ({
+            id,
+            state: 'APPROVED',
+            dismissed: false,
+            commit_id: commitId,
+            user: { login },
+          }),
+        ),
+      };
+    }
+
+    if (method === 'DELETE' && segments[1] === 'reviews' && segments[2]) {
+      const review = pullRequest.approvals?.find(({ id }) => id === Number(segments[2]));
+
+      if (!review) {
+        return { status: 404, json: { message: 'Not Found' } };
+      }
+
+      // Like Gitea, let a reviewer delete only their own review
+      if (review.login !== this.user.login) {
+        return { status: 403, json: { message: 'no permission to delete comment' } };
+      }
+
+      pullRequest.approvals = pullRequest.approvals?.filter((approval) => approval !== review);
+
+      return { status: 204, body: '' };
+    }
+
+    if (method === 'POST' && segments[1] === 'reviews') {
+      // Like Gitea, refuse an approval of one’s own pull request
+      if (body?.event === 'APPROVED' && pullRequest.author.login === this.user.login) {
+        return { status: 422, json: { message: 'approve your own pull is not allowed' } };
+      }
+
+      this.reviewCount += 1;
+
+      const id = this.reviewCount;
+
+      if (body?.event === 'APPROVED') {
+        pullRequest.approvals = [
+          ...(pullRequest.approvals ?? []),
+          { id, login: this.user.login, commitId: body.commit_id },
+        ];
+      }
+
+      return { json: { id, state: 'APPROVED', commit_id: body?.commit_id } };
     }
 
     if (segments[1] === 'merge') {
@@ -1028,6 +1165,20 @@ export class MockGitea extends MockGitRepository {
   }
 
   /**
+   * Get a made-up SHA for a directory of a file tree, which the trees endpoint then lists.
+   * @param {Map<string, string>} tree File tree.
+   * @param {string} dir Directory path.
+   * @returns {string} SHA.
+   */
+  getSubtreeSHA(tree, dir) {
+    const sha = /** @type {string} */ (MockGitRepository.getDirSHA(tree, dir));
+
+    this.subtrees.set(sha, { tree, prefix: `${dir}/` });
+
+    return sha;
+  }
+
+  /**
    * List the entries of a folder, the way the contents endpoint does for a path that isn’t a file.
    * @param {Map<string, string>} tree File tree.
    * @param {string} dir Folder path, or an empty string for the root.
@@ -1049,7 +1200,7 @@ export class MockGitea extends MockGitRepository {
       entries.set(
         entryPath,
         rest.length
-          ? { name, path: entryPath, type: 'dir' }
+          ? { name, path: entryPath, type: 'dir', sha: this.getSubtreeSHA(tree, entryPath) }
           : { name, path: entryPath, type: 'file', sha },
       );
     });
@@ -1195,13 +1346,15 @@ export class MockGitea extends MockGitRepository {
   }
 
   /**
-   * Get the blob SHA of a file on a branch.
-   * @param {string} branch Branch name.
+   * Get the blob SHA of a file at a branch or commit.
+   * @param {string} ref Branch name or commit SHA.
    * @param {string} path File path.
-   * @returns {string | undefined} SHA, or `undefined` if the branch or the file doesn’t exist.
+   * @returns {string | undefined} SHA, or `undefined` if the ref or the file doesn’t exist.
    */
-  getFileSHA(branch, path) {
-    return this.refs.has(branch) ? this.getHead(branch).tree.get(path) : undefined;
+  getFileSHA(ref, path) {
+    const commit = this.refs.has(ref) ? this.getHead(ref) : this.getCommit(ref);
+
+    return commit?.tree.get(path);
   }
 
   /**
@@ -1212,18 +1365,26 @@ export class MockGitea extends MockGitRepository {
    */
   handleTreeRequest(ref, searchParams) {
     const commit = this.refs.has(ref) ? this.getHead(ref) : this.getCommit(ref);
+    const subtree = this.subtrees.get(ref);
 
-    if (!commit) {
+    if (!commit && !subtree) {
       return { status: 404, json: { message: 'Not Found' } };
     }
 
+    // A subtree lists the files in its directory, with paths relative to it
+    const { tree, prefix } = commit ? { tree: commit.tree, prefix: '' } : subtree;
     const page = Number(searchParams.get('page') ?? 1);
-    const entries = [...commit.tree].sort(([a], [b]) => a.localeCompare(b));
+
+    const entries = [...tree]
+      .filter(([path]) => path.startsWith(prefix))
+      .map(([path, sha]) => [path.slice(prefix.length), sha])
+      .sort(([a], [b]) => a.localeCompare(b));
+
     const start = (page - 1) * this.treePageSize;
 
     return {
       json: {
-        sha: commit.oid,
+        sha: commit?.oid ?? ref,
         tree: entries.slice(start, start + this.treePageSize).map(([path, sha]) => ({
           path,
           mode: '100644',
@@ -1383,7 +1544,11 @@ export class MockGitea extends MockGitRepository {
     return {
       status: 201,
       json: {
-        commit: { sha: commit.oid, created: commit.date.toISOString() },
+        commit: {
+          sha: commit.oid,
+          created: commit.date.toISOString(),
+          parents: commit.parents.map((sha) => ({ sha })),
+        },
         files: /** @type {Record<string, any>[]} */ (files).map(({ operation, path }) =>
           operation === 'delete' ? null : { path, sha: tree.get(path) },
         ),

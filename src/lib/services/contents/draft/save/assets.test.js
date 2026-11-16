@@ -2,20 +2,34 @@ import { beforeEach, describe, expect, test, vi } from 'vitest';
 
 import {
   createPublicURL,
+  getAssetFolderPaths,
   getAssetSavingInfo,
   replaceBlobURL,
   resolveAssetFolderPaths,
 } from '$lib/services/contents/draft/save/assets';
+import { createEntryPath } from '$lib/services/contents/draft/save/entry-path';
+import { getFillSlugOptions } from '$lib/services/contents/draft/slugs';
+import { createMockAssetFolder } from '$lib/test/factories';
 
-vi.mock('$lib/services/assets', () => ({
-  getAssetsByDirName: vi.fn(() => []),
-  getAssetFolder: vi.fn(() => ({})),
-}));
-vi.mock('$lib/services/utils/file', () => ({
+vi.mock('$lib/services/assets', () => {
+  const getAssetsByDirName = vi.fn((/** @type {string} */ _dirPath) => /** @type {any[]} */ ([]));
+
+  return {
+    getAssetsByDirName,
+    getAssetFolder: vi.fn(() => ({})),
+    // Like the real one, the names of the assets, along with those of any other files and folders
+    getTakenNamesInDir: vi.fn((/** @type {string} */ dirPath) =>
+      getAssetsByDirName(dirPath).map((a) => a.name.normalize()),
+    ),
+  };
+});
+vi.mock('$lib/services/utils/file', async (importOriginal) => ({
+  ...(await importOriginal()),
   getGitHash: vi.fn(),
   encodeFilePath: vi.fn((path) => encodeURIComponent(path)),
   createPath: vi.fn((parts) => parts.filter(Boolean).join('/')),
   resolvePath: vi.fn((path) => path),
+  getDirName: vi.fn((path) => path.split('/').slice(0, -1).join('/')),
   sanitizePath: vi.fn((path) =>
     path
       .split('/')
@@ -26,6 +40,7 @@ vi.mock('$lib/services/utils/file', () => ({
 
 vi.mock('$lib/services/assets/file-name', () => ({
   formatFileName: vi.fn((name) => name.toLowerCase()),
+  isSameFileName: vi.fn((name1, name2) => name1.toLowerCase() === name2.toLowerCase()),
 }));
 vi.mock('$lib/services/contents/draft/slugs', () => ({
   getFillSlugOptions: vi.fn(() => ({ content: {}, collection: {} })),
@@ -201,7 +216,7 @@ describe('Test resolveAssetFolderPaths()', () => {
     });
   });
 
-  test('nested collection, absolute media and public folders with the entry’s folder', async () => {
+  test('nested entries, absolute media and public folders with the entry’s folder', async () => {
     // @see https://github.com/decaporg/decap-cms/issues/7752
     /** @type {any} */
     const collection = {
@@ -1625,7 +1640,7 @@ describe('Test resolveAssetFolderPaths()', () => {
     expect(result.resolvedInternalPath).toBeDefined();
   });
 
-  describe('nested collection without a `path` option', () => {
+  describe('nested entries without a `path` option', () => {
     const pagesFolder = {
       collectionName: 'pages',
       entryRelative: true,
@@ -1636,7 +1651,7 @@ describe('Test resolveAssetFolderPaths()', () => {
     };
 
     /**
-     * Create a nested collection that stores every entry as an index file.
+     * Create a collection with nested entries that stores every entry as an index file.
      * @param {object} [options] Options.
      * @param {boolean} [options.subfolders] Whether the collection uses the `subfolders` mode.
      * @param {InternalI18nOptions} [options.i18n] I18n options.
@@ -1713,6 +1728,36 @@ describe('Test resolveAssetFolderPaths()', () => {
 });
 
 describe('Test replaceBlobURL()', () => {
+  /**
+   * Create the draft of a new post, whose files are saved to the global `static/images` folder.
+   * @returns {any} Draft.
+   */
+  const createPostDraft = () => ({
+    collection: {
+      _type: 'entry',
+      _i18n: { defaultLocale: 'en' },
+      _file: { basePath: 'posts' },
+      _assetFolder: { fields: [] },
+    },
+    collectionName: 'posts',
+    fileName: undefined,
+    collectionFile: undefined,
+    isIndexFile: false,
+    currentValues: { en: { title: 'Test' } },
+    currentSlugs: { en: 'test-post' },
+  });
+
+  /**
+   * Create the global `static/images` asset folder of the posts.
+   * @returns {any} Asset folder.
+   */
+  const createImagesFolder = () =>
+    createMockAssetFolder({
+      collectionName: 'posts',
+      internalPath: 'static/images',
+      publicPath: '/images',
+    });
+
   beforeEach(async () => {
     vi.clearAllMocks();
 
@@ -1724,32 +1769,8 @@ describe('Test replaceBlobURL()', () => {
   test('should replace blob URL with public URL for new file', async () => {
     const mockFile = new File(['test content'], 'test-image.jpg', { type: 'image/jpeg' });
     const blobURL = 'blob:http://localhost:5173/abc-123';
-
-    /** @type {any} */
-    const draft = {
-      collection: {
-        _type: 'entry',
-        _i18n: { defaultLocale: 'en' },
-        _file: { basePath: 'posts' },
-        _assetFolder: { fields: [] },
-      },
-      collectionName: 'posts',
-      fileName: undefined,
-      collectionFile: undefined,
-      isIndexFile: false,
-      currentValues: { en: { title: 'Test' } },
-      currentSlugs: { en: 'test-post' },
-    };
-
-    /** @type {any} */
-    const folder = {
-      internalPath: 'static/images',
-      publicPath: '/images',
-      entryRelative: false,
-      collectionName: 'posts',
-      hasTemplateTags: false,
-    };
-
+    const draft = createPostDraft();
+    const folder = createImagesFolder();
     const content = { image: blobURL };
     /** @type {any[]} */
     const changes = [];
@@ -1775,6 +1796,87 @@ describe('Test replaceBlobURL()', () => {
     expect(savingAssets).toHaveLength(1);
   });
 
+  test('should count the file as prepared', async () => {
+    const { saveProgress, startPreparing, clearSaveProgress } =
+      await import('$lib/services/backends/commit-progress');
+
+    const blobURL = 'blob:http://localhost:5173/abc-123';
+
+    startPreparing(2);
+
+    await replaceBlobURL(
+      /** @type {any} */ ({
+        file: new File(['test content'], 'photo.jpg', { type: 'image/jpeg' }),
+        folder: createMockAssetFolder({
+          collectionName: 'posts',
+          internalPath: 'static/images',
+          publicPath: '/images',
+        }),
+        replace: false,
+        blobURL,
+        draft: {
+          collection: {
+            _type: 'entry',
+            _i18n: { defaultLocale: 'en' },
+            _file: { basePath: 'posts' },
+            _assetFolder: { fields: [] },
+          },
+          collectionName: 'posts',
+          isIndexFile: false,
+          currentValues: { en: { title: 'Test' } },
+          currentSlugs: { en: 'test-post' },
+        },
+        defaultLocaleSlug: 'test-post',
+        keyPath: 'image',
+        content: { image: blobURL },
+        changes: [],
+        savingAssets: [],
+        encodingEnabled: false,
+      }),
+    );
+
+    expect(saveProgress.current).toMatchObject({ phase: 'preparing', done: 1, total: 2 });
+    clearSaveProgress();
+  });
+
+  test('should insert a public URL containing `$` patterns verbatim', async () => {
+    const blobURL = 'blob:http://localhost:5173/abc-123';
+    const content = { body: `![](${blobURL})` };
+
+    await replaceBlobURL(
+      /** @type {any} */ ({
+        file: new File(['test content'], 'save-$$-$&.jpg', { type: 'image/jpeg' }),
+        folder: createMockAssetFolder({
+          collectionName: 'posts',
+          internalPath: 'static/images',
+          publicPath: '/images',
+        }),
+        replace: false,
+        blobURL,
+        draft: {
+          collection: {
+            _type: 'entry',
+            _i18n: { defaultLocale: 'en' },
+            _file: { basePath: 'posts' },
+            _assetFolder: { fields: [] },
+          },
+          collectionName: 'posts',
+          isIndexFile: false,
+          currentValues: { en: { title: 'Test' } },
+          currentSlugs: { en: 'test-post' },
+        },
+        defaultLocaleSlug: 'test-post',
+        keyPath: 'body',
+        content,
+        changes: [],
+        savingAssets: [],
+        encodingEnabled: false,
+      }),
+    );
+
+    expect(content.body).toBe('![](/images/save-$$-$&.jpg)');
+  });
+
   test('refuses a file headed for a folder the CMS is served from', async () => {
     // The picker can browse to any subfolder, but the files in such a folder are read-only
     /** @type {any[]} */
@@ -1784,13 +1886,11 @@ describe('Test replaceBlobURL()', () => {
       replaceBlobURL(
         /** @type {any} */ ({
           file: new File(['<html></html>'], 'index.html', { type: 'text/html' }),
-          folder: {
+          folder: createMockAssetFolder({
+            collectionName: 'posts',
             internalPath: 'static',
             publicPath: '/',
-            entryRelative: false,
-            collectionName: 'posts',
-            hasTemplateTags: false,
-          },
+          }),
           subfolderPath: 'admin',
           replace: true,
           blobURL: 'blob:http://localhost:5173/abc-123',
@@ -1937,31 +2037,8 @@ describe('Test replaceBlobURL()', () => {
 
     vi.mocked(getGitHash).mockResolvedValue('sha-duplicate');
 
-    /** @type {any} */
-    const draft = {
-      collection: {
-        _type: 'entry',
-        _i18n: { defaultLocale: 'en' },
-        _file: { basePath: 'posts' },
-        _assetFolder: { fields: [] },
-      },
-      collectionName: 'posts',
-      fileName: undefined,
-      collectionFile: undefined,
-      isIndexFile: false,
-      currentValues: { en: { title: 'Test' } },
-      currentSlugs: { en: 'test-post' },
-    };
-
-    /** @type {any} */
-    const folder = {
-      internalPath: 'static/images',
-      publicPath: '/images',
-      entryRelative: false,
-      collectionName: 'posts',
-      hasTemplateTags: false,
-    };
-
+    const draft = createPostDraft();
+    const folder = createImagesFolder();
     const content = { image: blobURL };
     /** @type {any[]} */
     const changes = [];
@@ -2004,30 +2081,14 @@ describe('Test replaceBlobURL()', () => {
 
     vi.mocked(getGitHash).mockResolvedValue('sha-duplicate');
 
-    /** @type {any} */
-    const draft = {
-      collection: {
-        _type: 'entry',
-        _i18n: { defaultLocale: 'en' },
-        _file: { basePath: 'posts' },
-        _assetFolder: { fields: [] },
-      },
-      collectionName: 'posts',
-      fileName: undefined,
-      collectionFile: undefined,
-      isIndexFile: false,
-      currentValues: { en: { title: 'Test' } },
-      currentSlugs: { en: 'test-post' },
-    };
+    const draft = createPostDraft();
 
     /** @type {any} */
-    const folder = {
+    const folder = createMockAssetFolder({
+      collectionName: 'posts',
       internalPath: '',
       publicPath: '/',
-      entryRelative: false,
-      collectionName: 'posts',
-      hasTemplateTags: false,
-    };
+    });
 
     const content = { image: blobURL };
     /** @type {any[]} */
@@ -2070,31 +2131,8 @@ describe('Test replaceBlobURL()', () => {
 
     vi.mocked(getGitHash).mockResolvedValue('sha-duplicate');
 
-    /** @type {any} */
-    const draft = {
-      collection: {
-        _type: 'entry',
-        _i18n: { defaultLocale: 'en' },
-        _file: { basePath: 'posts' },
-        _assetFolder: { fields: [] },
-      },
-      collectionName: 'posts',
-      fileName: undefined,
-      collectionFile: undefined,
-      isIndexFile: false,
-      currentValues: { en: { title: 'Test' } },
-      currentSlugs: { en: 'test-post' },
-    };
-
-    /** @type {any} */
-    const folder = {
-      internalPath: 'static/images',
-      publicPath: '/images',
-      entryRelative: false,
-      collectionName: 'posts',
-      hasTemplateTags: false,
-    };
-
+    const draft = createPostDraft();
+    const folder = createImagesFolder();
     const content = { image: blobURL };
     /** @type {any[]} */
     const changes = [];
@@ -2137,31 +2175,14 @@ describe('Test replaceBlobURL()', () => {
   test('should handle root public path correctly', async () => {
     const mockFile = new File(['content'], 'root-image.jpg', { type: 'image/jpeg' });
     const blobURL = 'blob:http://localhost:5173/ghi-789';
+    const draft = createPostDraft();
 
     /** @type {any} */
-    const draft = {
-      collection: {
-        _type: 'entry',
-        _i18n: { defaultLocale: 'en' },
-        _file: { basePath: 'posts' },
-        _assetFolder: { fields: [] },
-      },
+    const folder = createMockAssetFolder({
       collectionName: 'posts',
-      fileName: undefined,
-      collectionFile: undefined,
-      isIndexFile: false,
-      currentValues: { en: { title: 'Test' } },
-      currentSlugs: { en: 'test-post' },
-    };
-
-    /** @type {any} */
-    const folder = {
       internalPath: 'static',
       publicPath: '/',
-      entryRelative: false,
-      collectionName: 'posts',
-      hasTemplateTags: false,
-    };
+    });
 
     const content = { image: blobURL };
     /** @type {any[]} */
@@ -2193,32 +2214,8 @@ describe('Test replaceBlobURL()', () => {
 
     const mockFile = new File(['content'], 'test file with spaces.jpg', { type: 'image/jpeg' });
     const blobURL = 'blob:http://localhost:5173/jkl-012';
-
-    /** @type {any} */
-    const draft = {
-      collection: {
-        _type: 'entry',
-        _i18n: { defaultLocale: 'en' },
-        _file: { basePath: 'posts' },
-        _assetFolder: { fields: [] },
-      },
-      collectionName: 'posts',
-      fileName: undefined,
-      collectionFile: undefined,
-      isIndexFile: false,
-      currentValues: { en: { title: 'Test' } },
-      currentSlugs: { en: 'test-post' },
-    };
-
-    /** @type {any} */
-    const folder = {
-      internalPath: 'static/images',
-      publicPath: '/images',
-      entryRelative: false,
-      collectionName: 'posts',
-      hasTemplateTags: false,
-    };
-
+    const draft = createPostDraft();
+    const folder = createImagesFolder();
     const content = { image: blobURL };
     /** @type {any[]} */
     const changes = [];
@@ -2245,31 +2242,14 @@ describe('Test replaceBlobURL()', () => {
   test('should handle empty internal path', async () => {
     const mockFile = new File(['content'], 'no-path.jpg', { type: 'image/jpeg' });
     const blobURL = 'blob:http://localhost:5173/mno-345';
+    const draft = createPostDraft();
 
     /** @type {any} */
-    const draft = {
-      collection: {
-        _type: 'entry',
-        _i18n: { defaultLocale: 'en' },
-        _file: { basePath: 'posts' },
-        _assetFolder: { fields: [] },
-      },
+    const folder = createMockAssetFolder({
       collectionName: 'posts',
-      fileName: undefined,
-      collectionFile: undefined,
-      isIndexFile: false,
-      currentValues: { en: { title: 'Test' } },
-      currentSlugs: { en: 'test-post' },
-    };
-
-    /** @type {any} */
-    const folder = {
       internalPath: '',
       publicPath: '',
-      entryRelative: false,
-      collectionName: 'posts',
-      hasTemplateTags: false,
-    };
+    });
 
     const content = { image: blobURL };
     /** @type {any[]} */
@@ -2297,31 +2277,14 @@ describe('Test replaceBlobURL()', () => {
   test('should replace multiple occurrences of blob URL', async () => {
     const mockFile = new File(['content'], 'multi-use.jpg', { type: 'image/jpeg' });
     const blobURL = 'blob:http://localhost:5173/stu-901';
+    const draft = createPostDraft();
 
     /** @type {any} */
-    const draft = {
-      collection: {
-        _type: 'entry',
-        _i18n: { defaultLocale: 'en' },
-        _file: { basePath: 'posts' },
-        _assetFolder: { fields: [] },
-      },
+    const folder = createMockAssetFolder({
       collectionName: 'posts',
-      fileName: undefined,
-      collectionFile: undefined,
-      isIndexFile: false,
-      currentValues: { en: { title: 'Test' } },
-      currentSlugs: { en: 'test-post' },
-    };
-
-    /** @type {any} */
-    const folder = {
       internalPath: 'static',
       publicPath: '/static',
-      entryRelative: false,
-      collectionName: 'posts',
-      hasTemplateTags: false,
-    };
+    });
 
     const content = {
       body: `![Image](${blobURL}) and another reference ${blobURL}`,
@@ -2350,7 +2313,6 @@ describe('Test replaceBlobURL()', () => {
   });
 
   test('should handle dot-only public path correctly', async () => {
-    const { getFillSlugOptions } = await import('$lib/services/contents/draft/slugs');
     const mockFile = new File(['content'], 'relative-image.jpg', { type: 'image/jpeg' });
     const blobURL = 'blob:http://localhost:5173/vwx-234';
 
@@ -2600,31 +2562,8 @@ describe('Test replaceBlobURL()', () => {
 
     vi.mocked(getAssetsByDirName).mockReturnValue(/** @type {any} */ ([{ name: 'photo.jpg' }]));
 
-    /** @type {any} */
-    const draft = {
-      collection: {
-        _type: 'entry',
-        _i18n: { defaultLocale: 'en' },
-        _file: { basePath: 'posts' },
-        _assetFolder: { fields: [] },
-      },
-      collectionName: 'posts',
-      fileName: undefined,
-      collectionFile: undefined,
-      isIndexFile: false,
-      currentValues: { en: { title: 'Test' } },
-      currentSlugs: { en: 'test-post' },
-    };
-
-    /** @type {any} */
-    const folder = {
-      internalPath: 'static/images',
-      publicPath: '/images',
-      entryRelative: false,
-      collectionName: 'posts',
-      hasTemplateTags: false,
-    };
-
+    const draft = createPostDraft();
+    const folder = createImagesFolder();
     const content = { image: blobURL };
     /** @type {any[]} */
     const changes = [];
@@ -2651,6 +2590,48 @@ describe('Test replaceBlobURL()', () => {
     expect(content.image).toBe('/images/photo.jpg');
   });
 
+  test('should not replace or take the name of a file that is not an asset', async () => {
+    const { getTakenNamesInDir } = await import('$lib/services/assets');
+    const { formatFileName } = await import('$lib/services/assets/file-name');
+    const mockFile = new File(['test content'], 'index.md', { type: 'text/markdown' });
+    const blobURL = 'blob:http://localhost:5173/entry-file-123';
+
+    // An entry file is next to the asset, which isn’t an asset itself
+    vi.mocked(getTakenNamesInDir).mockReturnValueOnce(['index.md']);
+    vi.mocked(formatFileName).mockImplementation((name, { assetNamesInSameFolder = [] } = {}) =>
+      assetNamesInSameFolder.includes(name) ? name.replace('.', '-1.') : name,
+    );
+
+    const draft = createPostDraft();
+    const folder = createImagesFolder();
+    const content = { file: blobURL };
+    /** @type {any[]} */
+    const changes = [];
+
+    try {
+      await replaceBlobURL({
+        file: mockFile,
+        folder,
+        replace: true,
+        blobURL,
+        draft,
+        defaultLocaleSlug: 'test-post',
+        keyPath: 'file',
+        content,
+        changes,
+        savingAssets: [],
+        encodingEnabled: false,
+      });
+    } finally {
+      vi.mocked(formatFileName).mockImplementation((name) => name.toLowerCase());
+    }
+
+    expect(changes).toHaveLength(1);
+    expect(changes[0]).toEqual(
+      expect.objectContaining({ action: 'create', path: 'static/images/index-1.md' }),
+    );
+  });
+
   test('should overwrite an existing file whose name only differs in case when replace is true', async () => {
     const { getAssetsByDirName } = await import('$lib/services/assets');
     const { formatFileName } = await import('$lib/services/assets/file-name');
@@ -2660,31 +2641,8 @@ describe('Test replaceBlobURL()', () => {
     vi.mocked(getAssetsByDirName).mockReturnValue(/** @type {any} */ ([{ name: 'photo.jpg' }]));
     vi.mocked(formatFileName).mockImplementation((name) => name);
 
-    /** @type {any} */
-    const draft = {
-      collection: {
-        _type: 'entry',
-        _i18n: { defaultLocale: 'en' },
-        _file: { basePath: 'posts' },
-        _assetFolder: { fields: [] },
-      },
-      collectionName: 'posts',
-      fileName: undefined,
-      collectionFile: undefined,
-      isIndexFile: false,
-      currentValues: { en: { title: 'Test' } },
-      currentSlugs: { en: 'test-post' },
-    };
-
-    /** @type {any} */
-    const folder = {
-      internalPath: 'static/images',
-      publicPath: '/images',
-      entryRelative: false,
-      collectionName: 'posts',
-      hasTemplateTags: false,
-    };
-
+    const draft = createPostDraft();
+    const folder = createImagesFolder();
     const content = { image: blobURL };
     /** @type {any[]} */
     const changes = [];
@@ -2732,31 +2690,8 @@ describe('Test replaceBlobURL()', () => {
       assetNamesInSameFolder.includes(name) ? name.replace('.', '-1.') : name,
     );
 
-    /** @type {any} */
-    const draft = {
-      collection: {
-        _type: 'entry',
-        _i18n: { defaultLocale: 'en' },
-        _file: { basePath: 'posts' },
-        _assetFolder: { fields: [] },
-      },
-      collectionName: 'posts',
-      fileName: undefined,
-      collectionFile: undefined,
-      isIndexFile: false,
-      currentValues: { en: { title: 'Test' } },
-      currentSlugs: { en: 'test-post' },
-    };
-
-    /** @type {any} */
-    const folder = {
-      internalPath: 'static/images',
-      publicPath: '/images',
-      entryRelative: false,
-      collectionName: 'posts',
-      hasTemplateTags: false,
-    };
-
+    const draft = createPostDraft();
+    const folder = createImagesFolder();
     const content = { body: `![](${firstBlobURL}) ![](${secondBlobURL})` };
     /** @type {any[]} */
     const changes = [];
@@ -2791,11 +2726,14 @@ describe('Test replaceBlobURL()', () => {
     vi.mocked(formatFileName).mockImplementation((name) => name.toLowerCase());
   });
 
-  test('should use action "create" when replace is true but file does not exist in folder', async () => {
-    const mockFile = new File(['test content'], 'new-photo.jpg', { type: 'image/jpeg' });
-    const blobURL = 'blob:http://localhost:5173/replace-new-456';
+  test('should not save a replacing file under the name of an identical file in the same save', async () => {
+    const { getAssetsByDirName } = await import('$lib/services/assets');
+    const { getGitHash } = await import('$lib/services/utils/file');
+    const tinyFile = new File(['same'], 'tiny.webp', { type: 'image/webp' });
+    const thumbFile = new File(['same'], 'thumb.webp', { type: 'image/webp' });
 
-    // getAssetsByDirName returns [] by default (file does not exist)
+    vi.mocked(getAssetsByDirName).mockReturnValue(/** @type {any} */ ([{ name: 'thumb.webp' }]));
+    vi.mocked(getGitHash).mockResolvedValue('sha-same');
 
     /** @type {any} */
     const draft = {
@@ -2806,22 +2744,97 @@ describe('Test replaceBlobURL()', () => {
         _assetFolder: { fields: [] },
       },
       collectionName: 'posts',
-      fileName: undefined,
-      collectionFile: undefined,
       isIndexFile: false,
       currentValues: { en: { title: 'Test' } },
       currentSlugs: { en: 'test-post' },
     };
 
-    /** @type {any} */
-    const folder = {
-      internalPath: 'static/images',
-      publicPath: '/images',
-      entryRelative: false,
-      collectionName: 'posts',
-      hasTemplateTags: false,
+    const content = { tiny: 'blob:tiny', thumb: 'blob:thumb' };
+    /** @type {any[]} */
+    const changes = [];
+
+    const args = {
+      folder: createMockAssetFolder({
+        collectionName: 'posts',
+        internalPath: 'static/images',
+        publicPath: '/images',
+      }),
+      replace: true,
+      draft,
+      defaultLocaleSlug: 'test-post',
+      content,
+      changes,
+      savingAssets: [],
+      encodingEnabled: false,
     };
 
+    await replaceBlobURL({ ...args, file: tinyFile, blobURL: 'blob:tiny', keyPath: 'tiny' });
+    await replaceBlobURL({ ...args, file: thumbFile, blobURL: 'blob:thumb', keyPath: 'thumb' });
+
+    // Each file keeps the fixed name it was given, even though the contents are the same
+    expect(changes.map(({ action, path }) => ({ action, path }))).toEqual([
+      { action: 'create', path: 'static/images/tiny.webp' },
+      { action: 'update', path: 'static/images/thumb.webp' },
+    ]);
+    expect(content).toEqual({ tiny: '/images/tiny.webp', thumb: '/images/thumb.webp' });
+  });
+
+  test('should only replace an existing file with the first of the same-named files in the same save', async () => {
+    const { getAssetsByDirName } = await import('$lib/services/assets');
+    const { getGitHash } = await import('$lib/services/utils/file');
+    const { formatFileName } = await import('$lib/services/assets/file-name');
+    const firstFile = new File(['first'], 'image.png', { type: 'image/png' });
+    const secondFile = new File(['second'], 'image.png', { type: 'image/png' });
+    const firstBlobURL = 'blob:http://localhost:5173/replacing-1';
+    const secondBlobURL = 'blob:http://localhost:5173/replacing-2';
+
+    vi.mocked(getAssetsByDirName).mockReturnValue(/** @type {any} */ ([{ name: 'image.png' }]));
+    vi.mocked(getGitHash).mockImplementation(async (file) =>
+      file === firstFile ? 'sha-first' : 'sha-second',
+    );
+    // Same as the actual implementation: add a suffix to a name that’s taken
+    vi.mocked(formatFileName).mockImplementation((name, { assetNamesInSameFolder = [] } = {}) =>
+      assetNamesInSameFolder.includes(name) ? name.replace('.', '-1.') : name,
+    );
+
+    const draft = createPostDraft();
+    const folder = createImagesFolder();
+    const content = { image1: firstBlobURL, image2: secondBlobURL };
+    /** @type {any[]} */
+    const changes = [];
+    /** @type {any[]} */
+    const savingAssets = [];
+
+    const args = {
+      folder,
+      replace: true,
+      draft,
+      defaultLocaleSlug: 'test-post',
+      content,
+      changes,
+      savingAssets,
+      encodingEnabled: false,
+    };
+
+    await replaceBlobURL({ ...args, file: firstFile, blobURL: firstBlobURL, keyPath: 'image1' });
+    await replaceBlobURL({ ...args, file: secondFile, blobURL: secondBlobURL, keyPath: 'image2' });
+
+    // The second file would otherwise overwrite the first one
+    expect(changes.map(({ action, path }) => ({ action, path }))).toEqual([
+      { action: 'update', path: 'static/images/image.png' },
+      { action: 'create', path: 'static/images/image-1.png' },
+    ]);
+    expect(content).toEqual({ image1: '/images/image.png', image2: '/images/image-1.png' });
+
+    vi.mocked(formatFileName).mockImplementation((name) => name.toLowerCase());
+  });
+
+  test('should use action "create" when replace is true but file does not exist in folder', async () => {
+    const mockFile = new File(['test content'], 'new-photo.jpg', { type: 'image/jpeg' });
+    const blobURL = 'blob:http://localhost:5173/replace-new-456';
+    // getAssetsByDirName returns [] by default (file does not exist)
+    const draft = createPostDraft();
+    const folder = createImagesFolder();
     const content = { image: blobURL };
     /** @type {any[]} */
     const changes = [];
@@ -3285,6 +3298,197 @@ describe('Test getAssetSavingInfo()', () => {
   });
 });
 
+describe('Test getAssetSavingInfo() for an entry moving to another folder', () => {
+  /**
+   * Create the draft of a page bundle entry, which keeps its assets in a folder of its own.
+   * @param {object} [props] Draft properties to override.
+   * @returns {any} Draft.
+   */
+  const createDraft = (props = {}) => ({
+    collection: {
+      name: 'blog',
+      _type: 'entry',
+      _i18n: { defaultLocale: 'en' },
+      _file: { basePath: 'content/blog', subPath: '{{slug}}/index' },
+    },
+    collectionName: 'blog',
+    collectionFile: undefined,
+    isIndexFile: false,
+    isNew: false,
+    originalEntry: { locales: { en: { path: 'content/blog/old/index.md' } } },
+    ...props,
+  });
+
+  /** @type {any} */
+  const folder = {
+    collectionName: 'blog',
+    entryRelative: true,
+    internalPath: 'content/blog',
+    publicPath: '',
+  };
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+
+    const { getAssetsByDirName } = await import('$lib/services/assets');
+
+    vi.mocked(getAssetsByDirName).mockImplementation(
+      (/** @type {string} */ dirName) =>
+        /** @type {any} */ (dirName === 'content/blog/old' ? [{ name: 'photo.jpg' }] : []),
+    );
+    vi.mocked(getFillSlugOptions).mockReturnValue(
+      /** @type {any} */ ({ collection: createDraft().collection, content: {} }),
+    );
+    vi.mocked(createEntryPath).mockReturnValue('content/blog/new/index.md');
+  });
+
+  test('lists the names of the assets moving to the new folder in the same save', () => {
+    const result = getAssetSavingInfo({ draft: createDraft(), defaultLocaleSlug: 'new', folder });
+
+    expect(result.assetFolderPaths.resolvedInternalPath).toBe('content/blog/new');
+    // The folder is empty until the save, but the assets of the old one are on their way there
+    expect(result.assetNamesInSameFolder).toEqual([]);
+    expect(result.assetNamesMovingIn).toEqual(['photo.jpg']);
+  });
+
+  test('maps a subfolder of the new folder to the same subfolder of the old one', async () => {
+    const { getAssetsByDirName } = await import('$lib/services/assets');
+
+    vi.mocked(getAssetsByDirName).mockImplementation(
+      (/** @type {string} */ dirName) =>
+        /** @type {any} */ (dirName === 'content/blog/old/images' ? [{ name: 'photo.jpg' }] : []),
+    );
+
+    const result = getAssetSavingInfo({
+      draft: createDraft(),
+      defaultLocaleSlug: 'new',
+      folder,
+      subfolderPath: 'images',
+    });
+
+    expect(result.assetFolderPaths.resolvedInternalPath).toBe('content/blog/new/images');
+    expect(result.assetNamesMovingIn).toEqual(['photo.jpg']);
+  });
+
+  test('lists nothing when the entry stays in its folder', () => {
+    vi.mocked(createEntryPath).mockReturnValue('content/blog/old/index.md');
+
+    const result = getAssetSavingInfo({ draft: createDraft(), defaultLocaleSlug: 'old', folder });
+
+    expect(result.assetNamesInSameFolder).toEqual(['photo.jpg']);
+    expect(result.assetNamesMovingIn).toEqual([]);
+  });
+
+  test('lists nothing for a new entry, or one without a file in the locale', () => {
+    expect(
+      getAssetSavingInfo({ draft: createDraft({ isNew: true }), defaultLocaleSlug: 'new', folder })
+        .assetNamesMovingIn,
+    ).toEqual([]);
+    expect(
+      getAssetSavingInfo({
+        draft: createDraft({ originalEntry: { locales: {} } }),
+        defaultLocaleSlug: 'new',
+        folder,
+      }).assetNamesMovingIn,
+    ).toEqual([]);
+  });
+
+  test('lists nothing when the entry has no folder of its own', () => {
+    const draft = createDraft({
+      collection: {
+        name: 'blog',
+        _type: 'entry',
+        _i18n: { defaultLocale: 'en' },
+        _file: { basePath: 'content/blog', subPath: '{{slug}}' },
+      },
+      originalEntry: { locales: { en: { path: 'content/blog/old.md' } } },
+    });
+
+    vi.mocked(createEntryPath).mockReturnValue('content/blog/new.md');
+
+    // The assets are shared with the rest of the collection, so none of them moves
+    expect(
+      getAssetSavingInfo({ draft, defaultLocaleSlug: 'new', folder }).assetNamesMovingIn,
+    ).toEqual([]);
+  });
+
+  test('lists nothing for a folder outside the entry’s own', () => {
+    // A file collection or a global folder isn’t moved along with the entry
+    expect(
+      getAssetSavingInfo({
+        draft: createDraft(),
+        defaultLocaleSlug: 'new',
+        folder: { ...folder, entryRelative: false, internalPath: 'static/uploads' },
+      }).assetNamesMovingIn,
+    ).toEqual([]);
+  });
+
+  test('avoids the name of an asset moving in for a new file that doesn’t replace it', async () => {
+    const { formatFileName } = await import('$lib/services/assets/file-name');
+    const { getGitHash } = await import('$lib/services/utils/file');
+    const blobURL = 'blob:http://localhost:5173/abc-123';
+    /** @type {any[]} */
+    const changes = [];
+
+    vi.mocked(getGitHash).mockResolvedValue('sha123');
+
+    await replaceBlobURL(
+      /** @type {any} */ ({
+        file: new File(['other image'], 'photo.jpg', { type: 'image/jpeg' }),
+        folder,
+        replace: false,
+        blobURL,
+        draft: createDraft({ currentValues: { en: {} }, currentSlugs: { en: 'new' } }),
+        defaultLocaleSlug: 'new',
+        keyPath: 'image',
+        content: { image: blobURL },
+        changes,
+        savingAssets: [],
+        encodingEnabled: false,
+      }),
+    );
+
+    // Otherwise the file would take the place of the existing `photo.jpg` once it has moved, and
+    // the move would drop the existing file as replaced
+    expect(vi.mocked(formatFileName)).toHaveBeenCalledWith('photo.jpg', {
+      assetNamesInSameFolder: ['photo.jpg'],
+    });
+  });
+
+  test('replaces an asset moving in only when the file is meant to replace it', async () => {
+    const { formatFileName } = await import('$lib/services/assets/file-name');
+    const { getGitHash } = await import('$lib/services/utils/file');
+    const blobURL = 'blob:http://localhost:5173/abc-123';
+    /** @type {any[]} */
+    const changes = [];
+
+    vi.mocked(getGitHash).mockResolvedValue('sha123');
+
+    await replaceBlobURL(
+      /** @type {any} */ ({
+        file: new File(['new image'], 'photo.jpg', { type: 'image/jpeg' }),
+        folder,
+        replace: true,
+        blobURL,
+        draft: createDraft({ currentValues: { en: {} }, currentSlugs: { en: 'new' } }),
+        defaultLocaleSlug: 'new',
+        keyPath: 'image',
+        content: { image: blobURL },
+        changes,
+        savingAssets: [],
+        encodingEnabled: false,
+      }),
+    );
+
+    // The file is created in the new folder, which has nothing to update yet; the move then drops
+    // the old copy it replaces
+    expect(vi.mocked(formatFileName)).toHaveBeenCalledWith('photo.jpg');
+    expect(changes).toEqual([
+      { action: 'create', path: 'content/blog/new/photo.jpg', data: expect.any(File) },
+    ]);
+  });
+});
+
 describe('Test createPublicURL()', () => {
   test('should join the public path and file name', () => {
     expect(createPublicURL('/uploads', 'image.png')).toBe('/uploads/image.png');
@@ -3300,5 +3504,87 @@ describe('Test createPublicURL()', () => {
 
   test('should keep the dot prefix for an entry-relative public path', () => {
     expect(createPublicURL('.', 'image.png')).toBe('./image.png');
+  });
+});
+
+describe('Test getAssetFolderPaths()', () => {
+  const collection = /** @type {any} */ ({
+    name: 'blog',
+    _type: 'entry',
+    _file: { basePath: 'content/blog', subPath: '{{slug}}/index' },
+    _i18n: { defaultLocale: 'en' },
+  });
+
+  /** @type {any} */
+  const folder = {
+    collectionName: 'blog',
+    entryRelative: true,
+    hasTemplateTags: false,
+    internalPath: 'content/blog',
+    internalSubPath: 'images',
+    publicPath: 'images',
+  };
+
+  beforeEach(() => {
+    vi.mocked(getFillSlugOptions).mockReturnValue(/** @type {any} */ ({ collection, content: {} }));
+  });
+
+  test('resolves the paths against the default locale’s entry by default', () => {
+    const draft = /** @type {any} */ ({ collection, isIndexFile: false });
+
+    vi.mocked(createEntryPath).mockReturnValue('content/blog/hello/index.md');
+
+    expect(getAssetFolderPaths({ draft, defaultLocaleSlug: 'hello', folder })).toEqual({
+      resolvedInternalPath: 'content/blog/hello/images',
+      resolvedPublicPath: 'images',
+    });
+    expect(createEntryPath).toHaveBeenCalledWith({ draft, locale: 'en', slug: 'hello' });
+  });
+
+  test('resolves the paths against the given locale’s entry', () => {
+    const draft = /** @type {any} */ ({ collection, isIndexFile: false });
+
+    vi.mocked(createEntryPath).mockReturnValue('content/blog/fr/bonjour/index.md');
+
+    expect(
+      getAssetFolderPaths({
+        draft,
+        locale: 'fr',
+        slug: 'bonjour',
+        defaultLocaleSlug: 'hello',
+        folder,
+      }).resolvedInternalPath,
+    ).toBe('content/blog/fr/bonjour/images');
+    expect(createEntryPath).toHaveBeenCalledWith({ draft, locale: 'fr', slug: 'bonjour' });
+  });
+
+  test('uses the default locale of the collection file', () => {
+    const draft = /** @type {any} */ ({
+      collection: { ...collection, _i18n: { defaultLocale: 'en' } },
+      collectionFile: { name: 'about', _i18n: { defaultLocale: 'de' } },
+      isIndexFile: false,
+    });
+
+    vi.mocked(createEntryPath).mockReturnValue('content/blog/about/index.md');
+    getAssetFolderPaths({ draft, defaultLocaleSlug: 'about', folder });
+
+    expect(createEntryPath).toHaveBeenCalledWith({ draft, locale: 'de', slug: 'about' });
+  });
+
+  test('fills date/time tags with the time of the save rather than the entry’s date', () => {
+    const draft = /** @type {any} */ ({ collection, isIndexFile: false });
+
+    vi.mocked(getFillSlugOptions).mockReturnValue(
+      /** @type {any} */ ({ collection, content: {}, dateTimeParts: { year: '2000' } }),
+    );
+    vi.mocked(createEntryPath).mockReturnValue('content/blog/hello/index.md');
+
+    expect(
+      getAssetFolderPaths({
+        draft,
+        defaultLocaleSlug: 'hello',
+        folder: { ...folder, entryRelative: false, internalPath: 'static/{{year}}' },
+      }).resolvedInternalPath,
+    ).toBe(`static/${new Date().getUTCFullYear()}`);
   });
 });

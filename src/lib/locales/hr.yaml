@@ -1132,7 +1132,7 @@ edit_slug_error:
   invalid: Slug ne smije sadržavati posebne znakove, uključujući kose crte i razmake.
   duplicate: Taj se slug već koristi za drugi unos.
 
-# Entry path editing in a nested collection
+# Entry path editing for nested entries
 # Heading for the parent folder picker shown when the `meta.path` option is enabled
 entry_parent_folder: Nadređena mapa
 new_parent_folder: Nova mapa
@@ -1542,6 +1542,10 @@ cloud_storage:
       requested: Prijava u tijeku…
       error: Korisničko ime ili lozinka nisu točni. Provjerite ih i pokušajte ponovno.
 
+  # Shared by the S3-compatible services, unless overridden below
+  s3:
+    auth_key_label: Tajni pristupni ključ
+
   # Service-specific configurations
   cloudinary:
     iframe_title: Cloudinary medijska biblioteka
@@ -1553,15 +1557,6 @@ cloud_storage:
 
   uploadcare:
     auth_key_label: Tajni API ključ
-
-  aws_s3:
-    auth_key_label: Tajni pristupni ključ
-
-  cloudflare_r2:
-    auth_key_label: Tajni pristupni ključ
-
-  digitalocean_spaces:
-    auth_key_label: Tajni pristupni ključ
 
 # ==============================================================================
 # Configuration Validation
@@ -1619,7 +1614,7 @@ config:
     oauth_implicit_flow: Konfigurirana metoda autentifikacije (implicit flow) nije podržana u Sveltia CMS-u. Umjesto nje upotrijebite drugu <a>metodu autentifikacije</a>.
     github_pkce_unsupported: PKCE autorizacija još nije podržana zbog ograničenja GitHuba. Umjesto nje upotrijebite drugu <a>metodu autentifikacije</a>.
     oauth_no_app_id: ID OAuth aplikacije nije definiran.
-    # Don’t localize `open_authoring` and `editorial_workflow`
+    # Don’t localize `open_authoring`, `editorial_workflow` and `preview`
     open_authoring_no_workflow: Opcija `open_authoring` zahtijeva način objave `editorial_workflow`. Pojedinosti potražite u <a>dokumentaciji</a>.
     # Don’t localize `auth_methods`
     no_auth_methods: Opcija `auth_methods` mora sadržavati barem jednu metodu.
@@ -2039,13 +2034,23 @@ prefs:
       description: Prikaži podcrtavanje poveznica u pretpregledu unosa i oznakama korisničkog sučelja.
       switch_label: Uvijek podcrtaj poveznice
 
-  # Advanced panel
-  advanced:
-    title: Napredno
-    beta:
-      title: Beta značajke
-      description: Omogućite neke beta značajke koje mogu biti nestabilne ili neprevedene.
-      switch_label: Pridruži se beta programu
+  # Data Management panel
+  data:
+    clear_data:
+      title: Očisti podatke
+      # Clear File Cache button
+      file_cache:
+        description: Izbrišite lokalno predmemorirani sadržaj datoteka i sličice slika kako biste oslobodili prostor za pohranu ili riješili probleme uzrokovane zastarjelim podacima.
+        button_label: Očisti predmemoriju datoteka
+        confirmation: Lokalno predmemorirani sadržaj datoteka i sličice slika bit će izbrisani. Vaše nespremljene skice i postavke bit će zadržane, a izbrisani podaci po potrebi će se ponovno preuzeti ili generirati. CMS će se po završetku ponovno učitati.
+      # Erase All Data button
+      all_data:
+        description: Izbrišite sve što CMS čuva u ovom pregledniku, uključujući predmemorirane datoteke, nespremljene skice i postavke. Ono što je već spremljeno u vašem repozitoriju neće biti zahvaćeno.
+        button_label: Izbriši sve podatke
+        confirmation: Svi podaci pohranjeni u ovom pregledniku bit će izbrisani, uključujući predmemorirani sadržaj datoteka, sličice slika, nespremljene skice, postavke i stanje prijave. Vaš repozitorij neće biti zahvaćen, ali sve nespremljene promjene bit će izgubljene i morat ćete se ponovno prijaviti. CMS će se po završetku ponovno učitati.
+
+  # Developer panel
+  developer:
     developer_mode:
       title: Razvojni način rada
       description: Omogućite neke značajke namijenjene razvojnim programerima, uključujući detaljne zapise u konzoli i izvorne kontekstne izbornike.
@@ -2063,18 +2068,6 @@ prefs:
         field_label: Zaglavlje Authorization (npr. Bearer <token>) (neobavezno)
         saved: Zaglavlje Authorization je spremljeno.
         removed: Zaglavlje Authorization je uklonjeno.
-    clear_data:
-      title: Očisti podatke
-      # Clear File Cache button
-      file_cache:
-        description: Izbrišite lokalno predmemorirani sadržaj datoteka i sličice slika kako biste oslobodili prostor za pohranu ili riješili probleme uzrokovane zastarjelim podacima.
-        button_label: Očisti predmemoriju datoteka
-        confirmation: Lokalno predmemorirani sadržaj datoteka i sličice slika bit će izbrisani. Vaše nespremljene skice i postavke bit će zadržane, a izbrisani podaci po potrebi će se ponovno preuzeti ili generirati. CMS će se po završetku ponovno učitati.
-      # Erase All Data button
-      all_data:
-        description: Izbrišite sve što CMS čuva u ovom pregledniku, uključujući predmemorirane datoteke, nespremljene skice i postavke. Ono što je već spremljeno u vašem repozitoriju neće biti zahvaćeno.
-        button_label: Izbriši sve podatke
-        confirmation: Svi podaci pohranjeni u ovom pregledniku bit će izbrisani, uključujući predmemorirani sadržaj datoteka, sličice slika, nespremljene skice, postavke i stanje prijave. Vaš repozitorij neće biti zahvaćen, ali sve nespremljene promjene bit će izgubljene i morat ćete se ponovno prijaviti. CMS će se po završetku ponovno učitati.
 
 # ==============================================================================
 # Keyboard Shortcuts

@@ -11,8 +11,12 @@
   import TranslatorApiKeyDialog from '$lib/components/contents/details/editor/translator-api-key-dialog.svelte';
   import ContentUpdatesToast from '$lib/components/contents/shared/content-updates-toast.svelte';
   import EntryParseErrorsToast from '$lib/components/contents/shared/entry-parse-errors-toast.svelte';
+  import CustomPage from '$lib/components/custom-pages/custom-page.svelte';
+  import DemoWelcomeDialog from '$lib/components/global/demo-welcome-dialog.svelte';
+  import LiveReloadInfobar from '$lib/components/global/infobars/live-reload-infobar.svelte';
   import MobilePromoInfobar from '$lib/components/global/infobars/mobile-promo-infobar.svelte';
   import NewLanguageInfobar from '$lib/components/global/infobars/new-language-infobar.svelte';
+  import LocalGitNoticeToast from '$lib/components/global/local-git-notice-toast.svelte';
   import NotFoundPage from '$lib/components/global/not-found-page.svelte';
   import BottomNavigation from '$lib/components/global/toolbar/bottom-navigation.svelte';
   import GlobalToolbar from '$lib/components/global/toolbar/global-toolbar.svelte';
@@ -21,6 +25,7 @@
   import SearchPage from '$lib/components/search/search-page.svelte';
   import SettingsPage from '$lib/components/settings/settings-page.svelte';
   import WorkflowPage from '$lib/components/workflow/workflow-page.svelte';
+  import { getCustomPageId, selectedCustomPageId } from '$lib/services/app/custom-pages';
   import {
     parseLocation,
     redirectLegacyEntryLink,
@@ -48,6 +53,7 @@
         : SearchPage,
     workflow: WorkflowPage,
     config: ConfigPage,
+    pages: CustomPage,
     // For small screens
     menu: MenuPage,
     settings: SettingsPage,
@@ -70,7 +76,12 @@
       return;
     }
 
-    const route = resolveRoute(parseLocation().path, Object.keys(pages));
+    const { path } = parseLocation();
+    const route = resolveRoute(path, Object.keys(pages));
+
+    // The custom page is looked up by the page itself, as it may be registered after the app has
+    // been mounted
+    selectedCustomPageId.current = getCustomPageId(path);
 
     if ('redirect' in route) {
       window.location.replace(route.redirect);
@@ -105,6 +116,7 @@
   }}
 />
 
+<LiveReloadInfobar />
 <NewLanguageInfobar />
 
 {#if canShowMobileSignInDialog.current}
@@ -130,6 +142,8 @@
 <ContentUpdatesToast />
 <TranslatorApiKeyDialog />
 <EntryParseErrorsToast />
+<LocalGitNoticeToast />
+<DemoWelcomeDialog />
 <CloudinaryIframe />
 
 <style>

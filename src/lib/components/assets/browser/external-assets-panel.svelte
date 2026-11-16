@@ -5,20 +5,23 @@
 -->
 <script>
   import { _ } from '@sveltia/i18n';
-  import { Alert, EmptyState, InfiniteScroll, Toast } from '@sveltia/ui';
-  import { sleep } from '@sveltia/utils/misc';
+  import { EmptyState, Infobar } from '@sveltia/ui';
   import { onMount } from 'svelte';
 
   import AssetPath from '$lib/components/assets/browser/asset-path.svelte';
   import PickerBreadcrumb from '$lib/components/assets/browser/picker-breadcrumb.svelte';
   import SimpleImageGridItem from '$lib/components/assets/browser/simple-image-grid-item.svelte';
   import SimpleImageGrid from '$lib/components/assets/browser/simple-image-grid.svelte';
-  import SubfolderStrip from '$lib/components/assets/browser/subfolder-strip.svelte';
   import SubfolderNameDialog from '$lib/components/assets/list/subfolder-name-dialog.svelte';
   import AssetPreview from '$lib/components/assets/shared/asset-preview.svelte';
   import CloudServiceAuth from '$lib/components/assets/shared/cloud-service-auth.svelte';
   import DropZone from '$lib/components/assets/shared/drop-zone.svelte';
   import RejectedFilesAlertDialog from '$lib/components/assets/shared/rejected-files-alert-dialog.svelte';
+  import {
+    getSelectionWithResource,
+    trackInsertedExternalAssets,
+  } from '$lib/services/assets/browser/select-assets-dialog.svelte';
+  import { runAssetCommit } from '$lib/services/assets/data/commit';
   import { getFetchOptions, mergeUploadedExternalAssets } from '$lib/services/assets/external';
   import {
     fetchExternalAssetBlob,
@@ -33,10 +36,12 @@
   import { getRelativePath, getTakenNames } from '$lib/services/assets/subfolders';
   import { selectAssetsView } from '$lib/services/contents/editor';
   import { env } from '$lib/services/user/env.svelte';
+  import { createLatestGuard } from '$lib/services/utils/scheduling';
   import { watch } from '$lib/services/utils/state.svelte';
 
   /**
    * @import {
+   * EntryDraft,
    * ExternalAsset,
    * MediaLibraryAssetKind,
    * MediaLibraryFetchOptions,
@@ -49,6 +54,8 @@
   /**
    * @typedef {object} Props
    * @property {MediaField} [fieldConfig] File/Image field configuration.
+   * @property {EntryDraft | null} [draft] Draft of the entry the files are selected for, whose
+   * values fill the `filename_template` option of an uploaded file.
    * @property {MediaLibraryAssetKind} [kind] Asset kind.
    * @property {boolean} [multiple] Whether to allow selecting multiple assets.
    * @property {string} [searchTerms] Search terms for filtering assets.
@@ -59,15 +66,14 @@
 
   /** @type {Props} */
   let {
-    /* eslint-disable prefer-const */
     kind,
     fieldConfig = undefined,
+    draft = undefined,
     multiple = false,
     searchTerms = '',
     serviceProps,
     gridId = undefined,
     selectedResources = $bindable([]),
-    /* eslint-enable prefer-const */
   } = $props();
 
   const {
@@ -82,6 +88,7 @@
     search,
     upload,
     createFolder,
+    trackDownload,
   } = $derived(serviceProps);
 
   // Use the grid view for Picsum as it doesn’t provide description for the assets, and the list
@@ -116,17 +123,16 @@
    * prefix. Empty at the root.
    */
   let dirPath = $state('');
+  /**
+   * Whether the listing stopped short of the end, as the service holds more files than are listed
+   * at once, so some files are left out.
+   */
+  let truncated = $state(false);
   let newFolderDialogOpen = $state(false);
-  let folderCreationFailed = $state(false);
   /** @type {string | undefined} */
   let error = $state();
-  /** @type {{ show: boolean, status: 'info' | 'error', length: number }} */
-  let uploadingToast = $state({ show: false, status: 'info', length: 0 });
-  /** @type {string[]} */
-  let oversizedFileNames = $state([]);
-  /** @type {string[]} */
-  let invalidFileNames = $state([]);
-  let showRejectedFilesAlert = $state(false);
+  /** @type {RejectedFilesAlertDialog | undefined} */
+  let rejectedFilesAlert = $state();
 
   /** @type {MediaLibraryFetchOptions} */
   const listFetchOptions = $derived({ kind, fieldConfig, apiKey, userName, password });
@@ -160,49 +166,54 @@
   const folderLabel = $derived(getExternalFolderLabel({ dirPath, serviceLabel }));
 
   /**
-   * ID of the latest {@link getAssets} request. A request made earlier, e.g. a search for the terms
-   * typed before, can come back after a later one, and its result must not replace the latest one.
+   * Guard for {@link getAssets}. A request made earlier, e.g. a search for the terms typed before,
+   * can come back after a later one, and its result must not replace the latest one.
    */
-  let latestRequestId = 0;
+  const requestGuard = createLatestGuard();
 
   /**
    * Search or list assets from the external media library.
    * @param {string} query Search query, which is only given to a service that can search.
    */
   const getAssets = async (query) => {
-    latestRequestId += 1;
-
-    const requestId = latestRequestId;
+    const isLatest = requestGuard.next();
 
     listedAssets = null;
     error = undefined;
+    truncated = false;
 
     try {
       /** @type {ExternalAsset[]} */
       let assets;
       /** @type {string[] | undefined} */
       let emptyFolders;
+      let incomplete = false;
 
       if (query) {
         assets = await /** @type {NonNullable<typeof search>} */ (search)(query, listFetchOptions);
       } else if (browse) {
         // A service with folder support lists its empty folders along with the files
-        ({ assets, folders: emptyFolders } = await browse(listFetchOptions));
+        ({
+          assets,
+          folders: emptyFolders,
+          truncated: incomplete = false,
+        } = await browse(listFetchOptions));
       } else {
         assets = (await list?.(listFetchOptions)) ?? [];
       }
 
-      if (requestId !== latestRequestId) {
+      if (!isLatest()) {
         return;
       }
 
       listedAssets = assets;
+      truncated = incomplete;
 
       if (emptyFolders) {
         folders = emptyFolders;
       }
     } catch (ex) {
-      if (requestId !== latestRequestId) {
+      if (!isLatest()) {
         return;
       }
 
@@ -240,39 +251,52 @@
   };
 
   /**
+   * Whether files can be uploaded, which takes a service that supports it and the credentials,
+   * which the user may not have provided yet.
+   * @returns {boolean} Result.
+   */
+  export const canUpload = () => hasAuthInfo && !!upload;
+
+  /**
    * Handle `Drop` event to upload files.
    * @param {File[]} files Dropped files.
    */
   export const uploadFiles = async (files) => {
-    if (!upload) {
+    // A request without the credentials would only fail
+    if (!canUpload()) {
       return;
     }
 
-    const prepared = await prepareExternalUploads(files, allMediaLibraryOptions);
+    const prepared = await prepareExternalUploads(files, allMediaLibraryOptions, { draft });
 
     files = prepared.validFiles;
-    oversizedFileNames = prepared.oversizedFileNames;
-    invalidFileNames = prepared.invalidFileNames;
-
-    if (oversizedFileNames.length || invalidFileNames.length) {
-      showRejectedFilesAlert = true;
-    }
+    rejectedFilesAlert?.report(prepared);
 
     if (!files.length) {
       return;
     }
 
-    uploadingToast = { show: true, status: 'info', length: files.length };
+    const { ok } = await runAssetCommit(
+      async () => {
+        // The files go to the folder being browsed, or the one the search started from
+        const uploaded = await /** @type {NonNullable<typeof upload>} */ (upload)(files, {
+          ...listFetchOptions,
+          dirPath,
+        });
 
-    try {
-      // The files go to the folder being browsed, or the one the search started from
-      const uploaded = await upload(files, { ...listFetchOptions, dirPath });
-      const resources = await Promise.all(uploaded.map((asset) => getResource(asset)));
+        const resources = await Promise.all(uploaded.map((asset) => getResource(asset)));
 
-      selectedResources = resources.filter((r) => !!r).slice(0, multiple ? undefined : 1);
-      listedAssets = mergeUploadedExternalAssets(uploaded, listedAssets ?? []);
-    } catch {
-      uploadingToast = { show: true, status: 'error', length: files.length };
+        // The uploaded files, listed first and selected, confirm the upload
+        selectedResources = resources.filter((r) => !!r).slice(0, multiple ? undefined : 1);
+        listedAssets = mergeUploadedExternalAssets(uploaded, listedAssets ?? []);
+      },
+      { progress: 'uploading_files_progress', failure: 'uploading_files_failed' },
+    );
+
+    if (!ok) {
+      // The files are uploaded one by one, so those uploaded before the failure are on the service
+      // already. Reload the list to show them rather than leave them out until the next reload
+      getAssets(searchQuery);
     }
   };
 
@@ -294,17 +318,19 @@
    * Create a folder in the folder being browsed, which is then listed along with the others.
    * @param {string} name Folder name.
    */
-  const createNewFolder = async (name) => {
+  const createNewFolder = (name) => {
     const path = dirPath ? `${dirPath}/${name}` : name;
 
-    try {
-      await /** @type {NonNullable<typeof createFolder>} */ (createFolder)(path, listFetchOptions);
-      folders = [...folders, path];
-    } catch (ex) {
-      folderCreationFailed = true;
-      // eslint-disable-next-line no-console
-      console.error(ex);
-    }
+    runAssetCommit(
+      async () => {
+        await /** @type {NonNullable<typeof createFolder>} */ (createFolder)(
+          path,
+          listFetchOptions,
+        );
+        folders = [...folders, path];
+      },
+      { failure: 'creating_folder_failed' },
+    );
   };
 
   /**
@@ -331,12 +357,41 @@
   const requestedSelection = new Map();
 
   /**
+   * The assets picked from the list, keyed by download URL, so the service can be told which ones
+   * have been inserted. An asset stays here once deselected: only the selected resources count.
+   * @type {Map<string, ExternalAsset>}
+   */
+  // eslint-disable-next-line svelte/prefer-svelte-reactivity
+  const pickedAssets = new Map();
+
+  /**
+   * Let the service know the selected assets have been inserted, if its API guidelines require it,
+   * like Unsplash’s. The requests are not awaited, so they never hold up the insertion.
+   */
+  export const trackDownloads = () => {
+    trackInsertedExternalAssets({
+      trackDownload,
+      resources: selectedResources,
+      assets: pickedAssets,
+      options: listFetchOptions,
+    });
+  };
+
+  /**
    * Handle selection change of an asset.
    * @param {ExternalAsset} asset The asset whose selection changed.
    * @param {boolean} selected `true` if the asset is now selected, `false` otherwise.
    */
   const onSelectionChange = async (asset, selected) => {
     const { downloadURL } = asset;
+
+    if (selected && !multiple) {
+      // A new single selection replaces the earlier one, including a pick hidden by a search or
+      // left in another folder, which the list box doesn’t deselect, and a pick still downloading
+      [...requestedSelection.keys()].forEach((url) => {
+        requestedSelection.set(url, false);
+      });
+    }
 
     requestedSelection.set(downloadURL, selected);
 
@@ -345,7 +400,18 @@
 
       // Read the selection again, as it may have changed during the `await`
       if (resource && requestedSelection.get(downloadURL)) {
-        selectedResources = [...selectedResources.filter((r) => r.url !== downloadURL), resource];
+        pickedAssets.set(downloadURL, asset);
+        selectedResources = getSelectionWithResource({
+          resources: selectedResources,
+          resource,
+          /**
+           * Check if a selected resource comes from the same asset.
+           * @param {SelectedResource} r Selected resource.
+           * @returns {boolean} Result.
+           */
+          isSame: (r) => r.url === downloadURL,
+          multiple,
+        });
       }
     } else {
       selectedResources = selectedResources.filter((r) => r.url !== downloadURL);
@@ -415,50 +481,58 @@
     </EmptyState>
   {:else}
     {@render breadcrumb()}
+    {#if truncated}
+      <Infobar
+        status="warning"
+        dismissible={false}
+        --sui-infobar-border-width="0 0 1px"
+        --sui-infobar-message-justify-content="center"
+      >
+        {_('external_assets_truncated')}
+      </Infobar>
+    {/if}
     <div role="none" class="grid-wrapper">
-      {#if subfolders.length}
-        <SubfolderStrip
-          {subfolders}
-          {viewType}
-          onOpen={({ path }) => {
-            dirPath = path;
-          }}
-        />
-      {/if}
-      <SimpleImageGrid {viewType} {gridId} {multiple}>
-        <InfiniteScroll items={panelAssets} itemKey="id">
-          {#snippet renderItem(/** @type {ExternalAsset} */ asset)}
-            {#await sleep() then}
-              {@const { id, previewURL, description, kind: _kind } = asset}
-              <SimpleImageGridItem
-                value={id}
-                ariaLabel={description}
-                {viewType}
-                {multiple}
-                selected={isSelected(asset)}
-                onChange={({ detail: { selected } }) => {
-                  onSelectionChange(asset, selected);
-                }}
-              >
-                <AssetPreview
-                  kind={_kind}
-                  src={previewURL}
-                  alt={description}
-                  variant="tile"
-                  crossorigin="anonymous"
-                />
-                {#if viewType === 'list' || (!env.isSmallScreen && !isStockAssets)}
-                  <!-- The path is relative to the folder being browsed -->
-                  <AssetPath
-                    {...isStockAssets
-                      ? { caption: description }
-                      : { path: browsing ? getRelativePath(description, dirPath) : description }}
-                  />
-                {/if}
-              </SimpleImageGridItem>
-            {/await}
-          {/snippet}
-        </InfiniteScroll>
+      <SimpleImageGrid
+        {viewType}
+        {gridId}
+        {multiple}
+        {kind}
+        {subfolders}
+        onOpenSubfolder={({ path }) => {
+          dirPath = path;
+        }}
+        items={panelAssets}
+        itemKey="id"
+      >
+        {#snippet renderItem(/** @type {ExternalAsset} */ asset)}
+          {@const { id, previewURL, description, kind: _kind } = asset}
+          <SimpleImageGridItem
+            value={id}
+            ariaLabel={description}
+            {viewType}
+            {multiple}
+            selected={isSelected(asset)}
+            onChange={({ detail: { selected } }) => {
+              onSelectionChange(asset, selected);
+            }}
+          >
+            <AssetPreview
+              kind={_kind}
+              src={previewURL}
+              alt={description}
+              variant="tile"
+              crossorigin="anonymous"
+            />
+            {#if viewType === 'list' || (!env.isSmallScreen && !isStockAssets)}
+              <!-- The path is relative to the folder being browsed -->
+              <AssetPath
+                {...isStockAssets
+                  ? { caption: description }
+                  : { path: browsing ? getRelativePath(description, dirPath) : description }}
+              />
+            {/if}
+          </SimpleImageGridItem>
+        {/snippet}
       </SimpleImageGrid>
     </div>
   {/if}
@@ -484,27 +558,7 @@
   </EmptyState>
 {/if}
 
-<Toast bind:show={uploadingToast.show}>
-  <Alert status={uploadingToast.status}>
-    {#if uploadingToast.status === 'info'}
-      {_('uploading_files_progress')}
-    {/if}
-    {#if uploadingToast.status === 'error'}
-      {_('uploading_files_failed')}
-    {/if}
-  </Alert>
-</Toast>
-
-<RejectedFilesAlertDialog
-  bind:open={showRejectedFilesAlert}
-  {oversizedFileNames}
-  {invalidFileNames}
-  {maxSize}
-/>
-
-<Toast bind:show={folderCreationFailed}>
-  <Alert status="error">{_('creating_folder_failed')}</Alert>
-</Toast>
+<RejectedFilesAlertDialog bind:this={rejectedFilesAlert} {maxSize} />
 
 {#if createFolder}
   <SubfolderNameDialog

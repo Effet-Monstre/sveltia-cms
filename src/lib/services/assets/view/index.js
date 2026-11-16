@@ -2,8 +2,14 @@ import { _, locale as appLocale } from '@sveltia/i18n';
 import equal from 'fast-deep-equal';
 import { untrack } from 'svelte';
 
+import { isAssetInFolder } from '$lib/services/assets';
 import { selectedAssetFolder } from '$lib/services/assets/folders';
-import { publishedAssets, selectedAssets, uploadingAssets } from '$lib/services/assets/state';
+import {
+  focusedAsset,
+  publishedAssets,
+  selectedAssets,
+  uploadingAssets,
+} from '$lib/services/assets/state';
 import {
   browsedDirPath,
   focusedSubfolder,
@@ -19,6 +25,7 @@ import { backend } from '$lib/services/backends';
 import { getCollection, getCollectionLabel } from '$lib/services/contents/collection';
 import { getCollectionFile, getCollectionFileLabel } from '$lib/services/contents/collection/files';
 import { prefs } from '$lib/services/user/prefs.svelte';
+import { getBaseName } from '$lib/services/utils/file';
 import {
   createDerivedState,
   createRawState,
@@ -90,12 +97,9 @@ export const selectedFolderAssets = createDerivedState(() => {
   const { current: _selectedAssetFolder } = selectedAssetFolder;
 
   if (_allAssets && _selectedAssetFolder && _selectedAssetFolder.internalPath !== undefined) {
-    // An asset’s folder is usually the very object the selection was made from, so identity
-    // settles it without walking the folder; the deep comparison is the fallback for a folder
-    // restored from `window.history.state`, which is an equal but separate object.
-    return _allAssets.filter(
-      ({ folder }) => folder === _selectedAssetFolder || equal(folder, _selectedAssetFolder),
-    );
+    // A folder restored from `window.history.state` is an equal but separate object, and the
+    // assets of another folder with the same path are listed as well
+    return _allAssets.filter((asset) => isAssetInFolder(asset, _selectedAssetFolder));
   }
 
   return _allAssets ? [..._allAssets] : [];
@@ -160,7 +164,7 @@ export const folderSummary = createDerivedState(() => {
 
   return {
     name:
-      selectedSubfolderPath.current.split('/').at(-1) ||
+      getBaseName(selectedSubfolderPath.current) ||
       // `appLocale.current` is a key, because the label can be localized
       (appLocale.current && getFolderLabelByCollection(folder)),
     // The All Assets folder has no path
@@ -174,14 +178,20 @@ export const folderSummary = createDerivedState(() => {
 /**
  * Find the assets listed right before and after the given one, for the previous/next navigation in
  * the details overlay. The list is the one the user sees, so the neighbors follow the current
- * sorting, filtering and grouping.
+ * sorting, filtering and grouping. An asset that can’t be previewed isn’t opened in the overlay
+ * from the list, so it’s skipped.
  * @template T
- * @param {T[]} assets Listed assets.
+ * @param {Record<string, T[]>} groups Listed assets, grouped as the list shows them.
  * @param {(asset: T) => boolean} isCurrent Whether an asset is the one shown in the overlay.
+ * @param {(asset: T) => boolean} canPreview Whether an asset can be shown in the overlay.
  * @returns {{ previous?: T, next?: T }} Neighbors, each omitted when the current asset is the first
  * or last one, or when it isn’t listed at all.
  */
-export const getAdjacentAssets = (assets, isCurrent) => {
+export const getAdjacentAssets = (groups, isCurrent, canPreview) => {
+  const assets = Object.values(groups)
+    .flat(1)
+    .filter((asset) => isCurrent(asset) || canPreview(asset));
+
   const index = assets.findIndex(isCurrent);
 
   if (index === -1) {
@@ -270,10 +280,27 @@ createRootEffect(() => {
   }
 });
 
+// Clear the selection when the listed assets or the filter change, so it never includes an asset
+// the current view hides, which a bulk action like Delete would otherwise apply to. Likewise, drop
+// the focus from an asset the view no longer lists, e.g. an image once the list is filtered to
+// documents, as the toolbar actions and the info panel fall back to the focused asset. An updated
+// copy of the focused asset, e.g. after it’s replaced, has the same path, so the focus stays.
 createRootEffect(() => {
   const assets = listedAssets.current;
+  const filter = filterConditions.current;
+  const asset = untrack(() => focusedAsset.current);
 
   selectedAssets.current = [];
+
+  if (
+    asset &&
+    !filterAssets(
+      assets.filter(({ path }) => path === asset.path),
+      filter,
+    ).length
+  ) {
+    focusedAsset.current = undefined;
+  }
 
   if (untrack(() => prefs.devModeEnabled)) {
     // eslint-disable-next-line no-console

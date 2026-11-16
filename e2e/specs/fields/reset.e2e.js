@@ -1,4 +1,5 @@
 import { expect, test } from '../../fixtures/test.js';
+import { getEditor } from '../../fixtures/ui.js';
 
 /**
  * A blog whose posts have fields with default values, including a required KeyValue field and a
@@ -62,15 +63,11 @@ test.beforeEach(async ({ cms, page }) => {
   await cms.seed({ [PATH]: FILE });
   await cms.signIn();
   await page.getByRole('row', { name: /Hello/ }).click();
-  await expect(
-    page
-      .getByRole('group', { name: 'Content Editor' })
-      .getByRole('group', { name: /Links.*Field/ }),
-  ).toBeVisible();
+  await expect(getEditor(page).getByRole('group', { name: /Links.*Field/ })).toBeVisible();
 });
 
 test('restores the default values of the entry and saves them', async ({ cms, page }) => {
-  const editor = page.getByRole('group', { name: 'Content Editor' });
+  const editor = getEditor(page);
 
   await cms.chooseMenuItem(
     page.getByRole('button', { name: 'Show Editor Options' }),
@@ -114,7 +111,7 @@ test('restores the default values of the entry and saves them', async ({ cms, pa
 // Upstream reverts the cleared list from the field options, which the fork hides; see
 // `docs/fork.md`. What’s left to check is that clearing the list works and can’t be undone there
 test('clears a list, which the field options offer no way to revert', async ({ page }) => {
-  const editor = page.getByRole('group', { name: 'Content Editor' });
+  const editor = getEditor(page);
   const links = editor.getByRole('group', { name: /Links.*Field/ });
   const optionsButton = links.getByRole('button', { name: 'Show Field Options' }).first();
 

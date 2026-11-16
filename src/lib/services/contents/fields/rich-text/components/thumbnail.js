@@ -1,9 +1,8 @@
-import { flatten } from 'flat';
-
 import { getObjectThumbnail } from '$lib/services/contents/fields/object/thumbnail';
+import { flattenKeys } from '$lib/services/utils/object';
 
 /**
- * @import { Entry, EntryFileMap, MediaFieldSource } from '$lib/types/private';
+ * @import { Entry, EntryFileMap, InternalLocaleCode, MediaFieldSource } from '$lib/types/private';
  * @import { RawEntryContent } from '$lib/types/public';
  */
 
@@ -22,6 +21,8 @@ import { getObjectThumbnail } from '$lib/services/contents/fields/object/thumbna
  * @param {Entry} [args.entry] Entry being edited, used to locate an asset from a relative path.
  * @param {EntryFileMap} [args.files] Files uploaded in the draft but not saved yet, keyed by the
  * blob URL the field holds meanwhile.
+ * @param {InternalLocaleCode} [args.locale] Locale being edited, which an entry-relative path is
+ * relative to.
  * @returns {MediaFieldSource | undefined} The image to preview, or `undefined` if the option is not
  * set, the field is not an Image/File field, it’s empty, or the file is not an image.
  */
@@ -36,6 +37,6 @@ export const getComponentThumbnail = ({ thumbnailFieldName, values, ...args }) =
     thumbnailFieldName,
     keyPath: '',
     typedKeyPath: '',
-    valueMap: flatten(values),
+    valueMap: flattenKeys(values),
   });
 };

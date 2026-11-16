@@ -5,6 +5,7 @@ import dayjsLocalizedFormat from 'dayjs/plugin/localizedFormat';
 import dayjsUTC from 'dayjs/plugin/utc';
 
 import { backend } from '$lib/services/backends';
+import { getSlugTimeZone } from '$lib/services/common/slug';
 import { fillTemplate } from '$lib/services/common/template';
 import { DATE_TIME_TEMPLATE_REGEX } from '$lib/services/common/template/constants';
 import { cmsConfig } from '$lib/services/config';
@@ -14,6 +15,9 @@ import {
 } from '$lib/services/contents/collection/entries/index-file';
 import { parseDateTimeConfig } from '$lib/services/contents/fields/date-time/config';
 import { getDate, isValidDate } from '$lib/services/contents/fields/date-time/parse';
+import { omitLocalePlaceholder } from '$lib/services/contents/i18n/placeholder';
+import { addSharedValues } from '$lib/services/contents/i18n/shared-values';
+import { encodePathSegments } from '$lib/services/utils/url';
 
 /**
  * @import {
@@ -37,9 +41,13 @@ dayjs.extend(dayjsUTC);
  * @param {string} [args.dateFieldName] Date field name.
  * @param {Field[]} args.fields Fields.
  * @param {FlattenedEntryContent} args.content Entry content.
+ * @param {InternalLocaleCode} [args.locale] Locale of the content.
+ * @param {boolean} [args.inSlugTimeZone] Whether to read a date/time value in the time zone of the
+ * slug template tags instead of the field’s own. See `getSlugTimeZone()`. A date-only value is
+ * always read as written.
  * @returns {Record<string, string> | undefined} Date and time parts.
  */
-export const extractDateTime = ({ dateFieldName, fields, content }) => {
+export const extractDateTime = ({ dateFieldName, fields, content, locale, inSlugTimeZone }) => {
   const fieldConfig = dateFieldName
     ? fields.find(({ widget, name }) => widget === 'datetime' && name === dateFieldName)
     : fields.find(({ widget }) => widget === 'datetime');
@@ -51,16 +59,25 @@ export const extractDateTime = ({ dateFieldName, fields, content }) => {
   }
 
   const config = /** @type {DateTimeField} */ (fieldConfig);
-  const date = getDate(fieldValue, config);
+  const date = getDate(fieldValue, config, locale);
 
   if (!isValidDate(date)) {
     return undefined;
   }
 
-  const { utc, outputUTC } = parseDateTimeConfig(config);
-  const timeZone = utc || outputUTC ? 'UTC' : undefined;
+  const { format, dateOnly, utc, outputUTC, singleCustomTimeZone } = parseDateTimeConfig(config);
 
-  return getDateTimeParts({ date, timeZone });
+  // Read the parts in the time zone `getDate()` parsed the value in: a date without a custom format
+  // is UTC midnight, while one in a custom format is the browser’s midnight, and a date/time is
+  // shown in the field’s custom time zone if any, like in the input
+  const fieldTimeZone =
+    utc || outputUTC || (dateOnly && !format) ? 'UTC' : dateOnly ? undefined : singleCustomTimeZone;
+
+  if (inSlugTimeZone && !dateOnly) {
+    return getDateTimeParts({ date, timeZone: getSlugTimeZone() });
+  }
+
+  return getDateTimeParts({ date, timeZone: fieldTimeZone });
 };
 
 /**
@@ -73,6 +90,8 @@ export const extractDateTime = ({ dateFieldName, fields, content }) => {
  * If omitted, the first DateTime field is used.
  * @param {Field[]} args.fields Fields of the collection or collection file.
  * @param {InternalCollection} args.collection Collection.
+ * @param {InternalCollectionFile} [args.collectionFile] Collection file. File/singleton collection
+ * only. Its fields and i18n configuration are used instead of the collection’s.
  * @param {InternalLocaleCode} args.locale Locale.
  * @param {string} [args.slug] Entry slug for the locale.
  * @param {string} args.entryFilePath Entry file path for the locale.
@@ -87,6 +106,7 @@ export const fillEntryPathTemplate = ({
   dateFieldName,
   fields,
   collection,
+  collectionFile,
   locale,
   slug,
   entryFilePath,
@@ -97,7 +117,7 @@ export const fillEntryPathTemplate = ({
   let dateTimeParts;
 
   if (DATE_TIME_TEMPLATE_REGEX.test(pathTemplate)) {
-    dateTimeParts = extractDateTime({ dateFieldName, fields, content });
+    dateTimeParts = extractDateTime({ dateFieldName, fields, content, locale });
 
     // Cannot generate a path if the date and time parts are not available
     if (!dateTimeParts) {
@@ -109,6 +129,7 @@ export const fillEntryPathTemplate = ({
     return fillTemplate(pathTemplate, {
       type: 'preview_path',
       collection,
+      collectionFile,
       content,
       locale,
       currentSlug: slug,
@@ -133,6 +154,9 @@ export const fillEntryPathTemplate = ({
  * @param {string} [args.slug] Entry slug for the locale.
  * @param {string} [args.path] Entry file path for the locale.
  * @param {FlattenedEntryContent} [args.content] Entry content for the locale.
+ * @param {FlattenedEntryContent} [args.defaultContent] Entry content for the default locale. A
+ * field that isn’t translated, like a date, is only stored in the default locale, so its value is
+ * taken from there unless the locale’s content has one.
  * @param {boolean} [args.isIndexFile] Whether the corresponding entry is the collection’s special
  * index file used specifically in Hugo.
  * @returns {string | undefined} Path on the live site, or `undefined` if it cannot be determined,
@@ -145,6 +169,7 @@ export const getPreviewPath = ({
   slug,
   path: entryFilePath,
   content,
+  defaultContent,
   isIndexFile = false,
 }) => {
   const {
@@ -164,7 +189,7 @@ export const getPreviewPath = ({
   // Handle the case where the default locale is omitted from the preview path, ensuring that the
   // URL is correctly generated without the locale segment for the default locale.
   if (locale === defaultLocale && omitDefaultLocaleFromPreviewPath) {
-    template = template.replace(/{{locale}}[./]/, '');
+    template = omitLocalePlaceholder(template) ?? template;
   }
 
   return fillEntryPathTemplate({
@@ -172,10 +197,22 @@ export const getPreviewPath = ({
     dateFieldName,
     fields: indexFile?.fields ?? regularFields,
     collection,
+    collectionFile,
     locale,
     slug,
     entryFilePath,
-    content,
+    // A field that isn’t translated has no value in another locale’s content
+    content: addSharedValues({
+      getFieldArgs: {
+        collectionName: collection.name,
+        fileName: collectionFile?.name,
+        isIndexFile,
+      },
+      locale,
+      defaultLocale,
+      content,
+      defaultContent,
+    }),
     isIndexFile,
   });
 };
@@ -222,6 +259,7 @@ export const getEntryPreviewURL = (entry, locale, collection, collectionFile, op
     slug,
     path,
     content,
+    defaultContent: entry.locales[(collectionFile ?? collection)._i18n.defaultLocale]?.content,
     isIndexFile: isCollectionIndexFile(collection, entry),
   });
 
@@ -238,5 +276,9 @@ export const getEntryPreviewURL = (entry, locale, collection, collectionFile, op
  * @param {InternalLocaleCode} locale Locale.
  * @returns {string} URL on the repository.
  */
-export const getEntryRepoBlobURL = (entry, locale) =>
-  `${backend.current?.repository?.blobBaseURL}/${entry.locales[locale]?.path}?plain=1`;
+export const getEntryRepoBlobURL = (entry, locale) => {
+  const path = entry.locales[locale]?.path;
+
+  // A name can contain characters like `#` or `%` that have a meaning in a URL
+  return `${backend.current?.repository?.blobBaseURL}/${path ? encodePathSegments(path) : ''}?plain=1`;
+};

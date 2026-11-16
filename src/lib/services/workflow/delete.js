@@ -1,4 +1,5 @@
 import { deleteEntries } from '$lib/services/contents/collection/data/delete';
+import { cancelBackup, deleteBackup, getBackupSlug } from '$lib/services/contents/draft/backup';
 import { deleteWorkflowEntries, discardWorkflowEntries } from '$lib/services/workflow/save';
 
 /**
@@ -11,6 +12,39 @@ import { deleteWorkflowEntries, discardWorkflowEntries } from '$lib/services/wor
  * UpdateToastState,
  * } from '$lib/types/private';
  */
+
+/**
+ * Delete the draft backups of the given entries, which are gone or about to be. A backup is stored
+ * under the collection name and the entry slug, so one left behind would be offered to restore to
+ * a new entry created with the same slug. A backup scheduled for a change made just before the
+ * deletion is dropped as well, so it doesn’t take the place of the one deleted here. The entries
+ * are deleted already, so a backup that can’t be deleted doesn’t fail the deletion.
+ * @param {object} args Arguments.
+ * @param {Entry[]} args.entries Deleted or discarded entries.
+ * @param {InternalCollection} [args.collection] Collection the entries belong to.
+ * @param {InternalCollectionFile} [args.collectionFile] Collection file, if the entry is one.
+ */
+const deleteBackups = async ({ entries, collection, collectionFile }) => {
+  cancelBackup();
+
+  if (!collection) {
+    return;
+  }
+
+  await Promise.all(
+    entries.map(async (entry) => {
+      try {
+        await deleteBackup(
+          collection.name,
+          getBackupSlug({ collection, fileName: collectionFile?.name, originalEntry: entry }),
+        );
+      } catch (ex) {
+        // eslint-disable-next-line no-console
+        console.error(ex);
+      }
+    }),
+  );
+};
 
 /**
  * Take the given entries off the site, each in the way that suits it. An unpublished entry that has
@@ -36,11 +70,20 @@ export const deleteOrDiscardEntries = async ({
   collectionFile = undefined,
   useWorkflow,
 }) => {
-  if (drafts.length) {
-    await discardWorkflowEntries(drafts);
-  }
+  /**
+   * Discard the drafts. It’s done after the published entries are deleted, which may ask the user
+   * for a commit message: cancelling it then leaves the whole selection as it was.
+   */
+  const discardDrafts = async () => {
+    if (drafts.length) {
+      await discardWorkflowEntries(drafts);
+      await deleteBackups({ entries: drafts, collection, collectionFile });
+    }
+  };
 
   if (items.length) {
+    const entries = items.map(({ entry }) => entry);
+
     if (useWorkflow && collection) {
       // Committing the removals straight to the configured branch would bypass review and be
       // rejected outright when the branch is protected
@@ -48,6 +91,9 @@ export const deleteOrDiscardEntries = async ({
       await deleteWorkflowEntries(
         items.map(({ entry, assets }) => ({ entry, collection, collectionFile, assets })),
       );
+      // The deletion asked for drops the unsaved changes as well
+      await deleteBackups({ entries, collection, collectionFile });
+      await discardDrafts();
 
       // The entries stay on the site until the deletion is published
       return { deleted: true, deletionPending: true, count: items.length };
@@ -55,12 +101,16 @@ export const deleteOrDiscardEntries = async ({
 
     // `deleteEntries()` reports the outcome itself
     await deleteEntries(
-      items.map(({ entry }) => entry),
+      entries,
       items.flatMap(({ assets }) => assets),
     );
+    await deleteBackups({ entries, collection, collectionFile });
+    await discardDrafts();
 
     return undefined;
   }
+
+  await discardDrafts();
 
   // Nothing was published, so the entries really are gone
   return drafts.length ? { deleted: true, count: drafts.length } : undefined;

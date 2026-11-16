@@ -1072,7 +1072,7 @@ edit_slug_error:
   invalid: Đường dẫn tĩnh không được chứa ký tự đặc biệt, kể cả dấu gạch chéo và dấu cách.
   duplicate: Đường dẫn tĩnh này đang được một bài viết khác sử dụng.
 
-# Entry path editing in a nested collection
+# Entry path editing for nested entries
 # Heading for the parent folder picker shown when the `meta.path` option is enabled
 entry_parent_folder: Thư mục cha
 new_parent_folder: Thư mục mới
@@ -1455,6 +1455,10 @@ cloud_storage:
       requested: Đang đăng nhập…
       error: Tên người dùng hoặc mật khẩu không chính xác. Vui lòng kiểm tra lại và thử lại.
 
+  # Shared by the S3-compatible services, unless overridden below
+  s3:
+    auth_key_label: Khóa truy cập bí mật
+
   # Service-specific configurations
   cloudinary:
     iframe_title: Thư viện phương tiện Cloudinary
@@ -1466,15 +1470,6 @@ cloud_storage:
 
   uploadcare:
     auth_key_label: Khóa API bí mật
-
-  aws_s3:
-    auth_key_label: Khóa truy cập bí mật
-
-  cloudflare_r2:
-    auth_key_label: Khóa truy cập bí mật
-
-  digitalocean_spaces:
-    auth_key_label: Khóa truy cập bí mật
 
 # ==============================================================================
 # Configuration Validation
@@ -1531,7 +1526,7 @@ config:
     oauth_implicit_flow: Sveltia CMS không hỗ trợ phương thức xác thực đã cấu hình (Implicit Flow). Hãy sử dụng <a>phương thức xác thực khác</a>.
     github_pkce_unsupported: Xác thực PKCE chưa được hỗ trợ do các hạn chế của GitHub. Thay vào đó, hãy sử dụng <a>phương thức xác thực khác</a>.
     oauth_no_app_id: ID ứng dụng OAuth không được xác định.
-    # Don’t localize `open_authoring` and `editorial_workflow`
+    # Don’t localize `open_authoring`, `editorial_workflow` and `preview`
     open_authoring_no_workflow: Tùy chọn `open_authoring` yêu cầu chế độ xuất bản `editorial_workflow`. Xem <a>tài liệu</a> để biết chi tiết.
     # Don’t localize `auth_methods`
     no_auth_methods: Tùy chọn `auth_methods` phải chứa ít nhất một phương thức.
@@ -1945,13 +1940,23 @@ prefs:
       description: Hiển thị gạch chân dưới các liên kết trong bản xem trước nội dung và trên giao diện.
       switch_label: Luôn gạch chân các liên kết
 
-  # Advanced panel
-  advanced:
-    title: Cài đặt nâng cao
-    beta:
-      title: Tính năng thử nghiệm
-      description: Bật một số tính năng thử nghiệm có thể chưa ổn định hoặc chưa được dịch đầy đủ.
-      switch_label: Bật tính năng thử nghiệm
+  # Data Management panel
+  data:
+    clear_data:
+      title: Xóa dữ liệu
+      # Clear File Cache button
+      file_cache:
+        description: Xóa nội dung tệp và hình thu nhỏ được lưu trong bộ nhớ đệm cục bộ để giải phóng dung lượng lưu trữ hoặc khắc phục sự cố do dữ liệu cũ gây ra.
+        button_label: Xóa bộ nhớ đệm tệp
+        confirmation: Nội dung tệp và hình thu nhỏ được lưu trong bộ nhớ đệm cục bộ sẽ bị xóa. Các bản nháp chưa lưu và cài đặt của bạn sẽ được giữ lại. Dữ liệu đã xóa sẽ được tải xuống hoặc tạo lại khi cần. CMS sẽ được tải lại sau khi hoàn tất.
+      # Erase All Data button
+      all_data:
+        description: Xóa mọi thứ mà CMS lưu trong trình duyệt này, bao gồm các tệp trong bộ nhớ đệm, bản nháp chưa lưu và cài đặt. Những gì đã lưu vào kho mã nguồn của bạn sẽ không bị ảnh hưởng.
+        button_label: Xóa toàn bộ dữ liệu
+        confirmation: Thao tác này sẽ xóa bộ nhớ đệm, bản nháp chưa lưu, cài đặt và trạng thái đăng nhập trong trình duyệt. Dữ liệu trong kho mã nguồn vẫn được giữ nguyên. CMS sẽ tải lại và bạn cần đăng nhập lại.
+
+  # Developer panel
+  developer:
     developer_mode:
       title: Chế độ nhà phát triển
       description: Bật các tính năng dành cho nhà phát triển, bao gồm thông tin chi tiết trong nhật ký bảng điều khiển và trình đơn chuột phải mặc định.
@@ -1969,18 +1974,6 @@ prefs:
         field_label: 'Header xác thực (ví dụ: Bearer <token>) (không bắt buộc)'
         saved: Đã lưu header xác thực.
         removed: Đã xóa header xác thực.
-    clear_data:
-      title: Xóa dữ liệu
-      # Clear File Cache button
-      file_cache:
-        description: Xóa nội dung tệp và hình thu nhỏ được lưu trong bộ nhớ đệm cục bộ để giải phóng dung lượng lưu trữ hoặc khắc phục sự cố do dữ liệu cũ gây ra.
-        button_label: Xóa bộ nhớ đệm tệp
-        confirmation: Nội dung tệp và hình thu nhỏ được lưu trong bộ nhớ đệm cục bộ sẽ bị xóa. Các bản nháp chưa lưu và cài đặt của bạn sẽ được giữ lại. Dữ liệu đã xóa sẽ được tải xuống hoặc tạo lại khi cần. CMS sẽ được tải lại sau khi hoàn tất.
-      # Erase All Data button
-      all_data:
-        description: Xóa mọi thứ mà CMS lưu trong trình duyệt này, bao gồm các tệp trong bộ nhớ đệm, bản nháp chưa lưu và cài đặt. Những gì đã lưu vào kho mã nguồn của bạn sẽ không bị ảnh hưởng.
-        button_label: Xóa toàn bộ dữ liệu
-        confirmation: Thao tác này sẽ xóa bộ nhớ đệm, bản nháp chưa lưu, cài đặt và trạng thái đăng nhập trong trình duyệt. Dữ liệu trong kho mã nguồn vẫn được giữ nguyên. CMS sẽ tải lại và bạn cần đăng nhập lại.
 
 # ==============================================================================
 # Keyboard Shortcuts

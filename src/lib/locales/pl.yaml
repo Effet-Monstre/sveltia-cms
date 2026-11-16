@@ -1159,7 +1159,7 @@ edit_slug_error:
   invalid: Przyjazny link nie może zawierać znaków specjalnych, w tym ukośników i spacji.
   duplicate: Ten przyjazny link jest już używany przez inny wpis.
 
-# Entry path editing in a nested collection
+# Entry path editing for nested entries
 # Heading for the parent folder picker shown when the `meta.path` option is enabled
 entry_parent_folder: Folder nadrzędny
 new_parent_folder: Nowy folder
@@ -1578,6 +1578,10 @@ cloud_storage:
       requested: Logowanie…
       error: Nazwa użytkownika lub hasło są nieprawidłowe. Sprawdź je i spróbuj ponownie.
 
+  # Shared by the S3-compatible services, unless overridden below
+  s3:
+    auth_key_label: Tajny klucz dostępu
+
   # Service-specific configurations
   cloudinary:
     iframe_title: Biblioteka multimediów Cloudinary
@@ -1589,15 +1593,6 @@ cloud_storage:
 
   uploadcare:
     auth_key_label: Tajny klucz API
-
-  aws_s3:
-    auth_key_label: Tajny klucz dostępu
-
-  cloudflare_r2:
-    auth_key_label: Tajny klucz dostępu
-
-  digitalocean_spaces:
-    auth_key_label: Tajny klucz dostępu
 
 # ==============================================================================
 # Configuration Validation
@@ -1655,7 +1650,7 @@ config:
     oauth_implicit_flow: Skonfigurowana metoda uwierzytelniania (implicit flow) nie jest obsługiwana w Sveltia CMS. Użyj innej <a>metody uwierzytelniania</a>.
     github_pkce_unsupported: Autoryzacja PKCE nie jest jeszcze obsługiwana z powodu ograniczeń GitHub. Użyj innej <a>metody uwierzytelniania</a>.
     oauth_no_app_id: Identyfikator aplikacji OAuth nie jest zdefiniowany.
-    # Don’t localize `open_authoring` and `editorial_workflow`
+    # Don’t localize `open_authoring`, `editorial_workflow` and `preview`
     open_authoring_no_workflow: Opcja `open_authoring` wymaga trybu publikacji `editorial_workflow`. Szczegóły znajdziesz w <a>dokumentacji</a>.
     # Don’t localize `auth_methods`
     no_auth_methods: Opcja `auth_methods` musi zawierać co najmniej jedną metodę.
@@ -2075,13 +2070,23 @@ prefs:
       description: Pokaż podkreślenie linków w podglądzie wpisu i etykietach interfejsu użytkownika.
       switch_label: Zawsze podkreślaj linki
 
-  # Advanced panel
-  advanced:
-    title: Zaawansowane
-    beta:
-      title: Funkcje beta
-      description: Włącz niektóre funkcje beta, które mogą być niestabilne lub nieprzetłumaczone.
-      switch_label: Dołącz do programu beta
+  # Data Management panel
+  data:
+    clear_data:
+      title: Wyczyść dane
+      # Clear File Cache button
+      file_cache:
+        description: Usuń zapisaną lokalnie w pamięci podręcznej zawartość plików i miniatury obrazów, aby zwolnić miejsce lub rozwiązać problemy spowodowane nieaktualnymi danymi.
+        button_label: Wyczyść pamięć podręczną plików
+        confirmation: Zapisana lokalnie w pamięci podręcznej zawartość plików i miniatury obrazów zostaną usunięte. Twoje niezapisane szkice i ustawienia zostaną zachowane, a usunięte dane zostaną w razie potrzeby ponownie pobrane lub wygenerowane. Po zakończeniu CMS zostanie przeładowany.
+      # Erase All Data button
+      all_data:
+        description: Usuń wszystko, co CMS przechowuje w tej przeglądarce, w tym pliki w pamięci podręcznej, niezapisane szkice i ustawienia. Nie wpłynie to na nic, co zostało już zapisane w repozytorium.
+        button_label: Wymaż wszystkie dane
+        confirmation: Wszystkie dane przechowywane w tej przeglądarce zostaną usunięte, w tym zawartość plików w pamięci podręcznej, miniatury obrazów, niezapisane szkice, ustawienia i stan logowania. Nie wpłynie to na repozytorium, ale wszystkie niezapisane zmiany zostaną utracone i konieczne będzie ponowne zalogowanie. Po zakończeniu CMS zostanie przeładowany.
+
+  # Developer panel
+  developer:
     developer_mode:
       title: Tryb programisty
       description: Włącz niektóre funkcje skierowane do programistów, w tym szczegółowe logi w konsoli i natywne menu kontekstowe.
@@ -2099,18 +2104,6 @@ prefs:
         field_label: Nagłówek autoryzacji (np. Bearer <token>) (opcjonalnie)
         saved: Nagłówek autoryzacji zapisany.
         removed: Nagłówek autoryzacji usunięty.
-    clear_data:
-      title: Wyczyść dane
-      # Clear File Cache button
-      file_cache:
-        description: Usuń zapisaną lokalnie w pamięci podręcznej zawartość plików i miniatury obrazów, aby zwolnić miejsce lub rozwiązać problemy spowodowane nieaktualnymi danymi.
-        button_label: Wyczyść pamięć podręczną plików
-        confirmation: Zapisana lokalnie w pamięci podręcznej zawartość plików i miniatury obrazów zostaną usunięte. Twoje niezapisane szkice i ustawienia zostaną zachowane, a usunięte dane zostaną w razie potrzeby ponownie pobrane lub wygenerowane. Po zakończeniu CMS zostanie przeładowany.
-      # Erase All Data button
-      all_data:
-        description: Usuń wszystko, co CMS przechowuje w tej przeglądarce, w tym pliki w pamięci podręcznej, niezapisane szkice i ustawienia. Nie wpłynie to na nic, co zostało już zapisane w repozytorium.
-        button_label: Wymaż wszystkie dane
-        confirmation: Wszystkie dane przechowywane w tej przeglądarce zostaną usunięte, w tym zawartość plików w pamięci podręcznej, miniatury obrazów, niezapisane szkice, ustawienia i stan logowania. Nie wpłynie to na repozytorium, ale wszystkie niezapisane zmiany zostaną utracone i konieczne będzie ponowne zalogowanie. Po zakończeniu CMS zostanie przeładowany.
 
 # ==============================================================================
 # Keyboard Shortcuts

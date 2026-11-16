@@ -9,13 +9,19 @@ import { panels } from '.';
 vi.mock('$lib/components/settings/panels/accessibility-panel.svelte', () => ({
   default: {},
 }));
-vi.mock('$lib/components/settings/panels/advanced-panel.svelte', () => ({
+vi.mock('$lib/components/settings/panels/ai-panel.svelte', () => ({
   default: {},
 }));
 vi.mock('$lib/components/settings/panels/appearance-panel.svelte', () => ({
   default: {},
 }));
 vi.mock('$lib/components/settings/panels/contents-panel.svelte', () => ({
+  default: {},
+}));
+vi.mock('$lib/components/settings/panels/data-panel.svelte', () => ({
+  default: {},
+}));
+vi.mock('$lib/components/settings/panels/developer-panel.svelte', () => ({
   default: {},
 }));
 vi.mock('$lib/components/settings/panels/i18n-panel.svelte', () => ({
@@ -60,15 +66,6 @@ describe('Settings panels', () => {
     expect(contentsPanel?.component).toBeDefined();
   });
 
-  test('should have i18n panel', () => {
-    const panelList = panels.current;
-    const i18nPanel = panelList.find((panel) => panel.key === 'i18n');
-
-    expect(i18nPanel).toBeDefined();
-    expect(i18nPanel?.icon).toBe('translate');
-    expect(i18nPanel?.component).toBeDefined();
-  });
-
   test('should have media panel', () => {
     const panelList = panels.current;
     const mediaPanel = panelList.find((panel) => panel.key === 'media');
@@ -76,6 +73,15 @@ describe('Settings panels', () => {
     expect(mediaPanel).toBeDefined();
     expect(mediaPanel?.icon).toBe('photo_library');
     expect(mediaPanel?.component).toBeDefined();
+  });
+
+  test('should have AI panel before accessibility panel', () => {
+    const panelList = panels.current;
+    const index = panelList.findIndex((panel) => panel.key === 'ai');
+
+    expect(panelList[index]?.icon).toBe('auto_awesome');
+    expect(panelList[index]?.component).toBeDefined();
+    expect(panelList[index + 1]?.key).toBe('accessibility');
   });
 
   test('should have accessibility panel', () => {
@@ -87,13 +93,21 @@ describe('Settings panels', () => {
     expect(accessibilityPanel?.component).toBeDefined();
   });
 
-  test('should have advanced panel', () => {
+  test('should have data management panel', () => {
     const panelList = panels.current;
-    const advancedPanel = panelList.find((panel) => panel.key === 'advanced');
+    const dataPanel = panelList.find((panel) => panel.key === 'data');
 
-    expect(advancedPanel).toBeDefined();
-    expect(advancedPanel?.icon).toBe('build');
-    expect(advancedPanel?.component).toBeDefined();
+    expect(dataPanel).toBeDefined();
+    expect(dataPanel?.icon).toBe('database');
+    expect(dataPanel?.component).toBeDefined();
+  });
+
+  test('should have developer panel', () => {
+    const developerPanel = panels.current.find((panel) => panel.key === 'developer');
+
+    expect(developerPanel).toBeDefined();
+    expect(developerPanel?.icon).toBe('code_xml');
+    expect(developerPanel?.component).toBeDefined();
   });
 
   test('should enable i18n panel when multiple locales configured', () => {
@@ -113,7 +127,12 @@ describe('Settings panels', () => {
     const panelList = panels.current;
     const i18nPanel = panelList.find((panel) => panel.key === 'i18n');
 
-    expect(i18nPanel?.enabled).toBe(true);
+    expect(i18nPanel?.icon).toBe('translate');
+    expect(i18nPanel?.component).toBeDefined();
+    // It’s listed right after the contents panel
+    expect(panelList.at(panelList.indexOf(/** @type {any} */ (i18nPanel)) - 1)?.key).toBe(
+      'contents',
+    );
   });
 
   test('should disable i18n panel when single locale configured', () => {
@@ -130,10 +149,7 @@ describe('Settings panels', () => {
       _baseURL: 'http://localhost',
     };
 
-    const panelList = panels.current;
-    const i18nPanel = panelList.find((panel) => panel.key === 'i18n');
-
-    expect(i18nPanel?.enabled).toBe(false);
+    expect(panels.current.find((panel) => panel.key === 'i18n')).toBeUndefined();
   });
 
   test('should disable i18n panel when no locales configured', () => {
@@ -145,9 +161,6 @@ describe('Settings panels', () => {
       _baseURL: 'http://localhost',
     };
 
-    const panelList = panels.current;
-    const i18nPanel = panelList.find((panel) => panel.key === 'i18n');
-
-    expect(i18nPanel?.enabled).toBe(false);
+    expect(panels.current.find((panel) => panel.key === 'i18n')).toBeUndefined();
   });
 });

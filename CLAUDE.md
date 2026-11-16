@@ -26,6 +26,8 @@ pnpm check:stylelint
 pnpm check:svelte
 pnpm check:oxlint
 pnpm check:cspell
+pnpm check:duplicates # copy-paste detection with jscpd, configured in `.jscpd.json`
+pnpm find:similar     # report functions that look alike, which jscpd misses once they have drifted
 pnpm check:imports    # custom script, more accurate than standard unused-import tools
 pnpm check:audit
 
@@ -68,13 +70,16 @@ Build output: `package/dist/sveltia-cms.js` (IIFE), `package/dist/sveltia-cms.mj
 
 ## CI
 
-`.github/workflows/tests.yml` runs on every push: Check, Test (three shards each of the unit and component tests and six of the end-to-end tests, the latter two with Chromium), Build in parallel, using `.nvmrc` Node version and pnpm. A PR must pass ESLint, Prettier, all tests, Svelte compiler checks, the production build, and the unused-imports check.
+`.github/workflows/tests.yml` runs on every push, using the `.nvmrc` Node version and pnpm: Check, Test (three shards each of the unit and component tests and six of the end-to-end tests, the latter two with Chromium) and Build in parallel, except the end-to-end tests, which wait for Build and run against the bundle it uploads. A PR must pass ESLint, Prettier, all tests, Svelte compiler checks, the production build, and the unused-imports check.
 
 ## Workflow
 
 - Fix a bug a test turns up, and cover it with a test that fails without the fix; don’t work around it in the test. When the fix needs a product decision, pin the current behaviour with a “(known issue)” test (see `e2e/README.md`) and raise it instead.
-- Before committing a change, review it with `/code-review --fix` and repeat until it reports no findings.
+- Before running tests, review the change with `/code-review --fix` repeatedly until it reports no findings.
+- Also run `/security-review` to check for security issues if the change touches a backend, API client, integration, or any code that handles user input or content.
 - Run the end-to-end tests on a port of your own, e.g. `E2E_PORT=4181 pnpm test:e2e`, when another worktree may be running them: the run fails rather than share a busy port.
+- Do not add a `Co-Authored-By` trailer to commit messages.
+- When an issue ID is given, add `Fix #(ISSUE_ID)` to the commit description.
 
 ## Localization PRs
 

@@ -2,6 +2,7 @@ import { describe, expect, test } from 'vitest';
 import { page } from 'vitest/browser';
 
 import { createMockDraft, renderWithDraft } from '$lib/test/draft';
+import { renderFieldPreview } from '$lib/test/field.svelte';
 
 import ObjectPreview from './object-preview.svelte';
 
@@ -35,20 +36,14 @@ const blockField = {
  * @param {Record<string, any>} values Flattened values.
  * @returns {Promise<HTMLElement>} Container.
  */
-const renderPreview = async (fieldConfig, values) => {
-  const { container } = await renderWithDraft(ObjectPreview, {
-    draft: createMockDraft({ fields: [fieldConfig], values: { _default: values } }),
-    props: {
-      locale: '_default',
-      keyPath: fieldConfig.name,
-      typedKeyPath: fieldConfig.name,
+const renderPreview = async (fieldConfig, values) =>
+  (
+    await renderFieldPreview(ObjectPreview, {
       fieldConfig,
-      currentValue: undefined,
-    },
-  });
-
-  return container;
-};
+      locale: '_default',
+      draft: createMockDraft({ fields: [fieldConfig], values: { _default: values } }),
+    })
+  ).container;
 
 describe('ObjectPreview', () => {
   test('previews each subfield', async () => {
@@ -61,6 +56,8 @@ describe('ObjectPreview', () => {
 
     expect(sections).toHaveLength(2);
     expect(sections[0]).toHaveAttribute('data-key-path', 'author.name');
+    // Each subfield is marked outside its lazily rendered preview, for the Edit Pane to scroll to
+    expect(sections[1].parentElement).toHaveAttribute('data-lazy-key-path', 'author.email');
     expect(sections[0]).toHaveTextContent('name Melvin Lucas');
     expect(sections[1].querySelector('a')).toHaveAttribute('href', 'mailto:melvin@example.com');
     // No type label
@@ -101,6 +98,17 @@ describe('ObjectPreview', () => {
     );
   });
 
+  test('labels the type in the UI locale without a content locale', async () => {
+    /** @type {ObjectField} */
+    const fieldConfig = {
+      ...blockField,
+      types: [{ ...blockField.types[0], label_localized: { en: 'Banner' } }, blockField.types[1]],
+    };
+
+    await renderPreview(fieldConfig, { 'block.type': 'hero', 'block.heading': 'Welcome' });
+    await expect.element(page.getByRole('group', { name: 'Banner' })).toBeVisible();
+  });
+
   test('falls back to the type name as the label', async () => {
     await renderPreview(blockField, { 'block.type': 'quote', 'block.text': 'Hi' });
     await expect.element(page.getByRole('group', { name: 'quote' })).toBeVisible();
@@ -115,5 +123,20 @@ describe('ObjectPreview', () => {
   test('shows nothing when the object has no values', async () => {
     expect((await renderPreview(authorField, {})).children).toHaveLength(0);
     expect((await renderPreview(authorField, { 'author.name': '' })).children).toHaveLength(0);
+  });
+
+  test('shows a number, even zero, but not an unchecked Boolean', async () => {
+    /** @type {ObjectField} */
+    const statsField = {
+      name: 'stats',
+      widget: 'object',
+      fields: [
+        { name: 'count', widget: 'number', value_type: 'int' },
+        { name: 'featured', widget: 'boolean' },
+      ],
+    };
+
+    expect((await renderPreview(statsField, { 'stats.count': 0 })).children).not.toHaveLength(0);
+    expect((await renderPreview(statsField, { 'stats.featured': false })).children).toHaveLength(0);
   });
 });

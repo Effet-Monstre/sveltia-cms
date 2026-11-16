@@ -3,8 +3,7 @@ import {
   COLLECTION_OPTIONS_FILES,
 } from '../../fixtures/configs/collection-options.js';
 import { expect, test } from '../../fixtures/test.js';
-
-import { openCollection } from './helpers.js';
+import { getEditor, getEntryRows, openCollection } from '../../fixtures/ui.js';
 
 test.use({ config: COLLECTION_OPTIONS_CONFIG });
 
@@ -48,7 +47,7 @@ test.describe('with creation and deletion turned off', () => {
     await openCollection(page, 'Announcements');
     await page.getByRole('row', { name: /Opening Day/ }).click();
 
-    const editor = page.getByRole('group', { name: 'Content Editor' });
+    const editor = getEditor(page);
 
     await expect(editor.getByRole('textbox', { name: 'Body' })).toHaveValue(
       'The gates open at nine.',
@@ -75,7 +74,7 @@ test.describe('with creation and deletion turned off', () => {
       window.location.hash = '#/collections/announcements/new';
     });
 
-    const editor = page.getByRole('group', { name: 'Content Editor' });
+    const editor = getEditor(page);
 
     await expect(editor).toContainText(
       'Creating new entries in this collection is disabled by the administrator.',
@@ -96,7 +95,7 @@ test.describe('with a limit on the number of entries', () => {
     );
     await createButton.click();
 
-    const editor = page.getByRole('group', { name: 'Content Editor' });
+    const editor = getEditor(page);
 
     await editor.getByRole('textbox', { name: 'Question' }).fill('Is there parking?');
     await editor.getByRole('textbox', { name: 'Answer' }).fill('On the street.');
@@ -104,7 +103,7 @@ test.describe('with a limit on the number of entries', () => {
     await expect
       .poll(async () => Object.keys(await cms.readRepo()))
       .toContain('content/faqs/is-there-parking.md');
-    await expect(collection.getByRole('row')).toHaveCount(4);
+    await expect(getEntryRows(collection)).toHaveCount(4);
     await expect(createButton).toBeDisabled();
     await expect(collection.getByRole('status')).toHaveText(
       /You cannot add new entries to this collection because it has reached its limit of 4 entries\./,
@@ -130,10 +129,14 @@ test.describe('hidden collection', () => {
     await openCollection(page, 'Journal');
     await page.getByRole('row', { name: /First Sowing/ }).click();
 
-    const editor = page.getByRole('group', { name: 'Content Editor' });
+    const editor = getEditor(page);
     const plot = editor.getByRole('radiogroup', { name: 'Plot' });
 
     await expect(plot.getByRole('radio', { name: 'North Bed' })).toBeChecked();
+    // Nor can a plot be added or edited from the field, which would open the hidden collection’s
+    // editor (#1147)
+    await expect(editor.getByRole('button', { name: 'Add \u2068Plot\u2069' })).toHaveCount(0);
+    await expect(editor.getByRole('button', { name: 'Edit \u2068North Bed\u2069' })).toHaveCount(0);
     await plot.getByRole('radio', { name: 'Herb Spiral' }).click();
     await editor.getByRole('button', { name: 'Save' }).click();
 

@@ -8,15 +8,16 @@
   import { CodeEditor } from '@sveltia/ui';
   import { sleep } from '@sveltia/utils/misc';
   import { isObject } from '@sveltia/utils/object';
-  import { getContext, tick } from 'svelte';
 
   import { getEntryDraftContext } from '$lib/services/contents/draft/state.svelte';
-  import { getValueMapSnapshot } from '$lib/services/contents/draft/value-map.svelte';
-  import { trackPendingFieldUpdate } from '$lib/services/contents/editor/pending';
+  import { deferDraftWrite } from '$lib/services/contents/draft/update/deferred';
+  import { getFieldValueMapSnapshot } from '$lib/services/contents/draft/value-map.svelte';
+  import { getFieldEditorContext } from '$lib/services/contents/editor/field-context';
+  import { trackPendingWhile } from '$lib/services/contents/editor/pending.svelte';
   import { watch } from '$lib/services/utils/state.svelte';
 
   /**
-   * @import { FieldEditorContext, FieldEditorProps } from '$lib/types/private';
+   * @import { FieldEditorProps } from '$lib/types/private';
    * @import { CodeField } from '$lib/types/public';
    */
 
@@ -28,12 +29,10 @@
 
   const entryDraft = getEntryDraftContext();
 
-  /** @type {FieldEditorContext} */
-  const { valueStoreKey = 'currentValues' } = getContext('field-editor') ?? {};
+  const { valueStoreKey = 'currentValues' } = getFieldEditorContext();
 
   /** @type {FieldEditorProps & Props} */
   let {
-    /* eslint-disable prefer-const */
     locale,
     keyPath,
     fieldId,
@@ -42,7 +41,6 @@
     required = true,
     readonly = false,
     invalid = false,
-    /* eslint-enable prefer-const */
   } = $props();
 
   let code = $state('');
@@ -55,9 +53,20 @@
     output_code_only: outputCodeOnly = false,
     keys: outputKeys = { code: 'code', lang: 'lang' },
   } = $derived(fieldConfig);
-  const valueMap = $derived(getValueMapSnapshot(entryDraft.current, locale, valueStoreKey));
+  const valueMap = $derived(
+    getFieldValueMapSnapshot(entryDraft.current, locale, keyPath, valueStoreKey),
+  );
   const codeKeyPath = $derived(`${keyPath}.${outputKeys.code}`);
   const langKeyPath = $derived(`${keyPath}.${outputKeys.lang}`);
+
+  /**
+   * Values of {@link code} and {@link lang} right after they were last synced with the draft. The
+   * value is only written back once the user has changed either of them, so opening an entry
+   * doesn’t add the object placeholder or the default language to the stored value, which would
+   * mark the draft as modified. A new value comes with an empty language, though, which is
+   * replaced with the default one right away.
+   */
+  let syncedInputValues = { code: '', lang: '' };
 
   /**
    * Update {@link code} and {@link lang} based on {@link currentValue}.
@@ -82,10 +91,14 @@
       }
 
       if (typeof _lang !== 'string') {
-        lang = '';
+        // Fall back to the default language rather than an empty one, which the editor replaces
+        // with `plain` on its own, as if the user had picked it
+        lang = defaultLanguage;
       } else if (lang !== _lang) {
         lang = _lang;
       }
+
+      syncedInputValues = { code, lang: valueMap[langKeyPath] === '' ? '' : lang };
     }
   };
 
@@ -101,12 +114,18 @@
       return;
     }
 
+    if (code === syncedInputValues.code && lang === syncedInputValues.lang) {
+      return;
+    }
+
     const draft = entryDraft.current;
 
     /* v8 ignore next 3 -- the editor is only rendered while the draft is there */
     if (!draft) {
       return;
     }
+
+    syncedInputValues = { code, lang };
 
     /** @type {Record<string, any>} */
     const updates = {};
@@ -123,16 +142,15 @@
       updates[langKeyPath] = lang;
     }
 
+    /* v8 ignore next 3 -- only when a change is undone before the previous one reaches the draft */
     if (!Object.keys(updates).length) {
       return;
     }
 
     const valueStore = draft[valueStoreKey][locale];
 
-    // This runs from an effect, so defer the write to the draft like `<FieldEditor>` does: a write
-    // made while an effect is running makes Svelte walk the derived graph below the value map
-    // without memoizing, which takes exponentially longer with each level of nesting
-    queueMicrotask(() => {
+    // This runs from an effect, so the write to the draft is deferred
+    deferDraftWrite(() => {
       Object.assign(valueStore, updates);
     });
   };
@@ -154,23 +172,7 @@
   // While the editor holds a change made by the user, register it as a pending update: the editor
   // passes the code on with a short delay, so a save right after a change would otherwise validate
   // and write the previous value
-  $effect(() => {
-    if (!pending) {
-      return undefined;
-    }
-
-    /** @type {PromiseWithResolvers<void>} */
-    const { promise, resolve } = Promise.withResolvers();
-
-    trackPendingFieldUpdate(promise);
-
-    // Settle once the value has reached the draft, which `setCurrentValue()` writes in a microtask,
-    // or when the editor goes away
-    return async () => {
-      await tick();
-      resolve();
-    };
-  });
+  trackPendingWhile(() => pending);
 </script>
 
 {#await sleep() then}

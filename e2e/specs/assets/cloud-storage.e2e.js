@@ -4,6 +4,7 @@ import { MockS3 } from '../../fixtures/cloud/s3.js';
 import { MockUploadcare } from '../../fixtures/cloud/uploadcare.js';
 import { createPNG } from '../../fixtures/files.js';
 import { expect, test } from '../../fixtures/test.js';
+import { getEditor } from '../../fixtures/ui.js';
 
 /**
  * @import { Locator, Page } from '@playwright/test';
@@ -49,7 +50,7 @@ const createConfig = (mediaLibraries, extraFields = []) => ({
 const openSelectImageDialog = async (page, service) => {
   await page.getByRole('button', { name: 'Create New Entry' }).first().click();
 
-  const editor = page.getByRole('group', { name: 'Content Editor' });
+  const editor = getEditor(page);
   const cover = editor.getByRole('group', { name: '“\u2068Cover\u2069” Field' });
   const dialog = page.getByRole('dialog', { name: 'Select Image' });
 
@@ -81,6 +82,11 @@ const selectOption = async (option) => {
   await expect(option).toHaveAttribute('aria-selected', 'true');
 };
 
+/**
+ * URL the Amazon S3 bucket is served at.
+ */
+const S3_URL = 'https://e2e-bucket.s3.eu-west-3.amazonaws.com';
+
 test.describe('Amazon S3', () => {
   test.use({
     config: createConfig({
@@ -105,6 +111,10 @@ test.describe('Amazon S3', () => {
     s3.put({ 'uploads/sunset.png': SUNSET, 'uploads/trips/': '', 'uploads/trips/map.png': KITE });
     await s3.install(page);
     await cms.open();
+    // An entry links to a file in a folder of the bucket
+    await cms.seed({
+      'content/posts/hike.md': `---\ntitle: Hike\ncover: ${S3_URL}/uploads/trips/map.png\n---\n`,
+    });
     await cms.signIn();
   });
 
@@ -224,6 +234,45 @@ test.describe('Amazon S3', () => {
       await expect(page.getByRole('row', { name: 'dusk.png' })).toBeVisible();
     });
 
+    test('renames a file and updates the entry using it', async ({ cms, page }) => {
+      await page.getByRole('row', { name: 'trips' }).dblclick();
+      await page.getByRole('row', { name: 'map.png' }).click();
+      await page.getByRole('button', { name: 'Show Edit Options' }).click();
+      await page.getByRole('menuitem', { name: /^Rename/ }).click();
+
+      const dialog = page.getByRole('dialog', { name: /Rename/ });
+
+      await expect(dialog).toContainText('An entry using the asset will also be updated.');
+      await dialog.getByRole('textbox').fill('route.png');
+      await dialog.getByRole('button', { name: 'Rename' }).click();
+      await expect.poll(() => s3.objects.has('uploads/trips/route.png')).toBe(true);
+      expect(s3.objects.has('uploads/trips/map.png')).toBe(false);
+      await expect
+        .poll(async () => (await cms.readRepo())['content/posts/hike.md'])
+        .toBe(`---\ntitle: Hike\ncover: ${S3_URL}/uploads/trips/route.png\n---\n`);
+    });
+
+    test('renames a folder and updates the entry using a file in it', async ({ cms, page }) => {
+      await page
+        .getByRole('row', { name: 'trips' })
+        .getByRole('button', { name: 'Show Folder Options' })
+        .click();
+      await page.getByRole('menuitem', { name: 'Rename Folder' }).click();
+
+      const dialog = page.getByRole('dialog', { name: /Rename/ });
+
+      await expect(dialog).toContainText(
+        'The asset in the folder will be moved along, and any entry using it will be updated.',
+      );
+      await dialog.getByRole('textbox').fill('travel');
+      await dialog.getByRole('button', { name: 'Rename' }).click();
+      await expect.poll(() => s3.objects.has('uploads/travel/map.png')).toBe(true);
+      expect(s3.objects.has('uploads/trips/map.png')).toBe(false);
+      await expect
+        .poll(async () => (await cms.readRepo())['content/posts/hike.md'])
+        .toBe(`---\ntitle: Hike\ncover: ${S3_URL}/uploads/travel/map.png\n---\n`);
+    });
+
     test('creates a folder', async ({ page }) => {
       await page.getByRole('button', { name: 'New Folder' }).click();
 
@@ -238,6 +287,246 @@ test.describe('Amazon S3', () => {
         .toBe('application/x-directory');
       await expect(page.getByRole('row', { name: 'beach' })).toBeVisible();
     });
+  });
+});
+
+test.describe('Amazon S3 bucket holding more files than listed at once', () => {
+  test.use({
+    config: createConfig({
+      aws_s3: {
+        access_key_id: 'AKIAE2ETESTKEY000000',
+        bucket: 'e2e-bucket',
+        region: 'eu-west-3',
+        prefix: 'uploads/',
+      },
+    }),
+  });
+
+  /** @type {MockS3} */
+  let s3;
+
+  test.beforeEach(async ({ cms, page }) => {
+    s3 = new MockS3({ bucket: 'e2e-bucket', region: 'eu-west-3', baseURL: S3_URL });
+    // A page holds a single object, so the 10 pages listed at once leave the end of the folder out
+    s3.pageSize = 1;
+    s3.put({
+      'uploads/sunset.png': SUNSET,
+      'uploads/trips/': '',
+      ...Object.fromEntries(
+        Array.from({ length: 10 }, (_, index) => [
+          `uploads/trips/day${String(index + 1).padStart(2, '0')}.png`,
+          KITE,
+        ]),
+      ),
+      'uploads/trips/summer/map.png': KITE,
+    });
+    await s3.install(page);
+    await cms.open();
+    await cms.signIn();
+    await page.getByRole('radio', { name: 'Assets' }).click();
+    await page.getByRole('option', { name: /^Amazon S3/ }).click();
+    await enterCredential(page.getByRole('main'), 'Amazon S3', s3.secretAccessKey);
+  });
+
+  test('says some files are left out, and deletes a folder in full', async ({ page }) => {
+    await expect(page.getByRole('main').getByRole('alert')).toHaveText(
+      /There are too many files on the service to list them all/,
+    );
+
+    await page
+      .getByRole('row', { name: 'trips' })
+      .getByRole('button', { name: 'Show Folder Options' })
+      .click();
+    await page.getByRole('menuitem', { name: 'Delete Folder' }).click();
+    await page.getByRole('alertdialog').getByRole('button', { name: 'Delete' }).click();
+
+    // The files left out of the list are deleted too, along with the placeholder
+    await expect
+      .poll(() => [...s3.objects.keys()], { timeout: 15_000 })
+      .toEqual(['uploads/sunset.png']);
+  });
+
+  test('renames a folder in full', async ({ page }) => {
+    await page
+      .getByRole('row', { name: 'trips' })
+      .getByRole('button', { name: 'Show Folder Options' })
+      .click();
+    await page.getByRole('menuitem', { name: 'Rename Folder' }).click();
+
+    const dialog = page.getByRole('dialog', { name: /Rename/ });
+
+    await dialog.getByRole('textbox').fill('journeys');
+    await dialog.getByRole('button', { name: 'Rename' }).click();
+
+    // The files left out of the list are moved too
+    await expect
+      .poll(() => [...s3.objects.keys()].filter((key) => key.startsWith('uploads/trips/')), {
+        timeout: 15_000,
+      })
+      .toEqual([]);
+    expect(s3.objects.has('uploads/journeys/summer/map.png')).toBe(true);
+    expect(s3.objects.has('uploads/journeys/day10.png')).toBe(true);
+  });
+});
+
+test.describe('Self-hosted S3-compatible storage', () => {
+  test.use({
+    config: createConfig({
+      aws_s3: {
+        access_key_id: 'GKe2e0000000000000000000000',
+        bucket: 'e2e-bucket',
+        label: 'Garage',
+        region: 'garage',
+        endpoint: 'https://s3.example.com',
+        public_url: 'https://web.example.com',
+      },
+    }),
+  });
+
+  test('goes by its label, accepts a longer secret key than Amazon S3, and picks an image', async ({
+    cms,
+    page,
+  }) => {
+    // A Garage server is addressed with the bucket in the path, and its secret keys are 64 hex
+    // digits rather than the 40 characters of Amazon S3
+    const garage = new MockS3({
+      bucket: 'e2e-bucket',
+      region: 'garage',
+      baseURL: 'https://s3.example.com/e2e-bucket',
+      publicURL: 'https://web.example.com',
+    });
+
+    garage.accessKeyId = 'GKe2e0000000000000000000000';
+    garage.secretAccessKey = '0123456789abcdef'.repeat(4);
+    garage.put({ 'sunset.png': SUNSET });
+    await garage.install(page);
+    await cms.open();
+    await cms.signIn();
+
+    const { cover, dialog } = await openSelectImageDialog(page, 'Garage');
+
+    await enterCredential(dialog, 'Garage', garage.secretAccessKey);
+    await selectOption(
+      dialog
+        .getByRole('listbox', { name: 'Available Images' })
+        .getByRole('option', { name: 'sunset.png' }),
+    );
+    await dialog.getByRole('button', { name: 'Insert' }).click();
+
+    await expect(cover.getByRole('textbox', { name: 'Cover' })).toHaveText(
+      'https://web.example.com/sunset.png',
+    );
+    expect(garage.refused).toEqual([]);
+  });
+});
+
+test.describe('Amazon S3 with a prefix made of an entry field', () => {
+  const config = createConfig(
+    {
+      aws_s3: {
+        access_key_id: 'AKIAE2ETESTKEY000000',
+        bucket: 'e2e-bucket',
+        region: 'eu-west-3',
+      },
+    },
+    [{ name: 'release', label: 'Release', widget: 'number', value_type: 'int', required: false }],
+  );
+
+  // The bucket and the other options are inherited from the site level
+  config.collections[0].fields[1].media_libraries = { aws_s3: { prefix: '{{fields.release}}/' } };
+  test.use({ config });
+
+  test('waits for the field to be filled in, then stays in the folder it names', async ({
+    cms,
+    page,
+  }) => {
+    const s3 = new MockS3({ bucket: 'e2e-bucket', region: 'eu-west-3', baseURL: S3_URL });
+    const balloon = createPNG({ color: [0, 128, 255] });
+
+    s3.put({ '12/sunset.png': SUNSET, '13/kite.png': KITE });
+    await s3.install(page);
+    await cms.open();
+    await cms.signIn();
+
+    const { editor, cover, dialog } = await openSelectImageDialog(page, 'Amazon S3');
+
+    await expect(dialog.getByText('Fill in the fields this location depends on')).toBeVisible();
+    await expect(dialog.getByRole('button', { name: 'Upload' })).toBeHidden();
+    await dialog.getByRole('button', { name: 'Cancel' }).click();
+    await expect(dialog).toBeHidden();
+
+    await editor.getByRole('spinbutton', { name: 'Release' }).fill('12');
+    await cover.getByRole('button', { name: 'Browse' }).click();
+    await dialog.getByRole('option', { name: 'Amazon S3' }).click();
+    await enterCredential(dialog, 'Amazon S3', s3.secretAccessKey);
+    await expect(
+      dialog.getByRole('listbox', { name: 'Available Images' }).getByRole('option'),
+    ).toHaveText(['sunset.png']);
+
+    const [chooser] = await Promise.all([
+      page.waitForEvent('filechooser'),
+      dialog.getByRole('button', { name: 'Upload' }).click(),
+    ]);
+
+    await chooser.setFiles({ name: 'balloon.png', mimeType: 'image/png', buffer: balloon });
+    await expect.poll(() => s3.objects.get('12/balloon.png')?.body).toEqual(balloon);
+    await dialog.getByRole('button', { name: 'Insert' }).click();
+    await expect(cover.getByRole('textbox', { name: 'Cover' })).toHaveText(
+      `${S3_URL}/12/balloon.png`,
+    );
+    expect(s3.refused).toEqual([]);
+  });
+});
+
+test.describe('Amazon S3 with a file name made of an entry field', () => {
+  const config = createConfig(
+    {
+      aws_s3: {
+        access_key_id: 'AKIAE2ETESTKEY000000',
+        bucket: 'e2e-bucket',
+        region: 'eu-west-3',
+      },
+    },
+    [{ name: 'release', label: 'Release', widget: 'number', value_type: 'int', required: false }],
+  );
+
+  config.collections[0].fields[1].media_libraries = {
+    all: { filename_template: 'guestpic{{release}}' },
+  };
+  test.use({ config });
+
+  test('names an uploaded file after the field, as filled in at the time', async ({
+    cms,
+    page,
+  }) => {
+    const s3 = new MockS3({ bucket: 'e2e-bucket', region: 'eu-west-3', baseURL: S3_URL });
+    const balloon = createPNG({ color: [0, 128, 255] });
+
+    await s3.install(page);
+    await cms.open();
+    await cms.signIn();
+
+    const { editor, cover, dialog } = await openSelectImageDialog(page, 'Amazon S3');
+
+    await dialog.getByRole('button', { name: 'Cancel' }).click();
+    await expect(dialog).toBeHidden();
+    await editor.getByRole('spinbutton', { name: 'Release' }).fill('521');
+    await cover.getByRole('button', { name: 'Browse' }).click();
+    await dialog.getByRole('option', { name: 'Amazon S3' }).click();
+    await enterCredential(dialog, 'Amazon S3', s3.secretAccessKey);
+
+    const [chooser] = await Promise.all([
+      page.waitForEvent('filechooser'),
+      dialog.getByRole('button', { name: 'Upload' }).click(),
+    ]);
+
+    await chooser.setFiles({ name: 'balloon.png', mimeType: 'image/png', buffer: balloon });
+    await expect.poll(() => s3.objects.get('guestpic521.png')?.body).toEqual(balloon);
+    await dialog.getByRole('button', { name: 'Insert' }).click();
+    await expect(cover.getByRole('textbox', { name: 'Cover' })).toHaveText(
+      `${S3_URL}/guestpic521.png`,
+    );
+    expect(s3.refused).toEqual([]);
   });
 });
 
@@ -281,6 +570,55 @@ test.describe('Cloudflare R2', () => {
       'https://cdn.example.com/sunset.png',
     );
     expect(r2.refused).toEqual([]);
+  });
+});
+
+/**
+ * S3 endpoint of the Neon branch, as shown as `AWS_ENDPOINT_URL_S3` in the Neon Console.
+ */
+const NEON_ENDPOINT = 'https://br-e2e-branch-a1b2c3d4.storage.c-1.us-east-2.aws.neon.tech';
+
+test.describe('Neon Object Storage', () => {
+  test.use({
+    config: createConfig({
+      neon_object_storage: {
+        access_key_id: 'nak_live_0123456789abcdef0123456789abcdef',
+        bucket: 'e2e-bucket',
+        endpoint: NEON_ENDPOINT,
+      },
+    }),
+  });
+
+  test('picks an image, which the entry links to at the branch endpoint', async ({ cms, page }) => {
+    // Neon is addressed with the bucket in the path, and signed for the region in the endpoint’s
+    // hostname. A `public_read` bucket serves its objects at the same URL without a signature.
+    const neon = new MockS3({
+      bucket: 'e2e-bucket',
+      region: 'us-east-2',
+      baseURL: `${NEON_ENDPOINT}/e2e-bucket`,
+    });
+
+    neon.accessKeyId = 'nak_live_0123456789abcdef0123456789abcdef';
+    neon.secretAccessKey = `nsk_live_${'0123456789abcdef'.repeat(4)}`;
+    neon.put({ 'sunset.png': SUNSET });
+    await neon.install(page);
+    await cms.open();
+    await cms.signIn();
+
+    const { cover, dialog } = await openSelectImageDialog(page, 'Neon Object Storage');
+
+    await enterCredential(dialog, 'Neon Object Storage', neon.secretAccessKey);
+    await selectOption(
+      dialog
+        .getByRole('listbox', { name: 'Available Images' })
+        .getByRole('option', { name: 'sunset.png' }),
+    );
+    await dialog.getByRole('button', { name: 'Insert' }).click();
+
+    await expect(cover.getByRole('textbox', { name: 'Cover' })).toHaveText(
+      `${NEON_ENDPOINT}/e2e-bucket/sunset.png`,
+    );
+    expect(neon.refused).toEqual([]);
   });
 });
 
@@ -421,6 +759,30 @@ test.describe('Uploadcare', () => {
     await dialog.getByRole('button', { name: 'Insert' }).click();
     await expect(cover.getByRole('textbox', { name: 'Cover' })).toHaveText(
       `https://ucarecdn.com/${uploadcare.files[1].uuid}/`,
+    );
+  });
+
+  test('uploads an image to a project on its own CDN subdomain', async ({ page }) => {
+    // Newer projects serve their files from a subdomain, which the upload response doesn’t tell
+    uploadcare.cdnOrigin = 'https://e2e.ucarecd.net';
+
+    const { cover, dialog } = await openSelectImageDialog(page, 'Uploadcare');
+
+    await enterCredential(dialog, 'Uploadcare', uploadcare.secretKey);
+
+    const [chooser] = await Promise.all([
+      page.waitForEvent('filechooser'),
+      dialog.getByRole('button', { name: 'Upload' }).click(),
+    ]);
+
+    await chooser.setFiles({ name: 'kite.png', mimeType: 'image/png', buffer: KITE });
+    await expect(dialog.getByRole('option', { name: 'kite.png' })).toHaveAttribute(
+      'aria-selected',
+      'true',
+    );
+    await dialog.getByRole('button', { name: 'Insert' }).click();
+    await expect(cover.getByRole('textbox', { name: 'Cover' })).toHaveText(
+      `https://e2e.ucarecd.net/${uploadcare.files[1].uuid}/`,
     );
   });
 

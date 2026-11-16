@@ -1,12 +1,13 @@
-import { getPathInfo } from '@sveltia/utils/file';
 import { compare } from '@sveltia/utils/string';
 
 import { allAssetFolders, selectedAssetFolder } from '$lib/services/assets/folders';
 import { isCmsFolderName, isCmsFolderPath } from '$lib/services/assets/reserved';
+import { allAssets } from '$lib/services/assets/state';
 import { gitConfigFiles } from '$lib/services/backends/git/shared/config';
-import { slugify } from '$lib/services/common/slug';
+import { slugify, validateNewFolderName } from '$lib/services/common/slug';
+import { allEntries } from '$lib/services/contents';
 import { getDefaultMediaLibraryOptions } from '$lib/services/integrations/media-libraries/default';
-import { createPath, sanitizeFileName } from '$lib/services/utils/file';
+import { createPath, getBaseName, getDirName, sanitizeFileName } from '$lib/services/utils/file';
 import { createDerivedState, createRawState } from '$lib/services/utils/state.svelte';
 
 /**
@@ -43,14 +44,6 @@ export const renamingSubfolder = createRawState();
  * @type {{ current: AssetSubfolder | undefined }}
  */
 export const deletingSubfolder = createRawState();
-
-/**
- * Get the directory part of a file path. Unlike `getPathInfo()`, which has no directory for a file
- * at the root, this is always a string, so a root file’s directory compares equal to the root path.
- * @param {string} path File path.
- * @returns {string} Directory path, which is an empty string for a file at the root.
- */
-export const getDirName = (path) => getPathInfo(path).dirname ?? '';
 
 /**
  * Check if the given asset folder can be browsed by subfolder, which takes a folder whose files all
@@ -197,11 +190,67 @@ export const listSubfolders = ({ dirPath, paths }) => {
  * @param {AssetSubfolder[]} args.subfolders Subfolders of the directory.
  * @param {string[]} args.fileNames Names of the files right in the directory.
  * @param {string} [args.exclude] Name of the subfolder being renamed, which it can keep.
+ * @param {string} [args.dirPath] Path of the directory in the repository. When given, the names of
+ * the subfolders leading to another configured asset folder nested in it, e.g. `projects` in
+ * `static/uploads` for a collection’s `static/uploads/projects` folder, are taken too: such a
+ * folder isn’t listed as a subfolder, as it’s browsed as a folder of its own, but a subfolder
+ * renamed or created with its name would be merged into it.
  * @returns {string[]} Names.
  */
-export const getTakenNames = ({ subfolders, fileNames, exclude = undefined }) => [
+export const getTakenNames = ({
+  subfolders,
+  fileNames,
+  exclude = undefined,
+  dirPath = undefined,
+}) => [
   ...subfolders.map(({ name }) => name).filter((name) => name !== exclude),
   ...fileNames,
+  ...(dirPath === undefined
+    ? []
+    : listSubfolders({
+        dirPath,
+        // A trailing slash makes `listSubfolders` read the folder itself as a subfolder path
+        paths: allAssetFolders.current
+          .filter(({ internalPath, hasTemplateTags }) => internalPath && !hasTemplateTags)
+          .map(({ internalPath }) => `${internalPath}/`),
+      }).map(({ name }) => name)),
+];
+
+/**
+ * Get the names of every folder right in a directory of the repository, which a file renamed in it
+ * can’t take: the folders holding assets or Git config files, whichever asset folder they belong
+ * to, and the ones leading to a configured asset folder nested in the directory.
+ * @param {string} dirPath Directory path. An empty string for the repository root.
+ * @returns {string[]} Names.
+ */
+export const getFolderNamesInDir = (dirPath) =>
+  getTakenNames({
+    subfolders: listSubfolders({
+      dirPath,
+      paths: [...allAssets.current, ...gitConfigFiles.current].map(({ path }) => path),
+    }),
+    fileNames: [],
+    dirPath,
+  });
+
+/**
+ * Get the names of the files right in a directory of the repository that aren’t assets, which a
+ * file renamed or uploaded there can’t take without overwriting them: the entry files, as in a Hugo
+ * page bundle keeping its images next to its `index.md`, and the Git config files like `.gitkeep`.
+ * @param {string} dirPath Directory path. An empty string for the repository root.
+ * @returns {string[]} Names.
+ */
+export const getNonAssetFileNamesInDir = (dirPath) => [
+  ...new Set(
+    [
+      ...allEntries.current.flatMap(({ locales }) =>
+        Object.values(locales).map(({ path }) => path),
+      ),
+      ...gitConfigFiles.current.map(({ path }) => path),
+    ]
+      .filter((path) => getDirName(path) === dirPath)
+      .map(getBaseName),
+  ),
 ];
 
 /**
@@ -313,29 +362,11 @@ export const formatSubfolderName = (name) => {
  * @returns {'empty' | 'invalid' | 'reserved' | 'duplicate' | undefined} What stops the name from
  * being used, or `undefined` if it can be used.
  */
-export const validateSubfolderName = ({ name, takenNames }) => {
-  const trimmedName = name.trim();
-
-  if (!trimmedName) {
-    return 'empty';
-  }
-
-  const folderName = formatSubfolderName(trimmedName);
-
-  // A name has to stay a single folder, a leading dot would hide the folder from most file
-  // listings, and sanitization can leave nothing to name the folder with
-  if (!folderName || trimmedName.includes('/') || folderName.startsWith('.')) {
-    return 'invalid';
-  }
-
+export const validateSubfolderName = ({ name, takenNames }) =>
   // The files in a folder the CMS itself is usually served from are read-only
-  if (isCmsFolderName(folderName)) {
-    return 'reserved';
-  }
-
-  const normalizedName = folderName.normalize().toLowerCase();
-
-  return takenNames.some((taken) => taken.normalize().toLowerCase() === normalizedName)
-    ? 'duplicate'
-    : undefined;
-};
+  validateNewFolderName({
+    name,
+    takenNames,
+    format: formatSubfolderName,
+    isReserved: isCmsFolderName,
+  });

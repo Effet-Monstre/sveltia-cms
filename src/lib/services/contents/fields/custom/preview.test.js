@@ -2,8 +2,9 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { getImmutable } from '$lib/services/api/immutable';
 import { buildPreviewData } from '$lib/services/api/preview-data';
+import { customFieldTypeRegistry } from '$lib/services/api/registries';
 
-import { buildPreviewProps } from './preview';
+import { buildPreviewProps, getCustomFieldSummary } from './preview';
 
 vi.mock('$lib/services/api/preview-data', () => ({
   convertEntryToMap: vi.fn(({ entry, locale, collectionName, content }) => ({
@@ -15,7 +16,13 @@ vi.mock('$lib/services/api/preview-data', () => ({
   })),
   createEntryMap: vi.fn((args) => ({ ...args, __mocked: true })),
   createGetAsset: vi.fn(() => vi.fn()),
-  getMetaData: vi.fn(() => ({ get: vi.fn(() => undefined) })),
+  getMetaData: vi.fn(() => ({ getIn: vi.fn(() => undefined) })),
+  // Drop the List item indices, naming the single subfield of the `tags` List field `tag`
+  getMetaDataPath: vi.fn(({ keyPath }) =>
+    keyPath === 'tags.0'
+      ? ['tags', 'tag']
+      : keyPath.split('.').filter((/** @type {string} */ segment) => !/^\d+$/.test(segment)),
+  ),
   buildPreviewData: vi.fn(({ draft, locale }) => ({
     entryMap: {
       __mocked: true,
@@ -24,7 +31,8 @@ vi.mock('$lib/services/api/preview-data', () => ({
       collectionName: draft?.collectionName ?? '',
       isNew: false,
     },
-    fieldsMetaData: { get: vi.fn(() => undefined) },
+    getFieldArgs: { collectionName: draft?.collectionName ?? '' },
+    fieldsMetaData: { getIn: vi.fn(() => undefined) },
     getAsset: vi.fn(),
   })),
 }));
@@ -148,9 +156,9 @@ describe('contents/fields/custom/preview-helpers', () => {
   describe('looks up the metadata by the key path of the field', () => {
     const fieldsMetaData = getImmutable().fromJS({
       title: { authors: { alice: { name: 'Alice' } } },
-      'details.author': { authors: { bob: { name: 'Bob' } } },
-      'authors.1.person': { authors: { carol: { name: 'Carol' } } },
-      tags: { tags: { news: { label: 'News' } } },
+      details: { author: { authors: { bob: { name: 'Bob' } } } },
+      authors: { person: { authors: { carol: { name: 'Carol' } } } },
+      tags: { tag: { tags: { news: { label: 'News' } } } },
     });
 
     /** @type {any} */
@@ -163,7 +171,7 @@ describe('contents/fields/custom/preview-helpers', () => {
      */
     const getMetadata = (keyPath) => {
       vi.mocked(buildPreviewData).mockReturnValueOnce(
-        /** @type {any} */ ({ entryMap: {}, fieldsMetaData, getAsset: vi.fn() }),
+        /** @type {any} */ ({ entryMap: {}, getFieldArgs: {}, fieldsMetaData, getAsset: vi.fn() }),
       );
 
       return buildPreviewProps({
@@ -196,5 +204,42 @@ describe('contents/fields/custom/preview-helpers', () => {
     it('with no metadata', () => {
       expect(getMetadata('details.summary')).toEqual({});
     });
+  });
+});
+
+describe('getCustomFieldSummary()', () => {
+  /**
+   * A custom field summary.
+   * @returns {null} Nothing.
+   */
+  const summary = () => null;
+  /**
+   * A custom field control.
+   * @returns {null} Nothing.
+   */
+  const control = () => null;
+
+  it('returns the summary component of a custom field type', () => {
+    // @ts-ignore
+    customFieldTypeRegistry.set('with-summary', { control, summary });
+
+    expect(getCustomFieldSummary({ name: 'photo', widget: 'with-summary' })).toBe(summary);
+
+    customFieldTypeRegistry.delete('with-summary');
+  });
+
+  it('returns undefined for a custom field type without a summary component', () => {
+    // @ts-ignore
+    customFieldTypeRegistry.set('without-summary', { control });
+
+    expect(getCustomFieldSummary({ name: 'photo', widget: 'without-summary' })).toBeUndefined();
+
+    customFieldTypeRegistry.delete('without-summary');
+  });
+
+  it('returns undefined for a built-in field type or a missing field', () => {
+    expect(getCustomFieldSummary({ name: 'title', widget: 'string' })).toBeUndefined();
+    expect(getCustomFieldSummary({ name: 'title' })).toBeUndefined();
+    expect(getCustomFieldSummary(undefined)).toBeUndefined();
   });
 });

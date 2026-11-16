@@ -1,12 +1,16 @@
+import { marked } from 'marked';
 import { createElement } from 'react';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 
+import { renderRichText } from '$lib/services/api/methods/render-rich-text';
 import { loadReactDom, reactDomLoaded } from '$lib/services/api/react-dom';
 import { customComponentRegistry } from '$lib/services/api/registries';
 import { allAssetFolders } from '$lib/services/assets/folders';
 import { allAssets } from '$lib/services/assets/state';
 import { cmsConfig } from '$lib/services/config';
+import { sanitizeRichTextHTML } from '$lib/services/contents/fields/rich-text/sanitize';
 import { createMockDraft, renderWithDraft } from '$lib/test/draft';
+import { renderFieldPreview } from '$lib/test/field.svelte';
 
 import RichTextPreview from './rich-text-preview.svelte';
 
@@ -29,6 +33,9 @@ vi.mock('$lib/services/api/react-dom', async (importOriginal) => {
   };
 });
 
+// Count the blocks parsed and sanitized
+vi.mock('$lib/services/contents/fields/rich-text/sanitize', { spy: true });
+
 /**
  * Render the preview, keeping the props to change the value later.
  * @param {string | undefined} currentValue Markdown.
@@ -40,17 +47,11 @@ const renderPreviewWithProps = async (currentValue, config = {}) => {
   /** @type {RichTextField} */
   const fieldConfig = { name: 'body', widget: 'richtext', ...config };
 
-  const props = $state({
-    locale: '_default',
-    keyPath: 'body',
-    typedKeyPath: 'body',
+  const { container, props, unmount } = await renderFieldPreview(RichTextPreview, {
     fieldConfig,
+    locale: '_default',
     currentValue,
-  });
-
-  const { container, unmount } = await renderWithDraft(RichTextPreview, {
     draft: createMockDraft({ fields: [fieldConfig] }),
-    props,
   });
 
   return {
@@ -124,6 +125,20 @@ describe('RichTextPreview', () => {
     expect(raw.querySelector('p')).toHaveAttribute('onclick');
   });
 
+  test('only parses the blocks that have changed', async () => {
+    const { preview, props } = await renderPreviewWithProps('First\n\nSecond\n\nFirst');
+
+    await expect.poll(() => preview.querySelectorAll('p').length).toBe(3);
+
+    vi.mocked(sanitizeRichTextHTML).mockClear();
+    props.currentValue = 'First\n\nChanged\n\nFirst';
+
+    await expect
+      .poll(() => [...preview.querySelectorAll('p')].map((p) => p.textContent))
+      .toEqual(['First', 'Changed', 'First']);
+    expect(vi.mocked(sanitizeRichTextHTML).mock.calls).toEqual([['<p dir="auto">Changed</p>\n']]);
+  });
+
   test('renders an HTML value as is, without parsing it as Markdown', async () => {
     defineGreeting(() => '<b class="greeting">Hello</b>');
 
@@ -170,7 +185,7 @@ describe('RichTextPreview', () => {
       // eslint-disable-next-line jsdoc/require-jsdoc
       toBlock: ({ text }) => `:::note ${text}`,
       // eslint-disable-next-line jsdoc/require-jsdoc
-      toPreview: ({ text }) => {
+      toPreview: (/** @type {Record<string, any>} */ { text }) => {
         const element = document.createElement('strong');
 
         element.className = 'note-preview';
@@ -287,6 +302,75 @@ describe('RichTextPreview', () => {
     // A code block without a language is left alone
     expect(preview.querySelectorAll('pre').length).toBe(3);
     expect(preview.querySelector('pre:not(.shiki)')).toHaveTextContent('plain');
+  });
+
+  test('adds the Marked extensions only once, however many previews are rendered', async () => {
+    (await renderPreviewWithProps('One')).unmount();
+
+    // Every `marked.use()` call wraps the renderer methods in another layer, each falling back to
+    // the previous one
+    const { code, paragraph } = /** @type {any} */ (marked.defaults.renderer);
+
+    (await renderPreviewWithProps('Two')).unmount();
+    await renderPreview('Three');
+
+    expect(marked.defaults.renderer).toMatchObject({ code, paragraph });
+    expect(marked.parse('Hello')).toBe('<p dir="auto">Hello</p>\n');
+  });
+
+  test('renders without an entry draft, as `CMS.renderRichText()` does from a timer', async () => {
+    const target = document.createElement('div');
+
+    document.body.append(target);
+
+    // Called outside any component, like a React effect, so there is no context to inherit
+    const destroy = await new Promise((resolve) => {
+      setTimeout(() => {
+        resolve(renderRichText(target, '**Hello**\n\n![Missing](missing.png)'));
+      });
+    });
+
+    await expect.poll(() => target.querySelector('strong')?.textContent).toBe('Hello');
+    await expect.poll(() => target.querySelector('img')?.dataset.processed).toBe('true');
+    expect(target.querySelector('img')).toHaveAttribute('src', 'missing.png');
+
+    destroy();
+    target.remove();
+  });
+
+  test('renders the image syntax in code as is, and the Markdown after an image', async () => {
+    const preview = await renderPreview(
+      'Use `![a](b.png)` here\n\n```\n![c](d.png)\n```\n\n![e](f.png)\nSome **bold** caption',
+    );
+
+    await expect.poll(() => preview.querySelector('strong')?.textContent).toBe('bold');
+    expect(preview.querySelector('p code')).toHaveTextContent('![a](b.png)');
+    expect(preview.querySelector('pre')).toHaveTextContent('![c](d.png)');
+    expect(preview.querySelectorAll('img')).toHaveLength(1);
+    expect(preview.querySelector('p:has(img)')).toMatchTextContent(/Some bold caption/);
+  });
+
+  test('renders the constructs that span blank lines as a whole', async () => {
+    const preview = await renderPreview(
+      [
+        'See [the docs][1].',
+        '<!-- A comment\n\nwith a blank line -->',
+        '- One\n\n  More of one\n\n- Two',
+        '[1]: https://example.com/docs',
+        '~~~js\nconst a = 1;\n~~~',
+      ].join('\n\n'),
+    );
+
+    await expect
+      .poll(() => preview.querySelector('a')?.getAttribute('href'))
+      .toBe('https://example.com/docs');
+    expect(preview).not.toMatchTextContent(/blank line|\[1\]/);
+    expect(preview.querySelectorAll('ul')).toHaveLength(1);
+    expect([...preview.querySelectorAll('li')].map((li) => li.textContent?.trim())).toEqual([
+      'One\nMore of one',
+      'Two',
+    ]);
+    await expect.poll(() => preview.querySelectorAll('pre.shiki').length).toBe(1);
   });
 
   test('leaves an image that can’t be resolved as is', async () => {

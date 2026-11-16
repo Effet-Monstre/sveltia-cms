@@ -1,9 +1,10 @@
-import { beforeEach, describe, expect, test, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 
 import { fetchLastCommit } from '$lib/services/backends/git/github/commits';
 import {
   fetchBlob,
   fetchBlobText,
+  fetchDirSHA,
   fetchFileContents,
   fetchFileList,
   fetchFileMetadata,
@@ -14,7 +15,7 @@ import {
   parseFileMetadata,
 } from '$lib/services/backends/git/github/files';
 import {
-  getWorkflowRepository,
+  getContentRepository,
   initOpenAuthoring,
   isOpenAuthoringConfigured,
 } from '$lib/services/backends/git/github/fork';
@@ -47,7 +48,13 @@ const stopProgress = vi.hoisted(() => vi.fn());
 vi.mock('$lib/services/backends/git/shared/progress', () => ({
   startSimulatedProgress: vi.fn(() => stopProgress),
 }));
-vi.mock('mime', () => ({ default: { getType: vi.fn() } }));
+
+const mockGetRootDir = vi.hoisted(() => vi.fn(() => ''));
+
+vi.mock('$lib/services/backends/root-dir', () => ({ getRootDir: mockGetRootDir }));
+vi.mock('@sveltia/i18n', async () =>
+  (await import('$lib/test/i18n')).createI18nMock({ values: true }),
+);
 
 describe('GitHub files service', () => {
   beforeEach(() => {
@@ -58,7 +65,7 @@ describe('GitHub files service', () => {
       branch: 'main',
     });
     vi.mocked(isOpenAuthoringConfigured).mockReturnValue(false);
-    vi.mocked(getWorkflowRepository).mockReturnValue({ owner: 'test-owner', repo: 'test-repo' });
+    vi.mocked(getContentRepository).mockReturnValue({ owner: 'test-owner', repo: 'test-repo' });
   });
 
   describe('fetchFileList', () => {
@@ -162,10 +169,132 @@ describe('GitHub files service', () => {
       ]);
     });
 
+    describe('with a root directory', () => {
+      beforeEach(() => {
+        mockGetRootDir.mockReturnValue('apps/site');
+      });
+
+      afterEach(() => {
+        mockGetRootDir.mockReturnValue('');
+      });
+
+      test('lists only the root directory, with paths relative to the repository root', async () => {
+        vi.mocked(fetchAPI).mockResolvedValue({
+          tree: [
+            { type: 'blob', path: 'content/a.md', sha: 'a', size: 1 },
+            { type: 'tree', path: 'content', sha: 't1' },
+          ],
+          truncated: false,
+        });
+
+        await expect(fetchFileList('abc')).resolves.toEqual([
+          { path: 'apps/site/content/a.md', sha: 'a', size: 1, name: 'a.md' },
+        ]);
+        expect(fetchAPI).toHaveBeenCalledWith(
+          '/repos/test-owner/test-repo/git/trees/abc%3Aapps/site?recursive=1',
+        );
+      });
+
+      test('walks the subtrees of a root directory too big to list at once', async () => {
+        const prefix = '/repos/test-owner/test-repo/git/trees';
+
+        /** @type {Record<string, any>} */
+        const responses = {
+          [`${prefix}/abc%3Aapps/site?recursive=1`]: { tree: [], truncated: true },
+          [`${prefix}/abc%3Aapps/site`]: {
+            tree: [{ type: 'tree', path: 'content', sha: 't1' }],
+            truncated: false,
+          },
+          [`${prefix}/t1?recursive=1`]: {
+            tree: [{ type: 'blob', path: 'a.md', sha: 'a', size: 1 }],
+            truncated: false,
+          },
+        };
+
+        vi.mocked(fetchAPI).mockImplementation(async (path) => responses[path]);
+
+        await expect(fetchFileList('abc')).resolves.toEqual([
+          { path: 'apps/site/content/a.md', sha: 'a', size: 1, name: 'a.md' },
+        ]);
+      });
+
+      test('throws a localized error when the root directory doesn’t exist', async () => {
+        vi.mocked(fetchAPI).mockRejectedValue(
+          new Error('Not Found', { cause: { status: 404, message: 'Not Found' } }),
+        );
+
+        await expect(fetchFileList('abc')).rejects.toThrow(
+          expect.objectContaining({
+            message: 'Failed to list the files.',
+            cause: expect.objectContaining({
+              message: 'root_dir_not_found:{"repo":"test-owner/test-repo","dir":"apps/site"}',
+            }),
+          }),
+        );
+      });
+
+      test('passes any other error on', async () => {
+        const error = new Error('Server error', { cause: { status: 500 } });
+
+        vi.mocked(fetchAPI).mockRejectedValue(error);
+
+        await expect(fetchFileList('abc')).rejects.toBe(error);
+      });
+
+      test('passes on a 404 error for a subtree of the root directory', async () => {
+        const error = new Error('Not Found', { cause: { status: 404 } });
+
+        vi.mocked(fetchAPI).mockImplementation(async (path) => {
+          if (path.includes('/t1')) {
+            throw error;
+          }
+
+          return path.endsWith('?recursive=1')
+            ? { tree: [], truncated: true }
+            : { tree: [{ type: 'tree', path: 'content', sha: 't1' }], truncated: false };
+        });
+
+        await expect(fetchFileList('abc')).rejects.toBe(error);
+      });
+    });
+
+    test('passes on a 404 error without a root directory', async () => {
+      const error = new Error('Not Found', { cause: { status: 404 } });
+
+      vi.mocked(fetchAPI).mockRejectedValue(error);
+
+      await expect(fetchFileList('abc')).rejects.toBe(error);
+    });
+
     test('throws when a single directory is too big to list', async () => {
       vi.mocked(fetchAPI).mockResolvedValue({ tree: [], truncated: true });
 
       await expect(fetchFileList()).rejects.toThrow('too many files to list');
+    });
+  });
+
+  describe('fetchDirSHA', () => {
+    test('looks the tree of a directory up with a tree-ish expression', async () => {
+      vi.mocked(fetchGraphQL).mockResolvedValue({ repository: { object: { oid: 'tree-sha' } } });
+
+      await expect(fetchDirSHA('abc', 'apps/site')).resolves.toBe('tree-sha');
+      expect(fetchGraphQL).toHaveBeenCalledWith(expect.stringContaining('object(expression:'), {
+        owner: 'test-owner',
+        repo: 'test-repo',
+        expression: 'abc:apps/site',
+      });
+    });
+
+    test('returns `undefined` for a directory that doesn’t exist', async () => {
+      vi.mocked(fetchGraphQL).mockResolvedValue({ repository: { object: null } });
+
+      await expect(fetchDirSHA('abc', 'apps/site')).resolves.toBeUndefined();
+    });
+
+    test('returns `undefined` for a repository that can’t be read', async () => {
+      vi.mocked(fetchGraphQL).mockResolvedValue({ repository: null });
+
+      await expect(fetchDirSHA('abc', 'apps/site')).resolves.toBeUndefined();
     });
   });
 
@@ -645,7 +774,7 @@ describe('GitHub files service', () => {
     });
 
     test('reads an unpublished asset from the workflow repository', async () => {
-      vi.mocked(getWorkflowRepository).mockReturnValue({ owner: 'contributor', repo: 'test-repo' });
+      vi.mocked(getContentRepository).mockReturnValue({ owner: 'contributor', repo: 'test-repo' });
 
       const asset = /** @type {any} */ ({
         sha: 'test-sha',
@@ -667,98 +796,48 @@ describe('GitHub files service', () => {
       );
     });
 
-    test('handles text content with correct MIME type', async () => {
-      const asset = /** @type {any} */ ({
-        sha: 'test-sha',
-        path: 'file.svg',
-      });
+    test('keeps the content of an SVG file', async () => {
+      const asset = /** @type {any} */ ({ sha: 'test-sha', path: 'file.svg' });
 
-      const mockResponse = {
-        ok: true,
-        headers: new Map([['Content-Type', 'image/svg+xml']]),
-        text: vi.fn().mockResolvedValue('<svg></svg>'),
-      };
-
-      const mockMime = await import('mime');
-
-      vi.mocked(mockMime.default.getType).mockReturnValue('image/svg+xml');
-
-      vi.mocked(fetchAPI).mockResolvedValue(mockResponse);
+      vi.mocked(fetchAPI).mockResolvedValue(
+        new Response('<svg></svg>', { headers: { 'Content-Type': 'text/plain; charset=utf-8' } }),
+      );
 
       const result = await fetchBlob(asset);
 
-      expect(mockResponse.text).toHaveBeenCalled();
       expect(result).toBeInstanceOf(Blob);
-      expect(result.type).toBe('image/svg+xml');
+      expect(await result.text()).toBe('<svg></svg>');
     });
 
-    test('falls back to text/plain for unknown MIME types', async () => {
-      const asset = /** @type {any} */ ({
-        sha: 'test-sha',
-        path: 'file.unknown',
-      });
+    test('keeps the UTF-8 BOM of a text file', async () => {
+      const asset = /** @type {any} */ ({ sha: 'csv-sha', path: 'data.csv' });
+      const bytes = new Uint8Array([0xef, 0xbb, 0xbf, 0x61, 0x2c, 0x62]);
 
-      const mockResponse = {
-        ok: true,
-        headers: new Map([['Content-Type', 'text/plain']]),
-        text: vi.fn().mockResolvedValue('text content'),
-      };
-
-      const mockMime = await import('mime');
-
-      vi.mocked(mockMime.default.getType).mockReturnValue(null);
-
-      vi.mocked(fetchAPI).mockResolvedValue(mockResponse);
+      vi.mocked(fetchAPI).mockResolvedValue(
+        new Response(bytes, { headers: { 'Content-Type': 'text/plain; charset=utf-8' } }),
+      );
 
       const result = await fetchBlob(asset);
 
-      expect(result.type).toBe('text/plain');
+      expect(new Uint8Array(await result.arrayBuffer())).toEqual(bytes);
     });
 
-    test('handles text files with JSON content', async () => {
-      const asset = /** @type {any} */ ({
-        sha: 'json-sha',
-        path: 'data.json',
-      });
+    test.each([
+      // `café` in Latin-1, which decoding and re-encoding as UTF-8 would turn into `caf\xC3\xA9`
+      ['iso-8859-1', [0x63, 0x61, 0x66, 0xe9]],
+      // `hi` in UTF-16LE with a BOM
+      ['utf-16le', [0xff, 0xfe, 0x68, 0x00, 0x69, 0x00]],
+    ])('keeps the bytes of a text file served as %s', async (charset, values) => {
+      const asset = /** @type {any} */ ({ sha: 'txt-sha', path: 'legacy.txt' });
+      const bytes = new Uint8Array(values);
 
-      const mockResponse = {
-        ok: true,
-        headers: new Map([['Content-Type', 'application/json']]),
-        text: vi.fn().mockResolvedValue('{"key":"value"}'),
-      };
-
-      const mockMime = await import('mime');
-
-      vi.mocked(mockMime.default.getType).mockReturnValue('application/json');
-
-      vi.mocked(fetchAPI).mockResolvedValue(mockResponse);
+      vi.mocked(fetchAPI).mockResolvedValue(
+        new Response(bytes, { headers: { 'Content-Type': `text/plain; charset=${charset}` } }),
+      );
 
       const result = await fetchBlob(asset);
 
-      expect(result.type).toBe('application/json');
-    });
-
-    test('handles text files with Markdown content', async () => {
-      const asset = /** @type {any} */ ({
-        sha: 'md-sha',
-        path: 'README.md',
-      });
-
-      const mockResponse = {
-        ok: true,
-        headers: new Map([['Content-Type', 'text/markdown']]),
-        text: vi.fn().mockResolvedValue('# Readme'),
-      };
-
-      const mockMime = await import('mime');
-
-      vi.mocked(mockMime.default.getType).mockReturnValue('text/markdown');
-
-      vi.mocked(fetchAPI).mockResolvedValue(mockResponse);
-
-      const result = await fetchBlob(asset);
-
-      expect(result.type).toBe('text/markdown');
+      expect(new Uint8Array(await result.arrayBuffer())).toEqual(bytes);
     });
 
     test('throws instead of returning an error response as the file content', async () => {

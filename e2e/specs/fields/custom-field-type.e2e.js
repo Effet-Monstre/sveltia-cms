@@ -1,4 +1,5 @@
-import { BASE_CONFIG, expect, test } from '../../fixtures/test.js';
+import { addScripts, BASE_CONFIG, expect, test } from '../../fixtures/test.js';
+import { getEditor } from '../../fixtures/ui.js';
 
 test.use({
   config: {
@@ -43,15 +44,7 @@ const REGISTRATION_SCRIPT = `
 `;
 
 test.beforeEach(async ({ cms, page }) => {
-  await page.route('**/admin/', async (route) => {
-    const response = await route.fetch();
-    const html = await response.text();
-
-    await route.fulfill({
-      response,
-      body: html.replace('</body>', `<script>${REGISTRATION_SCRIPT}</script></body>`),
-    });
-  });
+  await addScripts(page, { after: REGISTRATION_SCRIPT });
 
   await cms.open();
   await cms.signIn();
@@ -63,7 +56,7 @@ test('renders a custom field control using hooks from the React the CMS exposes'
 }) => {
   await page.getByRole('button', { name: 'Create New Entry' }).first().click();
 
-  const editor = page.getByRole('group', { name: 'Content Editor' });
+  const editor = getEditor(page);
   const counter = editor.getByRole('button', { name: /^Count: / });
 
   await editor.getByRole('textbox', { name: 'Title' }).fill('Counted');
@@ -84,7 +77,7 @@ test('validates a custom field with an `isValid` method exposed by a function co
 }) => {
   await page.getByRole('button', { name: 'Create New Entry' }).first().click();
 
-  const editor = page.getByRole('group', { name: 'Content Editor' });
+  const editor = getEditor(page);
   const counter = editor.getByRole('button', { name: /^Count: / });
 
   await editor.getByRole('textbox', { name: 'Title' }).fill('Counted');

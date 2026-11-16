@@ -1,6 +1,8 @@
 import { beforeEach, describe, expect, test, vi } from 'vitest';
 
 import {
+  addCandidates,
+  collectSafely,
   findURLInSummary,
   getPreviewContext,
   normalizeURL,
@@ -230,12 +232,39 @@ describe('Git deployment selection', () => {
       const result = pickDeployment(
         [
           createCandidate({ name: 'deploy', url: 'http://insecure.example.com' }),
-          createCandidate({ name: 'lint', url: 'https://lint.example.com' }),
+          createCandidate({ name: 'vercel', url: 'https://vercel.example.com' }),
         ],
         { kind: 'preview' },
       );
 
-      expect(result.url).toBe('https://lint.example.com');
+      expect(result.url).toBe('https://vercel.example.com');
+    });
+
+    test('ranks a finished CI job below a deploy preview that’s still building', () => {
+      const result = pickDeployment(
+        [
+          createCandidate({
+            name: 'netlify/site/deploy-preview',
+            url: undefined,
+            state: 'pending',
+          }),
+          createCandidate({ name: 'ci/circleci: test', url: 'https://circleci.com/gh/o/r/1' }),
+        ],
+        { kind: 'preview' },
+      );
+
+      expect(result.state).toBe('pending');
+      expect(result.context).toBe('netlify/site/deploy-preview');
+    });
+
+    test('still takes the URL of a commit status from an unknown provider', () => {
+      const result = pickDeployment(
+        [createCandidate({ name: 'acme/site', url: 'https://acme.example.com' })],
+        { kind: 'preview' },
+      );
+
+      expect(result.state).toBe('ready');
+      expect(result.url).toBe('https://acme.example.com');
     });
 
     test('keeps a pending candidate without a URL', () => {
@@ -665,5 +694,56 @@ describe('resolveDeployments()', () => {
     });
 
     expect(result.abc.url).toBeUndefined();
+  });
+});
+
+describe('collectSafely()', () => {
+  test('runs the task', async () => {
+    const task = vi.fn().mockResolvedValue(undefined);
+
+    await collectSafely(task);
+
+    expect(task).toHaveBeenCalledOnce();
+  });
+
+  test('reports a failure instead of throwing it', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const ex = new Error('Not Found');
+
+    await expect(collectSafely(vi.fn().mockRejectedValue(ex))).resolves.toBeUndefined();
+    expect(warn).toHaveBeenCalledWith('Failed to fetch the deployment info.', ex);
+  });
+});
+
+describe('addCandidates()', () => {
+  test('adds a candidate for each item with a mapped state', () => {
+    /** @type {any[]} */
+    const list = [];
+
+    addCandidates(
+      list,
+      [
+        { name: 'a', status: 'ok' },
+        { name: 'b', status: 'skipped' },
+      ],
+      ({ status }) => (status === 'ok' ? 'ready' : undefined),
+      ({ name }) => ({ name, source: 'status' }),
+    );
+
+    expect(list).toEqual([{ name: 'a', state: 'ready', source: 'status' }]);
+  });
+
+  test('ignores missing items', () => {
+    /** @type {any[]} */
+    const list = [];
+
+    addCandidates(
+      list,
+      null,
+      () => 'ready',
+      () => ({ name: '', source: 'status' }),
+    );
+
+    expect(list).toEqual([]);
   });
 });
