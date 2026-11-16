@@ -1,0 +1,2 @@
+import{Mo as e}from"./init-sLlGZabr.js";var t=4,n=/^[\da-f]{40,64}$/,r=(r,i)=>{let a=e(t);return{fetchDirSHA:async(e,t)=>{let o=`${r.owner}/${r.repo}:${e}:${t}`;if(a.has(o))return a.get(o);let s=await i(e,t);return n.test(e)&&a.set(o,s),s},resetDirLookups:()=>{a.clear()}}};export{r as t};
+//# sourceMappingURL=dir-sha-BWlAcjSR.js.map

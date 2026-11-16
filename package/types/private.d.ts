@@ -114,10 +114,6 @@ export type Preferences = {
      */
     underlineLinks?: boolean | undefined;
     /**
-     * Whether to enable beta features.
-     */
-    beta?: boolean | undefined;
-    /**
      * Whether to enable the developer mode.
      */
     devModeEnabled?: boolean | undefined;
@@ -135,6 +131,19 @@ export type Preferences = {
      * Default translation service ID, e.g. `google`.
      */
     defaultTranslationService?: string | undefined;
+    /**
+     * Whether the local backend commits the saved changes to the
+     * current branch of the local Git repository, like the `MODE=git` option of Netlify/Decap CMS’s
+     * local proxy server. Default: `false`.
+     */
+    localGitCommits?: boolean | undefined;
+    /**
+     * Account that a magic
+     * link signed in to, if the API keys, log-in credentials and deploy hook came with the link. They
+     * belong to that account, so they’re removed once another account is signed in to, or the session
+     * ends.
+     */
+    magicLinkAccount?: Pick<User, "id" | "backendName" | "login"> | undefined;
 };
 /**
  * Basic Git repository information retrieved from the config file.
@@ -222,6 +231,39 @@ export type RepositoryPath = {
     repo: string;
 };
 /**
+ * An outstanding request asking the user what to do with uploaded files whose names are already
+ * taken, which the UI turns into a conflict resolution dialog.
+ */
+export type DuplicatesRequest = {
+    /**
+     * Number of duplicate files.
+     */
+    count: number;
+    /**
+     * Name of the first duplicate file.
+     */
+    name: string;
+    /**
+     * Function to answer the request: `true`
+     * to replace the existing files, `false` to keep both, or `undefined` to cancel.
+     */
+    respond: (replace: boolean | undefined) => void;
+};
+/**
+ * An outstanding request asking the user whether to sign in to the account a magic link belongs
+ * to, which the UI turns into a confirmation dialog.
+ */
+export type MagicLinkConfirmationRequest = {
+    /**
+     * Account the link signs in to.
+     */
+    account: User;
+    /**
+     * Function to answer the request.
+     */
+    respond: (confirmed: boolean) => void;
+};
+/**
  * An outstanding request for the user’s permission to fork the configured repository, which the UI
  * turns into a confirmation dialog.
  */
@@ -235,6 +277,36 @@ export type ForkPermissionRequest = {
      * promise the sign-in flow is waiting on.
      */
     respond: (granted: boolean) => void;
+};
+/**
+ * How the user is asked for a commit message, as the `prompt_commit_messages` backend option sets
+ * it: `true` to write the whole message, `prefix` or `suffix` to add text before or after the
+ * message made from the template.
+ */
+export type CommitMessagePromptMode = true | "prefix" | "suffix";
+/**
+ * An outstanding request for a commit message, which the UI turns into a prompt dialog.
+ */
+export type CommitMessageRequest = {
+    /**
+     * How the text the user enters is used.
+     */
+    mode: CommitMessagePromptMode;
+    /**
+     * Message made from the template, shown as the initial value of
+     * the text box with the `true` mode, or around the text in the preview otherwise.
+     */
+    defaultMessage: string;
+    /**
+     * Initial value of the text box.
+     */
+    initialValue: string;
+    /**
+     * Function to answer the request with the
+     * text entered, or `null` if the user has cancelled the commit, which resolves the promise the
+     * save is waiting on.
+     */
+    respond: (message: string | null) => void;
 };
 /**
  * API endpoint configuration.
@@ -309,6 +381,11 @@ export type FetchApiOptions = {
      * `user` store.
      */
     refreshToken?: string | undefined;
+    /**
+     * Whether the request can be sent again after a transient error.
+     * See `sendRequest()`.
+     */
+    retryable?: boolean | undefined;
 };
 /**
  * Options for a commit operation in the backend.
@@ -344,6 +421,13 @@ export type CommitOptions = {
      * exists. Used only for Git backends with Editorial Workflow enabled.
      */
     startBranch?: string | undefined;
+    /**
+     * Text the user has entered when asked for a commit message, which
+     * replaces the message made from the template, or goes before or after it, depending on the
+     * `prompt_commit_messages` backend option. An empty string means the user has been asked and left
+     * it empty, so the message made from the template is used as is. Used only for Git backends.
+     */
+    userMessage?: string | undefined;
 };
 /**
  * Results of a commit operation.
@@ -362,6 +446,13 @@ export type CommitResults = {
      * Commit date for a Git backend.
      */
     date?: Date | undefined;
+    /**
+     * Git object ID of the commit’s parent, for a Git backend that may
+     * make the commit on top of someone else’s commit to another file rather than on the head the site
+     * data reflects: GitLab and Gitea/Forgejo only check the files being changed. `undefined` for a
+     * backend that refuses a commit unless the branch is still at that head, like GitHub.
+     */
+    parentSha?: string | undefined;
     /**
      * Map of committed files. The key is
      * a file path, and the value is an object containing the Git object ID of the updated file. The
@@ -632,6 +723,12 @@ export type BackendService = {
      */
     fetchBlob?: ((asset: Asset) => Promise<Blob>) | undefined;
     /**
+     * Function
+     * to find the tree SHA of a directory at the given commit, or `undefined` if it doesn’t exist. It
+     * tells whether the configured root directory has changed between two commits. Git backends only.
+     */
+    fetchDirSHA?: ((ref: string, dirPath: string) => Promise<string | undefined>) | undefined;
+    /**
      * Function to save file changes, including additions and deletions, and return the
      * commit hash and a map of committed files.
      */
@@ -667,6 +764,10 @@ export type BackendService = {
  * corresponding pull request, prefixed with the `cms_label_prefix` backend option value.
  */
 export type WorkflowStatus = "draft" | "pending_review" | "pending_publish" | "pending_deletion";
+/**
+ * Color tone of a status pill, following the Alert and Infobar components of Sveltia UI.
+ */
+export type StatusPillTone = "info" | "warning" | "success" | "error";
 /**
  * An entry whose pull request has been merged, and whose change is on its way to the site.
  */
@@ -776,6 +877,38 @@ export type WorkflowPullRequest = {
      * case the merge is offered and left to the backend to allow or refuse.
      */
     canMerge?: boolean | undefined;
+    /**
+     * Pull request description, an empty string if it has none. It
+     * carries the record of the deletion group the pull request belongs to, if any: see
+     * `getDeletionGroup` in `$lib/services/backends/git/shared/pull-requests`. `undefined` for an Open
+     * Authoring draft, which has no pull request yet. Always empty for a pull request from a fork,
+     * whose description is the contributor’s and can’t be trusted to say which entries it deletes.
+     */
+    description?: string | undefined;
+    /**
+     * Fork the pull request comes from, when a contributor opened it with
+     * Open Authoring and the signed-in user is a maintainer reviewing it. Its `branch` is then
+     * qualified with the fork: see `getForkBranchName` in `$lib/services/workflow/forks`.
+     */
+    fork?: ForkHead | undefined;
+};
+/**
+ * Fork a pull request reviewed by a maintainer comes from.
+ */
+export type ForkHead = {
+    /**
+     * Owner of the fork.
+     */
+    owner: string;
+    /**
+     * Name of the fork.
+     */
+    repo: string;
+    /**
+     * Whether the contributor lets maintainers push to the pull request’s
+     * branch. Without that, the entry can only be viewed in the CMS.
+     */
+    editable: boolean;
 };
 /**
  * Editorial Workflow properties attached to an unpublished entry.
@@ -804,6 +937,33 @@ export type UnpublishedEntryProps = {
      * published counterpart, which would otherwise be listed as a separate entry.
      */
     previousPaths?: string[] | undefined;
+    /**
+     * Entries in other collections that were created or
+     * edited from a Relation field of the entry and committed to its pull request, so they’re reviewed
+     * and published along with it.
+     */
+    companions?: CompanionEntry[] | undefined;
+};
+/**
+ * An entry that rides along in the pull request of another entry, which it was created or edited
+ * for from a Relation field with the quick-add dialog. It isn’t on the board on its own: the pull
+ * request stands for the entry it was opened for, whose card lists it.
+ */
+export type CompanionEntry = {
+    /**
+     * Name of the collection the entry belongs to.
+     */
+    collectionName: string;
+    /**
+     * Entry as it stands on the pull request’s branch. An existing entry keeps
+     * the ID of its published version.
+     */
+    entry: Entry;
+    /**
+     * Whether the entry is an existing one that the pull request changes,
+     * rather than a new one.
+     */
+    edited?: boolean | undefined;
 };
 /**
  * An entry that has not been published yet, backed by an open pull request. It’s a regular
@@ -812,6 +972,34 @@ export type UnpublishedEntryProps = {
  */
 export type UnpublishedEntry = Entry & {
     workflow: UnpublishedEntryProps;
+};
+/**
+ * Current state of the request an Open Authoring entry has, as read by a backend for
+ * `updateForkStatusWith`.
+ */
+export type ForkRequestState = {
+    /**
+     * Whether the request has been merged.
+     */
+    merged: boolean;
+    /**
+     * Whether the request is still the one the CMS manages for the
+     * contributor: opened by them, from their fork, to the configured branch.
+     */
+    isEntryRequest: boolean;
+    /**
+     * Function to read the head commit the request was
+     * merged at. Only called for a merged request that is the entry’s.
+     */
+    getMergedSHA: () => Promise<string>;
+    /**
+     * Request state in the service’s own terms, e.g. `open`.
+     */
+    state?: string | undefined;
+    /**
+     * Whether the service considers the request a draft.
+     */
+    draft?: boolean | undefined;
 };
 /**
  * A file changed by a pull request, as read by {@link WorkflowBackendService.fetchMergeState}.
@@ -893,6 +1081,12 @@ export type WorkflowSaveOptions = {
      * been saved once.
      */
     pullRequest?: WorkflowPullRequest | undefined;
+    /**
+     * ID of the selection of entries deleted together the pull
+     * request belongs to, to be recorded in its description. See `getDeletionGroup` in
+     * `$lib/services/backends/git/shared/pull-requests`.
+     */
+    deletionGroup?: string | undefined;
 };
 /**
  * Editorial Workflow implementation provided by a backend service.
@@ -916,6 +1110,17 @@ export type WorkflowBackendService = {
      * draft state.
      */
     updateStatus: (pullRequest: WorkflowPullRequest, status: WorkflowStatus) => Promise<WorkflowPullRequest>;
+    /**
+     * Function to approve the
+     * pull request on behalf of the signed-in user, pinned to its `headSHA`, so a branch protection
+     * rule requiring an approval doesn’t stand in the way of publishing it.
+     */
+    approve: (pullRequest: WorkflowPullRequest) => Promise<void>;
+    /**
+     * Function to
+     * withdraw the signed-in user’s approval of the pull request, if they have given one.
+     */
+    withdrawApproval: (pullRequest: WorkflowPullRequest) => Promise<void>;
     /**
      * Function to fetch
      * the commit the workflow branch points at, or `undefined` if the branch is gone. Two editors
@@ -961,6 +1166,11 @@ export type FileCommit = {
      * Commit SHA hash.
      */
     sha: string;
+    /**
+     * Headline of the commit message: its first line. GitHub shortens a
+     * long one with an ellipsis.
+     */
+    message: string;
     /**
      * Author’s display name.
      */
@@ -1064,6 +1274,12 @@ export type MediaLibraryService = {
      */
     authType: "api_key" | "none" | "password" | "widget";
     /**
+     * API the service is compatible with, e.g. `s3` for an
+     * S3-compatible service. Services with the same API share some localized strings, such as the
+     * credential label, unless they define their own.
+     */
+    compatibleAPI?: "s3" | undefined;
+    /**
      * URL of the page that provides the API/developer service.
      */
     developerURL?: string | undefined;
@@ -1105,6 +1321,12 @@ export type MediaLibraryService = {
      */
     list?: ((options: MediaLibraryFetchOptions) => Promise<ExternalAsset[]>) | undefined;
     /**
+     * Function to let the service know a file has been inserted into an entry, as the
+     * API guidelines of a stock asset service like Unsplash require. It’s called without being
+     * awaited, and should never reject, as a failure must not get in the way of the insertion.
+     */
+    trackDownload?: ((asset: ExternalAsset, options: MediaLibraryFetchOptions) => Promise<void>) | undefined;
+    /**
      * Function to upload files to the cloud storage service.
      */
     upload?: ((files: File[], options: MediaLibraryFetchOptions) => Promise<ExternalAsset[]>) | undefined;
@@ -1130,6 +1352,13 @@ export type MediaLibraryService = {
      * folders, like Uploadcare, or handles them in its own widget, like Cloudinary.
      */
     browse?: ((options: MediaLibraryFetchOptions) => Promise<ExternalFolderListing>) | undefined;
+    /**
+     * Function to list every file and empty folder below
+     * a folder on a service with folder support, at any depth, however many there are. Unlike
+     * `browse`, which may stop short of the end on a large service, it lists the folder in full, so a
+     * folder rename or deletion leaves nothing behind.
+     */
+    listFolder?: ((dirPath: string, options: MediaLibraryFetchOptions) => Promise<ExternalFolderListing>) | undefined;
     /**
      * Function to create an empty folder on the service, which keeps a placeholder
      * object for it, as object storage has no folders of its own. The path is relative to the
@@ -1162,6 +1391,11 @@ export type ExternalFolderListing = {
      * instead.
      */
     folders: string[];
+    /**
+     * Whether the listing stopped short of the end, as there are more
+     * files on the service than it lists at once, so some files are left out.
+     */
+    truncated?: boolean | undefined;
 };
 /**
  * Options for direct AI text completion requests.
@@ -1189,14 +1423,50 @@ export type AiCompletionOptions = {
      */
     temperature?: number | undefined;
     /**
-     * Maximum output tokens. Default is 4000.
+     * Maximum output tokens, including reasoning tokens. Default is
+     * 16,000.
      */
     maxTokens?: number | undefined;
     /**
-     * Reasoning effort. Only supported by certain providers (e.g., DeepSeek, Mistral AI). Default
-     * varies by provider. Anthropic Claude only supports `none`, which disables thinking.
+     * Reasoning effort. Only supported by certain providers (e.g., OpenAI, DeepSeek, Mistral AI).
+     * Default varies by provider. Anthropic Claude only supports `none`, which disables thinking.
      */
     reasoning?: "max" | "none" | "high" | "low" | "medium" | "minimal" | "xhigh" | undefined;
+};
+/**
+ * Generic AI service, such as a large language model provider.
+ */
+export type AiService = {
+    /**
+     * Service ID, also used as the key of the API key in the user
+     * preferences.
+     */
+    serviceId: string;
+    /**
+     * Service label.
+     */
+    serviceLabel: string;
+    /**
+     * API label, used in error messages.
+     */
+    apiLabel: string;
+    /**
+     * URL of the page that provides the API/developer service.
+     */
+    developerURL: string;
+    /**
+     * URL of the page that provides an API key.
+     */
+    apiKeyURL: string;
+    /**
+     * API key pattern.
+     */
+    apiKeyPattern: RegExp;
+    /**
+     * Function to send a
+     * message and return the response text.
+     */
+    complete: (options: AiCompletionOptions) => Promise<string>;
 };
 /**
  * Translation language pair.
@@ -1334,7 +1604,69 @@ export type RepositoryFileInfo = {
      * fetched yet.
      */
     meta?: RepositoryFileMetadata | undefined;
+    /**
+     * Content parsed from the text of an entry file, cached so
+     * the file doesn’t have to be parsed again on the next load.
+     */
+    parsed?: ParsedFileContent | undefined;
 };
+/**
+ * What is remembered about a file when it’s read, so it’s saved back the way it was written.
+ */
+export type FileState = {
+    /**
+     * Front matter format detected in the text, for a file whose
+     * format is `frontmatter`. Such a collection reads YAML, TOML and JSON front matter alike, and an
+     * existing file is saved back in the format it was read in.
+     */
+    format?: FrontMatterFormat | undefined;
+    /**
+     * Source text of the values that the parsed content
+     * can’t tell apart from others, e.g. a float that is a whole number.
+     */
+    valueSources?: ValueSourceMap | undefined;
+    /**
+     * Comments at the top of a YAML or TOML file, or of its front
+     * matter, which are kept on a save.
+     */
+    leadingComment?: string | undefined;
+};
+/**
+ * Content parsed from the text of an entry file, along with what it was parsed for and what is
+ * remembered about the file.
+ */
+export type ParsedFileContentProps = {
+    /**
+     * What the content was parsed for: the CMS version and the CMS configuration
+     * hash, either of which can change how a file is parsed.
+     */
+    key: string;
+    /**
+     * Parsed content.
+     */
+    content: RawEntryContent;
+};
+export type ParsedFileContent = ParsedFileContentProps & FileState;
+/**
+ * Source text of a value that the parsed content can’t tell apart from others, so it can be saved
+ * as it was read as long as it hasn’t been edited. A float that is a whole number, e.g. `10.0`, is
+ * held as the same `number` as an integer.
+ */
+export type ValueSource = {
+    /**
+     * Value in the parsed content, e.g. `10`.
+     */
+    value: any;
+    /**
+     * Source text of the value, e.g. `10.0`.
+     */
+    source: string;
+};
+/**
+ * Source text of the values in a file that the parsed content can’t tell apart from others, keyed
+ * by the key path of the value in the file, e.g. `price` or `items.0.price`.
+ */
+export type ValueSourceMap = Record<string, ValueSource>;
 /**
  * Canonical metadata of entry/asset files as well as text file contents retrieved from a Git
  * repository, keyed with a file path.
@@ -1352,6 +1684,12 @@ export type FileConfig = {
      * File format.
      */
     format: FileFormat;
+    /**
+     * Format given in the configuration, when it differs from
+     * `format`: `frontmatter` for an existing file of a collection in that format, which is saved in
+     * the front matter format detected in the file. A custom formatter is looked up by this format.
+     */
+    configuredFormat?: string | undefined;
     /**
      * Normalized `folder` collection option, relative to the project root
      * folder. Entry collection only.
@@ -1429,6 +1767,11 @@ export type BaseFileListItemProps = {
      * Metadata from the repository. Git backends only.
      */
     meta?: RepositoryFileMetadata | undefined;
+    /**
+     * Content parsed from the text of an entry file, restored
+     * from the file cache. Git backends only.
+     */
+    parsed?: ParsedFileContent | undefined;
 };
 /**
  * Collection-level or file-level entry folder information.
@@ -1725,7 +2068,7 @@ export type InternalSlugOptions = {
     /**
      * Slug template to fill for a new entry. It’s the configured template,
      * the legacy `{{fields._slug}}` tag when the slug is only given with the slug editor, or the
-     * identifier field tag by default.
+     * identifier field tag by default. An empty string when the slug is numbered automatically.
      */
     template: string;
     /**
@@ -1753,6 +2096,11 @@ export type InternalSlugOptions = {
      * tag in the template is filled with the locale’s own value.
      */
     localized: boolean;
+    /**
+     * Whether a new entry’s slug is the number after the highest one
+     * among the entries of the collection, instead of a filled template.
+     */
+    autoIncrement: boolean;
     /**
      * Short description shown with the slug editor.
      */
@@ -1887,6 +2235,11 @@ export type Entry = EntryProps & RepositoryFileMetadata;
  */
 export type EntrySearchResult = {
     /**
+     * ID of the entry, which keys the result in the list, so a row keeps showing
+     * the same entry when the results are reordered.
+     */
+    id: string;
+    /**
      * Entry that matched the search terms.
      */
     entry: Entry;
@@ -1916,6 +2269,10 @@ export type EntryBacklink = {
      */
     collectionLabel: string;
     /**
+     * Source collection file name, for file/singleton collections.
+     */
+    fileName?: string | undefined;
+    /**
      * Relation field label.
      */
     fieldLabel: string;
@@ -1927,6 +2284,20 @@ export type EntryBacklink = {
      * Display summary for the source entry.
      */
     summary: string;
+};
+/**
+ * Field that owns a value stored under a key path without a field configuration of its own, like a
+ * KeyValue pair. See `getValueOwnerField()`.
+ */
+export type OwnerField = {
+    /**
+     * Key path of the field.
+     */
+    keyPath: FieldKeyPath;
+    /**
+     * Field configuration.
+     */
+    fieldConfig: Field;
 };
 /**
  * - where key is a key path and value is
@@ -2040,6 +2411,48 @@ export type LocaleValidityMap = Record<InternalLocaleCode, FlattenedEntryValidit
  */
 export type LocaleExpanderMap = Record<InternalLocaleCode, FlattenedEntryExpanderStateMap>;
 /**
+ * Expander states of a list’s items, in list order, which a List field manipulates along with its
+ * values. An existing item is represented by its index before the manipulation, which carries its
+ * own state and those of the objects and lists nested in it; a new item is represented by its own
+ * state, e.g. `true` to show it expanded.
+ */
+export type ExpanderStateList = (number | boolean)[];
+/**
+ * Values of an Object field removed from an entry draft, in each locale they were removed from,
+ * keyed by their key path relative to the object’s, e.g. `.title` for `seo.title`, so they can be
+ * put back even if the object has moved since.
+ */
+export type RemovedObjectValues = Record<InternalLocaleCode, Record<string, any>>;
+/**
+ * Item removed from a List field with subfields, which is shown in its place with a button to
+ * restore it until the editor is closed.
+ */
+export type RemovedListItem = {
+    /**
+     * Unique ID, to key the item with.
+     */
+    id: string;
+    /**
+     * Position in the list the item is restored to: the index of the item
+     * it’s shown before, or the item count if it’s shown after every item.
+     */
+    index: number;
+    /**
+     * Item value in each locale it was removed
+     * from.
+     */
+    values: Record<InternalLocaleCode, any>;
+    /**
+     * Whether the item was expanded.
+     */
+    expanded: boolean;
+    /**
+     * Expander states of the
+     * objects and lists nested in the item, as returned by `getNestedExpanderStates()`.
+     */
+    nestedExpanderStates: [suffix: string, state: boolean][];
+};
+/**
  * Entry draft.
  */
 export type EntryDraft = {
@@ -2065,6 +2478,10 @@ export type EntryDraft = {
      * Whether the entry draft can show the preview pane.
      */
     canPreview: boolean;
+    /**
+     * Whether the entry draft can show the second pane.
+     */
+    canShowSecondPane: boolean;
     /**
      * Collection name, or `_singletons` for a singleton file.
      */
@@ -2169,17 +2586,57 @@ export type EntryDraft = {
      */
     interacted: boolean;
     /**
+     * Whether the user is being asked whether to restore a backup
+     * of the draft. The draft is read-only until the user has answered, so the edits made in the
+     * meantime can’t be lost to the restore, or replace the backup on offer. The editor can still be
+     * scrolled, so the user can look through the entry before deciding.
+     */
+    restorePending?: boolean | undefined;
+    /**
      * Entries created from a Relation field while editing
      * this entry, to be saved along with it.
      */
     pendingEntries: PendingEntry[];
+    /**
+     * Entry the pending entries go along with, when this is
+     * the draft of an entry being added with a quick-add dialog. Missing from any other draft, which
+     * is its own host.
+     */
+    quickAddHost?: QuickAddHost | undefined;
 };
 /**
- * An entry created with the quick-add dialog of a Relation field while another entry is being
- * edited. It’s kept on that entry’s draft and saved in the same commit as the entry, rather than on
- * its own, so the two never go out of sync. Everything needed to commit it is prepared as soon as
- * it’s added, because the preparation replaces the blob URLs in the content with asset paths, which
- * can only be done once.
+ * The entry being edited in the editor, which the entries created with quick-add dialogs, nested
+ * ones included, are saved along with.
+ */
+export type QuickAddHost = {
+    /**
+     * Name of the collection the entry belongs to.
+     */
+    collectionName: string;
+    /**
+     * Whether the entry is saved through Editorial Workflow, which takes
+     * the new entries into its pull request.
+     */
+    workflow: boolean;
+    /**
+     * Workflow branch of the entry’s pull request, if it already has one,
+     * which may hold entries created from it earlier.
+     */
+    branch?: string | undefined;
+    /**
+     * IDs of the entry and, in a nested quick-add dialog, the entries
+     * being edited in the dialogs it was opened from, none of which can be edited from a dialog.
+     */
+    entryIds: string[];
+};
+/**
+ * An entry created or edited with the quick-add dialog of a Relation field while another entry is
+ * being edited. It’s kept on that entry’s draft and saved in the same commit as the entry, rather
+ * than on its own, so the two never go out of sync. Everything needed to commit it is prepared as
+ * soon as it’s added, because the preparation replaces the blob URLs in the content with asset
+ * paths, which can only be done once. The `preSave` event hooks are the exception: they’re only
+ * called when the entry is committed, so they don’t run for an entry that is discarded along with
+ * the draft.
  */
 export type PendingEntry = {
     /**
@@ -2203,7 +2660,29 @@ export type PendingEntry = {
      * of the parent entry’s locales. The entry is only saved while one of them is still there.
      */
     values: any[];
+    /**
+     * Existing entry the changes were made to, as it was when the edit
+     * started, so the save can tell whether someone else has changed it since. Missing from a new
+     * entry.
+     */
+    baseEntry?: Entry | undefined;
+    /**
+     * Values of the dialog’s draft, blob URLs included, so the
+     * entry can be opened in the dialog again. Missing from an entry added before it was introduced.
+     */
+    source?: EntryDraftValues | undefined;
 };
+/**
+ * An entry a Relation field can refer to before it’s among the entries of its collection: one
+ * pending on the draft being edited, see {@link PendingEntry}, or one riding along in the pull
+ * request the draft’s host entry has been saved to, see {@link CompanionEntry}. An existing entry
+ * takes the place of its saved version.
+ */
+export type UnlistedEntry = Pick<PendingEntry, "collectionName" | "entry">;
+/**
+ * The values of an entry draft that a backup restores, see {@link EntryDraftBackup}.
+ */
+export type EntryDraftValues = Pick<EntryDraftBackup, "currentLocales" | "currentSlugs" | "currentPath" | "currentValues" | "files">;
 /**
  * Entry draft backup, which is a subset of {@link EntryDraft} plus metadata.
  */
@@ -2222,7 +2701,10 @@ export type EntryDraftBackup = {
      */
     collectionName: string;
     /**
-     * Entry slug. An empty string for a new entry.
+     * The `subPath` of an existing entry, which is unique in the collection
+     * unlike its slug, or the file name for a collection file. The index file name for a new index
+     * file, or an empty string for any other new entry. A backup taken before the `subPath` was used is
+     * stored under the entry slug.
      */
     slug: string;
     /**
@@ -2233,6 +2715,12 @@ export type EntryDraftBackup = {
      * Key is a locale code, value is the current slug.
      */
     currentSlugs: LocaleSlugMap;
+    /**
+     * Folder the entry will be stored in, relative to the collection
+     * folder, as edited with the path editor. Only set when the collection’s `meta.path` option is
+     * enabled. Missing from a backup taken before it was introduced.
+     */
+    currentPath?: string | undefined;
     /**
      * Key is a locale code, value is a flattened object
      * containing all the current field values while editing.
@@ -2247,6 +2735,11 @@ export type EntryDraftBackup = {
      * along with the entry. Missing from a backup taken before they were introduced.
      */
     pendingEntries?: PendingEntry[] | undefined;
+    /**
+     * Existing entry the edits were made to, as it was when the draft was
+     * opened. Missing from a backup of a new entry, and from one taken before it was introduced.
+     */
+    baseEntry?: Entry | undefined;
 };
 /**
  * Commit action to perform. It should match GitLab’s commit action types. The `move` action can be
@@ -2313,6 +2806,441 @@ export type ArrayItemTarget = {
      * doesn’t overwrite another item. `undefined` to skip the check.
      */
     locales?: LocalizedEntryMap | undefined;
+};
+/**
+ * Subset of the promise-based API of Node’s `fs` module that isomorphic-git uses, implemented on
+ * top of the File System Access API for the local backend’s Git commits. The paths are relative to
+ * the repository root.
+ */
+export type GitFileSystem = {
+    /**
+     * Read a file, as a `Buffer`, or a string if the `utf8` encoding is given.
+     */
+    readFile: (path: string, options?: string | {
+        encoding?: string;
+    }) => Promise<any>;
+    /**
+     * Write a file.
+     * The parent directory must exist.
+     */
+    writeFile: (path: string, data: string | Uint8Array) => Promise<void>;
+    /**
+     * Add to the end of a file.
+     * Not used by isomorphic-git.
+     */
+    appendFile: (path: string, data: string) => Promise<void>;
+    /**
+     * Create a directory. The parent directory must
+     * exist.
+     */
+    mkdir: (path: string) => Promise<void>;
+    /**
+     * Remove an empty directory.
+     */
+    rmdir: (path: string) => Promise<void>;
+    /**
+     * Remove a file.
+     */
+    unlink: (path: string) => Promise<void>;
+    /**
+     * List the names in a directory.
+     */
+    readdir: (path: string) => Promise<string[]>;
+    /**
+     * Get the stats of a file or directory.
+     */
+    stat: (path: string) => Promise<GitFileStats>;
+    /**
+     * Same as `stat`, as there are no
+     * symbolic links.
+     */
+    lstat: (path: string) => Promise<GitFileStats>;
+    /**
+     * Not supported.
+     */
+    readlink: (path: string) => Promise<never>;
+    /**
+     * Not supported.
+     */
+    symlink: (target: string, path: string) => Promise<never>;
+};
+/**
+ * Stats of a file or directory in a {@link GitFileSystem}.
+ */
+export type GitFileStats = {
+    /**
+     * File mode.
+     */
+    mode: number;
+    /**
+     * Size in bytes.
+     */
+    size: number;
+    /**
+     * Last modified time.
+     */
+    mtimeMs: number;
+    /**
+     * Same as `mtimeMs`, as the File System API doesn’t tell.
+     */
+    ctimeMs: number;
+    /**
+     * Always `0`.
+     */
+    ino: number;
+    /**
+     * Always `0`.
+     */
+    uid: number;
+    /**
+     * Always `0`.
+     */
+    gid: number;
+    /**
+     * Always `0`.
+     */
+    dev: number;
+    /**
+     * Whether it’s a file.
+     */
+    isFile: () => boolean;
+    /**
+     * Whether it’s a directory.
+     */
+    isDirectory: () => boolean;
+    /**
+     * Always `false`.
+     */
+    isSymbolicLink: () => boolean;
+};
+/**
+ * Type of a Git object.
+ */
+export type GitObjectType = "commit" | "tree" | "blob" | "tag";
+/**
+ * Git object read from a repository.
+ */
+export type GitObject = {
+    /**
+     * Type.
+     */
+    type: GitObjectType;
+    /**
+     * Content, without the header.
+     */
+    content: Uint8Array;
+};
+/**
+ * Parsed Git pack index file.
+ */
+export type GitPackIndex = {
+    /**
+     * Number of objects whose ID starts with a byte up to each value.
+     */
+    fanout: number[];
+    /**
+     * Sorted object IDs, 20 bytes each.
+     */
+    oids: Uint8Array;
+    /**
+     * Offset of each object in the pack file, in the order of `oids`.
+     */
+    offsets: Float64Array;
+};
+/**
+ * Git pack file along with its index.
+ */
+export type GitPack = {
+    /**
+     * Index.
+     */
+    index: GitPackIndex;
+    /**
+     * Pack file.
+     */
+    file: File;
+    /**
+     * Offsets of the objects in the order they appear in the
+     * file, to find where an object ends.
+     */
+    sortedOffsets?: Float64Array<ArrayBufferLike> | undefined;
+};
+/**
+ * Entry in a Git index file.
+ */
+export type GitIndexEntry = {
+    /**
+     * File path, relative to the repository root.
+     */
+    path: string;
+    /**
+     * File mode, e.g. `0o100644`.
+     */
+    mode: number;
+    /**
+     * Object ID of the file content.
+     */
+    oid: string;
+    /**
+     * Merge stage: `0` normally, or `1` to `3` for a file with a conflict.
+     */
+    stage: number;
+    /**
+     * The entry as stored in the file, including its stats and padding.
+     */
+    raw: Uint8Array;
+};
+/**
+ * Parsed Git index file.
+ */
+export type GitIndex = {
+    /**
+     * Format version.
+     */
+    version: number;
+    /**
+     * Entries. Empty if the version isn’t 2.
+     */
+    entries: GitIndexEntry[];
+    /**
+     * Signatures of the extensions.
+     */
+    extensions: string[];
+    /**
+     * Object IDs of the trees Git has cached in the
+     * index, keyed by directory path, which is an empty string for the root. Only the trees still
+     * valid are included.
+     */
+    cacheTree?: Map<string, string> | undefined;
+};
+/**
+ * Entry in a Git tree object.
+ */
+export type GitTreeEntry = {
+    /**
+     * Mode, e.g. `100644`, or `40000` for a subtree.
+     */
+    mode: string;
+    /**
+     * Name.
+     */
+    path: string;
+    /**
+     * Object ID.
+     */
+    oid: string;
+    /**
+     * Object type.
+     */
+    type: "blob" | "tree" | "commit";
+};
+/**
+ * Directory in the tree that index entries make up, before the tree objects are built.
+ */
+export type GitTreeDirectory = {
+    /**
+     * Entries for the files in the directory.
+     */
+    files: GitTreeEntry[];
+    /**
+     * Subdirectories, keyed by name.
+     */
+    dirs: Map<string, GitTreeDirectory>;
+};
+/**
+ * Rule in a `.gitattributes` file that sets or unsets the `filter` attribute, which Git LFS uses
+ * with the `lfs` value.
+ */
+export type GitFilterRule = {
+    /**
+     * Regular expression matching the paths the rule applies to, relative to
+     * the directory of the file.
+     */
+    regex: RegExp;
+    /**
+     * Whether the rule makes the files tracked with Git LFS.
+     */
+    lfs: boolean;
+};
+/**
+ * Git tree built from index entries.
+ */
+export type GitTreeNode = {
+    /**
+     * Object ID.
+     */
+    oid: string;
+    /**
+     * Entries, in Git’s order.
+     */
+    entries: GitTreeEntry[];
+    /**
+     * Subtrees, keyed by name.
+     */
+    subtrees: Map<string, GitTreeNode>;
+};
+/**
+ * Reason the local backend can’t commit the user’s changes to Git.
+ * - `unsupported_repository`: The repository uses a format the CMS doesn’t support, e.g. a linked
+ * worktree, SHA-256 object IDs, the reftable format, or an index version other than 2.
+ * - `missing_identity`: The repository’s configuration doesn’t have `user.name` and `user.email`.
+ * - `locked`: Another Git process is using the index.
+ * - `operation_in_progress`: An operation that has to be finished or aborted is in progress, or a
+ * file has a conflict; the detail is the {@link LocalGitOperation}.
+ * - `detached_head`: No branch is checked out.
+ * - `staged_changes`: The user has staged changes of their own.
+ * - `lfs`: A saved file is tracked with Git LFS.
+ * - `error`: An unexpected error occurred.
+ */
+export type LocalGitSkipReason = "unsupported_repository" | "missing_identity" | "locked" | "operation_in_progress" | "detached_head" | "staged_changes" | "lfs" | "error";
+/**
+ * Git operation in progress that keeps the local backend from committing: `merge`, `rebase`,
+ * `cherry_pick`, `revert`, `am` (`git am`), or `conflict` for files with a conflict left by any of
+ * them.
+ */
+export type LocalGitOperation = "merge" | "rebase" | "cherry_pick" | "revert" | "am" | "conflict";
+/**
+ * Git author identity.
+ */
+export type LocalGitAuthor = {
+    /**
+     * Name.
+     */
+    name: string;
+    /**
+     * Email address.
+     */
+    email: string;
+};
+/**
+ * Author and time of a Git commit, in the shape isomorphic-git takes.
+ */
+export type LocalGitSignature = {
+    /**
+     * Name.
+     */
+    name: string;
+    /**
+     * Email address.
+     */
+    email: string;
+    /**
+     * Time in seconds since the epoch.
+     */
+    timestamp: number;
+    /**
+     * Time zone offset in minutes, as returned by
+     * `Date.prototype.getTimezoneOffset()`.
+     */
+    timezoneOffset: number;
+};
+/**
+ * Whether the local backend can commit the user’s changes to Git right now.
+ */
+export type LocalGitStatus = {
+    /**
+     * Whether the changes can be committed.
+     */
+    ready: boolean;
+    /**
+     * Why they can’t be.
+     */
+    reason?: LocalGitSkipReason | undefined;
+    /**
+     * Details on the reason, e.g. the path of a file tracked with Git LFS,
+     * or an error message.
+     */
+    detail?: string | undefined;
+    /**
+     * Author of the commits, if known.
+     */
+    author?: LocalGitAuthor | undefined;
+    /**
+     * Full name of the current branch, e.g. `refs/heads/main`, if known.
+     */
+    branch?: string | undefined;
+};
+/**
+ * Repository the local backend commits to, as inspected before the changes are saved.
+ */
+export type LocalGitRepository = {
+    /**
+     * Isomorphic-git module, from the `git` chunk.
+     */
+    git: any;
+    /**
+     * File system.
+     */
+    fs: GitFileSystem;
+    /**
+     * Handle of the `.git` directory.
+     */
+    gitDirHandle: FileSystemDirectoryHandle;
+    /**
+     * Object
+     * reader.
+     */
+    reader: {
+        readObject: (oid: string) => Promise<GitObject | undefined>;
+    };
+    /**
+     * Full name of the current branch.
+     */
+    branch: string;
+    /**
+     * Author of the commit.
+     */
+    author: LocalGitAuthor;
+    /**
+     * ID of the current commit. `undefined` if the branch has no commits.
+     */
+    headOid?: string | undefined;
+    /**
+     * ID of the current commit’s tree.
+     */
+    headTreeOid?: string | undefined;
+    /**
+     * Index as inspected.
+     */
+    index: GitIndex;
+    /**
+     * Content of the index file as inspected, to put it back if
+     * the commit fails. `undefined` if the repository had no index.
+     */
+    indexBuffer?: ArrayBuffer | undefined;
+    /**
+     * Tree built from the index as inspected.
+     */
+    indexTree: GitTreeNode;
+    /**
+     * Whether `core.autocrlf` is `true` or `input`, which makes Git store
+     * text with LF line endings.
+     */
+    autocrlf: boolean;
+    /**
+     * Whether `core.ignorecase` is `true`, which makes Git match the
+     * patterns in `.gitattributes` case-insensitively.
+     */
+    ignoreCase: boolean;
+};
+/**
+ * Result of inspecting a repository the local backend commits to.
+ */
+export type LocalGitInspection = LocalGitStatus & {
+    repository?: LocalGitRepository;
+};
+/**
+ * Notice for the user when their changes have been saved but not committed.
+ */
+export type LocalGitNotice = {
+    /**
+     * Reason.
+     */
+    reason: LocalGitSkipReason;
+    /**
+     * Details on the reason.
+     */
+    detail?: string | undefined;
 };
 /**
  * Toast notification state for content/asset updates.
@@ -2418,6 +3346,11 @@ export type MovingAsset = {
      * New file path.
      */
     path: string;
+    /**
+     * Asset folder the file is moved to, when it’s another one
+     * than the asset’s own. Default: the asset’s folder.
+     */
+    folder?: AssetFolderInfo | undefined;
 };
 /**
  * Asset properties.
@@ -2554,6 +3487,61 @@ export type AssetSubfolder = {
     path: string;
 };
 /**
+ * Properties shared by every directory an asset can be moved to.
+ */
+export type AssetMoveDestinationBase = {
+    /**
+     * Directory path: relative to the project root directory in the
+     * repository, or to the configured prefix on a service, where an empty string is the root.
+     */
+    dirPath: string;
+    /**
+     * Folder or service label for the root, or the subfolder name.
+     */
+    label: string;
+    /**
+     * Subfolders of the directory.
+     */
+    children: AssetMoveDestination[];
+};
+/**
+ * Directory an asset can be moved to: the root of a repository asset folder or a subfolder below
+ * it, which has the `folder`, or the root of a cloud storage service or a folder on it, which has
+ * the `service`.
+ */
+export type AssetMoveDestination = AssetMoveDestinationBase & ({
+    folder: AssetFolderInfo;
+    service?: undefined;
+} | {
+    service: MediaLibraryService;
+    folder?: undefined;
+});
+/**
+ * Assets to be moved with the Move dialog: repository assets, or files on a cloud storage service.
+ */
+export type AssetMoveRequest = {
+    /**
+     * Repository assets.
+     */
+    assets?: Asset[] | undefined;
+    /**
+     * Files on a cloud storage service.
+     */
+    externalAssets?: ExternalAsset[] | undefined;
+    /**
+     * Service the `externalAssets` are on.
+     */
+    service?: MediaLibraryService | undefined;
+    /**
+     * Directory picked up front, by dropping the assets on a folder.
+     */
+    dirPath?: string | undefined;
+    /**
+     * ID of the service the directory picked up front is on, if any.
+     */
+    serviceId?: string | undefined;
+};
+/**
  * Media file dimensions.
  */
 export type MediaDimensions = {
@@ -2680,6 +3668,12 @@ export type ExternalAsset = {
      * service name/link.
      */
     credit?: string | undefined;
+    /**
+     * URL to request once the asset has been used, for a
+     * stock asset service that counts the downloads, like Unsplash. See
+     * {@link MediaLibraryService.trackDownload}.
+     */
+    downloadTrackingURL?: string | undefined;
 };
 /**
  * Resource selected on `<SelectAssetsDialog>`.
@@ -2726,6 +3720,29 @@ export type SelectedResource = {
  * Sorting order condition.
  */
 export type SortOrder = "ascending" | "descending";
+/**
+ * Sortable fields of an entry collection, parsed from the `sortable_fields` option or made from the
+ * default sort keys.
+ */
+export type ParsedSortableFields = {
+    /**
+     * Sort keys.
+     */
+    keys: string[];
+    /**
+     * Custom labels keyed by sort key, given in the Decap
+     * CMS object format of the `sortable_fields` option.
+     */
+    labels?: Record<string, string> | undefined;
+    /**
+     * Default sort key.
+     */
+    defaultKey?: string | undefined;
+    /**
+     * Default sort order.
+     */
+    defaultOrder?: SortOrder | undefined;
+};
 /**
  * Sort key shown in the Sort menu.
  */
@@ -2797,17 +3814,18 @@ export type GroupingConditionsProps = {
  */
 export type GroupingConditions = GroupingConditionsProps & ViewComparisonOptions;
 /**
- * Entry/Asset list view type.
+ * Entry/Asset list view type. The `table` view is only available in the entry list.
  */
-export type ViewType = "grid" | "list";
+export type ViewType = "grid" | "list" | "table";
 /**
  * Entry list view settings.
  */
 export type EntryListView = {
     /**
-     * View type.
+     * View type the user has picked. Not set until then, so the default
+     * applies.
      */
-    type: ViewType;
+    type?: ViewType | undefined;
     /**
      * Sorting conditions.
      */
@@ -2826,9 +3844,16 @@ export type EntryListView = {
     group?: GroupingConditions | null | undefined;
     /**
      * Names of the groups whose entries are
-     * hidden, under each grouping condition’s key. See `getGroupingKey()`.
+     * hidden, under each grouping condition’s key. See `getGroupingKey()`. Used when the groups start
+     * expanded.
      */
     collapsedGroups?: Record<string, string[]> | undefined;
+    /**
+     * Names of the groups whose entries are
+     * shown, under each grouping condition’s key. Used instead of `collapsedGroups` when the view group
+     * has the `collapsed` option enabled, so the groups start collapsed.
+     */
+    expandedGroups?: Record<string, string[]> | undefined;
     /**
      * Whether to show the Media pane.
      */
@@ -2851,6 +3876,24 @@ export type EntryEditorPane = {
      * widths of all panes should be 100.
      */
     width?: number | undefined;
+};
+/**
+ * Column of the entry list’s table view, resolved from the `table_columns` collection option.
+ */
+export type EntryTableColumn = {
+    /**
+     * Field key path, or one of the special keys: `_summary`, `slug`,
+     * `commit_author` and `commit_date`.
+     */
+    key: string;
+    /**
+     * Column header.
+     */
+    label: string;
+    /**
+     * Field configuration, if the key is a field key path.
+     */
+    fieldConfig?: Field | undefined;
 };
 /**
  * Select Assets dialog view settings.
@@ -2947,6 +3990,36 @@ export type CustomFileFormat = {
     formatter?: FileFormatter | undefined;
 };
 /**
+ * Custom page registered with the `CMS.registerCustomPage()` API, normalized for the UI.
+ */
+export type CustomPage = {
+    /**
+     * Page ID, used in the page’s URL path.
+     */
+    id: string;
+    /**
+     * Page label.
+     */
+    label: string;
+    /**
+     * Material Symbols icon name.
+     */
+    icon: string;
+    /**
+     * React component rendering the page content.
+     */
+    component?: ComponentType | undefined;
+    /**
+     * Absolute URL of the web page to show, embedded in an iframe unless
+     * `newTab` is `true`.
+     */
+    url?: string | undefined;
+    /**
+     * Whether the page is a link opening `url` in a new browser tab.
+     */
+    newTab: boolean;
+};
+/**
  * Key to store the current values in the {@link EntryDraft}. Usually `currentValues`, but can be
  * `extraValues` to store extra values for a rich text editor component.
  */
@@ -2980,6 +4053,11 @@ export type FieldEditorContext = {
     extraHint?: {
         current: Component | undefined;
     } | undefined;
+    /**
+     * Whether the subfields can’t be edited, as the List or Object
+     * field, or the rich text editor component, they belong to can’t be.
+     */
+    readonly?: boolean | undefined;
 };
 /**
  * Common properties to be passed to a field’s editor component.
@@ -3234,6 +4312,11 @@ export type GetDefaultValueMapFuncArgs = {
      */
     dynamicValue?: string | undefined;
     /**
+     * All the dynamic default values of the entry,
+     * keyed by key path, which tell an optional Object field whether its subfields have any.
+     */
+    dynamicValues?: Record<string, string> | undefined;
+    /**
      * Callback to populate a
      * default value for a sub-field, injected to avoid a circular dependency between field-type
      * defaults and the centralized `populateDefaultValue` dispatcher.
@@ -3264,11 +4347,17 @@ export type FillTemplateOptions = {
     /**
      * Slug type.
      */
-    type?: "preview_path" | "media_folder" | undefined;
+    type?: "preview_path" | "media_folder" | "library_prefix" | undefined;
     /**
      * Entry collection.
      */
     collection: InternalCollection;
+    /**
+     * Collection file being filled. File/singleton
+     * collection only. Its fields are used to look up a field’s options for transformations, and its
+     * i18n configuration decides whether `{{filename}}` drops a locale suffix.
+     */
+    collectionFile?: InternalCollectionFile | undefined;
     /**
      * Entry content for the default locale.
      */
@@ -3288,7 +4377,7 @@ export type FillTemplateOptions = {
     locale?: string | undefined;
     /**
      * Map of date/time parts. Required if the `type`
-     * is `preview_path`.
+     * is `preview_path`. Otherwise, it defaults to the current time.
      */
     dateTimeParts?: Record<string, string> | undefined;
     /**
@@ -3308,6 +4397,12 @@ export type FillTemplateOptions = {
      * for its name without the extension and its extension.
      */
     assetFileName?: string | undefined;
+    /**
+     * Folder within the collection folder a new entry goes to, as chosen
+     * with the path editor of a collection with nested entries. A filled slug then only has to be
+     * unique among the entries in that folder.
+     */
+    dirPath?: string | undefined;
 };
 /**
  * Entry slug variants.
@@ -3354,6 +4449,13 @@ export type InternalImageTransformationOptions = {
      * Fit option. Default: `scale-down`.
      */
     fit?: ImageFitOption | undefined;
+    /**
+     * Whether to use a format the browser encodes natively when it
+     * can’t encode the given `format`, such as WebP in Safari, rather than load an encoder for it:
+     * JPEG, or PNG for an image with transparency. For an image that’s only shown in the CMS, like a
+     * thumbnail. Default: `false`.
+     */
+    nativeOnly?: boolean | undefined;
 };
 /**
  * Shape of the `processedAssets` state.
@@ -3625,6 +4727,11 @@ export type ConfigParserCollectors = {
      * Collected relation fields.
      */
     relationFields: Set<CollectedRelationField>;
+    /**
+     * Locale codes DateTime fields write their values in with the
+     * `localize_format` option, whose Day.js locales are loaded before the content is.
+     */
+    formatLocales: Set<string>;
 };
 /**
  * A schema violation, in the shape the configuration error reporter works with. It mirrors the part
@@ -3678,6 +4785,20 @@ export type RelationOption = {
      * Searchable value.
      */
     searchValue: string;
+};
+/**
+ * Relation field options generated from a referenced entry, which can be more than one if the
+ * templates refer to a List subfield.
+ */
+export type RelationOptionGroup = {
+    /**
+     * Referenced entry.
+     */
+    refEntry: Entry;
+    /**
+     * Options generated from the entry.
+     */
+    options: RelationOption[];
 };
 /**
  * Arguments for a field parser function.
@@ -3738,9 +4859,60 @@ export type StringTransformation = {
      */
     method: string;
     /**
-     * Transformation arguments.
+     * Named arguments of a built-in transformation.
      */
     args: Record<string, string>;
+    /**
+     * Arguments of a transformation that isn’t
+     * built-in, which may be a custom one registered with `CMS.registerStringTransformation()`. Only
+     * present if the arguments are given in parentheses and can be parsed.
+     */
+    customArgs?: readonly (string | number)[] | undefined;
+};
+/**
+ * Options of a pattern-based inline editor component that the editor handles on its own, kept on
+ * its resolved definition. See {@link InlineEditorComponentDefinition}.
+ */
+export type InlinePatternOptions = {
+    /**
+     * Literal text every instance starts with.
+     */
+    trigger?: string | undefined;
+    /**
+     * Function called when the
+     * component is inserted from the toolbar.
+     */
+    onInsert?: InlineEditorComponentDefinition["onInsert"];
+    /**
+     * Function called when the
+     * component is clicked.
+     */
+    onEdit?: InlineEditorComponentDefinition["onEdit"];
+};
+/**
+ * Editor component definition resolved with `getComponentDef()`. A pattern-based inline component
+ * is converted to the shape of a field-based one without fields, with its own options kept in
+ * `inlinePattern`.
+ */
+export type ResolvedEditorComponentDefinition = EditorComponentDefinition & {
+    inlinePattern?: InlinePatternOptions;
+};
+/**
+ * Options for a task given to a {@link ConcurrencyLimiter}.
+ */
+export type ConcurrencyLimiterTaskOptions = {
+    /**
+     * Key identifying the queued task, so it can be moved up the queue with
+     * `prioritize()`.
+     */
+    key?: any;
+};
+/**
+ * Function running a task when there is room, created with `createConcurrencyLimiter()`, along
+ * with its `prioritize()` method.
+ */
+export type ConcurrencyLimiter = (<T>(task: () => Promise<T>, options?: ConcurrencyLimiterTaskOptions) => Promise<T>) & {
+    prioritize: (key: any) => void;
 };
 import type { LocaleCode } from './public';
 import type { CmsConfig } from './public';
@@ -3748,6 +4920,8 @@ import type { BackendName } from './public';
 import type { GitBackendName } from './public';
 import type { MediaField } from './public';
 import type { S3MediaLibrary } from './public';
+import type { FrontMatterFormat } from './public';
+import type { RawEntryContent } from './public';
 import type { FileExtension } from './public';
 import type { FileFormat } from './public';
 import type { BodyFieldOptions } from './public';
@@ -3761,6 +4935,7 @@ import type { Field } from './public';
 import type { ViewComparisonOptions } from './public';
 import type { FileParser } from './public';
 import type { FileFormatter } from './public';
+import type { ComponentType } from 'react';
 import type { Component } from 'svelte';
 import type { DateTimeInputType } from './public';
 import type { SelectField } from './public';
@@ -3769,3 +4944,5 @@ import type { RasterImageFormat } from './public';
 import type { Collection } from './public';
 import type { CustomField } from './public';
 import type { RelationField } from './public';
+import type { InlineEditorComponentDefinition } from './public';
+import type { EditorComponentDefinition } from './public';
