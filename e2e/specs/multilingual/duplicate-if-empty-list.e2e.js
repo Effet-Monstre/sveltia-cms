@@ -1,5 +1,6 @@
 import { stringify } from 'yaml';
 
+import { expandAll } from '../../fixtures/expanders.js';
 import { expect, test } from '../../fixtures/test.js';
 
 import { getEditPane, openEntry, save, showLocale } from './helpers.js';
@@ -67,6 +68,11 @@ test('adds an item to every locale and fills in its empty values', async ({ cms,
   const englishImages = english.getByRole('group', { name: /Images.*Field/ });
   const frenchImages = french.getByRole('group', { name: /Images.*Field/ });
 
+  await expect(englishImages).toBeVisible();
+  await expect(frenchImages).toBeVisible();
+  // The fork starts the list items collapsed; see `docs/fork.md`
+  await expandAll(englishImages);
+  await expandAll(frenchImages);
   await expect(frenchImages.getByRole('textbox', { name: 'Source' })).toHaveValue('a.png');
   // The items are added in the default locale only
   await expect(frenchImages.getByRole('button', { name: /Add.*Images/ })).toBeDisabled();

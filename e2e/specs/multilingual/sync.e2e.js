@@ -1,5 +1,6 @@
 import { stringify } from 'yaml';
 
+import { expandAll } from '../../fixtures/expanders.js';
 import { expect, test } from '../../fixtures/test.js';
 import { getEditor } from '../../fixtures/ui.js';
 
@@ -94,6 +95,11 @@ test('adds a list item to every locale from another locale', async ({ cms, page 
   const english = getEditPane(page, 'English');
   const french = await showLocale(page, 1, 'French');
 
+  await expect(english.getByRole('group', { name: /Links.*Field/ })).toBeVisible();
+  await expect(french.getByRole('group', { name: /Links.*Field/ })).toBeVisible();
+  // The fork starts the list items collapsed; see `docs/fork.md`
+  await expandAll(english);
+  await expandAll(french);
   await french.getByRole('button', { name: /Add\W+Link/ }).click();
   await french.getByRole('textbox', { name: 'URL' }).nth(1).fill('https://b.example');
   await expect(english.getByRole('textbox', { name: 'URL' }).nth(1)).toHaveValue(
@@ -113,7 +119,11 @@ test('adds a list item to every locale from another locale', async ({ cms, page 
   );
 });
 
-test('reverts a change in every locale from another locale', async ({ page }) => {
+// Upstream reverts the change from the field options, which the fork hides; see `docs/fork.md`.
+// What’s left to check is that the change reaches every locale and can’t be reverted there
+test('changes every locale from another locale, which the field options offer no way to revert', async ({
+  page,
+}) => {
   const english = getEditPane(page, 'English');
   const french = await showLocale(page, 1, 'French');
 
@@ -124,9 +134,7 @@ test('reverts a change in every locale from another locale', async ({ page }) =>
     .getByRole('group', { name: /Tagline.*Field/ })
     .getByRole('button', { name: 'Show Field Options' })
     .click();
-  await page.getByRole('menuitem', { name: 'Revert Changes' }).click();
-
-  await expect(french.getByRole('textbox', { name: 'Tagline' })).toHaveValue('Tag');
-  await expect(english.getByRole('textbox', { name: 'Tagline' })).toHaveValue('Tag');
-  await expect(getEditor(page).getByRole('button', { name: 'Save' })).toBeDisabled();
+  await expect(page.getByRole('menu', { name: 'Field Options' })).toBeVisible();
+  await expect(page.getByRole('menuitem', { name: 'Revert Changes' })).toHaveCount(0);
+  await expect(getEditor(page).getByRole('button', { name: 'Save' })).toBeEnabled();
 });

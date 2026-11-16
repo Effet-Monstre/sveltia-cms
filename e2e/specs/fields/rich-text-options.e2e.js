@@ -222,14 +222,15 @@ test.describe('editor components', () => {
   test.describe('default', () => {
     test.use({ config: noteConfig({}) });
 
-    test('offers the image and the code block, but not the table or the rule', async ({
+    // Upstream leaves the table out by default, but the fork enables it; see `docs/fork.md`
+    test('offers the image, the code block and the table, but not the rule', async ({
       cms,
       page,
     }) => {
       const { field } = await openNote({ cms, page, body: 'The dome opens.' });
 
       await expect(field.getByRole('button', { name: 'Image', exact: true })).toBeVisible();
-      await expect(field.getByRole('button', { name: 'Insert Table' })).toHaveCount(0);
+      await expect(field.getByRole('button', { name: 'Insert Table' })).toBeVisible();
       await expect(field.getByRole('button', { name: 'Insert Horizontal Rule' })).toHaveCount(0);
 
       const menu = await openBlockTypes(cms, page, field);

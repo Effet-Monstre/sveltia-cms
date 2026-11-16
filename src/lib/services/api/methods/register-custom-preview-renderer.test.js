@@ -1,3 +1,5 @@
+/* eslint-disable jsdoc/require-jsdoc */
+
 import { describe, expect, test } from 'vitest';
 
 import { registerCustomPreviewRenderer } from '$lib/services/api/methods/register-custom-preview-renderer';

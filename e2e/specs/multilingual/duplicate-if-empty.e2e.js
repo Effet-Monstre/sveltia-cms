@@ -110,7 +110,11 @@ test('keeps another locale in sync until it gets a value of its own', async ({ c
   );
 });
 
-test('restores the value of another locale when a change is reverted', async ({ page }) => {
+// Upstream reverts the change from the field options, which the fork hides; see `docs/fork.md`.
+// What’s left to check is that the change reaches the other locale and can’t be reverted there
+test('fills in another locale with a change, which the field options offer no way to revert', async ({
+  page,
+}) => {
   const english = getEditPane(page, 'English');
   const french = await showLocale(page, 1, 'French');
 
@@ -121,9 +125,7 @@ test('restores the value of another locale when a change is reverted', async ({ 
     .getByRole('group', { name: /Summary.*Field/ })
     .getByRole('button', { name: 'Show Field Options' })
     .click();
-  await page.getByRole('menuitem', { name: 'Revert Changes' }).click();
-
-  await expect(english.getByRole('textbox', { name: 'Summary' })).toHaveValue('Summary');
-  await expect(french.getByRole('textbox', { name: 'Summary' })).toHaveValue('Summary');
-  await expect(getEditor(page).getByRole('button', { name: 'Save' })).toBeDisabled();
+  await expect(page.getByRole('menu', { name: 'Field Options' })).toBeVisible();
+  await expect(page.getByRole('menuitem', { name: 'Revert Changes' })).toHaveCount(0);
+  await expect(getEditor(page).getByRole('button', { name: 'Save' })).toBeEnabled();
 });

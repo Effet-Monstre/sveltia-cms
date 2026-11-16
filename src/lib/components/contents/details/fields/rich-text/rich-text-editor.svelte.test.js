@@ -510,7 +510,9 @@ describe('RichTextEditor', () => {
       );
 
       await expect.element(page.getByRole('button', { name: 'Bold' })).toBeVisible();
-      expect(page.getByRole('button', { name: /Insert|Image/ }).elements()).toHaveLength(0);
+      // The fork enables the Insert Table button by default, which is a toolbar button rather than
+      // an editor component, so it isn’t counted here; see `docs/fork.md`
+      expect(page.getByRole('button', { name: /^Insert$|Image/ }).elements()).toHaveLength(0);
     },
   );
 

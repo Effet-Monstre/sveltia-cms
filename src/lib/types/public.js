@@ -2585,6 +2585,8 @@
  * loaded.
  * @typedef {object} ApiBackend
  * @property {'api'} name Backend name.
+ * @property {never} [root_dir] Not supported: the host application serves the files with their
+ * paths relative to the site root already.
  */
 
 /**

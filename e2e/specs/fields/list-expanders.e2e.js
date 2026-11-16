@@ -65,6 +65,18 @@ test('keeps the state of an object in an item when the items are added or remove
   const authors = getEditor(page).getByRole('group', { name: /Authors.*Field/ });
   const bios = authors.getByRole('textbox', { name: 'Bio' });
 
+  // The fork starts the list items collapsed (see `docs/fork.md`), so open the items, leaving the
+  // details collapsed as configured
+  await authors
+    .getByRole('group', { name: 'Item 1 of 2' })
+    .getByRole('button', { name: 'Expand' })
+    .first()
+    .click();
+  await authors
+    .getByRole('group', { name: 'Item 2 of 2' })
+    .getByRole('button', { name: 'Expand' })
+    .first()
+    .click();
   await expect(authors.getByRole('textbox', { name: 'Name' })).toHaveCount(2);
   await expect(bios).toHaveCount(0);
 

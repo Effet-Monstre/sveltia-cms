@@ -33,8 +33,14 @@ afterEach(() => {
 describe('getEditorComponentNames()', () => {
   test('includes the built-in and custom components by default', () => {
     customComponentRegistry.set('youtube', /** @type {any} */ ({}));
-    // `table` and `hr` have to be enabled explicitly
-    expect(getEditorComponentNames(fieldConfig)).toEqual(['code-block', 'linked-image', 'youtube']);
+    // `hr` has to be enabled explicitly. Upstream leaves `table` out as well, but the fork enables
+    // it by default; see `docs/fork.md`
+    expect(getEditorComponentNames(fieldConfig)).toEqual([
+      'code-block',
+      'linked-image',
+      'table',
+      'youtube',
+    ]);
   });
 
   test('includes `table` when listed', () => {

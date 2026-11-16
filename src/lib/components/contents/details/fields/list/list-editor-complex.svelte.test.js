@@ -1766,10 +1766,12 @@ describe('ListEditorComplex with a custom field type', () => {
   });
 
   test('draws collapsed items with the summary component of the type', async () => {
-    const { draft, container } = await renderEditor(photosField, {
-      'photos.0': 'a/1.jpg',
-      'photos.1': 'b/2.jpg',
-    });
+    const { draft, container } = await renderEditor(
+      photosField,
+      { 'photos.0': 'a/1.jpg', 'photos.1': 'b/2.jpg' },
+      {},
+      { expanded: false },
+    );
 
     await expect.poll(() => getSummaries(container)).toEqual(['photo: a/1.jpg', 'photo: b/2.jpg']);
     expect(container.querySelectorAll('.item-body .summary .photo-summary')).toHaveLength(2);
@@ -1792,6 +1794,8 @@ describe('ListEditorComplex with a custom field type', () => {
     const { container } = await renderEditor(
       { ...photosField, field: { name: 'photo', widget: 'plain-picker' } },
       { 'photos.0': 'a/1.jpg' },
+      {},
+      { expanded: false },
     );
 
     await expect.poll(() => getSummaries(container)).toEqual(['a/1.jpg']);

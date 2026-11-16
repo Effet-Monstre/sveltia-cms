@@ -1,3 +1,4 @@
+import { expandAll } from '../../fixtures/expanders.js';
 import { expect, test } from '../../fixtures/test.js';
 import { getEditor, getField, openCollection } from '../../fixtures/ui.js';
 
@@ -75,7 +76,13 @@ const openBibliography = async ({ cms, page, content }) => {
   await cms.signIn();
   await page.getByRole('row', { name: /Bibliography/ }).click();
 
-  return getField(page, 'References');
+  const references = getField(page, 'References');
+
+  await expect(references).toBeVisible();
+  // The fork starts the list items collapsed; see `docs/fork.md`
+  await expandAll(references);
+
+  return references;
 };
 
 test('edits the references stored as a map, keeping their order', async ({ cms, page }) => {
@@ -88,6 +95,7 @@ test('edits the references stored as a map, keeping their order', async ({ cms, 
 
   await references.getByRole('textbox', { name: 'Citation Key' }).first().fill('potter');
   await references.getByRole('button', { name: /Add.*Reference/ }).click();
+  await expandAll(references);
   await references.getByRole('textbox', { name: 'Citation Key' }).nth(2).fill('zola');
   await references.getByRole('textbox', { name: 'Type' }).nth(2).fill('Web');
   await references.getByRole('textbox', { name: 'Title' }).nth(2).fill('Zola');
@@ -105,6 +113,7 @@ test('refuses a missing, duplicate or numeric key', async ({ cms, page }) => {
   const keys = references.getByRole('group', { name: /Citation Key/ });
 
   await references.getByRole('button', { name: /Add.*Reference/ }).click();
+  await expandAll(references);
   await references.getByRole('textbox', { name: 'Type' }).nth(2).fill('Book');
   await references.getByRole('textbox', { name: 'Title' }).nth(2).fill('Untitled');
   await editor.getByRole('button', { name: 'Save' }).click();
@@ -253,7 +262,16 @@ sizes:
     await cms.signIn();
     await (await openCollection(page, 'Data')).getByRole('row', { name: /Settings/ }).click();
 
-    return { pages: getField(page, 'Page Settings'), sizes: getField(page, 'Sizes') };
+    const pages = getField(page, 'Page Settings');
+    const sizes = getField(page, 'Sizes');
+
+    await expect(pages).toBeVisible();
+    await expect(sizes).toBeVisible();
+    // The fork starts the list items collapsed; see `docs/fork.md`
+    await expandAll(pages);
+    await expandAll(sizes);
+
+    return { pages, sizes };
   };
 
   /**
@@ -279,9 +297,11 @@ sizes:
 
     await getOption(pages, 'Page', 1, 'Contact').click();
     await pages.getByRole('button', { name: /Add.*Page Setting/ }).click();
+    await expandAll(pages);
     await getOption(pages, 'Page', 2, 'About').click();
     await pages.getByRole('textbox', { name: 'XYZ' }).nth(2).fill('test3');
     await sizes.getByRole('button', { name: /Add.*Size/ }).click();
+    await expandAll(sizes);
     await getOption(sizes, 'Size', 1, 'Large').click();
     await sizes.getByRole('textbox', { name: 'Price' }).nth(1).fill('15');
     await getEditor(page).getByRole('button', { name: 'Save' }).click();

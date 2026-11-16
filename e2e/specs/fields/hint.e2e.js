@@ -1,3 +1,4 @@
+import { expandAll } from '../../fixtures/expanders.js';
 import { expect, test } from '../../fixtures/test.js';
 import { getEditor, getField } from '../../fixtures/ui.js';
 
@@ -157,6 +158,8 @@ test('doesn’t save a hint', async ({ cms, page }) => {
   await getField(page, 'Venue')
     .getByRole('checkbox', { name: /Add.*Venue/ })
     .check();
+  // The fork starts the object collapsed; see `docs/fork.md`
+  await expandAll(getField(page, 'Venue'));
   await getField(page, 'Venue').getByRole('textbox', { name: 'Room' }).fill('A1');
   await editor.getByRole('button', { name: 'Save' }).click();
 

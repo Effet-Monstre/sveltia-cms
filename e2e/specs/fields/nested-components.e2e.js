@@ -86,7 +86,10 @@ const getToolbar = (field) => field.getByRole('toolbar', { name: 'Text Editor' }
 const insertComponent = async (field, label) => {
   const page = field.page();
 
-  await getToolbar(field).getByRole('button', { name: 'Insert' }).click();
+  // The Insert menu button is matched exactly here and below, as the fork also offers the Insert
+  // Table button by default; see `docs/fork.md`
+
+  await getToolbar(field).getByRole('button', { name: 'Insert', exact: true }).click();
   await page.getByRole('menuitem', { name: label }).click();
 
   const component = field.getByRole('group', { name: label, exact: true }).first();
@@ -113,7 +116,7 @@ const expectInsertMenu = async (field, labels) => {
   const page = field.page();
   const menu = page.locator('[role="menu"]:not([inert])');
 
-  await getToolbar(field).getByRole('button', { name: 'Insert' }).click();
+  await getToolbar(field).getByRole('button', { name: 'Insert', exact: true }).click();
   await expect(menu.getByRole('menuitem')).toHaveText(labels);
   await page.keyboard.press('Escape');
   await expect(menu).toHaveCount(0);
@@ -161,7 +164,7 @@ test.describe('with `allow_nested_components: false`', () => {
     // The formatting buttons are left
     await expect(toolbar.getByRole('button', { name: 'Bold' })).toBeVisible();
     await expect(toolbar.getByRole('button', { name: 'Image' })).toHaveCount(0);
-    await expect(toolbar.getByRole('button', { name: 'Insert' })).toHaveCount(0);
+    await expect(toolbar.getByRole('button', { name: 'Insert', exact: true })).toHaveCount(0);
   });
 });
 
@@ -203,7 +206,7 @@ test.describe('with `allow_nested_components: exclude_self`', () => {
  * @returns {Promise<Locator>} Field.
  */
 const insertNote = async (page) => {
-  await getToolbar(getBody(page)).getByRole('button', { name: 'Insert' }).click();
+  await getToolbar(getBody(page)).getByRole('button', { name: 'Insert', exact: true }).click();
   await page.getByRole('menuitem', { name: 'Note' }).click();
 
   return page
@@ -261,6 +264,8 @@ test.describe('with `allow_nested_components: false` in `field_defaults.richtext
   test('offers no component in a component', async ({ page }) => {
     const callout = getComponentField(await insertComponent(getBody(page), 'Callout'));
 
-    await expect(getToolbar(callout).getByRole('button', { name: 'Insert' })).toHaveCount(0);
+    await expect(
+      getToolbar(callout).getByRole('button', { name: 'Insert', exact: true }),
+    ).toHaveCount(0);
   });
 });

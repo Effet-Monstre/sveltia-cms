@@ -145,7 +145,8 @@ test.describe('CMS.registerEditorComponent()', () => {
     const field = editor.getByRole('group', { name: /Body.*Field/ });
 
     await cms.chooseMenuItem(
-      field.getByRole('button', { name: 'Insert' }),
+      // Exactly, as the fork also offers the Insert Table button by default; see `docs/fork.md`
+      field.getByRole('button', { name: 'Insert', exact: true }),
       page.getByRole('menuitem', { name: 'YouTube' }),
     );
     await field
@@ -393,7 +394,8 @@ test.describe('toPreview() arguments', () => {
     const field = editor.getByRole('group', { name: /Body.*Field/ });
 
     await cms.chooseMenuItem(
-      field.getByRole('button', { name: 'Insert' }),
+      // Exactly, as the fork also offers the Insert Table button by default; see `docs/fork.md`
+      field.getByRole('button', { name: 'Insert', exact: true }),
       page.getByRole('menuitem', { name: 'Figure' }),
     );
     await field
@@ -489,7 +491,8 @@ test.describe('a relative media_folder in a component', () => {
     const dialog = page.getByRole('dialog', { name: 'Select Image' });
 
     await cms.chooseMenuItem(
-      field.getByRole('button', { name: 'Insert' }),
+      // Exactly, as the fork also offers the Insert Table button by default; see `docs/fork.md`
+      field.getByRole('button', { name: 'Insert', exact: true }),
       page.getByRole('menuitem', { name: 'Figure' }),
     );
     await field

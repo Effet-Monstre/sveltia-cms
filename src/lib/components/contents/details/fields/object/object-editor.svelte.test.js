@@ -145,6 +145,7 @@ describe('ObjectEditor', () => {
     const { container } = await renderEditor(
       { ...authorField, collapsed: true },
       { 'author.name': '', 'author.email': '' },
+      { expanded: false },
     );
 
     await expect.element(page.getByRole('button', { name: 'Expand' })).toBeInTheDocument();
@@ -636,6 +637,7 @@ describe('ObjectEditor', () => {
       const { draft, container } = await renderEditor(
         { ...blockField, collapsed: true },
         { 'block.type': 'video' },
+        { expanded: false },
       );
 
       await expect.poll(() => draft.expanderStates._['block#']).toBe(false);

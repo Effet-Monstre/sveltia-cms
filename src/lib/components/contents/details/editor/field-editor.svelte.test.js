@@ -407,6 +407,8 @@ describe('FieldEditor', () => {
       ...config,
       readonly: true,
       fields: [{ name: 'name', widget: 'string', readonly: false }],
+      // The fork starts the expanders collapsed, which would hide the subfield; see `docs/fork.md`
+      collapsed: false,
     });
 
     await renderEditor({ fieldConfig, values });
@@ -604,6 +606,9 @@ describe('FieldEditor', () => {
           label: 'Dates',
           widget: 'list',
           field: { name: 'date', label: 'Date', widget: 'datetime', auto_now: true },
+          // The fork starts the expanders collapsed, which would hide the subfield; see
+          // `docs/fork.md`
+          collapsed: false,
         },
         context: 'rich-text-editor-component',
         valueStoreKey: 'extraValues',
@@ -842,7 +847,14 @@ describe('FieldEditor (nested in a duplicated field)', () => {
 
     await renderWithDraft(FieldEditor, {
       draft,
-      props: { locale: 'ja', keyPath: 'venue', typedKeyPath: 'venue', fieldConfig: venueField },
+      props: {
+        locale: 'ja',
+        keyPath: 'venue',
+        typedKeyPath: 'venue',
+        // The fork starts the expanders collapsed, which would hide the subfields; see
+        // `docs/fork.md`
+        fieldConfig: { ...venueField, collapsed: false },
+      },
     });
 
     const name = page.getByRole('group', { name: /“.name.” Field/ }).getByRole('textbox');

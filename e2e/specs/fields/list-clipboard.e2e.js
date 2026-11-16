@@ -1,3 +1,4 @@
+import { expandAll } from '../../fixtures/expanders.js';
 import { createPNG } from '../../fixtures/files.js';
 import { expect, test } from '../../fixtures/test.js';
 import { getEditor, openEntry } from '../../fixtures/ui.js';
@@ -101,6 +102,9 @@ test('pastes an item into another collection along with its image', async ({ cms
 
   await page.getByRole('button', { name: 'Cancel Editing' }).click();
   await openEntry(page, 'About', { collection: 'Pages' });
+  await expect(editor.getByRole('group', { name: /Sections.*Field/ })).toBeVisible();
+  // The fork starts the list items collapsed; see `docs/fork.md`
+  await expandAll(editor);
   await editor.getByRole('button', { name: 'Paste Item' }).click();
   await expect(editor.getByRole('textbox', { name: 'Heading' }).nth(1)).toHaveValue('Hi there');
   // The pasted item is scrolled into view and focused, which would close a menu opened before

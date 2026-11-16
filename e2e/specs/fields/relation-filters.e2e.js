@@ -1,3 +1,4 @@
+import { expandAll } from '../../fixtures/expanders.js';
 import { expect, test } from '../../fixtures/test.js';
 import {
   expectRadioOptions,
@@ -239,6 +240,9 @@ test.describe('menus', () => {
     ]);
 
     const diets = getField(page, 'Diets');
+
+    // The fork starts the list items collapsed; see `docs/fork.md`
+    await expandAll(diets);
 
     // The options follow the list as an item is removed or edited
     await diets.getByRole('button', { name: 'Remove' }).last().click();

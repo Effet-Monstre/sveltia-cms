@@ -114,11 +114,12 @@ test.describe('with a `summary` for each file', () => {
     await rows.filter({ hasText: 'Contact Page' }).click();
 
     const editor = getEditor(page);
+    const office = editor.getByRole('group', { name: /Office/ });
 
-    await editor
-      .getByRole('group', { name: /Office/ })
-      .getByRole('textbox', { name: 'City' })
-      .fill('Vancouver');
+    await expect(office).toBeVisible();
+    // The fork starts the expanders collapsed; see `docs/fork.md`
+    await expandAll(editor);
+    await office.getByRole('textbox', { name: 'City' }).fill('Vancouver');
     await editor.getByRole('button', { name: 'Save' }).click();
     await expect(editor).toBeHidden();
     await expect(rows).toHaveText([/ABOUT US/, /Contact Page in Vancouver/]);
