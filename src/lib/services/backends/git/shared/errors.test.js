@@ -3,13 +3,17 @@ import { describe, expect, it, vi } from 'vitest';
 
 import {
   createLocalizedError,
+  createNoAccessError,
+  createNoWriteAccessError,
+  createPermissionError,
   getErrorMessage,
   NOT_COLLABORATOR_ERROR_MESSAGE,
+  toRepositoryAccessError,
 } from '$lib/services/backends/git/shared/errors';
 
-vi.mock('@sveltia/i18n', () => ({
-  _: vi.fn((key, options) => `${key}${options ? `:${JSON.stringify(options.values)}` : ''}`),
-}));
+vi.mock('@sveltia/i18n', async () =>
+  (await import('$lib/test/i18n')).createI18nMock({ values: true }),
+);
 
 describe('NOT_COLLABORATOR_ERROR_MESSAGE', () => {
   it('should be the message checked by the sign-in flow', () => {
@@ -73,5 +77,67 @@ describe('getErrorMessage', () => {
     ).toBe('fallback');
     expect(getErrorMessage(new Error('Something failed'), 'fallback')).toBe('fallback');
     expect(getErrorMessage(undefined, 'fallback')).toBe('fallback');
+  });
+});
+
+describe('createNoAccessError', () => {
+  it('should carry the shared message and say there is no access', () => {
+    const error = createNoAccessError('repo');
+
+    expect(error.message).toBe(NOT_COLLABORATOR_ERROR_MESSAGE);
+    expect(getErrorMessage(error, 'fallback')).toBe('repository_no_access:{"repo":"repo"}');
+  });
+});
+
+describe('createPermissionError', () => {
+  it('should say write access is missing to a user who can read the repository', () => {
+    expect(getErrorMessage(createPermissionError('repo', true), 'fallback')).toBe(
+      'repository_no_write_access:{"repo":"repo"}',
+    );
+  });
+
+  it('should say there is no access to a user who can’t', () => {
+    expect(getErrorMessage(createPermissionError('repo', false), 'fallback')).toBe(
+      'repository_no_access:{"repo":"repo"}',
+    );
+    expect(getErrorMessage(createPermissionError('repo'), 'fallback')).toBe(
+      'repository_no_access:{"repo":"repo"}',
+    );
+  });
+});
+
+describe('createNoWriteAccessError', () => {
+  it('should carry the shared message and say write access is missing', () => {
+    const error = createNoWriteAccessError('repo');
+
+    expect(error.message).toBe(NOT_COLLABORATOR_ERROR_MESSAGE);
+    expect(/** @type {Error} */ (error.cause).message).toBe(
+      'repository_no_write_access:{"repo":"repo"}',
+    );
+    expect(getErrorMessage(error, 'fallback')).toBe('repository_no_write_access:{"repo":"repo"}');
+  });
+});
+
+describe('toRepositoryAccessError', () => {
+  const repository = { owner: 'owner', repo: 'repo' };
+  /**
+   * Get the localized message of the given error.
+   * @param {Error} error Error.
+   * @returns {string} Message.
+   */
+  const getCause = (error) => /** @type {Error} */ (error.cause).message;
+
+  it.each([401, 403, 404])('should report a %i as no access', (status) => {
+    const error = toRepositoryAccessError(repository, status);
+
+    expect(error.message).toBe(NOT_COLLABORATOR_ERROR_MESSAGE);
+    expect(getCause(error)).toBe('repository_no_access:{"repo":"repo"}');
+  });
+
+  it.each([undefined, 429, 500])('should report a failed check for %s', (status) => {
+    const error = toRepositoryAccessError(repository, status);
+
+    expect(error.message).toBe('Failed to check the repository permission.');
+    expect(getCause(error)).toBe('open_authoring.permission_check_failed:{"repo":"owner/repo"}');
   });
 });

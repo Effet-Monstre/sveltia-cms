@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 
+import { createMockAssetFolder } from '$lib/test/factories';
+
 /**
  * @import { Asset, Entry, InternalEntryCollection } from '$lib/types/private';
  */
@@ -19,6 +21,9 @@ const {
   mockGetPathInfo,
   mockGetEntriesByCollection,
   mockFillEntryPathTemplate,
+  mockGetOwnedEntryFolderPath,
+  mockFindEntriesByAssets,
+  mockAllEntries,
 } = vi.hoisted(() => ({
   mockGetMediaFieldURL: vi.fn(),
   mockGetMediaFieldSource: vi.fn(),
@@ -33,6 +38,13 @@ const {
   mockGetPathInfo: vi.fn(),
   mockGetEntriesByCollection: vi.fn(() => /** @type {any[]} */ ([])),
   mockFillEntryPathTemplate: vi.fn(),
+  mockFindEntriesByAssets: vi.fn(),
+  mockAllEntries: { current: /** @type {any[]} */ ([]) },
+  // Unless a test says otherwise, every entry occupies the folder its file is stored in
+  mockGetOwnedEntryFolderPath: vi.fn(
+    (/** @type {any} */ _collection, /** @type {string} */ path) =>
+      path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : undefined,
+  ),
 }));
 
 // Mock the dependencies with hoisted functions
@@ -44,6 +56,14 @@ vi.mock('$lib/services/assets', () => ({
    * @returns {boolean} `true` if the path is relative.
    */
   isRelativePath: (path) => !/^[/@]/.test(path),
+}));
+
+vi.mock('$lib/services/contents', () => ({
+  allEntries: mockAllEntries,
+}));
+
+vi.mock('$lib/services/assets/references', () => ({
+  findEntriesByAssets: mockFindEntriesByAssets,
 }));
 
 vi.mock('$lib/services/assets/state', () => ({
@@ -80,6 +100,10 @@ vi.mock('$lib/services/contents/collection/entries/index-file', () => ({
   isCollectionIndexFile: mockIsCollectionIndexFile,
 }));
 
+vi.mock('$lib/services/assets/entry-folder', () => ({
+  getOwnedEntryFolderPath: mockGetOwnedEntryFolderPath,
+}));
+
 vi.mock('$lib/services/contents/entry', () => ({
   fillEntryPathTemplate: mockFillEntryPathTemplate,
 }));
@@ -101,6 +125,7 @@ vi.mock('@sveltia/utils/string', () => ({
 const {
   getEntryThumbnail,
   getAssociatedAssets,
+  getEntriesRelativeAssets,
   getEntryRelativeAssets,
   isThumbnailPath,
   loadEntryThumbnail,
@@ -254,6 +279,7 @@ describe('getEntryThumbnail', () => {
       entry: mockEntry,
       collectionName: 'posts',
       typedKeyPath: 'image',
+      locale: 'en',
       thumbnail: true,
     });
     expect(result).toEqual({ src: 'https://example.com/thumbnails/test.jpg', owned: false });
@@ -318,7 +344,8 @@ describe('loadEntryThumbnail', () => {
     expect(onLoad).toHaveBeenCalledExactlyOnceWith('blob:thumb');
 
     release();
-    expect(onLoad).toHaveBeenLastCalledWith(undefined);
+    // Releasing doesn’t call back: no state is written while the caller is being torn down
+    expect(onLoad).toHaveBeenCalledOnce();
     expect(mockRevokeBlobURLIfNeeded).toHaveBeenCalledExactlyOnceWith('blob:thumb');
   });
 
@@ -332,7 +359,7 @@ describe('loadEntryThumbnail', () => {
 
     await settle();
     release();
-    expect(onLoad).toHaveBeenLastCalledWith(undefined);
+    expect(onLoad).toHaveBeenCalledOnce();
     expect(mockRevokeBlobURLIfNeeded).not.toHaveBeenCalled();
   });
 
@@ -470,6 +497,34 @@ describe('getAssociatedAssets', () => {
     expect(result).toEqual([mockAsset]);
   });
 
+  test('resolves each locale’s values against that locale’s entry file', () => {
+    const enAsset = /** @type {any} */ ({ path: 'content/posts/en/hello/photo.jpg' });
+    const frAsset = /** @type {any} */ ({ path: 'content/posts/fr/hello/photo.jpg' });
+
+    mockGetCollection.mockReturnValue({ name: 'posts', _type: 'entry' });
+    mockIsCollectionIndexFile.mockReturnValue(false);
+    mockGetField.mockReturnValue({ widget: 'image' });
+    mockGetAssetByPath.mockImplementation(({ locale }) => (locale === 'fr' ? frAsset : enAsset));
+    mockGetAssetFoldersByPath.mockReturnValue([
+      { collectionName: 'posts', fileName: undefined, entryRelative: true },
+    ]);
+
+    // With the `multiple_folders` i18n structure, each locale’s entry file has a folder of its own
+    const result = getAssociatedAssets({
+      entry: /** @type {any} */ ({
+        id: 'hello',
+        slug: 'hello',
+        locales: {
+          en: { path: 'content/posts/en/hello/index.md', content: { image: 'photo.jpg' } },
+          fr: { path: 'content/posts/fr/hello/index.md', content: { image: 'photo.jpg' } },
+        },
+      }),
+      collectionName: 'posts',
+    });
+
+    expect(result).toEqual([enAsset, frAsset]);
+  });
+
   test('returns assets for image and file fields', () => {
     const mockCollection = { name: 'posts', _type: 'entry' };
 
@@ -481,13 +536,11 @@ describe('getAssociatedAssets', () => {
       size: 1024,
       text: '',
       sha: 'abc123',
-      folder: {
+      folder: createMockAssetFolder({
         collectionName: 'posts',
         internalPath: 'images',
         publicPath: '/images',
-        entryRelative: false,
-        hasTemplateTags: false,
-      },
+      }),
     };
 
     mockGetCollection.mockReturnValue(mockCollection);
@@ -656,6 +709,7 @@ describe('getAssociatedAssets', () => {
       entry,
       collectionName: 'posts',
       typedKeyPath: undefined,
+      locale: 'en',
       thumbnail: true,
     });
   });
@@ -716,13 +770,11 @@ describe('getAssociatedAssets', () => {
       size: 1024,
       text: '',
       sha: 'abc123',
-      folder: {
+      folder: createMockAssetFolder({
         collectionName: 'posts',
         internalPath: 'images',
         publicPath: '/images',
-        entryRelative: false,
-        hasTemplateTags: false,
-      },
+      }),
     };
 
     // Entry with duplicate image references
@@ -883,13 +935,11 @@ describe('getAssociatedAssets', () => {
       size: 1024,
       text: '',
       sha: 'abc123',
-      folder: {
+      folder: createMockAssetFolder({
         collectionName: 'posts',
         internalPath: 'images',
         publicPath: '/images',
-        entryRelative: false,
-        hasTemplateTags: false,
-      },
+      }),
     };
 
     const entryWithAsset = /** @type {any} */ ({
@@ -1158,13 +1208,11 @@ describe('getAssociatedAssets', () => {
       size: 1024,
       text: '',
       sha: 'abc123',
-      folder: {
+      folder: createMockAssetFolder({
         collectionName: 'posts',
         internalPath: 'media',
         publicPath: '/media',
-        entryRelative: false,
-        hasTemplateTags: false,
-      },
+      }),
     };
 
     const entryWithAliasPath = /** @type {any} */ ({
@@ -1321,11 +1369,11 @@ describe('getAssociatedAssets', () => {
 
   describe('assets owned by a descendant entry', () => {
     /**
-     * Set up a nested collection where `pages/about` holds the entry being looked at and
-     * `pages/about/team` holds another one.
+     * Set up a collection with nested entries where `pages/about` holds the entry being looked at
+     * and `pages/about/team` holds another one.
      * @param {any[]} assets Assets to expose through the store.
      */
-    const setupNestedCollection = (assets) => {
+    const setupNestedEntries = (assets) => {
       mockGetCollection.mockReturnValue({ name: 'pages', _type: 'entry' });
       mockIsCollectionIndexFile.mockReturnValue(false);
       mockGetField.mockReturnValue(undefined);
@@ -1355,7 +1403,7 @@ describe('getAssociatedAssets', () => {
       const ownAsset = /** @type {any} */ ({ path: 'pages/about/parent.jpg' });
       const childAsset = /** @type {any} */ ({ path: 'pages/about/team/child.jpg' });
 
-      setupNestedCollection([ownAsset, childAsset]);
+      setupNestedEntries([ownAsset, childAsset]);
       mockGetEntriesByCollection.mockReturnValue([parentEntry, childEntry]);
 
       expect(
@@ -1366,7 +1414,7 @@ describe('getAssociatedAssets', () => {
     test('leaves out the assets in a subfolder of a descendant entry’s folder', () => {
       const childAsset = /** @type {any} */ ({ path: 'pages/about/team/images/child.jpg' });
 
-      setupNestedCollection([childAsset]);
+      setupNestedEntries([childAsset]);
       mockGetEntriesByCollection.mockReturnValue([parentEntry, childEntry]);
 
       expect(
@@ -1377,7 +1425,7 @@ describe('getAssociatedAssets', () => {
     test('keeps the assets in a subfolder that holds no entry', () => {
       const ownAsset = /** @type {any} */ ({ path: 'pages/about/images/parent.jpg' });
 
-      setupNestedCollection([ownAsset]);
+      setupNestedEntries([ownAsset]);
       mockGetEntriesByCollection.mockReturnValue([parentEntry, childEntry]);
 
       expect(
@@ -1393,7 +1441,7 @@ describe('getAssociatedAssets', () => {
         locales: { en: { path: 'README.md', content: { title: 'Readme' } } },
       });
 
-      setupNestedCollection([ownAsset]);
+      setupNestedEntries([ownAsset]);
       mockGetEntriesByCollection.mockReturnValue([rootEntry, parentEntry, childEntry]);
 
       expect(
@@ -1404,7 +1452,7 @@ describe('getAssociatedAssets', () => {
     test('keeps its own assets when looking at the descendant', () => {
       const childAsset = /** @type {any} */ ({ path: 'pages/about/team/child.jpg' });
 
-      setupNestedCollection([/** @type {any} */ ({ path: 'pages/about/parent.jpg' }), childAsset]);
+      setupNestedEntries([/** @type {any} */ ({ path: 'pages/about/parent.jpg' }), childAsset]);
       mockGetEntriesByCollection.mockReturnValue([parentEntry, childEntry]);
 
       expect(
@@ -1425,7 +1473,7 @@ describe('getAssociatedAssets', () => {
         },
       });
 
-      setupNestedCollection([enAsset, deAsset]);
+      setupNestedEntries([enAsset, deAsset]);
       mockGetEntriesByCollection.mockReturnValue([entry]);
 
       expect(getAssociatedAssets({ entry, collectionName: 'pages', relative: true })).toEqual([
@@ -1448,12 +1496,16 @@ describe('getAssociatedAssets', () => {
         locales: { en: { path: 'pages/contact.md', content: { title: 'Contact' } } },
       });
 
-      setupNestedCollection([sharedAsset]);
+      setupNestedEntries([sharedAsset]);
       mockGetEntriesByCollection.mockReturnValue([entry, sibling]);
+      mockGetOwnedEntryFolderPath.mockReturnValueOnce(undefined);
 
-      expect(getAssociatedAssets({ entry, collectionName: 'pages', relative: true })).toEqual([
-        sharedAsset,
-      ]);
+      // The asset can belong to either entry, so deleting this one mustn’t take it along
+      expect(getAssociatedAssets({ entry, collectionName: 'pages', relative: true })).toEqual([]);
+      expect(mockGetOwnedEntryFolderPath).toHaveBeenCalledWith(
+        { name: 'pages', _type: 'entry' },
+        'pages/overview.md',
+      );
     });
   });
 
@@ -1522,7 +1574,7 @@ describe('getAssociatedAssets', () => {
     expect(result).not.toContain(mockAsset);
   });
 
-  test('returns undefined when entryFolderPath is undefined (line 124)', () => {
+  test('skips the orphan lookup when the entry owns no folder', () => {
     const mockCollection = { name: 'posts', _type: 'entry' };
 
     const mockAsset = /** @type {Asset} */ ({
@@ -1576,6 +1628,7 @@ describe('getAssociatedAssets', () => {
       };
     });
     mockAllAssets.current = /** @type {any} */ ([mockAsset]);
+    mockGetOwnedEntryFolderPath.mockReturnValueOnce(undefined);
 
     const result = getAssociatedAssets({
       entry: entryWithContent,
@@ -1583,7 +1636,7 @@ describe('getAssociatedAssets', () => {
       relative: true,
     });
 
-    // Should not include the asset since the entry folder path is undefined
+    // Should not include the asset since the entry owns no folder
     expect(result).not.toContain(mockAsset);
   });
 });
@@ -1676,5 +1729,152 @@ describe('getEntryRelativeAssets', () => {
 
     expect(getEntryRelativeAssets({ entry, collectionName: 'posts' })).toEqual([]);
     expect(mockGetCollection).not.toHaveBeenCalled();
+  });
+  test('looks for no other entry using an asset in a folder the entry owns', () => {
+    mockGetAssetFolder.mockReturnValue({ collectionName: 'posts', entryRelative: true });
+
+    expect(getEntryRelativeAssets({ entry, collectionName: 'posts' })).toEqual([asset]);
+    expect(mockFindEntriesByAssets).not.toHaveBeenCalled();
+  });
+
+  describe('in a folder shared by the entries', () => {
+    /** @type {Entry} */
+    const original = {
+      id: 'hello',
+      slug: 'hello',
+      subPath: 'hello',
+      locales: {
+        _default: {
+          slug: 'hello',
+          path: 'content/posts/hello.md',
+          content: { title: 'Hello', image: 'photo.jpg' },
+        },
+      },
+    };
+
+    /** @type {Entry} */
+    const copy = {
+      ...original,
+      id: 'hello-1',
+      slug: 'hello-1',
+      subPath: 'hello-1',
+      locales: { _default: { ...original.locales._default, path: 'content/posts/hello-1.md' } },
+    };
+
+    /** @type {Asset} */
+    const photo = /** @type {any} */ ({ path: 'content/posts/photo.jpg', name: 'photo.jpg' });
+
+    beforeEach(() => {
+      mockGetAssetFolder.mockReturnValue({ collectionName: 'posts', entryRelative: true });
+      // The entries are files sharing the collection folder, so none owns it
+      mockGetOwnedEntryFolderPath.mockReturnValue(undefined);
+      mockGetAssetByPath.mockReturnValue(photo);
+      mockGetEntriesByCollection.mockReturnValue([original, copy]);
+    });
+
+    afterEach(() => {
+      // Back to the implementations the mocks were created with
+      mockGetOwnedEntryFolderPath.mockReset();
+      mockGetAssetByPath.mockReset();
+      mockGetEntriesByCollection.mockReset();
+    });
+
+    test('leaves out an asset another entry uses too', () => {
+      // A duplicated entry keeps referring to the original’s files in a shared folder, so deleting
+      // the original mustn’t delete them
+      mockFindEntriesByAssets.mockReturnValue([[original, copy]]);
+
+      expect(getEntryRelativeAssets({ entry: original, collectionName: 'posts' })).toEqual([]);
+      expect(mockFindEntriesByAssets).toHaveBeenCalledWith([{ asset: photo }], {
+        entries: [original, copy],
+      });
+    });
+
+    test('looks at the entries of other collections stored in the same folder', () => {
+      // Another collection can list the entries of the folder, filtered by a field, and a page
+      // elsewhere has nothing to do with them
+      /** @type {any} */
+      const translation = {
+        id: 'bonjour',
+        locales: { _default: { path: 'content/posts/bonjour.md', content: {} } },
+      };
+
+      /** @type {any} */
+      const page = {
+        id: 'about',
+        locales: { _default: { path: 'content/about.md', content: {} } },
+      };
+
+      mockAllEntries.current = [original, copy, translation, page];
+      mockFindEntriesByAssets.mockReturnValue([[original]]);
+
+      getEntryRelativeAssets({ entry: original, collectionName: 'posts' });
+
+      expect(mockFindEntriesByAssets).toHaveBeenCalledWith([{ asset: photo }], {
+        entries: [original, copy, translation],
+      });
+
+      mockAllEntries.current = [];
+    });
+
+    test('returns an asset only the entry uses', () => {
+      mockFindEntriesByAssets.mockReturnValue([[original]]);
+
+      expect(getEntryRelativeAssets({ entry: original, collectionName: 'posts' })).toEqual([photo]);
+    });
+
+    test('looks the assets of every entry up at once', () => {
+      /** @type {Asset} */
+      const cover = /** @type {any} */ ({ path: 'content/posts/cover.jpg', name: 'cover.jpg' });
+
+      mockGetAssetByPath.mockImplementation(({ entry: { id } }) =>
+        id === 'hello' ? photo : cover,
+      );
+      // The two share no asset, but a third entry uses the copy’s cover
+      mockFindEntriesByAssets.mockReturnValue([[original], [copy, { id: 'other' }]]);
+
+      expect(
+        getEntriesRelativeAssets({ entries: [original, copy], collectionName: 'posts' }),
+      ).toEqual([[photo], []]);
+      expect(mockFindEntriesByAssets).toHaveBeenCalledOnce();
+      expect(mockFindEntriesByAssets).toHaveBeenCalledWith([{ asset: photo }, { asset: cover }], {
+        entries: [original, copy],
+      });
+    });
+
+    test('returns the assets in a folder an entry owns as they are', () => {
+      /** @type {Entry} */
+      const owner = {
+        ...original,
+        id: 'owner',
+        locales: { _default: { ...original.locales._default, path: 'content/posts/own/index.md' } },
+      };
+
+      /** @type {Asset} */
+      const cover = /** @type {any} */ ({ path: 'content/posts/own/cover.jpg', name: 'cover.jpg' });
+
+      mockGetOwnedEntryFolderPath.mockImplementation((_collection, path) =>
+        path.endsWith('/index.md') ? 'content/posts/own' : undefined,
+      );
+      mockGetAssetByPath.mockImplementation(({ entry: { id } }) =>
+        id === 'owner' ? cover : photo,
+      );
+      mockFindEntriesByAssets.mockReturnValue([[original, copy]]);
+
+      expect(
+        getEntriesRelativeAssets({ entries: [owner, original], collectionName: 'posts' }),
+      ).toEqual([[cover], []]);
+      // Only the asset outside the owned folder is looked up
+      expect(mockFindEntriesByAssets).toHaveBeenCalledWith([{ asset: photo }], expect.anything());
+    });
+
+    test('keeps a file shared by entries deleted together', () => {
+      // Either entry may still need it, e.g. while its deletion awaits review
+      mockFindEntriesByAssets.mockReturnValue([[original, copy]]);
+
+      expect(
+        getEntriesRelativeAssets({ entries: [original, copy], collectionName: 'posts' }),
+      ).toEqual([[], []]);
+    });
   });
 });

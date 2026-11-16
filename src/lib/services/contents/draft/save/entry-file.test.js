@@ -43,7 +43,13 @@ describe('formatEntryData()', () => {
       'formatted:{"title":"Single"}',
     );
 
-    expect(buildSingleFileContent).toHaveBeenCalledWith({ config, entry, draft });
+    // The content is serialized for the format the file is saved in, not the configured one
+    expect(buildSingleFileContent).toHaveBeenCalledWith({
+      config,
+      entry,
+      draft,
+      format: 'yaml-frontmatter',
+    });
     expect(getSingleFileComments).toHaveBeenCalledWith({ config, fields });
     expect(formatEntryFile).toHaveBeenCalledWith({
       content: { title: 'Single' },
@@ -52,6 +58,16 @@ describe('formatEntryData()', () => {
     });
     expect(serializeContent).not.toHaveBeenCalled();
     expect(getFieldComments).not.toHaveBeenCalled();
+  });
+
+  test('passes the source text of the values read from the file', async () => {
+    const state = { valueSources: { price: { value: 10, source: '10.0' } } };
+
+    await formatEntryData({ draft, config, _file, entry, state });
+    expect(formatEntryFile).toHaveBeenLastCalledWith(expect.objectContaining({ state }));
+
+    await formatEntryData({ draft, config, _file, entry, locale: 'ja', state });
+    expect(formatEntryFile).toHaveBeenLastCalledWith(expect.objectContaining({ state }));
   });
 
   test('formats the content of the given locale only', async () => {
@@ -63,6 +79,7 @@ describe('formatEntryData()', () => {
       draft,
       locale: 'ja',
       valueMap: { title: 'こんにちは' },
+      format: 'yaml-frontmatter',
     });
     expect(getFieldComments).toHaveBeenCalledWith(fields);
     expect(formatEntryFile).toHaveBeenCalledWith({
@@ -72,5 +89,26 @@ describe('formatEntryData()', () => {
     });
     expect(buildSingleFileContent).not.toHaveBeenCalled();
     expect(getSingleFileComments).not.toHaveBeenCalled();
+  });
+
+  test('passes on the source text of the TOML dates', async () => {
+    const sourceMap = { date: { value: '1979-05-27', source: '1979-05-27' } };
+    const tomlFile = { format: 'toml' };
+    const state = { valueSources: sourceMap };
+
+    await formatEntryData({ draft, config, _file: tomlFile, entry, state });
+    await formatEntryData({
+      draft,
+      config,
+      _file: tomlFile,
+      entry,
+      locale: 'en',
+      state,
+    });
+
+    expect(vi.mocked(formatEntryFile).mock.calls.map(([args]) => args.state)).toEqual([
+      state,
+      state,
+    ]);
   });
 });

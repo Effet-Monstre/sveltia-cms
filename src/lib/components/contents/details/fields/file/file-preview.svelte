@@ -22,21 +22,15 @@
    */
 
   /** @type {FieldPreviewProps & Props} */
-  let {
-    /* eslint-disable prefer-const */
-    typedKeyPath,
-    fieldConfig,
-    currentValue,
-    /* eslint-enable prefer-const */
-  } = $props();
+  let { locale, typedKeyPath, fieldConfig, currentValue } = $props();
 </script>
 
 {#if isMultiple(fieldConfig)}
   {#if Array.isArray(currentValue)}
     {#each currentValue as value, index (`${value}-${index}`)}
-      <FilePreviewItem {value} {fieldConfig} {typedKeyPath} />
+      <FilePreviewItem {value} {fieldConfig} {typedKeyPath} {locale} />
     {/each}
   {/if}
 {:else if typeof currentValue === 'string' && currentValue}
-  <FilePreviewItem value={currentValue} {fieldConfig} {typedKeyPath} />
+  <FilePreviewItem value={currentValue} {fieldConfig} {typedKeyPath} {locale} />
 {/if}

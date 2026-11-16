@@ -2,6 +2,7 @@ import { describe, expect, test } from 'vitest';
 
 import {
   canDuplicateEntry,
+  getEntryToolbarState,
   getRemovalMenuItems,
   getSaveFailure,
 } from '$lib/services/contents/editor/toolbar';
@@ -142,5 +143,130 @@ describe('getSaveFailure', () => {
       message: '',
       unexpected: true,
     });
+  });
+});
+
+describe('getEntryToolbarState', () => {
+  /** @type {any} */
+  const collection = { _type: 'entry', name: 'posts' };
+
+  const args = {
+    collection,
+    collectionFile: undefined,
+    isIndexFile: false,
+    hasPullRequest: false,
+    workflowEnabled: false,
+    publishedVersionExists: false,
+    discardsDraft: false,
+    pendingDeletion: false,
+    readonly: false,
+    openAuthoring: false,
+    creationDisabled: false,
+  };
+
+  test('offers everything for an ordinary entry', () => {
+    expect(getEntryToolbarState(args)).toEqual({
+      useWorkflow: false,
+      discardsDraft: false,
+      locked: false,
+      canDuplicate: true,
+      removalMenuItems: { discard: true, delete: false },
+      showPublishControl: false,
+    });
+  });
+
+  test('gives the publish control a place for an entry with a pull request', () => {
+    const withPullRequest = { ...args, hasPullRequest: true };
+
+    expect(getEntryToolbarState(withPullRequest).showPublishControl).toBe(true);
+    expect(getEntryToolbarState({ ...withPullRequest, readonly: true }).showPublishControl).toBe(
+      false,
+    );
+    // A contributor’s pull request that maintainers can’t push to is read-only, but it still gets
+    // the link to review it on the Git service
+    expect(
+      getEntryToolbarState({
+        ...withPullRequest,
+        readonly: true,
+        fork: { owner: 'alice', repo: 'website', editable: false },
+      }).showPublishControl,
+    ).toBe(true);
+  });
+
+  test('uses Editorial Workflow for a collection that has it or an entry with a pull request', () => {
+    expect(getEntryToolbarState({ ...args, workflowEnabled: true }).useWorkflow).toBe(true);
+    expect(
+      getEntryToolbarState({ ...args, hasPullRequest: true, discardsDraft: true }),
+    ).toMatchObject({ useWorkflow: true, discardsDraft: true });
+    expect(
+      getEntryToolbarState({ ...args, hasPullRequest: true, publishedVersionExists: true }),
+    ).toMatchObject({ discardsDraft: false, removalMenuItems: { discard: true, delete: true } });
+  });
+
+  test('locks an entry awaiting deletion or a read-only one', () => {
+    expect(getEntryToolbarState({ ...args, pendingDeletion: true }).locked).toBe(true);
+    expect(getEntryToolbarState({ ...args, readonly: true })).toMatchObject({
+      locked: true,
+      canDuplicate: false,
+      removalMenuItems: { discard: false, delete: false },
+    });
+  });
+
+  test('withholds deletion when the collection disallows it', () => {
+    expect(
+      getEntryToolbarState({ ...args, collection: { ...collection, delete: false } })
+        .removalMenuItems,
+    ).toEqual({ discard: false, delete: false });
+    expect(
+      getEntryToolbarState({
+        ...args,
+        collection: /** @type {any} */ ({ _type: 'file', name: 'pages', delete: false }),
+      }).removalMenuItems,
+    ).toEqual({ discard: true, delete: false });
+    expect(getEntryToolbarState({ ...args, collection: undefined }).removalMenuItems).toEqual({
+      discard: true,
+      delete: false,
+    });
+  });
+
+  test('lets a maintainer only close a contributor’s pull request', () => {
+    expect(
+      getEntryToolbarState({
+        ...args,
+        fork: { owner: 'alice', repo: 'website', editable: true },
+        hasPullRequest: true,
+      }).removalMenuItems,
+    ).toEqual({ discard: false, delete: false });
+    expect(
+      getEntryToolbarState({
+        ...args,
+        fork: { owner: 'alice', repo: 'website', editable: true },
+        hasPullRequest: true,
+        discardsDraft: true,
+      }).removalMenuItems,
+    ).toEqual({ discard: true, delete: false });
+    expect(
+      getEntryToolbarState({
+        ...args,
+        fork: { owner: 'alice', repo: 'website', editable: true },
+        hasPullRequest: true,
+        publishedVersionExists: true,
+      }).removalMenuItems,
+    ).toEqual({ discard: true, delete: false });
+  });
+
+  test('lets an Open Authoring contributor delete only their own draft', () => {
+    expect(getEntryToolbarState({ ...args, openAuthoring: true }).removalMenuItems).toEqual({
+      discard: false,
+      delete: false,
+    });
+    expect(
+      getEntryToolbarState({
+        ...args,
+        openAuthoring: true,
+        hasPullRequest: true,
+        discardsDraft: true,
+      }).removalMenuItems,
+    ).toEqual({ discard: true, delete: false });
   });
 });

@@ -7,7 +7,8 @@ import {
   fetchBranchHead,
   fetchPullRequestFileList,
   fetchPullRequestFiles,
-  reopenPullRequest,
+  parseAuthor,
+  parseFileNodes,
   updateDraftState,
   updateLabels,
 } from '$lib/services/backends/git/github/pull-requests';
@@ -43,6 +44,24 @@ describe('GitHub pull request helpers', () => {
     mockStores();
     vi.mocked(fetchAPI).mockResolvedValue({});
     vi.mocked(fetchGraphQL).mockResolvedValue({});
+  });
+
+  describe('parseFileNodes', () => {
+    test('converts the GraphQL file nodes to workflow files', () => {
+      expect(
+        parseFileNodes([
+          { path: 'a.md', changeType: 'ADDED' },
+          { path: 'b.md', changeType: 'MODIFIED' },
+          { path: 'c.md', changeType: 'DELETED' },
+          { path: 'd.md', changeType: 'RENAMED' },
+        ]),
+      ).toEqual([
+        { path: 'a.md', sha: '', size: 0, deleted: false, renamed: false },
+        { path: 'b.md', sha: '', size: 0, deleted: false, renamed: false },
+        { path: 'c.md', sha: '', size: 0, deleted: true, renamed: false },
+        { path: 'd.md', sha: '', size: 0, deleted: false, renamed: true },
+      ]);
+    });
   });
 
   describe('fetchPullRequestFileList', () => {
@@ -269,6 +288,20 @@ describe('GitHub pull request helpers', () => {
       });
     });
 
+    test('reads the branch of a pull request from a fork in that fork', async () => {
+      vi.mocked(fetchGraphQL).mockResolvedValue({
+        repository: { branchHead: { target: { oid: 'abc123' } } },
+      });
+
+      await expect(fetchBranchHead('alice/website:cms/posts/hello')).resolves.toBe('abc123');
+
+      expect(fetchGraphQL).toHaveBeenCalledWith(expect.stringContaining('branchHead: ref('), {
+        owner: 'alice',
+        repo: 'website',
+        branch: 'refs/heads/cms/posts/hello',
+      });
+    });
+
     test('answers undefined for a branch that is gone', async () => {
       // A pull request merged or closed outside the CMS leaves no branch behind
       vi.mocked(fetchGraphQL).mockResolvedValue({ repository: { branchHead: null } });
@@ -278,6 +311,14 @@ describe('GitHub pull request helpers', () => {
   });
 
   describe('deleteBranch', () => {
+    test('refuses to delete a branch in a contributor’s fork', async () => {
+      await expect(deleteBranch('alice/website:cms/posts/hello')).rejects.toThrow(
+        'A branch in a contributor’s fork cannot be deleted.',
+      );
+
+      expect(fetchAPI).not.toHaveBeenCalled();
+    });
+
     test('deletes the reference', async () => {
       await deleteBranch('cms/posts/hello');
 
@@ -384,7 +425,69 @@ describe('GitHub pull request helpers', () => {
     });
   });
 
+  describe('parseAuthor', () => {
+    test('should parse a user from the REST API, which has no name or email address', () => {
+      expect(parseAuthor({ login: 'octocat', id: 1 })).toEqual({
+        name: 'octocat',
+        email: '',
+        id: 1,
+        login: 'octocat',
+      });
+    });
+
+    test('should parse a user from the GraphQL API', () => {
+      expect(
+        parseAuthor({ login: 'octocat', name: 'Mona', email: 'mona@example.com', databaseId: 2 }),
+      ).toEqual({ name: 'Mona', email: 'mona@example.com', id: 2, login: 'octocat' });
+      expect(parseAuthor({ login: 'octocat', name: null, email: null, databaseId: 2 })).toEqual({
+        name: 'octocat',
+        email: '',
+        id: 2,
+        login: 'octocat',
+      });
+    });
+
+    test('should fall back to the login for an empty display name', () => {
+      expect(parseAuthor({ login: 'octocat', name: '', databaseId: 2 })).toEqual({
+        name: 'octocat',
+        email: '',
+        id: 2,
+        login: 'octocat',
+      });
+    });
+
+    test('should return undefined for an unknown user', () => {
+      expect(parseAuthor(undefined)).toBeUndefined();
+      expect(parseAuthor({ id: 3 })).toBeUndefined();
+    });
+  });
+
   describe('createPullRequest', () => {
+    test('opens the pull request with the given description', async () => {
+      const description = 'Automatically generated\n\n<!-- sveltia-cms:deletion-group=group-1 -->';
+
+      vi.mocked(fetchAPI)
+        .mockResolvedValueOnce({ number: 5, created_at: '2026-01-01T00:00:00Z' })
+        .mockResolvedValueOnce({});
+
+      const result = await createPullRequest({
+        branch: 'cms/posts/hello',
+        title: 'Delete Post “hello”',
+        status: 'pending_deletion',
+        description,
+      });
+
+      expect(fetchAPI).toHaveBeenNthCalledWith(1, '/repos/owner/repo/pulls', {
+        method: 'POST',
+        body: expect.objectContaining({ body: description }),
+      });
+      // Only a pull request from a fork has anyone else to let push to its branch
+      expect(vi.mocked(fetchAPI).mock.calls[0][1]?.body).not.toHaveProperty(
+        'maintainer_can_modify',
+      );
+      expect(result.description).toBe(description);
+    });
+
     test('creates a draft pull request and applies the draft label', async () => {
       vi.mocked(fetchAPI)
         .mockResolvedValueOnce({
@@ -402,6 +505,7 @@ describe('GitHub pull request helpers', () => {
         branch: 'cms/posts/hello',
         title: 'Create Post “hello”',
         status: 'draft',
+        description: 'Description',
       });
 
       expect(fetchAPI).toHaveBeenNthCalledWith(1, '/repos/owner/repo/pulls', {
@@ -430,6 +534,22 @@ describe('GitHub pull request helpers', () => {
           files: [],
         }),
       );
+    });
+
+    test('records the user who opened the pull request as its author', async () => {
+      vi.mocked(fetchAPI)
+        .mockResolvedValueOnce({ number: 5, user: { login: 'alice', id: 7 } })
+        .mockResolvedValueOnce({});
+
+      const result = await createPullRequest({
+        branch: 'cms/posts/hello',
+        title: 'Create Post “hello”',
+        status: 'draft',
+        description: 'Description',
+      });
+
+      // The same author a listed pull request has, so a later save recognizes it as the user’s own
+      expect(result.author).toEqual({ name: 'alice', email: '', id: 7, login: 'alice' });
     });
   });
 
@@ -467,6 +587,7 @@ describe('GitHub pull request helpers', () => {
           branch: 'cms/contributor/repo/posts/hello',
           title: 'Create Post “hello”',
           status: 'pending_review',
+          description: 'Description',
         });
 
         expect(fetchAPI).toHaveBeenCalledWith('/repos/owner/repo/pulls', {
@@ -475,22 +596,53 @@ describe('GitHub pull request helpers', () => {
             head: 'contributor:cms/contributor/repo/posts/hello',
             base: 'main',
             draft: false,
+            // The maintainers can edit the entry while reviewing it
+            maintainer_can_modify: true,
           }),
         });
 
         // Labelling needs write access to the configured repository, which a contributor lacks
         expect(fetchAPI).toHaveBeenCalledTimes(1);
       });
-    });
 
-    describe('reopenPullRequest', () => {
-      test('reopens the pull request on the configured repository', async () => {
-        await reopenPullRequest(/** @type {any} */ ({ number: 7 }));
+      test('opens it without maintainer edits when GitHub refuses them for the fork', async () => {
+        // A fork owned by an organization can’t let the maintainers push to it
+        vi.mocked(fetchAPI)
+          .mockRejectedValueOnce(
+            new Error('Validation Failed', {
+              cause: { status: 422, message: 'Fork collab can’t be granted' },
+            }),
+          )
+          .mockResolvedValueOnce({ number: 5, created_at: '2026-01-01T00:00:00Z' });
 
-        expect(fetchAPI).toHaveBeenCalledWith('/repos/owner/repo/pulls/7', {
-          method: 'PATCH',
-          body: { state: 'open' },
+        const result = await createPullRequest({
+          branch: 'cms/contributor/repo/posts/hello',
+          title: 'Create Post “hello”',
+          status: 'pending_review',
+          description: 'Description',
         });
+
+        expect(result.number).toBe(5);
+        expect(fetchAPI).toHaveBeenCalledTimes(2);
+        expect(vi.mocked(fetchAPI).mock.calls[1][1]?.body).not.toHaveProperty(
+          'maintainer_can_modify',
+        );
+      });
+
+      test('passes any other failure on', async () => {
+        const error = new Error('Server error', { cause: { status: 500 } });
+
+        vi.mocked(fetchAPI).mockRejectedValueOnce(error);
+
+        await expect(
+          createPullRequest({
+            branch: 'cms/contributor/repo/posts/hello',
+            title: 'Create Post “hello”',
+            status: 'pending_review',
+            description: 'Description',
+          }),
+        ).rejects.toBe(error);
+        expect(fetchAPI).toHaveBeenCalledTimes(1);
       });
     });
   });

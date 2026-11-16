@@ -1,11 +1,14 @@
 import { cacheAssetBlob } from '$lib/services/assets/info';
 import { allAssets } from '$lib/services/assets/state';
 import { backend } from '$lib/services/backends';
-import { repositoryHead } from '$lib/services/backends/git/shared/fetch';
+import { promptCommitMessage } from '$lib/services/backends/commit-prompt';
+import { isDeployingCommit } from '$lib/services/backends/git/shared/commits';
+import { repositoryHead } from '$lib/services/backends/git/shared/head';
 import { checkForRemoteChanges, suspendChecksWhile } from '$lib/services/backends/refresh';
 import { allEntries } from '$lib/services/contents';
+import { getEntryPaths } from '$lib/services/contents/entry/paths';
 import { combineArrayFileChanges, createArrayFileEntries } from '$lib/services/contents/file/array';
-import { productionSHA } from '$lib/services/deployments';
+import { productionSHA, setLastCommitPublishHint } from '$lib/services/deployments';
 import { user } from '$lib/services/user/account.svelte';
 import { prefs } from '$lib/services/user/prefs.svelte';
 import { getRepositoryDatabase } from '$lib/services/utils/database';
@@ -107,10 +110,7 @@ export const updateCache = async ({ changes, commit }) => {
  */
 export const updateStores = ({ changes, savedEntries, savedAssets, arrayFileEntries = [] }) => {
   const savedEntryIds = new Set([...savedEntries, ...arrayFileEntries].map((e) => e.id));
-
-  const arrayFilePaths = new Set(
-    arrayFileEntries.flatMap((e) => Object.values(e.locales).map(({ path }) => path)),
-  );
+  const arrayFilePaths = new Set(arrayFileEntries.flatMap((e) => getEntryPaths(e)));
 
   allEntries.current = [
     ...allEntries.current.filter(
@@ -160,6 +160,9 @@ export const updateStores = ({ changes, savedEntries, savedAssets, arrayFileEntr
  */
 export const saveChanges = async ({ changes, savingEntries = [], savingAssets = [], options }) => {
   const { commitChanges, fetchLastCommit } = /** @type {BackendService} */ (backend.current);
+  // Ask for a commit message first if configured, so the repository is checked for changes once
+  // the user is done, however long that takes. Cancelling it throws, leaving everything as it was
+  const commitOptions = await promptCommitMessage(changes, options);
 
   try {
     await checkForRemoteChanges();
@@ -168,14 +171,19 @@ export const saveChanges = async ({ changes, savingEntries = [], savingAssets = 
     console.error('Failed to check the repository for changes.', ex);
   }
 
-  return suspendChecksWhile(async () => {
+  /** Whether the commit has landed on top of someone else’s commit the stores don’t reflect. */
+  let missedRemoteChanges = false;
+
+  const results = await suspendChecksWhile(async () => {
+    // The head the stores reflect, which the commit is expected to be made on top of
+    const headBefore = repositoryHead.current;
     // A check for remote changes made from here on would replace the items the changes are applied
     // to, and the entries the saved ones are matched up with
     const { changes: combinedChanges, arrayFileUpdates } = await combineArrayFileChanges(changes);
 
     /** @type {CommitResults} */
     const commit = {
-      ...(await commitChanges(combinedChanges, options)),
+      ...(await commitChanges(combinedChanges, commitOptions)),
       author: getCommitAuthor(),
     };
 
@@ -219,25 +227,67 @@ export const saveChanges = async ({ changes, savingEntries = [], savingAssets = 
         // gets the URL of a wrapper that can’t run any script, like an asset loaded from the
         // repository does. The file is remembered with it, so reading the asset gives the file
         if (file) {
-          await cacheAssetBlob(savedAsset, file);
+          try {
+            await cacheAssetBlob(savedAsset, file);
+          } catch (ex) {
+            // The commit has landed, so the save has succeeded; the asset is loaded from the
+            // repository instead
+            // eslint-disable-next-line no-console
+            console.error('Failed to cache the saved asset.', ex);
+          }
         }
 
         return savedAsset;
       }),
     );
 
-    await updateCache({ changes: combinedChanges, commit });
+    try {
+      await updateCache({ changes: combinedChanges, commit });
+    } catch (ex) {
+      // The commit has landed, so the save has succeeded even if the cache couldn’t be written,
+      // e.g. when the storage quota is exceeded. The stores still have to be updated and the head
+      // advanced, or the next commit would be refused. A file missing from the cache is fetched
+      // again on the next load
+      // eslint-disable-next-line no-console
+      console.error('Failed to update the file cache.', ex);
+    }
+
     updateStores({ changes: combinedChanges, savedEntries, savedAssets, arrayFileEntries });
     // The site is rebuilt from this commit, so the deploy state the UI reports is now about the
     // user’s own change. Editorial Workflow commits don’t come through here; they land on a
     // workflow branch and are tracked by the pull request instead
     productionSHA.current = commit.sha;
+    // Whatever the commit is, e.g. an entry deletion or an asset upload, it replaces what the
+    // previous one was expected to do, until the CI/CD provider is asked about it
+    setLastCommitPublishHint(isDeployingCommit(commitOptions));
 
-    // The stores now reflect this commit, so it’s the head to compare the branch with from here on
     if (fetchLastCommit) {
-      repositoryHead.current = commit.sha;
+      // GitLab and Gitea/Forgejo only refuse a commit when one of the files being changed has been
+      // changed by someone else, so the commit can be made on top of a colleague’s commit to
+      // another file. The stores then reflect the commit only as far as the user’s own files go,
+      // and taking it as the head would mean the colleague’s commit is never fetched: the file
+      // would be saved over later, or the save refused for good. The head is left where it was
+      // instead, so the colleague’s commit is fetched by the next check
+      if (commit.parentSha === undefined || commit.parentSha === headBefore) {
+        // The stores now reflect this commit, so it’s the head to compare the branch with from here
+        // on
+        repositoryHead.current = commit.sha;
+      } else {
+        missedRemoteChanges = true;
+      }
     }
 
     return { commit, savedEntries, savedAssets };
   });
+
+  if (missedRemoteChanges) {
+    // Fetch the commits made in the meantime now rather than on the next scheduled check. It’s not
+    // waited for: the save is done, and a failure leaves it to the next check
+    checkForRemoteChanges().catch((ex) => {
+      // eslint-disable-next-line no-console
+      console.error('Failed to check the repository for changes.', ex);
+    });
+  }
+
+  return results;
 };

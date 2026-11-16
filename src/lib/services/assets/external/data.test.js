@@ -1,10 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { assetUpdatesToast } from '$lib/services/assets/data';
+import { saveReferenceChanges } from '$lib/services/assets/data/move';
 import {
   externalAssetCounts,
   externalAssets,
   externalAssetsError,
+  externalAssetsTruncated,
   externalFolders,
   focusedExternalAsset,
   focusedExternalSubfolder,
@@ -12,6 +14,7 @@ import {
   selectedExternalAssets,
   selectedExternalDirPath,
 } from '$lib/services/assets/external';
+import { planExternalReferenceRewrite } from '$lib/services/assets/external/move';
 import { processFile } from '$lib/services/assets/process';
 import { cmsConfig } from '$lib/services/config';
 
@@ -48,11 +51,28 @@ vi.mock('$lib/services/assets/external', async (importOriginal) => {
     externalAssetCounts: { current: {} },
     externalAssets: { current: undefined },
     externalAssetsError: { current: undefined },
+    externalAssetsTruncated: { current: false },
     externalFolders: { current: [] },
     focusedExternalSubfolder: { current: undefined },
     selectedCloudService: { current: undefined },
     selectedExternalDirPath: { current: '' },
     getFetchOptions: vi.fn(() => ({ apiKey: 'secret' })),
+  };
+});
+
+// The references are found and rewritten for real, but nothing is committed
+vi.mock('$lib/services/assets/data/move', async (importOriginal) => ({
+  ...(await importOriginal()),
+  saveReferenceChanges: vi.fn(),
+}));
+
+vi.mock('$lib/services/assets/external/move', async (importOriginal) => {
+  /** @type {any} */
+  const original = await importOriginal();
+
+  return {
+    ...original,
+    planExternalReferenceRewrite: vi.fn(original.planExternalReferenceRewrite),
   };
 });
 
@@ -63,6 +83,10 @@ vi.mock('$lib/services/assets/process', async (importOriginal) => ({
 
 vi.mock('$lib/services/config', () => ({
   cmsConfig: { current: undefined },
+}));
+
+vi.mock('$lib/services/contents/draft/slugs', () => ({
+  getSlugs: vi.fn(() => ({ defaultLocaleSlug: 'hello' })),
 }));
 
 /**
@@ -104,6 +128,7 @@ describe('assets/external/data', () => {
     externalAssets.current = [a, b];
     externalAssetCounts.current = {};
     externalAssetsError.current = undefined;
+    externalAssetsTruncated.current = false;
     externalFolders.current = [];
     selectedExternalDirPath.current = '';
     selectedExternalAssets.current = [a];
@@ -311,6 +336,46 @@ describe('assets/external/data', () => {
       });
     });
 
+    it('should fill the file name template with the values of the entry draft', async () => {
+      const file = new File(['x'], 'ok.png', { type: 'image/png' });
+      const options = { filename_template: 'guestpic{{release}}' };
+      const content = { release: 521 };
+      const collection = { name: 'posts' };
+
+      const draft = /** @type {any} */ ({
+        collection,
+        fileName: undefined,
+        isIndexFile: false,
+        defaultLocale: 'en',
+        currentValues: { en: content, fr: {} },
+      });
+
+      await prepareExternalUploads([file], options, { draft });
+
+      expect(processFile).toHaveBeenCalledWith(file, options, {
+        nameTemplate: 'guestpic{{release}}',
+        nameContext: {
+          collection,
+          collectionFileName: undefined,
+          content,
+          slug: 'hello',
+          isIndexFile: false,
+        },
+      });
+    });
+
+    it('should work out no entry values without a file name template', async () => {
+      const file = new File(['x'], 'ok.png', { type: 'image/png' });
+      const options = {};
+
+      await prepareExternalUploads([file], options, { draft: /** @type {any} */ ({}) });
+
+      expect(processFile).toHaveBeenCalledWith(file, options, {
+        nameTemplate: undefined,
+        nameContext: undefined,
+      });
+    });
+
     it('should not rename a file replacing an existing asset', async () => {
       const file = new File(['x'], 'ok.png', { type: 'image/png' });
       const options = { filename_template: '{{filename}}-{{uuid_short}}' };
@@ -376,17 +441,20 @@ describe('assets/external/data', () => {
       expect(result).toEqual({ oversizedFileNames: ['big.png'], invalidFileNames: ['bad.png'] });
     });
 
-    it('should report an upload failure', async () => {
+    it('should report an upload failure and reload the list, as some files may be uploaded', async () => {
+      // The first file made it before the second one failed
       service.upload.mockRejectedValue(new Error('fail'));
+      service.list.mockResolvedValue([c, a, b]);
 
-      await uploadExternalAssets([file]);
+      await uploadExternalAssets([file, new File(['y'], 'd.png', { type: 'image/png' })]);
 
       expect(externalAssetsToast.current).toEqual({
         show: true,
         status: 'error',
         message: 'uploading_files_failed',
       });
-      expect(externalAssets.current).toEqual([a, b]);
+      expect(service.list).toHaveBeenCalledWith(fetchOptions);
+      expect(externalAssets.current).toEqual([c, a, b]);
     });
 
     it('should replace an existing asset', async () => {
@@ -473,6 +541,25 @@ describe('assets/external/data', () => {
       await loadExternalAssets(service);
       expect(externalAssets.current).toEqual([]);
       expect(externalFolders.current).toEqual([]);
+    });
+
+    it('should tell whether the listing was cut short', async () => {
+      vi.mocked(service.browse).mockResolvedValueOnce({
+        assets: [a],
+        folders: [],
+        truncated: true,
+      });
+      await loadExternalAssets(service);
+      expect(externalAssetsTruncated.current).toBe(true);
+
+      // A complete listing, or a failed one, clears the flag
+      await loadExternalAssets(service);
+      expect(externalAssetsTruncated.current).toBe(false);
+
+      externalAssetsTruncated.current = true;
+      vi.mocked(service.browse).mockRejectedValueOnce(new Error('offline'));
+      await loadExternalAssets(service);
+      expect(externalAssetsTruncated.current).toBe(false);
     });
 
     it('should upload files to the folder being browsed', async () => {
@@ -564,6 +651,34 @@ describe('assets/external/data', () => {
       expect(focusedExternalSubfolder.current).toEqual({ name: '2024', path: '2024' });
     });
 
+    it('should refuse to rename a folder onto an existing one', async () => {
+      // `other` is an empty folder kept by a placeholder, and `2024` holds files
+      expect(await renameExternalFolder({ name: '2024', path: '2024' }, 'other')).toBe(false);
+      expect(await renameExternalFolder({ name: 'other', path: 'other' }, '2024')).toBe(false);
+      expect(service.move).not.toHaveBeenCalled();
+      expect(service.createFolder).not.toHaveBeenCalled();
+      expect(service.deleteFolder).not.toHaveBeenCalled();
+      expect(externalAssetsToast.current.message).toBe('renaming_folder_failed');
+    });
+
+    it('should point the entries at the files’ new URLs, or move the files back', async () => {
+      vi.mocked(saveReferenceChanges).mockRejectedValueOnce(new Error('Commit failed'));
+
+      expect(await renameExternalFolder({ name: '2024', path: '2024' }, '2025')).toBe(false);
+
+      expect(planExternalReferenceRewrite).toHaveBeenCalledWith([spring, nested]);
+      expect(vi.mocked(saveReferenceChanges).mock.calls[0][0].newURLs).toHaveLength(2);
+      // Moved there and back, and the placeholders are left alone
+      expect(service.move).toHaveBeenNthCalledWith(
+        3,
+        expect.objectContaining({ id: '2025/spring.png' }),
+        '2024/spring.png',
+        fetchOptions,
+      );
+      expect(service.createFolder).not.toHaveBeenCalled();
+      expect(externalAssetsToast.current.message).toBe('renaming_folder_failed');
+    });
+
     it('should report a failure to rename a folder and reload the list', async () => {
       vi.mocked(service.move).mockRejectedValue(new Error('denied'));
 
@@ -603,6 +718,77 @@ describe('assets/external/data', () => {
       expect(service.delete).toHaveBeenCalledWith([], fetchOptions);
       expect(service.deleteFolder).toHaveBeenCalledExactlyOnceWith('other', fetchOptions);
       expect(focusedExternalSubfolder.current).toBeUndefined();
+    });
+
+    describe('on a service that lists a folder in full', () => {
+      // A file the asset list left out, as the service holds more files than it lists at once
+      const unlisted = { ...createAsset('2024/unlisted.png'), fileName: 'unlisted.png' };
+
+      beforeEach(() => {
+        // Only the folder being renamed or deleted holds anything
+        service.listFolder = vi.fn(async (dirPath) =>
+          dirPath === '2024'
+            ? { assets: [spring, nested, unlisted], folders: ['2024/empty', '2024/unlisted-empty'] }
+            : { assets: [], folders: [] },
+        );
+      });
+
+      it('should rename every file below the folder, listed or not', async () => {
+        expect(await renameExternalFolder({ name: '2024', path: '2024' }, '2025')).toBe(true);
+
+        expect(service.listFolder).toHaveBeenCalledWith('2024', fetchOptions);
+        expect(service.move).toHaveBeenCalledTimes(3);
+        expect(service.move).toHaveBeenCalledWith(unlisted, '2025/unlisted.png', fetchOptions);
+        expect(service.createFolder).toHaveBeenCalledWith('2025/unlisted-empty', fetchOptions);
+        expect(service.deleteFolder).toHaveBeenCalledWith('2024/unlisted-empty', fetchOptions);
+      });
+
+      it('should refuse to rename a folder onto an existing one the list left out', async () => {
+        // A file or an empty folder kept by a placeholder at the destination, which the list the
+        // new name was picked against doesn’t have
+        const existing = { ...createAsset('2025/x.png'), fileName: 'x.png' };
+
+        vi.mocked(service.listFolder).mockImplementation(async (/** @type {string} */ dirPath) =>
+          dirPath === '2025'
+            ? { assets: [existing], folders: [] }
+            : { assets: [spring], folders: dirPath === 'else' ? ['else'] : [] },
+        );
+
+        expect(await renameExternalFolder({ name: '2024', path: '2024' }, '2025')).toBe(false);
+        expect(service.listFolder).toHaveBeenCalledWith('2025', fetchOptions);
+        expect(externalAssetsToast.current.message).toBe('renaming_folder_failed');
+
+        expect(await renameExternalFolder({ name: '2024', path: '2024' }, 'else')).toBe(false);
+        expect(service.listFolder).toHaveBeenCalledWith('else', fetchOptions);
+
+        expect(service.move).not.toHaveBeenCalled();
+        expect(service.createFolder).not.toHaveBeenCalled();
+        expect(service.deleteFolder).not.toHaveBeenCalled();
+        // The list is reloaded either way
+        expect(service.browse).toHaveBeenCalledTimes(2);
+      });
+
+      it('should delete every file below the folder, listed or not', async () => {
+        expect(await deleteExternalFolder({ name: '2024', path: '2024' })).toBe(true);
+
+        expect(service.listFolder).toHaveBeenCalledWith('2024', fetchOptions);
+        expect(service.delete).toHaveBeenCalledWith([spring, nested, unlisted], fetchOptions);
+        expect(service.deleteFolder).toHaveBeenCalledWith('2024/unlisted-empty', fetchOptions);
+        expect(externalAssets.current).toEqual([a]);
+        expect(externalFolders.current).toEqual(['other']);
+      });
+
+      it('should report a failure to list the folder without touching any file', async () => {
+        vi.mocked(service.listFolder).mockRejectedValue(new Error('denied'));
+
+        expect(await deleteExternalFolder({ name: '2024', path: '2024' })).toBe(false);
+        expect(service.delete).not.toHaveBeenCalled();
+        expect(externalAssetsToast.current.message).toBe('deleting_folder_failed');
+
+        expect(await renameExternalFolder({ name: '2024', path: '2024' }, '2025')).toBe(false);
+        expect(service.move).not.toHaveBeenCalled();
+        expect(externalAssetsToast.current.message).toBe('renaming_folder_failed');
+      });
     });
 
     it('should report a failure to delete a folder and reload the list', async () => {
@@ -686,6 +872,56 @@ describe('assets/external/data', () => {
       expect(assetUpdatesToast.current).toEqual(
         expect.objectContaining({ renamed: true, count: 1 }),
       );
+    });
+
+    it('should point the entries using the asset at its new URL', async () => {
+      const renamed = { ...createAsset('z.png'), downloadURL: 'https://cdn/z.png' };
+
+      service.rename.mockResolvedValue(renamed);
+
+      await renameExternalAsset(a, 'z.png');
+
+      expect(planExternalReferenceRewrite).toHaveBeenCalledWith([a]);
+      expect(saveReferenceChanges).toHaveBeenCalledWith({
+        plan: expect.objectContaining({ targets: [{ url: a.downloadURL }] }),
+        newURLs: ['https://cdn/z.png'],
+        commitType: 'uploadMedia',
+      });
+    });
+
+    it('should rename the asset back when the entries can’t be saved', async () => {
+      const renamed = createAsset('z.png');
+
+      service.rename.mockResolvedValueOnce(renamed);
+      vi.mocked(saveReferenceChanges).mockRejectedValueOnce(new Error('Commit failed'));
+
+      expect(await renameExternalAsset(a, 'z.png')).toBeUndefined();
+
+      expect(service.rename).toHaveBeenLastCalledWith(renamed, 'a.png', fetchOptions);
+      expect(externalAssets.current).toEqual([a, b]);
+      expect(externalAssetsToast.current.message).toBe('renaming_asset_failed');
+    });
+
+    it('should leave the asset renamed when it can’t be renamed back', async () => {
+      const renamed = createAsset('z.png');
+
+      service.rename.mockResolvedValueOnce(renamed).mockRejectedValueOnce(new Error('Gone'));
+      vi.mocked(saveReferenceChanges).mockRejectedValueOnce(new Error('Commit failed'));
+
+      expect(await renameExternalAsset(a, 'z.png')).toBeUndefined();
+
+      // eslint-disable-next-line no-console
+      expect(console.error).toHaveBeenCalledWith(new Error('Gone'));
+      expect(externalAssetsToast.current.message).toBe('renaming_asset_failed');
+    });
+
+    it('should refuse when the entries using the asset can’t be updated', async () => {
+      vi.mocked(planExternalReferenceRewrite).mockRejectedValueOnce(new Error('Read-only'));
+
+      expect(await renameExternalAsset(a, 'z.png')).toBeUndefined();
+
+      expect(service.rename).not.toHaveBeenCalled();
+      expect(externalAssetsToast.current.message).toBe('renaming_asset_failed');
     });
 
     it('should do nothing when the service cannot rename', async () => {

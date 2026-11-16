@@ -2,12 +2,12 @@ import { sleep } from '@sveltia/utils/misc';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
-  assertResponseOK,
   browseObjects,
   createObjectStorageOperations,
   deleteObjects,
   fetchListing,
   getRenamedPath,
+  listFolderObjects,
   listObjects,
   replaceObject,
   searchObjects,
@@ -60,7 +60,9 @@ describe('integrations/media-libraries/cloud/shared/object-storage', () => {
       ),
     ),
     putObject: vi.fn(async ({ key }) => ({ key })),
+    copyObject: vi.fn(async ({ key }) => ({ key })),
     deleteObject: vi.fn(async () => undefined),
+    putFolderObject: vi.fn(async () => undefined),
   };
 
   beforeEach(() => {
@@ -86,6 +88,7 @@ describe('integrations/media-libraries/cloud/shared/object-storage', () => {
           { key: 'uploads/2024/beach.png' },
         ],
         folders: ['2024', '2024/summer'],
+        truncated: false,
       });
       expect(provider.listPage).toHaveBeenNthCalledWith(1, {
         config,
@@ -106,7 +109,27 @@ describe('integrations/media-libraries/cloud/shared/object-storage', () => {
       const result = await fetchListing(provider, config, options, { maxPages: 1 });
 
       expect(result.files).toHaveLength(2);
+      // The objects on the next page are left out, which the caller is told about
+      expect(result.truncated).toBe(true);
       expect(provider.listPage).toHaveBeenCalledTimes(1);
+    });
+
+    it('should list the objects below the given folder', async () => {
+      pages = [[{ key: 'uploads/2024/' }, { key: 'uploads/2024/beach.png' }]];
+
+      const result = await fetchListing(provider, config, options, { dirPath: '2024' });
+
+      expect(result).toEqual({
+        files: [{ key: 'uploads/2024/beach.png' }],
+        folders: ['2024'],
+        truncated: false,
+      });
+      expect(provider.listPage).toHaveBeenCalledWith({
+        config,
+        credential: 'secret',
+        prefix: 'uploads/2024/',
+        cursor: undefined,
+      });
     });
 
     it('should reject when the credential is missing', async () => {
@@ -114,6 +137,28 @@ describe('integrations/media-libraries/cloud/shared/object-storage', () => {
         'Credential is required',
       );
       expect(provider.listPage).not.toHaveBeenCalled();
+    });
+
+    it('should refuse to send the credential to a custom endpoint over plain HTTP', async () => {
+      const insecureConfig = /** @type {any} */ ({ ...config, endpoint: 'http://example.com' });
+
+      await expect(fetchListing(provider, insecureConfig, options)).rejects.toThrow(
+        'Refusing to send credentials over an insecure connection',
+      );
+      expect(provider.listPage).not.toHaveBeenCalled();
+    });
+
+    it('should allow a custom endpoint over HTTPS or on the local computer', async () => {
+      await Promise.all(
+        ['https://example.com', 'http://localhost:10000', 'http://127.0.0.1:9000'].map(
+          async (endpoint) => {
+            const endpointConfig = /** @type {any} */ ({ ...config, endpoint });
+            const result = await fetchListing(provider, endpointConfig, options);
+
+            expect(result.files).toHaveLength(3);
+          },
+        ),
+      );
     });
   });
 
@@ -146,6 +191,45 @@ describe('integrations/media-libraries/cloud/shared/object-storage', () => {
       expect(assets).toHaveLength(2);
       expect(folders).toEqual(['2024', '2024/summer']);
     });
+
+    it('should tell whether the listing was cut short', async () => {
+      expect((await browseObjects(provider, config, options)).truncated).toBe(false);
+
+      // 11 pages are more than the 10 listed at once
+      pages = Array.from({ length: 11 }, (_, index) => [{ key: `uploads/${index}.jpg` }]);
+
+      const { assets, truncated } = await browseObjects(provider, config, options);
+
+      expect(assets).toHaveLength(10);
+      expect(truncated).toBe(true);
+    });
+  });
+
+  describe('listFolderObjects', () => {
+    it('should list every file and folder below the folder, past the page limit', async () => {
+      // 12 pages are more than the 10 the asset list fetches, yet every one is listed
+      pages = [
+        [{ key: 'uploads/2024/' }, { key: 'uploads/2024/notes.txt' }],
+        ...Array.from({ length: 10 }, (_, index) => [{ key: `uploads/2024/${index}.jpg` }]),
+        [{ key: 'uploads/2024/summer/' }, { key: 'uploads/2024/summer/beach.png' }],
+      ];
+
+      // The kind filter is ignored, as a folder operation acts on every file
+      const { assets, folders } = await listFolderObjects(provider, '2024', config, {
+        ...options,
+        kind: 'image',
+      });
+
+      expect(assets).toHaveLength(12);
+      expect(assets.map(({ id }) => id)).toContain('uploads/2024/notes.txt');
+      expect(assets.at(-1)?.id).toBe('uploads/2024/summer/beach.png');
+      expect(folders).toEqual(['2024', '2024/summer']);
+      expect(provider.listPage).toHaveBeenCalledTimes(12);
+      expect(provider.listPage).toHaveBeenCalledWith(
+        expect.objectContaining({ prefix: 'uploads/2024/' }),
+      );
+      expect(provider.parseResults).toHaveBeenCalledWith(expect.any(Array), config, 'secret');
+    });
   });
 
   describe('searchObjects', () => {
@@ -157,9 +241,14 @@ describe('integrations/media-libraries/cloud/shared/object-storage', () => {
   });
 
   describe('uploadObjects', () => {
+    beforeEach(() => {
+      pages = [[{ key: 'uploads/2024/' }, { key: 'uploads/2024/beach.png' }]];
+    });
+
     it('should return an empty array when there is no file', async () => {
       expect(await uploadObjects(provider, [], config, { apiKey: '' })).toEqual([]);
       expect(provider.requireCredential).not.toHaveBeenCalled();
+      expect(provider.listPage).not.toHaveBeenCalled();
     });
 
     it('should upload the files to the given folder, one by one', async () => {
@@ -187,10 +276,100 @@ describe('integrations/media-libraries/cloud/shared/object-storage', () => {
       expect(sleep).not.toHaveBeenCalled();
     });
 
-    it('should keep a file name that has no segment', async () => {
-      const assets = await uploadObjects(provider, [new File(['a'], '/')], config, options);
+    it('should list the files right in the folder, to the end of the listing', async () => {
+      pages = Array.from({ length: 12 }, (_, index) => [{ key: `uploads/2024/${index}.jpg` }]);
 
-      expect(assets.map(({ id }) => id)).toEqual(['uploads//']);
+      const assets = await uploadObjects(provider, [new File(['a'], '11.jpg')], config, {
+        ...options,
+        dirPath: '2024',
+      });
+
+      expect(provider.listPage).toHaveBeenCalledTimes(12);
+      expect(provider.listPage).toHaveBeenCalledWith(
+        expect.objectContaining({ prefix: 'uploads/2024/', delimiter: '/' }),
+      );
+      expect(assets.map(({ id }) => id)).toEqual(['uploads/2024/11-1.jpg']);
+    });
+
+    it('should rename a file whose name is taken in the folder', async () => {
+      pages = [
+        [
+          { key: 'uploads/' },
+          { key: 'uploads/photo.jpg' },
+          { key: 'uploads/photo-1.jpg' },
+          { key: 'uploads/Notes.TXT' },
+        ],
+      ];
+
+      const assets = await uploadObjects(
+        provider,
+        [new File(['a'], 'photo.jpg'), new File(['b'], 'notes.txt'), new File(['c'], 'new.jpg')],
+        config,
+        options,
+      );
+
+      expect(assets.map(({ id }) => id)).toEqual([
+        'uploads/photo-2.jpg',
+        'uploads/notes-1.txt',
+        'uploads/new.jpg',
+      ]);
+      expect(provider.putObject).not.toHaveBeenCalledWith(
+        expect.objectContaining({ key: 'uploads/photo.jpg' }),
+      );
+    });
+
+    it('should rename a file whose name is taken by an earlier file in the batch', async () => {
+      // e.g. `photo.jpg` and `photo.png` converted to WebP, or two files from a dropped folder
+      const assets = await uploadObjects(
+        provider,
+        [
+          new File(['a'], 'photo.webp'),
+          new File(['b'], 'b/photo.webp'),
+          new File(['c'], 'photo.webp'),
+        ],
+        config,
+        { ...options, dirPath: '2024' },
+      );
+
+      expect(assets.map(({ id }) => id)).toEqual([
+        'uploads/2024/photo.webp',
+        'uploads/2024/photo-1.webp',
+        'uploads/2024/photo-2.webp',
+      ]);
+    });
+
+    it('should not avoid the names of the files in a subfolder', async () => {
+      // A service that ignores the delimiter lists the files in the subfolders as well, like
+      // `uploads/2024/beach.png` here
+
+      const assets = await uploadObjects(provider, [new File(['a'], 'beach.png')], config, options);
+
+      expect(assets.map(({ id }) => id)).toEqual(['uploads/beach.png']);
+    });
+
+    it('should match the existing names regardless of the Unicode normalization', async () => {
+      pages = [[{ key: 'uploads/cafe\u0301.jpg' }]];
+
+      const assets = await uploadObjects(
+        provider,
+        [new File(['a'], 'caf\u00e9.jpg')],
+        config,
+        options,
+      );
+
+      expect(assets.map(({ id }) => id)).toEqual(['uploads/caf\u00e9-1.jpg']);
+    });
+
+    it('should reject a file name that has nothing left once sanitized', async () => {
+      const files = [new File(['a'], 'a.jpg'), new File(['b'], '..')];
+
+      await expect(uploadObjects(provider, files, config, options)).rejects.toThrow(
+        'Invalid file name: ..',
+      );
+      await expect(
+        uploadObjects(provider, [new File(['a'], '/')], config, options),
+      ).rejects.toThrow('Invalid file name: /');
+      expect(provider.putObject).not.toHaveBeenCalled();
     });
   });
 
@@ -218,6 +397,16 @@ describe('integrations/media-libraries/cloud/shared/object-storage', () => {
       await expect(deleteObjects(provider, [], config, { apiKey: '' })).rejects.toThrow(
         'Credential is required',
       );
+    });
+
+    it('should refuse to send the credential to a custom endpoint over plain HTTP', async () => {
+      const insecureConfig = /** @type {any} */ ({ ...config, endpoint: 'http://example.com' });
+      const assets = [/** @type {ExternalAsset} */ ({ id: 'uploads/a.jpg' })];
+
+      await expect(deleteObjects(provider, assets, insecureConfig, options)).rejects.toThrow(
+        'Refusing to send credentials over an insecure connection',
+      );
+      expect(provider.deleteObject).not.toHaveBeenCalled();
     });
   });
 
@@ -252,41 +441,8 @@ describe('integrations/media-libraries/cloud/shared/object-storage', () => {
     });
   });
 
-  describe('assertResponseOK', () => {
-    it('should resolve when the response is OK', async () => {
-      await expect(
-        assertResponseOK(new Response('ok', { status: 200 }), 'Failed'),
-      ).resolves.toBeUndefined();
-    });
-
-    it('should throw with the response body appended to the message', async () => {
-      await expect(
-        assertResponseOK(new Response('Access Denied', { status: 403 }), 'Failed to list objects'),
-      ).rejects.toThrow(new Error('Failed to list objects: Access Denied'));
-    });
-
-    it('should throw on a 404 response unless it’s allowed', async () => {
-      await expect(
-        assertResponseOK(new Response('Not Found', { status: 404 }), 'Failed'),
-      ).rejects.toThrow('Failed: Not Found');
-      await expect(
-        assertResponseOK(new Response('Not Found', { status: 404 }), 'Failed', {
-          allowNotFound: true,
-        }),
-      ).resolves.toBeUndefined();
-    });
-  });
-
   describe('createObjectStorageOperations', () => {
-    const move = vi.fn(async (/** @type {ExternalAsset} */ asset) => asset);
-    const createFolder = vi.fn(async () => undefined);
-    const deleteFolder = vi.fn(async () => undefined);
-
-    const operations = createObjectStorageOperations(provider, {
-      move,
-      createFolder,
-      deleteFolder,
-    });
+    const operations = createObjectStorageOperations(provider);
 
     it('should bind the provider to the shared operations', async () => {
       expect((await operations.list(config, options)).map(({ id }) => id)).toEqual([
@@ -295,6 +451,10 @@ describe('integrations/media-libraries/cloud/shared/object-storage', () => {
         'uploads/2024/beach.png',
       ]);
       expect((await operations.browse(config, options)).folders).toEqual(['2024', '2024/summer']);
+      expect((await operations.listFolder('2024', config, options)).folders).toEqual([
+        '2024',
+        '2024/summer',
+      ]);
       expect((await operations.search('beach', config, options)).map(({ id }) => id)).toEqual([
         'uploads/2024/beach.png',
       ]);
@@ -324,15 +484,94 @@ describe('integrations/media-libraries/cloud/shared/object-storage', () => {
     it('should rename a file by moving it within its folder', async () => {
       const asset = /** @type {ExternalAsset} */ ({ id: 'uploads/2024/a.jpg' });
 
-      await operations.rename(asset, 'b.jpg', config, options);
-
-      expect(move).toHaveBeenCalledWith(asset, '2024/b.jpg', config, options);
+      expect((await operations.rename(asset, 'b.jpg', config, options)).id).toBe(
+        'uploads/2024/b.jpg',
+      );
+      expect(provider.copyObject).toHaveBeenCalledWith({
+        asset,
+        key: 'uploads/2024/b.jpg',
+        config,
+        credential: 'secret',
+      });
     });
 
-    it('should pass the service-specific operations through', () => {
-      expect(operations.move).toBe(move);
-      expect(operations.createFolder).toBe(createFolder);
-      expect(operations.deleteFolder).toBe(deleteFolder);
+    it('should refuse to rename a file over another one in its folder', async () => {
+      const asset = /** @type {ExternalAsset} */ ({ id: 'uploads/2024/a.jpg' });
+
+      // The file isn’t necessarily in the listing the user has seen, so the folder is listed again
+      pages = [[{ key: 'uploads/2024/a.jpg' }], [{ key: 'uploads/2024/b.jpg' }]];
+
+      await expect(operations.rename(asset, 'b.jpg', config, options)).rejects.toThrow(
+        'A file named “b.jpg” already exists in the folder.',
+      );
+      expect(provider.copyObject).not.toHaveBeenCalled();
+
+      // The file’s own name isn’t taken
+      await expect(operations.rename(asset, 'a.jpg', config, options)).resolves.toEqual(
+        expect.objectContaining({ id: 'uploads/2024/a.jpg' }),
+      );
+    });
+
+    it('should move a file by copying it and deleting the source', async () => {
+      const asset = /** @type {ExternalAsset} */ ({ id: 'uploads/a.jpg' });
+
+      expect((await operations.move(asset, '2024/a.jpg', config, options)).id).toBe(
+        'uploads/2024/a.jpg',
+      );
+      expect(provider.copyObject).toHaveBeenCalledWith({
+        asset,
+        key: 'uploads/2024/a.jpg',
+        config,
+        credential: 'secret',
+      });
+      expect(provider.deleteObject).toHaveBeenCalledWith({
+        key: 'uploads/a.jpg',
+        config,
+        credential: 'secret',
+      });
+      expect(provider.parseResults).toHaveBeenLastCalledWith(
+        [{ key: 'uploads/2024/a.jpg' }],
+        config,
+        'secret',
+      );
+    });
+
+    it('should keep the source when the copy fails', async () => {
+      vi.mocked(provider.copyObject).mockRejectedValueOnce(new Error('Failed to copy'));
+
+      await expect(
+        operations.move(/** @type {ExternalAsset} */ ({ id: 'uploads/a.jpg' }), 'b.jpg', config, {
+          ...options,
+        }),
+      ).rejects.toThrow('Failed to copy');
+      expect(provider.deleteObject).not.toHaveBeenCalled();
+    });
+
+    it('should create a folder by putting a placeholder object', async () => {
+      await operations.createFolder('2024/summer', config, options);
+
+      expect(provider.putFolderObject).toHaveBeenCalledWith({
+        key: 'uploads/2024/summer/',
+        config,
+        credential: 'secret',
+      });
+      await expect(operations.createFolder('2024', config, { apiKey: '' })).rejects.toThrow(
+        'Credential is required',
+      );
+    });
+
+    it('should delete the placeholder object of a folder, if any', async () => {
+      await operations.deleteFolder('2024/summer', config, options);
+
+      expect(provider.deleteObject).toHaveBeenCalledWith({
+        key: 'uploads/2024/summer/',
+        config,
+        credential: 'secret',
+        allowNotFound: true,
+      });
+      await expect(operations.deleteFolder('2024', config, { apiKey: '' })).rejects.toThrow(
+        'Credential is required',
+      );
     });
   });
 });

@@ -7,15 +7,21 @@
   import { GridRow } from '@sveltia/ui';
 
   import EntryListItemCells from '$lib/components/contents/list/entry-list-item-cells.svelte';
-  import { encodeRoutePath, goto } from '$lib/services/app/navigation';
+  import { goto } from '$lib/services/app/navigation';
   import { selectedEntries } from '$lib/services/contents/collection/entries';
   import { listedEntryIndexMap } from '$lib/services/contents/collection/view';
+  import { getEntryEditorPath } from '$lib/services/contents/editor/route';
   import { getEntrySummary } from '$lib/services/contents/entry/summary';
   import { toggleListItem } from '$lib/services/utils/array';
   import { openAuthoring } from '$lib/services/workflow/open-authoring';
 
   /**
-   * @import { Entry, InternalEntryCollection, ViewType } from '$lib/types/private';
+   * @import {
+   * Entry,
+   * EntryTableColumn,
+   * InternalEntryCollection,
+   * ViewType,
+   * } from '$lib/types/private';
    */
 
   /**
@@ -23,24 +29,23 @@
    * @property {InternalEntryCollection} collection Selected collection.
    * @property {Entry} entry Entry.
    * @property {ViewType} viewType View type.
+   * @property {EntryTableColumn[]} [columns] Columns of the table view.
    */
 
   /** @type {Props} */
-  let {
-    /* eslint-disable prefer-const */
-    collection,
-    entry,
-    viewType,
-    /* eslint-enable prefer-const */
-  } = $props();
+  let { collection, entry, viewType, columns = [] } = $props();
 
-  // `aria-rowindex` is 1-based, unlike the index map. `undefined` for an entry that has never been
-  // published, as those are listed in a separate group above `listedEntries`. The attribute is then
-  // omitted rather than set to an invalid index.
+  // `aria-rowindex` is 1-based, unlike the index map. `undefined` for an entry that isn’t listed,
+  // e.g. one filtered out, so the attribute is omitted rather than set to an invalid index.
   const rowIndex = $derived.by(() => {
     const index = listedEntryIndexMap.current.get(entry.id);
 
-    return index === undefined ? undefined : index + 1;
+    if (index === undefined) {
+      return undefined;
+    }
+
+    // The table view’s header row comes first
+    return viewType === 'table' ? index + 2 : index + 1;
   });
 
   /* v8 ignore start -- the app locale is always set once the UI strings are loaded */
@@ -66,7 +71,7 @@
     updateSelection(event.detail.selected);
   }}
   onclick={() => {
-    goto(encodeRoutePath(`/collections/${collection.name}/entries/${entry.subPath}`), {
+    goto(getEntryEditorPath(collection.name, entry.subPath), {
       transitionType: 'forwards',
     });
   }}
@@ -77,6 +82,7 @@
     {collection}
     {entry}
     {viewType}
+    {columns}
     showCheckbox={!openAuthoring.current}
     onSelect={updateSelection}
   />

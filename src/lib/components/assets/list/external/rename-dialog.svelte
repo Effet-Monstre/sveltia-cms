@@ -1,8 +1,9 @@
 <!--
   @component
-  Rename Asset dialog for an asset on a cloud storage service. Unlike the dialog for repository
-  assets, there are no entries to update, and the new name is checked against the other assets in
-  the same virtual folder on the service.
+  Rename Asset dialog for an asset on a cloud storage service. As with repository assets, the
+  entries linking to the asset are pointed at its new URL, and the dialog opens once they have been
+  found, so it can tell how many will be updated, or refuse the rename if they can’t be. The new
+  name is checked against the other assets in the same virtual folder on the service.
 -->
 <script>
   import { getPathInfo } from '@sveltia/utils/file';
@@ -17,11 +18,19 @@
     selectedCloudService,
   } from '$lib/services/assets/external';
   import { renameExternalAsset } from '$lib/services/assets/external/data';
+  import { getExternalAssetUsedEntries } from '$lib/services/assets/external/details';
+  import { getExternalChangeBlockedMessage } from '$lib/services/assets/external/move';
+  import { createUsedEntriesState } from '$lib/services/assets/used-entries.svelte';
 
   const asset = $derived(renamingExternalAsset.current);
-  // Open while there’s an asset to act on. Closing the dialog writes `open` back, and the asset is
-  // let go of once the dialog has closed
-  let open = $derived(!!asset);
+  /** Entries linking to the asset, which are updated along with the rename. */
+  const usedEntries = createUsedEntriesState(() =>
+    asset ? getExternalAssetUsedEntries(asset) : undefined,
+  );
+  // Open while there’s an asset to act on, once the entries using it have been found, so the rename
+  // can be refused up front. Closing the dialog writes `open` back, and the asset is let go of once
+  // the dialog has closed
+  let open = $derived(!!asset && !!usedEntries.entries);
   /* v8 ignore start -- the dialog is only shown for a listed asset */
   const { dirname } = $derived(getPathInfo(asset?.id ?? ''));
   const listedAssets = $derived(externalAssets.current ?? []);
@@ -32,6 +41,9 @@
       .filter((a) => a.id !== asset?.id && getPathInfo(a.id).dirname === dirname)
       .map((a) => a.fileName),
   );
+
+  // The rename is refused up front if the entries can’t be updated
+  const blockedMessage = $derived(getExternalChangeBlockedMessage(usedEntries.entries ?? [], 1));
 
   /**
    * Rename the asset. Also, update the URL hash silently to reflect the new asset ID if the rename
@@ -63,6 +75,8 @@
   bind:open
   name={asset?.fileName ?? ''}
   {otherNames}
+  usedEntryCount={usedEntries.entries?.length}
+  {blockedMessage}
   onRename={renameAsset}
   onClose={() => {
     renamingExternalAsset.current = undefined;

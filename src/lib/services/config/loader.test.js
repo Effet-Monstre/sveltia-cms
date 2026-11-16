@@ -440,6 +440,45 @@ describe('config/loader', () => {
       });
     });
 
+    test('should not let a merged config file set the prototype of the result', async () => {
+      const mockLinks = [
+        { href: 'base-config.json', type: 'application/json' },
+        { href: 'override-config.json', type: 'application/json' },
+      ];
+
+      document.querySelectorAll.mockReturnValue(mockLinks);
+
+      fetch
+        .mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          /**
+           *
+           */
+          json: () =>
+            Promise.resolve(JSON.parse('{"__proto__":{"base":true},"backend":{"name":"github"}}')),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          /**
+           *
+           */
+          json: () =>
+            Promise.resolve(
+              JSON.parse('{"__proto__":{"polluted":true},"backend":{"__proto__":{"x":1}}}'),
+            ),
+        });
+
+      const result = await fetchCmsConfig();
+
+      expect(Object.getPrototypeOf(result)).toBe(Object.prototype);
+      expect(Object.getPrototypeOf(result.backend)).toBe(Object.prototype);
+      expect(result).toEqual({ backend: { name: 'github' } });
+      expect(/** @type {any} */ (result).base).toBeUndefined();
+      expect(/** @type {any} */ (result).polluted).toBeUndefined();
+    });
+
     test('should handle JSON config files', async () => {
       const mockLinks = [{ href: 'config.json', type: 'application/json' }];
 
@@ -454,6 +493,18 @@ describe('config/loader', () => {
       const result = await fetchCmsConfig();
 
       expect(result).toEqual({ backend: { name: 'gitlab' } });
+    });
+
+    test('should handle legacy application/x-yaml type', async () => {
+      fetch.mockResolvedValue({
+        ok: true,
+        status: 200,
+        text: () => Promise.resolve('backend:\n  name: gitea'),
+      });
+
+      const result = await fetchFile({ href: '/config.yml', type: 'application/x-yaml' });
+
+      expect(result).toEqual({ backend: { name: 'gitea' } });
     });
 
     test('should throw error for unsupported file type', async () => {

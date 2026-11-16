@@ -6,15 +6,16 @@ import {
   checkRepositoryAccess,
   fetchDefaultBranchName,
   getBaseURLs,
+  isRateLimited,
   repository,
 } from '$lib/services/backends/git/github/repository';
 import { fetchAPI, fetchGraphQL } from '$lib/services/backends/git/shared/api';
 
 // Mock dependencies
 vi.mock('$lib/services/backends/git/shared/api');
-vi.mock('@sveltia/i18n', () => ({
-  _: vi.fn(() => 'Translation message'),
-}));
+vi.mock('@sveltia/i18n', async () =>
+  (await import('$lib/test/i18n')).createI18nMock({ values: true }),
+);
 
 describe('GitHub repository service', () => {
   beforeEach(() => {
@@ -41,6 +42,14 @@ describe('GitHub repository service', () => {
       });
     });
 
+    test('encodes a branch name with a character that ends a URL path', () => {
+      const repoURL = 'https://github.com/owner/repo';
+      const result = getBaseURLs(repoURL, 'cms/posts/c#');
+
+      expect(result.treeBaseURL).toBe(`${repoURL}/tree/cms/posts/c%23`);
+      expect(result.blobBaseURL).toBe(`${repoURL}/blob/cms/posts/c%23`);
+    });
+
     test('handles undefined branch', () => {
       const repoURL = 'https://github.com/owner/repo';
       const result = getBaseURLs(repoURL, undefined);
@@ -50,6 +59,31 @@ describe('GitHub repository service', () => {
         blobBaseURL: '',
         commitBaseURL: `${repoURL}/commit`,
       });
+    });
+  });
+
+  describe('isRateLimited', () => {
+    /**
+     * Create a response with the given status and headers.
+     * @param {number} status HTTP status.
+     * @param {Record<string, string>} [headers] Headers.
+     * @returns {Response} Response.
+     */
+    const createResponse = (status, headers = {}) => new Response(null, { status, headers });
+
+    test('detects a secondary rate limit', () => {
+      expect(isRateLimited(createResponse(429))).toBe(true);
+      expect(isRateLimited(createResponse(403, { 'Retry-After': '60' }))).toBe(true);
+    });
+
+    test('detects an exhausted primary rate limit', () => {
+      expect(isRateLimited(createResponse(403, { 'X-RateLimit-Remaining': '0' }))).toBe(true);
+    });
+
+    test('ignores a refusal with requests remaining', () => {
+      expect(isRateLimited(createResponse(403, { 'X-RateLimit-Remaining': '42' }))).toBe(false);
+      expect(isRateLimited(createResponse(403))).toBe(false);
+      expect(isRateLimited(createResponse(404))).toBe(false);
     });
   });
 
@@ -74,22 +108,28 @@ describe('GitHub repository service', () => {
       );
     });
 
-    test('throws error when the user can only read the repository', async () => {
+    test('says write access is missing when the user can only read the repository', async () => {
       vi.mocked(fetchAPI).mockResolvedValue({
         ok: true,
         json: vi.fn().mockResolvedValue({ permissions: { pull: true, push: false } }),
       });
 
-      await expect(checkRepositoryAccess()).rejects.toThrow('Not a collaborator of the repository');
+      await expect(checkRepositoryAccess()).rejects.toMatchObject({
+        message: 'Not a collaborator of the repository',
+        cause: { message: 'repository_no_write_access:{"repo":"test-repo"}' },
+      });
     });
 
-    test('throws error when the repository reports no permissions', async () => {
+    test('says there is no access when the repository reports no permissions', async () => {
       vi.mocked(fetchAPI).mockResolvedValue({
         ok: true,
         json: vi.fn().mockResolvedValue({}),
       });
 
-      await expect(checkRepositoryAccess()).rejects.toThrow('Not a collaborator of the repository');
+      await expect(checkRepositoryAccess()).rejects.toMatchObject({
+        message: 'Not a collaborator of the repository',
+        cause: { message: 'repository_no_access:{"repo":"test-repo"}' },
+      });
     });
 
     test.each([401, 403, 404])(
@@ -99,9 +139,10 @@ describe('GitHub repository service', () => {
 
         vi.mocked(fetchAPI).mockResolvedValue(mockResponse);
 
-        await expect(checkRepositoryAccess()).rejects.toThrow(
-          'Not a collaborator of the repository',
-        );
+        await expect(checkRepositoryAccess()).rejects.toMatchObject({
+          message: 'Not a collaborator of the repository',
+          cause: { message: 'repository_no_access:{"repo":"test-repo"}' },
+        });
         expect(mockResponse.json).not.toHaveBeenCalled();
       },
     );

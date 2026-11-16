@@ -3,8 +3,9 @@
   import { Button } from '@sveltia/ui';
 
   import PanelContainer from '$lib/components/contents/details/sidebar/panels/panel-container.svelte';
-  import { encodeRoutePath, goto } from '$lib/services/app/navigation';
+  import { goto } from '$lib/services/app/navigation';
   import { getEntryDraftContext } from '$lib/services/contents/draft/state.svelte';
+  import { getEntryEditorPath } from '$lib/services/contents/editor/route';
   import { getBacklinks } from '$lib/services/contents/entry/relations/backlinks';
 
   /**
@@ -62,10 +63,9 @@
             class="ref"
             variant="ghost"
             onclick={() => {
-              goto(
-                encodeRoutePath(`/collections/${ref.collectionName}/entries/${ref.entry.subPath}`),
-                { transitionType: 'forwards' },
-              );
+              goto(getEntryEditorPath(ref.collectionName, ref.fileName ?? ref.entry.subPath), {
+                transitionType: 'forwards',
+              });
             }}
           >
             <span class="summary"><bdi>{ref.summary}</bdi></span>

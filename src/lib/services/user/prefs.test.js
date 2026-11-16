@@ -108,11 +108,33 @@ describe('prefs service', () => {
     expect(prefs.closeOnSave).toBe(true);
     expect(prefs.closeWithEscape).toBe(true);
     expect(prefs.underlineLinks).toBe(true);
-    expect(prefs.beta).toBe(false);
     expect(prefs.devModeEnabled).toBe(false);
+    expect(prefs.localGitCommits).toBe(false);
     expect(prefs.defaultTranslationService).toBe('google');
     expect(prefs.apiKeys).toEqual({});
     expect(prefs.locale).toBe('auto');
+  });
+
+  it('should apply default values when the stored value isn’t an object', async () => {
+    mockLocalStorage.get.mockResolvedValue('corrupt');
+
+    const { prefs, prefsError } = await import('./prefs.svelte.js');
+
+    await wait();
+
+    expect(prefsError.current).toBeUndefined();
+    expect(prefs.apiKeys).toEqual({});
+    expect(prefs.locale).toBe('auto');
+  });
+
+  it('should drop the legacy beta value', async () => {
+    mockLocalStorage.get.mockResolvedValue({ beta: true });
+
+    const { prefs } = await import('./prefs.svelte.js');
+
+    await wait();
+
+    expect(prefs).not.toHaveProperty('beta');
   });
 
   it('should set app locale when valid locale is loaded', async () => {
@@ -149,7 +171,7 @@ describe('prefs service', () => {
     mockWaitLocale.mockClear();
     mockAppLocale.set.mockClear();
 
-    prefs.beta = true;
+    prefs.devModeEnabled = true;
 
     await wait();
 
@@ -176,6 +198,78 @@ describe('prefs service', () => {
     expect(mockAppLocale.set).not.toHaveBeenCalledWith('fr');
     expect(prefs.locale).toBe('ja');
     expect(mockAppLocale.current).toBe('ja');
+  });
+
+  it('should revert to the automatic preference when a switch from it fails', async () => {
+    mockLocalStorage.get.mockResolvedValue({ locale: 'auto' });
+
+    const { prefs, navigatorLocale } = await import('./prefs.svelte.js');
+
+    navigatorLocale.current = 'ja';
+
+    await wait();
+
+    expect(mockAppLocale.current).toEqual('ja');
+
+    delete mockDictionary.fr;
+    prefs.locale = 'fr';
+
+    await wait();
+
+    // Reverting to the locale it resolved to would stop following the browser for good
+    expect(prefs.locale).toBe('auto');
+    expect(mockAppLocale.current).toBe('ja');
+  });
+
+  it('should revert to the active locale when no preference has been applied yet', async () => {
+    // The stored preference failed to load on startup, so the locale set by `initAppLocale()` is
+    // the one in use
+    mockAppLocale.current = 'en-US';
+    delete mockDictionary.fr;
+    delete mockDictionary['en-GB'];
+    mockLocalStorage.get.mockResolvedValue({ locale: 'fr' });
+
+    const { prefs } = await import('./prefs.svelte.js');
+
+    await wait();
+
+    prefs.locale = 'en-GB';
+
+    await wait();
+
+    expect(prefs.locale).toBe('en-US');
+  });
+
+  it('should not let a slow locale load override a locale picked later', async () => {
+    mockLocalStorage.get.mockResolvedValue({ locale: 'ja' });
+
+    const { prefs } = await import('./prefs.svelte.js');
+
+    await wait();
+
+    /** @type {() => void} */
+    let resolveFrench = () => undefined;
+
+    // The French strings are fetched from the CDN, while English ones are bundled
+    mockWaitLocale.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          /** Finish loading the French strings. */
+          resolveFrench = () => resolve(undefined);
+        }),
+    );
+    prefs.locale = 'fr';
+    await wait();
+    prefs.locale = 'en-US';
+    await wait();
+
+    expect(mockAppLocale.current).toBe('en-US');
+
+    resolveFrench();
+    await wait();
+
+    expect(mockAppLocale.current).toBe('en-US');
+    expect(prefs.locale).toBe('en-US');
   });
 
   it('should keep the stored locale when its strings cannot be loaded on startup', async () => {
@@ -357,9 +451,9 @@ describe('prefs service', () => {
 
     await wait();
     mockLocalStorage.set.mockClear();
-    mockLocalStorage.get.mockResolvedValue({ beta: false });
+    mockLocalStorage.get.mockResolvedValue({ devModeEnabled: false });
 
-    prefs.beta = true;
+    prefs.devModeEnabled = true;
 
     await wait();
 
@@ -374,7 +468,7 @@ describe('prefs service', () => {
 
     await wait();
 
-    prefs.beta = true;
+    prefs.devModeEnabled = true;
 
     // Should not throw
     await expect(wait()).resolves.toBeUndefined();

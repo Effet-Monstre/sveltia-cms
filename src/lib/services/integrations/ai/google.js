@@ -3,18 +3,27 @@
  * @see https://ai.google.dev/api/generate-content
  */
 
-import { postJSON } from '$lib/services/integrations/ai/api';
+import {
+  createTruncationError,
+  DEFAULT_MAX_TOKENS,
+  joinTextParts,
+  postJSON,
+} from '$lib/services/integrations/ai/api';
 
 /**
  * @import { AiCompletionOptions } from '$lib/types/private';
  */
 
+export const serviceId = 'google-ai';
+export const serviceLabel = 'Google Gemini';
 export const apiLabel = 'Gemini API';
 export const developerURL = 'https://ai.google.dev/gemini-api/docs';
 export const apiKeyURL = 'https://aistudio.google.com/api-keys';
 // Anchored, so a key for another service entered while this one is selected isn’t accepted and sent
-// to the wrong API
-export const apiKeyPattern = /^AIza[a-zA-Z0-9_-]{35}$/;
+// to the wrong API. Google AI Studio now issues `AQ.` authentication keys alongside the legacy
+// `AIza` ones.
+// @see https://discuss.ai.google.dev/t/gemini-api-key-start-from-aq/171575
+export const apiKeyPattern = /^(?:AIza[a-zA-Z0-9_-]{35}|AQ\.[a-zA-Z0-9._-]{20,})$/;
 
 /**
  * Send a message to the Google Gemini API and return the response text.
@@ -30,7 +39,7 @@ export const complete = async ({
   systemPrompt,
   userMessage,
   temperature = 0.3,
-  maxTokens = 4000,
+  maxTokens = DEFAULT_MAX_TOKENS,
   responseFormat,
 }) => {
   const data = await postJSON({
@@ -49,9 +58,12 @@ export const complete = async ({
     },
   });
 
-  if (!Array.isArray(data.candidates) || !data.candidates[0]?.content?.parts?.[0]) {
-    throw new Error('Invalid response format from Gemini API.');
+  const candidate = Array.isArray(data.candidates) ? data.candidates[0] : undefined;
+
+  if (candidate?.finishReason === 'MAX_TOKENS') {
+    throw createTruncationError('Gemini');
   }
 
-  return data.candidates[0].content.parts[0].text.trim();
+  // The answer can be split into several parts, and a thinking model can add a thought summary
+  return joinTextParts(candidate?.content?.parts, (part) => !part.thought, 'Gemini');
 };

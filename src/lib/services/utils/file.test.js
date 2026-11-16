@@ -1,14 +1,17 @@
 import { describe, expect, test, vi } from 'vitest';
 
-import { ESCAPED_PLACEHOLDER_REGEX } from '$lib/services/common/template/constants';
+import { getTemplatePattern } from '$lib/services/common/template/utils';
 import {
   createPath,
   createPathRegEx,
   encodeFilePath,
+  getBaseName,
   getBlob,
   getByteSize,
+  getDirName,
   getGitHash,
   isEquivalentFileExtension,
+  readBlobAsFile,
   renameIfNeeded,
   resolvePath,
   sanitizeFileName,
@@ -44,8 +47,34 @@ describe('Test sanitizeFileName()', () => {
 
 describe('Test renameIfNeeded()', () => {
   test('should take the highest number already used, whatever order the names come in', () => {
-    expect(renameIfNeeded('photo.png', ['photo-1.png', 'photo-0.png'])).toEqual('photo-2.png');
-    expect(renameIfNeeded('photo.png', ['photo-10.png', 'photo-9.png'])).toEqual('photo-11.png');
+    expect(renameIfNeeded('photo.png', ['photo-1.png', 'photo.png', 'photo-0.png'])).toEqual(
+      'photo-2.png',
+    );
+    expect(renameIfNeeded('photo.png', ['photo-10.png', 'photo-9.png', 'photo.png'])).toEqual(
+      'photo-11.png',
+    );
+    expect(renameIfNeeded('photo.png', ['photo.png', 'photo-0.png'])).toEqual('photo-1.png');
+    // A slug has no extension
+    expect(renameIfNeeded('my-post', ['my-post-1', 'my-post'])).toEqual('my-post-2');
+  });
+
+  test('should number a name without an extension at the end', () => {
+    expect(
+      renameIfNeeded('release-2.0', ['release-2.0', 'release-2.0-1'], { hasExtension: false }),
+    ).toEqual('release-2.0-2');
+    expect(renameIfNeeded('example.com', ['Example.com'], { hasExtension: false })).toEqual(
+      'example.com-1',
+    );
+    // A file name keeps its extension by default
+    expect(renameIfNeeded('example.com', ['example.com'])).toEqual('example-1.com');
+  });
+
+  test('should keep a name that isn’t taken, even if numbered variants of it are', () => {
+    expect(renameIfNeeded('summer.jpg', ['summer-2023.jpg'])).toEqual('summer.jpg');
+    expect(renameIfNeeded('photo.jpg', ['photo-1.jpg', 'photo-2.jpg'])).toEqual('photo.jpg');
+    expect(renameIfNeeded('my-post', ['my-post-1', 'other'])).toEqual('my-post');
+    // A different extension doesn’t clash
+    expect(renameIfNeeded('photo.jpg', ['photo.png', 'photo-1.png'])).toEqual('photo.jpg');
   });
 
   test('should treat names that only differ in case as taken', () => {
@@ -57,10 +86,12 @@ describe('Test renameIfNeeded()', () => {
   test('should not be fooled by a dot in the base name', () => {
     // The base name is everything before the last dot, so these candidates all share the `x.y.z`
     // prefix. Picking anything but the highest number would hand back a name that is already taken
-    expect(renameIfNeeded('x.y.z.png', ['x.y.z-1.png', 'x.y.z-0.png'])).toEqual('x.y.z-2.png');
-    expect(renameIfNeeded('my.photo.jpg', ['my.photo-8.jpg', 'my.photo-3.jpg'])).toEqual(
-      'my.photo-9.jpg',
+    expect(renameIfNeeded('x.y.z.png', ['x.y.z.png', 'x.y.z-1.png', 'x.y.z-0.png'])).toEqual(
+      'x.y.z-2.png',
     );
+    expect(
+      renameIfNeeded('my.photo.jpg', ['my.photo-8.jpg', 'my.photo.jpg', 'my.photo-3.jpg']),
+    ).toEqual('my.photo-9.jpg');
   });
 
   test('should leave the given list of other names alone', () => {
@@ -371,11 +402,14 @@ describe('Test resolvePath()', () => {
     expect(resolvePath('//folder/file.txt')).toBe('folder/file.txt'); // Leading empty segments are filtered
   });
 
-  test('should handle dots after all segments are removed', () => {
-    // When .. is encountered but no named segment exists before it (after first segment)
-    // This tests the case where lastIndex === -1 inside the .. handling
-    expect(resolvePath('file.txt/../..')).toBe(''); // .. after removing file.txt finds no segment
-    expect(resolvePath('a/file.txt/../../..')).toBe(''); // Going back 3 times removes all segments
+  test('should keep a `..` that goes up past the named segments', () => {
+    // The path points outside the starting folder, so the excess `..` can’t be dropped
+    expect(resolvePath('file.txt/../..')).toBe('..');
+    expect(resolvePath('a/file.txt/../../..')).toBe('..');
+    expect(resolvePath('a/../../b')).toBe('../b');
+    // A leading `..` isn’t cancelled out by a later one
+    expect(resolvePath('../a/../../b')).toBe('../../b');
+    expect(resolvePath('./a/../../b')).toBe('./../b');
     expect(resolvePath('a/b/file.txt/../..')).toBe('a'); // Going back twice: removes file.txt then b, a remains
     // Case where segment exists after going back
     expect(resolvePath('a/b/c/../../file.txt')).toBe('a/file.txt'); // Go back twice, then file.txt at same level
@@ -471,6 +505,32 @@ describe('Test createPath()', () => {
 
   test('should handle array with only falsy values', () => {
     expect(createPath([null, undefined, ''])).toBe('');
+  });
+});
+
+describe('Test getDirName()', () => {
+  test('should return the directory of a file path', () => {
+    expect(getDirName('static/images/photo.jpg')).toBe('static/images');
+    expect(getDirName('static/photo.jpg')).toBe('static');
+  });
+
+  test('should return an empty string for a file at the root', () => {
+    expect(getDirName('photo.jpg')).toBe('');
+  });
+});
+
+describe('Test getBaseName()', () => {
+  test('should return the last segment of a path', () => {
+    expect(getBaseName('static/images/photo.jpg')).toBe('photo.jpg');
+    expect(getBaseName('https://example.com/a/b_150.jpg')).toBe('b_150.jpg');
+  });
+
+  test('should return the path itself if it has no slash', () => {
+    expect(getBaseName('photo.jpg')).toBe('photo.jpg');
+  });
+
+  test('should return an empty string for a path ending with a slash', () => {
+    expect(getBaseName('static/images/')).toBe('');
   });
 });
 
@@ -610,14 +670,9 @@ describe('Test createPathRegEx()', () => {
   });
 
   test('should handle brackets with template tags', () => {
-    const regex = createPathRegEx('app/(pages)/{{slug}}.md', (segment) => {
-      // First escape special regex chars including parentheses
-      let escaped = segment.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-
-      // Then replace escaped template placeholders with wildcard
-      escaped = escaped.replace(ESCAPED_PLACEHOLDER_REGEX, '.+?');
-      return escaped;
-    });
+    const regex = createPathRegEx('app/(pages)/{{slug}}.md', (segment) =>
+      getTemplatePattern(segment, '.+?'),
+    );
 
     expect(regex.test('app/(pages)/my-post.md')).toBe(true);
     expect(regex.test('app/(pages)/another.md')).toBe(true);
@@ -637,5 +692,16 @@ describe('Test createPathRegEx()', () => {
     const result = 'src/assets/images/666-test/photo.jpg'.replace(regex, '/@assets/images/$<slug>');
 
     expect(result).toBe('/@assets/images/666-test/photo.jpg');
+  });
+});
+
+describe('readBlobAsFile()', () => {
+  test('copies the bytes and type of a blob into a named file', async () => {
+    const file = await readBlobAsFile(new Blob(['png'], { type: 'image/png' }), 'a.png');
+
+    expect(file).toBeInstanceOf(File);
+    expect(file.name).toBe('a.png');
+    expect(file.type).toBe('image/png');
+    expect(await file.text()).toBe('png');
   });
 });

@@ -1091,7 +1091,7 @@ edit_slug_error:
   invalid: El slug no pot contenir caràcters especials, incloses les barres i els espais.
   duplicate: Aquest slug ja s’usa per a una altra entrada.
 
-# Entry path editing in a nested collection
+# Entry path editing for nested entries
 # Heading for the parent folder picker shown when the `meta.path` option is enabled
 entry_parent_folder: Carpeta superior
 new_parent_folder: Carpeta nova
@@ -1488,6 +1488,10 @@ cloud_storage:
       requested: S’està iniciant la sessió…
       error: El nom d’usuari o la contrasenya no són correctes. Comproveu-los i torneu-ho a provar.
 
+  # Shared by the S3-compatible services, unless overridden below
+  s3:
+    auth_key_label: Secret Access Key
+
   # Service-specific configurations
   cloudinary:
     iframe_title: Biblioteca multimèdia de Cloudinary
@@ -1499,15 +1503,6 @@ cloud_storage:
 
   uploadcare:
     auth_key_label: API Secret Key
-
-  aws_s3:
-    auth_key_label: Secret Access Key
-
-  cloudflare_r2:
-    auth_key_label: Secret Access Key
-
-  digitalocean_spaces:
-    auth_key_label: Secret Access Key
 
 # ==============================================================================
 # Configuration Validation
@@ -1565,7 +1560,7 @@ config:
     oauth_implicit_flow: El mètode d’autenticació configurat (flux implícit) no és compatible amb Sveltia CMS. Useu un <a>mètode d’autenticació</a> diferent.
     github_pkce_unsupported: L’autorització PKCE encara no és compatible a causa de les limitacions de GitHub. Useu un <a>mètode d’autenticació</a> diferent.
     oauth_no_app_id: No s’ha definit l’ID de l’aplicació OAuth.
-    # Don’t localize `open_authoring` and `editorial_workflow`
+    # Don’t localize `open_authoring`, `editorial_workflow` and `preview`
     open_authoring_no_workflow: L’opció `open_authoring` requereix el mode de publicació `editorial_workflow`. Consulteu la <a>documentació</a> per a més detalls.
     # Don’t localize `auth_methods`
     no_auth_methods: L’opció `auth_methods` ha de contenir almenys un mètode.
@@ -1979,13 +1974,23 @@ prefs:
       description: Mostra el subratllat dels enllaços a la previsualització de l’entrada i a les etiquetes de la interfície d’usuari.
       switch_label: Subratlla sempre els enllaços
 
-  # Advanced panel
-  advanced:
-    title: Avançat
-    beta:
-      title: Funcionalitats beta
-      description: Habilita algunes funcionalitats beta que poden ser inestables o no localitzades.
-      switch_label: Uneix-te al programa beta
+  # Data Management panel
+  data:
+    clear_data:
+      title: Esborra les dades
+      # Clear File Cache button
+      file_cache:
+        description: Suprimeix el contingut dels fitxers i les miniatures d’imatges desats a la memòria cau local per alliberar espai d’emmagatzematge o resoldre problemes causats per dades obsoletes.
+        button_label: Esborra la memòria cau de fitxers
+        confirmation: Se suprimiran el contingut dels fitxers i les miniatures d’imatges desats a la memòria cau local. Els esborranys no desats i la configuració es conservaran, i les dades suprimides es tornaran a baixar o generar quan calgui. El CMS es tornarà a carregar quan acabi.
+      # Erase All Data button
+      all_data:
+        description: Suprimeix tot el que el CMS guarda en aquest navegador, inclosos els fitxers a la memòria cau, els esborranys no desats i la configuració. El que ja estigui desat al repositori no es veurà afectat.
+        button_label: Esborra totes les dades
+        confirmation: Se suprimiran totes les dades emmagatzemades en aquest navegador, inclosos el contingut dels fitxers a la memòria cau, les miniatures d’imatges, els esborranys no desats, la configuració i l’estat de la sessió. El repositori no es veurà afectat, però es perdrà qualsevol canvi que no hàgiu desat i haureu de tornar a iniciar la sessió. El CMS es tornarà a carregar quan acabi.
+
+  # Developer panel
+  developer:
     developer_mode:
       title: Mode de desenvolupador
       description: Habilita algunes funcionalitats orientades al desenvolupador, inclosos els registres detallats de la consola i els menús de context nadius.
@@ -2003,18 +2008,6 @@ prefs:
         field_label: Capçalera d’autorització (p. ex., Bearer <testimoni>) (opcional)
         saved: Capçalera d’autorització desada.
         removed: Capçalera d’autorització suprimida.
-    clear_data:
-      title: Esborra les dades
-      # Clear File Cache button
-      file_cache:
-        description: Suprimeix el contingut dels fitxers i les miniatures d’imatges desats a la memòria cau local per alliberar espai d’emmagatzematge o resoldre problemes causats per dades obsoletes.
-        button_label: Esborra la memòria cau de fitxers
-        confirmation: Se suprimiran el contingut dels fitxers i les miniatures d’imatges desats a la memòria cau local. Els esborranys no desats i la configuració es conservaran, i les dades suprimides es tornaran a baixar o generar quan calgui. El CMS es tornarà a carregar quan acabi.
-      # Erase All Data button
-      all_data:
-        description: Suprimeix tot el que el CMS guarda en aquest navegador, inclosos els fitxers a la memòria cau, els esborranys no desats i la configuració. El que ja estigui desat al repositori no es veurà afectat.
-        button_label: Esborra totes les dades
-        confirmation: Se suprimiran totes les dades emmagatzemades en aquest navegador, inclosos el contingut dels fitxers a la memòria cau, les miniatures d’imatges, els esborranys no desats, la configuració i l’estat de la sessió. El repositori no es veurà afectat, però es perdrà qualsevol canvi que no hàgiu desat i haureu de tornar a iniciar la sessió. El CMS es tornarà a carregar quan acabi.
 
 # ==============================================================================
 # Keyboard Shortcuts

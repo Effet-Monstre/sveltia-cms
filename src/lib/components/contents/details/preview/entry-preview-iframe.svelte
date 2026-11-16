@@ -17,7 +17,8 @@
     getEntryDraftContext,
   } from '$lib/services/contents/draft/state.svelte';
   import { highlightPreviewTemplateField } from '$lib/services/contents/editor/fields';
-  import { escapeAttr } from '$lib/services/utils/string';
+  import { buildPreviewFrameHTML } from '$lib/services/contents/editor/preview-frame';
+  import { getCanonicalLocale, getDirection } from '$lib/services/contents/i18n';
 
   /**
    * @import { ComponentType } from 'react';
@@ -37,20 +38,14 @@
    * @property {Omit<CustomPreviewTemplateProps, 'document' | 'window'>} [reactProps] Props for the
    * React component, except for the `document` and `window` props, which will be automatically
    * provided by the iframe.
+   * @property {(iframe: HTMLIFrameElement) => void} [onLoad] Function called with the iframe once
+   * its content has been loaded and mounted.
    */
 
   const entryDraft = getEntryDraftContext();
 
   /** @type {Props} */
-  let {
-    /* eslint-disable prefer-const */
-    locale,
-    styleURLs,
-    children,
-    reactComponent,
-    reactProps,
-    /* eslint-enable prefer-const */
-  } = $props();
+  let { locale, styleURLs, children, reactComponent, reactProps, onLoad } = $props();
 
   /**
    * Track if the iframe has been initialized to avoid duplicate initialization.
@@ -74,21 +69,14 @@
    */
   let placeholder;
 
+  /** Language of the frame’s document, unless the locale isn’t a valid language tag. */
+  const lang = $derived(getCanonicalLocale(locale));
   /**
-   * Generate the HTML content for the iframe.
-   * @returns {string} The HTML string.
+   * Text direction of the frame’s document. Without i18n, the locale doesn’t tell the language, so
+   * the direction is left to the template rather than set to `auto`, which would turn the whole
+   * document right-to-left whenever its first text is in a right-to-left script.
    */
-  const generateHTML = () => `
-    <!DOCTYPE html>
-    <html lang="${escapeAttr(locale)}">
-    <head>
-      <meta charset="UTF-8">
-      <base href="${escapeAttr(window.location.origin)}" target="_blank">
-      ${styleURLs.map((url) => `<link rel="stylesheet" href="${escapeAttr(url)}">`).join('\n')}
-    </head>
-    <body></body>
-    </html>
-  `;
+  const dir = $derived(locale === '_default' ? undefined : getDirection(locale));
 
   /**
    * Mount the Svelte placeholder component into the iframe’s body. This way, the iframe content
@@ -188,7 +176,8 @@
     }
 
     const mountComponent = reactComponent ? mountReactComponent : mountPlaceholder;
-    const blobURL = URL.createObjectURL(new Blob([generateHTML()], { type: 'text/html' }));
+    const html = buildPreviewFrameHTML({ lang, dir, styleURLs, origin: window.location.origin });
+    const blobURL = URL.createObjectURL(new Blob([html], { type: 'text/html' }));
 
     /**
      * Callback function to be called when the iframe has loaded its content. It mounts either the
@@ -205,6 +194,7 @@
 
       URL.revokeObjectURL(blobURL);
       initialized = true;
+      onLoad?.(/** @type {HTMLIFrameElement} */ (iframe));
     };
 
     iframe.addEventListener('load', listener, { once: true });
@@ -215,6 +205,28 @@
   $effect(() => {
     if (iframe && !initialized) {
       initializeIframe();
+    }
+  });
+
+  // Update the language and direction once the pane shows another locale, which doesn’t load the
+  // frame again
+  $effect(() => {
+    const root = initialized ? iframe?.contentDocument?.documentElement : undefined;
+
+    if (!root) {
+      return;
+    }
+
+    if (lang) {
+      root.lang = lang;
+    } else {
+      root.removeAttribute('lang');
+    }
+
+    if (dir) {
+      root.dir = dir;
+    } else {
+      root.removeAttribute('dir');
     }
   });
 

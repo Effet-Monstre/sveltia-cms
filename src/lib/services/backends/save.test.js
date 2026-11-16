@@ -2,10 +2,14 @@ import { beforeEach, describe, expect, test, vi } from 'vitest';
 
 import { allAssets } from '$lib/services/assets/state';
 import { backend } from '$lib/services/backends';
-import { repositoryHead } from '$lib/services/backends/git/shared/fetch';
+import { promptCommitMessage } from '$lib/services/backends/commit-prompt';
+import { repositoryHead } from '$lib/services/backends/git/shared/head';
 import { checkForRemoteChanges, suspendChecksWhile } from '$lib/services/backends/refresh';
+import { cmsConfig } from '$lib/services/config';
 import { allEntries } from '$lib/services/contents';
 import { combineArrayFileChanges, createArrayFileEntries } from '$lib/services/contents/file/array';
+import { lastCommitPublishHint, productionSHA } from '$lib/services/deployments';
+import { createMockAssetFolder } from '$lib/test/factories';
 
 import { getCommitAuthor, saveChanges, updateCache, updateStores } from './save.js';
 
@@ -46,7 +50,11 @@ vi.mock('$lib/services/backends', () => ({
   backend: { current: undefined },
 }));
 
-vi.mock('$lib/services/backends/git/shared/fetch', () => ({
+vi.mock('$lib/services/backends/commit-prompt', () => ({
+  promptCommitMessage: vi.fn(async (_changes, options) => options),
+}));
+
+vi.mock('$lib/services/backends/git/shared/head', () => ({
   repositoryHead: { current: '' },
 }));
 
@@ -95,12 +103,14 @@ describe('save', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(suspendChecksWhile).mockImplementation((commit) => commit());
+    vi.mocked(promptCommitMessage).mockImplementation(async (_changes, options) => options);
     vi.mocked(combineArrayFileChanges).mockImplementation(async (changes) => ({
       changes,
       arrayFileUpdates: [],
     }));
     vi.mocked(createArrayFileEntries).mockReturnValue({ entries: [], savedEntries: new Map() });
     repositoryHead.current = '';
+    cmsConfig.current = undefined;
     mockPrefs.devModeEnabled = false;
     mockUserState.account = {
       name: 'Test User',
@@ -703,6 +713,33 @@ describe('save', () => {
     /** @type {CommitOptions} */
     const simpleOptions = { commitType: /** @type {CommitType} */ ('create') };
 
+    test('records whether the commit is expected to start a deployment', async () => {
+      cmsConfig.current = /** @type {any} */ ({ backend: { name: 'github', skip_ci: true } });
+      lastCommitPublishHint.current = { published: true, time: 0 };
+
+      // The site is rebuilt from the commit, which skips CI as configured, so the Publish Changes
+      // button has to offer a deployment again, whatever the previous commit did
+      await saveChanges({ changes: simpleChanges, options: { commitType: 'uploadMedia' } });
+      expect(productionSHA.current).toBe('commit123');
+      expect(lastCommitPublishHint.current.published).toBe(false);
+
+      // A deletion is always deployed, so the content doesn’t stay online
+      await saveChanges({ changes: simpleChanges, options: { commitType: 'delete' } });
+      expect(lastCommitPublishHint.current.published).toBe(true);
+
+      await saveChanges({
+        changes: simpleChanges,
+        options: { commitType: 'update', skipCI: true },
+      });
+      expect(lastCommitPublishHint.current.published).toBe(false);
+
+      await saveChanges({
+        changes: simpleChanges,
+        options: { commitType: 'update', skipCI: false },
+      });
+      expect(lastCommitPublishHint.current.published).toBe(true);
+    });
+
     test('should check the repository for changes before committing', async () => {
       /** @type {string[]} */
       const order = [];
@@ -722,6 +759,44 @@ describe('save', () => {
       await saveChanges({ changes: simpleChanges, options: simpleOptions });
 
       expect(order).toEqual(['check', 'commit']);
+    });
+
+    test('should ask for a commit message before checking, and commit with the answer', async () => {
+      /** @type {string[]} */
+      const order = [];
+
+      vi.mocked(promptCommitMessage).mockImplementation(async (_changes, options) => {
+        order.push('prompt');
+
+        return { ...options, userMessage: 'JIRA-1' };
+      });
+
+      vi.mocked(checkForRemoteChanges).mockImplementation(async () => {
+        order.push('check');
+
+        return undefined;
+      });
+
+      await saveChanges({ changes: simpleChanges, options: simpleOptions });
+
+      expect(order).toEqual(['prompt', 'check']);
+      expect(promptCommitMessage).toHaveBeenCalledWith(simpleChanges, simpleOptions);
+      expect(mockCommitChanges).toHaveBeenCalledWith(simpleChanges, {
+        ...simpleOptions,
+        userMessage: 'JIRA-1',
+      });
+    });
+
+    test('should neither check nor commit when the user cancels the commit', async () => {
+      const error = new Error('commit_cancelled');
+
+      vi.mocked(promptCommitMessage).mockRejectedValue(error);
+
+      await expect(saveChanges({ changes: simpleChanges, options: simpleOptions })).rejects.toBe(
+        error,
+      );
+      expect(checkForRemoteChanges).not.toHaveBeenCalled();
+      expect(mockCommitChanges).not.toHaveBeenCalled();
     });
 
     test('should commit anyway when the check fails, reporting the failure', async () => {
@@ -785,6 +860,83 @@ describe('save', () => {
       await saveChanges({ changes: simpleChanges, options: simpleOptions });
 
       expect(repositoryHead.current).toBe('commit123');
+    });
+
+    test('should record the commit as the head when it is made on top of the head', async () => {
+      /** @type {any} */ (backend).current = {
+        commitChanges: mockCommitChanges,
+        fetchLastCommit: vi.fn(),
+        repository: { databaseName: 'test-db' },
+      };
+      repositoryHead.current = 'head0';
+      mockCommitChanges.mockResolvedValue({
+        sha: 'commit123',
+        date: new Date(),
+        parentSha: 'head0',
+        files: {},
+      });
+
+      await saveChanges({ changes: simpleChanges, options: simpleOptions });
+
+      expect(repositoryHead.current).toBe('commit123');
+      // Only the check before committing
+      expect(checkForRemoteChanges).toHaveBeenCalledTimes(1);
+    });
+
+    test('should keep the head and check again when the commit lands on someone else’s', async () => {
+      /** @type {any} */ (backend).current = {
+        commitChanges: mockCommitChanges,
+        fetchLastCommit: vi.fn(),
+        repository: { databaseName: 'test-db' },
+      };
+      repositoryHead.current = 'head0';
+      // A colleague’s commit to another file was made after the check before committing
+      mockCommitChanges.mockResolvedValue({
+        sha: 'commit123',
+        date: new Date(),
+        parentSha: 'colleague1',
+        files: {},
+      });
+
+      const { commit } = await saveChanges({ changes: simpleChanges, options: simpleOptions });
+
+      expect(commit.sha).toBe('commit123');
+      // The colleague’s commit is still to be fetched, so the stores don’t reflect the new head
+      expect(repositoryHead.current).toBe('head0');
+      // Once before committing, once after to fetch the colleague’s commit
+      expect(checkForRemoteChanges).toHaveBeenCalledTimes(2);
+    });
+
+    test('should report a failed check after a commit landing on someone else’s', async () => {
+      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const error = new Error('offline');
+
+      /** @type {any} */ (backend).current = {
+        commitChanges: mockCommitChanges,
+        fetchLastCommit: vi.fn(),
+        repository: { databaseName: 'test-db' },
+      };
+      repositoryHead.current = 'head0';
+      mockCommitChanges.mockResolvedValue({
+        sha: 'commit123',
+        date: new Date(),
+        parentSha: 'colleague1',
+        files: {},
+      });
+      vi.mocked(checkForRemoteChanges)
+        .mockResolvedValueOnce(undefined)
+        .mockRejectedValueOnce(error);
+
+      await saveChanges({ changes: simpleChanges, options: simpleOptions });
+
+      await vi.waitFor(() => {
+        expect(consoleSpy).toHaveBeenCalledWith(
+          'Failed to check the repository for changes.',
+          error,
+        );
+      });
+      expect(repositoryHead.current).toBe('head0');
+      consoleSpy.mockRestore();
     });
 
     test('should leave the head alone on a backend without commits to compare', async () => {
@@ -929,13 +1081,9 @@ describe('save', () => {
           size: 1024,
           sha: 'test-sha',
           kind: /** @type {AssetKind} */ ('image'),
-          folder: /** @type {AssetFolderInfo} */ ({
-            collectionName: undefined,
-            internalPath: 'images',
-            publicPath: '/images',
-            entryRelative: false,
-            hasTemplateTags: false,
-          }),
+          folder: /** @type {AssetFolderInfo} */ (
+            createMockAssetFolder({ internalPath: 'images', publicPath: '/images' })
+          ),
         },
       ];
 
@@ -1006,6 +1154,79 @@ describe('save', () => {
       expect(cacheAssetBlob).toHaveBeenCalledExactlyOnceWith(result.savedAssets[0], file);
     });
 
+    test('should complete the save when the saved asset can’t be cached', async () => {
+      const { cacheAssetBlob } = await import('$lib/services/assets/info');
+      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const error = new Error('cache failed');
+      const file = new File(['fake image data'], 'photo.jpg');
+
+      vi.mocked(cacheAssetBlob).mockRejectedValueOnce(error);
+      allAssets.current = [];
+      mockCommitChanges.mockResolvedValue({
+        sha: 'commit456',
+        date: new Date('2023-01-01T12:00:00Z'),
+        files: { 'images/photo.jpg': { sha: 'file123', file } },
+      });
+
+      const result = await saveChanges({
+        changes: [{ action: 'create', path: 'images/photo.jpg', data: file }],
+        // @ts-ignore - Minimal test object
+        savingAssets: [{ path: 'images/photo.jpg', name: 'photo.jpg' }],
+        options: { commitType: 'create' },
+      });
+
+      expect(result.savedAssets[0]).toMatchObject({ path: 'images/photo.jpg', sha: 'file123' });
+      expect(allAssets.current).toEqual(result.savedAssets);
+      expect(consoleSpy).toHaveBeenCalledWith('Failed to cache the saved asset.', error);
+      consoleSpy.mockRestore();
+    });
+
+    test('should complete the save when the file cache can’t be written', async () => {
+      const { IndexedDB } = await import('@sveltia/utils/storage');
+      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const error = new DOMException('Quota exceeded', 'QuotaExceededError');
+
+      /**
+       * Mock IndexedDB constructor whose writes fail.
+       * @returns {object} Mock cache database instance.
+       */
+      function MockIndexedDB() {
+        return { delete: vi.fn(), set: vi.fn().mockRejectedValue(error) };
+      }
+
+      vi.mocked(IndexedDB).mockImplementationOnce(/** @type {any} */ (MockIndexedDB));
+
+      /** @type {any} */ (backend).current = {
+        commitChanges: mockCommitChanges,
+        fetchLastCommit: vi.fn(),
+        repository: { databaseName: 'quota-db' },
+      };
+      repositoryHead.current = 'commit000';
+      allEntries.current = [];
+      mockCommitChanges.mockResolvedValue({
+        sha: 'commit123',
+        parentSha: 'commit000',
+        date: new Date('2023-01-01T12:00:00Z'),
+        files: {},
+      });
+
+      /** @type {any} */
+      const entry = { id: 'entry-a', slug: 'a', locales: {} };
+
+      const result = await saveChanges({
+        changes: simpleChanges,
+        savingEntries: [entry],
+        options: simpleOptions,
+      });
+
+      // The commit has landed, so the stores reflect it and the head moves on
+      expect(result.commit.sha).toBe('commit123');
+      expect(allEntries.current).toEqual([expect.objectContaining({ id: 'entry-a' })]);
+      expect(repositoryHead.current).toBe('commit123');
+      expect(consoleSpy).toHaveBeenCalledWith('Failed to update the file cache.', error);
+      consoleSpy.mockRestore();
+    });
+
     test('should handle asset changes with missing file in commit results', async () => {
       /** @type {FileChange[]} */
       const changes = [
@@ -1025,13 +1246,9 @@ describe('save', () => {
           size: 2048,
           sha: 'test-sha-2',
           kind: /** @type {AssetKind} */ ('image'),
-          folder: /** @type {AssetFolderInfo} */ ({
-            collectionName: undefined,
-            internalPath: 'images',
-            publicPath: '/images',
-            entryRelative: false,
-            hasTemplateTags: false,
-          }),
+          folder: /** @type {AssetFolderInfo} */ (
+            createMockAssetFolder({ internalPath: 'images', publicPath: '/images' })
+          ),
         },
       ];
 
@@ -1084,13 +1301,9 @@ describe('save', () => {
           size: 3072,
           sha: 'test-sha-3',
           kind: /** @type {AssetKind} */ ('image'),
-          folder: /** @type {AssetFolderInfo} */ ({
-            collectionName: undefined,
-            internalPath: 'images',
-            publicPath: '/images',
-            entryRelative: false,
-            hasTemplateTags: false,
-          }),
+          folder: /** @type {AssetFolderInfo} */ (
+            createMockAssetFolder({ internalPath: 'images', publicPath: '/images' })
+          ),
         },
       ];
 

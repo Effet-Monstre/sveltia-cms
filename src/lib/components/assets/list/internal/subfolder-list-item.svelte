@@ -5,7 +5,8 @@
 -->
 <script>
   import SubfolderListItem from '$lib/components/assets/list/subfolder-list-item.svelte';
-  import { encodeRoutePath, goto } from '$lib/services/app/navigation';
+  import { goto } from '$lib/services/app/navigation';
+  import { createAssetDropTarget } from '$lib/services/assets/drag';
   import { assetsLocked, selectedAssetFolder } from '$lib/services/assets/folders';
   import { isCmsFolderPath } from '$lib/services/assets/reserved';
   import { focusedAsset } from '$lib/services/assets/state';
@@ -15,6 +16,7 @@
     renamingSubfolder,
   } from '$lib/services/assets/subfolders';
   import { env } from '$lib/services/user/env.svelte';
+  import { encodePathSegments } from '$lib/services/utils/url';
 
   /**
    * @import { AssetSubfolder, ViewType } from '$lib/types/private';
@@ -28,20 +30,14 @@
    */
 
   /** @type {Props} */
-  let {
-    /* eslint-disable prefer-const */
-    subfolder,
-    rowIndex,
-    viewType,
-    /* eslint-enable prefer-const */
-  } = $props();
+  let { subfolder, rowIndex, viewType } = $props();
 
   /**
    * Browse the subfolder. The selected asset folder travels as history state, the same way it does
    * from the sidebar, so the page can tell it from another folder sharing its path.
    */
   const open = () => {
-    goto(encodeRoutePath(`/assets/${subfolder.path}`), {
+    goto(encodePathSegments(`/assets/${subfolder.path}`), {
       transitionType: 'forwards',
       state: { folder: selectedAssetFolder.current },
     });
@@ -70,6 +66,9 @@
   onDelete={() => {
     deletingSubfolder.current = subfolder;
   }}
+  dropTarget={selectedAssetFolder.current
+    ? createAssetDropTarget({ folder: selectedAssetFolder.current, dirPath: subfolder.path })
+    : undefined}
   actionsDisabled={assetsLocked.current ||
     !!selectedAssetFolder.current?.readonly ||
     isCmsFolderPath(subfolder.path)}

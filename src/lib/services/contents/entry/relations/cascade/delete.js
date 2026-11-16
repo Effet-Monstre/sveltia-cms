@@ -6,9 +6,9 @@ import {
   compactList,
   dedupeBlockers,
   getFieldBlockers,
-  ITEM_INDEX_SUFFIX_REGEX,
 } from '$lib/services/contents/entry/cascade';
 import { createSyntheticDraft } from '$lib/services/contents/entry/changes';
+import { ITEM_INDEX_SUFFIX_REGEX } from '$lib/services/contents/entry/key-paths';
 import {
   getEntryRelationValues,
   getReferencingRelationFields,
@@ -252,6 +252,28 @@ export const planCascadeDelete = ({ collection, collectionFile, entries }) => {
   }
 
   return { targets: [...targets.values()], blockers: dedupeBlockers(blockers) };
+};
+
+/**
+ * Run {@link planCascadeDelete} and throw if anything blocks the deletion.
+ * @param {object} args Arguments for {@link planCascadeDelete}.
+ * @param {InternalCollection} args.collection Collection of the entries being deleted.
+ * @param {InternalCollectionFile} [args.collectionFile] Collection file of the entries being
+ * deleted.
+ * @param {Entry[]} args.entries Entries being deleted.
+ * @param {string} message Error message used when the deletion is blocked.
+ * @returns {CascadeTarget[]} Targets from the plan.
+ * @throws {Error} When removing the references would leave another entry invalid. The blockers are
+ * attached as the error’s `cause`.
+ */
+export const planCascadeDeleteOrThrow = (args, message) => {
+  const { targets, blockers } = planCascadeDelete(args);
+
+  if (blockers.length) {
+    throw new Error(message, { cause: blockers });
+  }
+
+  return targets;
 };
 
 /**

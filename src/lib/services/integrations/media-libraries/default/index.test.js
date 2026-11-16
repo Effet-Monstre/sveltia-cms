@@ -5,6 +5,7 @@ import {
   getAcceptedFileTypes,
   getAcceptedImageTypes,
   getDefaultMediaLibraryOptions,
+  isAcceptedFile,
   transformFile,
 } from '.';
 
@@ -15,7 +16,7 @@ vi.mock('$lib/services/integrations/media-libraries', () => ({
 }));
 vi.mock('$lib/services/utils/media/image', () => ({
   RASTER_IMAGE_CONVERSION_FORMATS: ['webp', 'jpeg', 'png'],
-  RASTER_IMAGE_EXTENSION_REGEX: /\b(?:avif|gif|heic|heif|jfif|jpe?g|jpe|png|webp)$/i,
+  RASTER_IMAGE_EXTENSION_REGEX: /\.(?:avif|gif|heic|heif|jfif|jpe?g|jpe|png|webp)$/i,
   RASTER_IMAGE_FORMATS: ['heic', 'jpeg', 'jpg', 'png', 'webp'],
   SUPPORTED_IMAGE_TYPES: ['image/jpeg', 'image/png', 'image/svg+xml'],
   SUPPORTED_IMAGE_TYPES_WITH_HEIC: ['image/jpeg', 'image/png', 'image/svg+xml', 'image/heic'],
@@ -495,6 +496,65 @@ describe('integrations/media-libraries/default', () => {
       expect(result).toBe(jpegFile);
     });
 
+    it('should upload an animated image as is, as only its first frame would be kept', async () => {
+      const { transformImage } = await import('$lib/services/utils/media/image/transform');
+
+      vi.mocked(transformImage).mockResolvedValue(new Blob(['still'], { type: 'image/webp' }));
+
+      // An animated WebP: the `VP8X` header with the animation flag
+      const animatedWebP = new File(
+        [
+          new Uint8Array([
+            ...[...'RIFF'].map((c) => c.charCodeAt(0)),
+            30,
+            0,
+            0,
+            0,
+            ...[...'WEBPVP8X'].map((c) => c.charCodeAt(0)),
+            10,
+            0,
+            0,
+            0,
+            0x02,
+            ...Array(9).fill(0),
+          ]),
+        ],
+        'loop.webp',
+        { type: 'image/webp' },
+      );
+
+      // An APNG: an `acTL` chunk before the image data
+      const animatedPNG = new File(
+        [
+          new Uint8Array([
+            0x89,
+            ...[...'PNG\r\n\x1a\n'].map((c) => c.charCodeAt(0)),
+            0,
+            0,
+            0,
+            8,
+            ...[...'acTL'].map((c) => c.charCodeAt(0)),
+            ...Array(12).fill(0),
+            0,
+            0,
+            0,
+            0,
+            ...[...'IDAT'].map((c) => c.charCodeAt(0)),
+            0,
+            0,
+            0,
+            0,
+          ]),
+        ],
+        'loop.png',
+        { type: 'image/png' },
+      );
+
+      await expect(transformFile(animatedWebP, { raster_image: {} })).resolves.toBe(animatedWebP);
+      await expect(transformFile(animatedPNG, { raster_image: {} })).resolves.toBe(animatedPNG);
+      expect(vi.mocked(transformImage)).not.toHaveBeenCalled();
+    });
+
     describe('HEIC', () => {
       /** @type {Blob} */
       let webpBlob;
@@ -798,6 +858,18 @@ describe('integrations/media-libraries/default', () => {
       expect(result.name).toBe('image.webp'); // extension appended with a dot
     });
 
+    it('should add an extension to a name merely ending with a format name', async () => {
+      const { transformImage } = await import('$lib/services/utils/media/image/transform');
+      const mockBlob = new Blob(['transformed'], { type: 'image/webp' });
+      const file = new File(['content'], 'logo-png', { type: 'image/png' });
+
+      vi.mocked(transformImage).mockResolvedValue(mockBlob);
+
+      const result = await transformFile(file, /** @type {any} */ ({ png: { format: 'webp' } }));
+
+      expect(result.name).toBe('logo-png.webp');
+    });
+
     it('should replace a JPEG alias extension when converting to WebP', async () => {
       const { transformImage } = await import('$lib/services/utils/media/image/transform');
       const mockBlob = new Blob(['transformed'], { type: 'image/webp' });
@@ -952,6 +1024,30 @@ describe('integrations/media-libraries/default', () => {
 
     it('should accept any file otherwise', () => {
       expect(getAcceptedFileTypes({ image: false, transformations: undefined })).toBeUndefined();
+    });
+  });
+
+  describe('isAcceptedFile', () => {
+    it('should accept any file without file types', () => {
+      expect(isAcceptedFile({ name: 'a.zip' }, undefined)).toBe(true);
+      expect(isAcceptedFile({ name: 'a.zip' }, ' , ')).toBe(true);
+    });
+
+    it('should match a file extension in any case', () => {
+      expect(isAcceptedFile({ name: 'guide.PDF' }, '.pdf, .txt')).toBe(true);
+      expect(isAcceptedFile({ name: 'kite.png', type: 'image/png' }, '.pdf, .txt')).toBe(false);
+    });
+
+    it('should match the MIME type of a file', () => {
+      expect(isAcceptedFile({ name: 'kite', type: 'image/webp' }, 'image/webp')).toBe(true);
+      expect(isAcceptedFile({ name: 'kite.png', type: 'image/png' }, 'image/*')).toBe(true);
+      expect(isAcceptedFile({ name: 'kite.png', type: 'image/png' }, 'image/webp')).toBe(false);
+    });
+
+    it('should give a file without a type the MIME type of its extension', () => {
+      expect(isAcceptedFile({ name: 'logo.svg' }, 'image/png,image/svg+xml')).toBe(true);
+      expect(isAcceptedFile({ name: 'logo.svg', type: '' }, 'image/png')).toBe(false);
+      expect(isAcceptedFile({ name: 'README' }, 'image/png')).toBe(false);
     });
   });
 

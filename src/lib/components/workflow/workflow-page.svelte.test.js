@@ -7,19 +7,26 @@ import { backendName } from '$lib/services/backends';
 import { createLocalizedError } from '$lib/services/backends/git/shared/errors';
 import { deployments, productionSHA } from '$lib/services/deployments';
 import {
+  allUnpublishedEntries,
   publishingBranches,
-  unpublishedEntries,
   unpublishedEntriesLoaded,
 } from '$lib/services/workflow';
 import { resetDeployingEntries, trackDeployingEntry } from '$lib/services/workflow/deploy';
+import { reloadUnpublishedEntries } from '$lib/services/workflow/load';
 import { forkedRepository } from '$lib/services/workflow/open-authoring';
 import {
   discardWorkflowEntry,
-  publishWorkflowEntry,
+  publishReviewedEntry,
   updateWorkflowStatus,
 } from '$lib/services/workflow/save';
 import { canMoveToStatus, canPublish } from '$lib/services/workflow/validate';
-import { createMockEntry, initTestConfig, setEntries } from '$lib/test/config';
+import {
+  createMockEntry,
+  createMockWorkflowEntry,
+  initTestConfig,
+  setEntries,
+} from '$lib/test/config';
+import { waitForToastsToHide } from '$lib/test/toast';
 
 import WorkflowPage from './workflow-page.svelte';
 
@@ -30,12 +37,13 @@ vi.mock('$lib/services/deployments/poll', () => ({
 vi.mock('$lib/services/deployments/resolve', () => ({
   canResolveDeployments: vi.fn(() => true),
 }));
+vi.mock('$lib/services/workflow/load', () => ({ reloadUnpublishedEntries: vi.fn() }));
 vi.mock('$lib/services/workflow/save', () => ({
   upsertUnpublishedEntry: vi.fn(),
   removeUnpublishedEntry: vi.fn(),
   saveWorkflowChanges: vi.fn(),
   updateWorkflowStatus: vi.fn(),
-  publishWorkflowEntry: vi.fn(),
+  publishReviewedEntry: vi.fn(),
   discardWorkflowEntry: vi.fn(),
   deleteWorkflowEntry: vi.fn(),
   discardWorkflowEntries: vi.fn(),
@@ -52,14 +60,13 @@ vi.mock('$lib/services/workflow/validate', () => ({
  * @param {string} status Workflow status.
  * @returns {any} Entry.
  */
-const createEntry = (slug, status) => ({
-  ...createMockEntry({ slug, content: { _default: { title: slug } } }),
-  workflow: {
+const createEntry = (slug, status) =>
+  createMockWorkflowEntry({
+    slug,
     status,
-    collectionName: 'posts',
-    pullRequest: { number: 1, branch: `cms/posts/${slug}`, updatedDate: new Date() },
-  },
-});
+    content: { _default: { title: slug } },
+    pullRequest: { updatedDate: new Date() },
+  });
 
 /**
  * Simulate dragging a card to a column.
@@ -87,6 +94,7 @@ const dragTo = (card, column) => {
 describe('WorkflowPage', () => {
   beforeEach(async () => {
     await initTestConfig({
+      publish_mode: 'editorial_workflow',
       collections: [
         {
           name: 'posts',
@@ -104,7 +112,7 @@ describe('WorkflowPage', () => {
     resetDeployingEntries();
     deployments.current = {};
     productionSHA.current = '';
-    unpublishedEntries.current = [
+    allUnpublishedEntries.current = [
       createEntry('draft-1', 'draft'),
       createEntry('draft-2', 'draft'),
       createEntry('review-1', 'pending_review'),
@@ -114,7 +122,7 @@ describe('WorkflowPage', () => {
     vi.mocked(canMoveToStatus).mockReturnValue(true);
     vi.mocked(canPublish).mockReturnValue(true);
     vi.mocked(updateWorkflowStatus).mockResolvedValue(/** @type {any} */ ({}));
-    vi.mocked(publishWorkflowEntry).mockResolvedValue(undefined);
+    vi.mocked(publishReviewedEntry).mockResolvedValue(undefined);
     vi.mocked(discardWorkflowEntry).mockResolvedValue(undefined);
   });
 
@@ -299,7 +307,7 @@ describe('WorkflowPage', () => {
       .toHaveTextContent(
         'error Error The entry has errors. Please correct them before publishing it.',
       );
-    expect(publishWorkflowEntry).not.toHaveBeenCalled();
+    expect(publishReviewedEntry).not.toHaveBeenCalled();
 
     await page
       .getByRole('list', { name: 'Ready' })
@@ -309,7 +317,8 @@ describe('WorkflowPage', () => {
     await dialog.getByRole('button', { name: 'Publish' }).click();
 
     await vi.waitFor(() =>
-      expect(publishWorkflowEntry).toHaveBeenCalledWith(
+      expect(publishReviewedEntry).toHaveBeenCalledWith(
+        expect.objectContaining({ slug: 'ready-1' }),
         expect.objectContaining({ slug: 'ready-1' }),
       ),
     );
@@ -320,7 +329,7 @@ describe('WorkflowPage', () => {
 
   test('says why a publish was refused', async () => {
     vi.spyOn(console, 'error').mockImplementation(() => {});
-    vi.mocked(publishWorkflowEntry).mockRejectedValue(
+    vi.mocked(publishReviewedEntry).mockRejectedValue(
       new Error('publish_refused', { cause: { reason: 'other_changes', paths: ['src/app.js'] } }),
     );
 
@@ -480,7 +489,8 @@ describe('WorkflowPage', () => {
       );
     await dialog.getByRole('button', { name: 'Delete' }).click();
     await vi.waitFor(() =>
-      expect(publishWorkflowEntry).toHaveBeenCalledWith(
+      expect(publishReviewedEntry).toHaveBeenCalledWith(
+        expect.objectContaining({ slug: 'gone-1' }),
         expect.objectContaining({ slug: 'gone-1' }),
       ),
     );
@@ -496,9 +506,126 @@ describe('WorkflowPage', () => {
 
     await expect.element(page.getByRole('list', { name: 'In Review' })).toBeInTheDocument();
     expect(page.getByRole('list', { name: 'Ready' }).elements()).toHaveLength(0);
+    // An entry a maintainer has marked ready stays on the board, in the contributor’s last stage
     expect(announcedPageStatus.current).toBe(
-      'You’re now viewing the Editorial Workflow board. Drafts: 2. In Review: 1. Pending Deletion: 1.',
+      'You’re now viewing the Editorial Workflow board. Drafts: 2. In Review: 2. Pending Deletion: 1.',
     );
+  });
+
+  test('refreshes the board on request, saying when it’s done', async () => {
+    const { promise, resolve } = Promise.withResolvers();
+
+    vi.mocked(reloadUnpublishedEntries).mockReturnValueOnce(/** @type {any} */ (promise));
+    await render(WorkflowPage);
+
+    await expect
+      .element(page.getByRole('main', { name: 'Editorial Workflow' }).getByRole('toolbar'))
+      .toMatchTextContent('Editorial Workflow');
+
+    const button = page.getByRole('button', { name: 'Refresh' });
+
+    await button.click();
+    // A reload already in flight may have started before the click, so it isn’t joined
+    expect(reloadUnpublishedEntries).toHaveBeenCalledExactlyOnceWith({ fresh: true });
+    await expect.element(page.getByRole('status')).toMatchTextContent('Refreshing…');
+    // Not asked again while the request is on its way
+    await expect.element(button).toBeDisabled();
+
+    resolve(true);
+    await expect.element(page.getByRole('status')).toMatchTextContent('The board is up to date.');
+    await expect.element(button).toBeEnabled();
+    await waitForToastsToHide();
+  });
+
+  test('reports a failed refresh', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.mocked(reloadUnpublishedEntries).mockRejectedValueOnce(new Error('offline'));
+    await render(WorkflowPage);
+
+    await page.getByRole('button', { name: 'Refresh' }).click();
+    await expect
+      .element(page.getByRole('alert'))
+      .toMatchTextContent('Couldn’t refresh the board. Please try again.');
+    await expect.element(page.getByRole('button', { name: 'Refresh' })).toBeEnabled();
+    await waitForToastsToHide();
+  });
+
+  test('acts on an entry as it is once a reload has replaced it', async () => {
+    await render(WorkflowPage);
+
+    await page
+      .getByRole('list', { name: 'Ready' })
+      .getByRole('button', { name: 'Publish Entry' })
+      .click();
+
+    const dialog = page.getByRole('alertdialog', { name: 'Publish Entry' });
+
+    await expect.element(dialog).toBeVisible();
+
+    // The pull requests are read again while the dialog is open, and a colleague’s commit has
+    // changed the entry since; the reload keeps its ID
+    const [, , , ready, ...rest] = allUnpublishedEntries.current;
+    const { pullRequest } = ready.workflow;
+
+    const reloaded = {
+      ...ready,
+      slug: 'ready-1-reloaded',
+      workflow: { ...ready.workflow, pullRequest: { ...pullRequest, headSHA: 'pushed-since' } },
+    };
+
+    allUnpublishedEntries.current = [
+      ...allUnpublishedEntries.current.slice(0, 3),
+      reloaded,
+      ...rest,
+    ];
+    await dialog.getByRole('button', { name: 'Publish' }).click();
+
+    // The entry is the one in the store, but the merge stays pinned to the version the dialog was
+    // opened for, so the colleague’s commit isn’t published unseen
+    await vi.waitFor(() => expect(publishReviewedEntry).toHaveBeenCalledWith(reloaded, ready));
+    await waitForToastsToHide();
+  });
+
+  test('leaves an entry alone once a reload has taken it off the board', async () => {
+    await render(WorkflowPage);
+
+    await page
+      .getByRole('list', { name: 'Ready' })
+      .getByRole('button', { name: 'Publish Entry' })
+      .click();
+    await expect.element(page.getByRole('alertdialog', { name: 'Publish Entry' })).toBeVisible();
+
+    // Its pull request has been merged or closed on the Git service in the meantime
+    allUnpublishedEntries.current = allUnpublishedEntries.current.filter(
+      ({ slug }) => slug !== 'ready-1',
+    );
+    await page
+      .getByRole('alertdialog', { name: 'Publish Entry' })
+      .getByRole('button', { name: 'Publish' })
+      .click();
+    await expect
+      .element(page.getByRole('alertdialog', { name: 'Publish Entry' }))
+      .not.toBeInTheDocument();
+
+    await page
+      .getByRole('list', { name: 'Drafts' })
+      .getByRole('button', { name: 'Delete Entry' })
+      .nth(0)
+      .click();
+    await expect.element(page.getByRole('alertdialog', { name: 'Delete Entry' })).toBeVisible();
+    allUnpublishedEntries.current = allUnpublishedEntries.current.filter(
+      ({ slug }) => slug !== 'draft-1',
+    );
+    await page
+      .getByRole('alertdialog', { name: 'Delete Entry' })
+      .getByRole('button', { name: 'Delete' })
+      .click();
+    await expect
+      .element(page.getByRole('alertdialog', { name: 'Delete Entry' }))
+      .not.toBeInTheDocument();
+
+    expect(publishReviewedEntry).not.toHaveBeenCalled();
+    expect(discardWorkflowEntry).not.toHaveBeenCalled();
   });
 
   test('shows a loading state until the pull requests are fetched', async () => {
@@ -509,15 +636,97 @@ describe('WorkflowPage', () => {
     });
     backendName.current = 'github';
     unpublishedEntriesLoaded.current = false;
-    unpublishedEntries.current = [];
+    allUnpublishedEntries.current = [];
 
     await render(WorkflowPage);
 
     await expect.element(page.getByText('Loading entries…')).toBeInTheDocument();
+    // There’s nothing to refresh yet
+    await expect.element(page.getByRole('button', { name: 'Refresh' })).toBeDisabled();
 
     unpublishedEntriesLoaded.current = true;
     await expect
       .element(page.getByRole('list', { name: 'Drafts' }))
       .toHaveTextContent('No entries.');
+  });
+
+  test('lists the drafts in a single column with Preview Workflow', async () => {
+    await initTestConfig({ publish_mode: 'preview' });
+
+    const { container } = await render(WorkflowPage);
+
+    // Every entry is a draft that can be published right away, whatever its label says
+    // The page is named after the drafts, like its only column
+    await expect
+      .element(page.getByRole('group', { name: 'Drafts' }).first())
+      .toHaveAttribute('aria-label', 'Drafts');
+    await expect.poll(() => container.querySelectorAll('.column').length).toBe(1);
+    expect(container.querySelector('.board.single')).not.toBeNull();
+    expect(
+      page.getByRole('list', { name: 'Drafts' }).getByRole('listitem').elements(),
+    ).toHaveLength(4);
+    expect(page.getByRole('list', { name: 'In Review' }).elements()).toHaveLength(0);
+    expect(page.getByRole('button', { name: 'Publish Entry' }).elements()).toHaveLength(4);
+    // There’s no other stage to drag a card to
+    expect(container.querySelector('.card[draggable="true"]')).toBeNull();
+    expect(announcedPageStatus.current).toBe(
+      'You’re now viewing the Drafts page. Drafts: 4. Pending Deletion: 1.',
+    );
+  });
+
+  test('leaves out the In Review stage when it’s not configured', async () => {
+    await initTestConfig({
+      publish_mode: { type: 'editorial_workflow', stages: ['draft', 'pending_publish'] },
+    });
+
+    await render(WorkflowPage);
+
+    await expect.element(page.getByRole('list', { name: 'Ready' })).toBeInTheDocument();
+    expect(page.getByRole('list', { name: 'In Review' }).elements()).toHaveLength(0);
+    // The entry labelled In Review is still a draft
+    expect(announcedPageStatus.current).toBe(
+      'You’re now viewing the Editorial Workflow board. Drafts: 3. Ready: 1. Pending Deletion: 1.',
+    );
+  });
+
+  test('only moves an entry to a stage its collection has', async () => {
+    await initTestConfig({
+      publish_mode: 'editorial_workflow',
+      collections: [
+        {
+          name: 'posts',
+          label: 'Posts',
+          folder: 'content/posts',
+          publish_mode: { stages: ['draft', 'pending_publish'] },
+          fields: [{ name: 'title', widget: 'string' }],
+        },
+        {
+          name: 'pages',
+          label: 'Pages',
+          folder: 'content/pages',
+          fields: [{ name: 'title', widget: 'string' }],
+        },
+      ],
+    });
+
+    const { container } = await render(WorkflowPage);
+
+    await expect.poll(() => container.querySelectorAll('.card').length).toBe(5);
+
+    dragTo(
+      /** @type {HTMLElement} */ (container.querySelector('.card')),
+      /** @type {HTMLElement} */ (page.getByRole('list', { name: 'In Review' }).element()),
+    );
+    dragTo(
+      /** @type {HTMLElement} */ (container.querySelector('.card')),
+      /** @type {HTMLElement} */ (page.getByRole('list', { name: 'Ready' }).element()),
+    );
+
+    await vi.waitFor(() =>
+      expect(updateWorkflowStatus).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({ slug: 'draft-1' }),
+        'pending_publish',
+      ),
+    );
   });
 });

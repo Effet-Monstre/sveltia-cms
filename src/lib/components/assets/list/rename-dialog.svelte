@@ -7,12 +7,12 @@
 -->
 <script>
   import { _ } from '@sveltia/i18n';
-  import { Dialog, TextInput } from '@sveltia/ui';
   import { getPathInfo } from '@sveltia/utils/file';
   import { tick } from 'svelte';
 
+  import NameInputDialog from '$lib/components/assets/list/name-input-dialog.svelte';
   import FileExtensionChangeDialog from '$lib/components/assets/shared/file-extension-change-dialog.svelte';
-  import { formatFileName } from '$lib/services/assets/file-name';
+  import { formatFileName, validateAssetName } from '$lib/services/assets/file-name';
   import { showAssetOverlay } from '$lib/services/assets/view';
   import { isEquivalentFileExtension } from '$lib/services/utils/file';
 
@@ -22,6 +22,10 @@
    * @property {string} name Current file name.
    * @property {string[]} otherNames Names of the other files in the same folder, which the new name
    * must not duplicate.
+   * @property {string[]} [folderNames] Names of the subfolders in the same folder, which the new
+   * name must not duplicate either.
+   * @property {string[]} [fileNames] Names of the files in the same folder that aren’t assets, like
+   * entry files, which the new name must not duplicate either.
    * @property {number} [usedEntryCount] Number of entries using the asset, mentioned in the dialog
    * body because they will be updated as well.
    * @property {string} [blockedMessage] Why the asset can’t be renamed, e.g. because a read-only
@@ -36,19 +40,19 @@
 
   /** @type {Props} */
   let {
-    /* eslint-disable prefer-const */
     open = $bindable(false),
     name,
     otherNames,
+    folderNames = [],
+    fileNames = [],
     usedEntryCount = 0,
     blockedMessage = undefined,
     slugificationEnabled = false,
     onRename,
     onClose = undefined,
-    /* eslint-enable prefer-const */
   } = $props();
 
-  const componentId = $props.id();
+  const title = $derived(_('rename_x', { values: { name } }));
 
   let confirmationOpen = $state(false);
   /** @type {HTMLInputElement | undefined} */
@@ -59,22 +63,26 @@
 
   const { extension: oldExtension } = $derived(getPathInfo(name));
   const trimmedName = $derived(newName.trim());
-  /** Name the file will be renamed to, which may be different from the entered name. */
+  /**
+   * Name the file will be renamed to, which may be different from the entered name: sanitized like
+   * an uploaded file’s name, and slugified if enabled.
+   */
   const finalName = $derived(
-    slugificationEnabled && trimmedName
-      ? formatFileName(trimmedName, { slugificationEnabled })
-      : trimmedName,
+    trimmedName ? formatFileName(trimmedName, { slugificationEnabled }) : '',
   );
   const newExtension = $derived(getPathInfo(finalName).extension);
   /** Whether the file extension is being changed in a way that requires confirmation. */
   const extensionChanged = $derived(!isEquivalentFileExtension(oldExtension, newExtension));
 
-  const error = $derived.by(() => {
-    if (!trimmedName) return 'empty';
-    if (trimmedName.includes('/')) return 'character';
-    if (otherNames.includes(finalName)) return 'duplicate';
-    return undefined;
-  });
+  const error = $derived(
+    validateAssetName({
+      name: trimmedName,
+      fileName: finalName,
+      otherNames,
+      folderNames,
+      fileNames,
+    }),
+  );
 
   const invalid = $derived(!!error);
 
@@ -118,8 +126,8 @@
   });
 </script>
 
-<Dialog
-  title={_('rename_x', { values: { name } })}
+<NameInputDialog
+  {title}
   bind:open
   okLabel={_('rename')}
   okDisabled={!!blockedMessage || finalName === name || invalid}
@@ -139,36 +147,16 @@
   onOpen={() => {
     selectFileName();
   }}
->
-  {#if blockedMessage}
-    <p role="alert">{blockedMessage}</p>
-  {:else}
-    <p>
-      {_('enter_new_name_for_asset', { values: { count: usedEntryCount } })}
-    </p>
-  {/if}
-  <div role="none">
-    <TextInput
-      dir="auto"
-      bind:value={newName}
-      bind:element={inputElement}
-      flex
-      disabled={!!blockedMessage}
-      {invalid}
-      aria-errormessage="{componentId}-error"
-    />
-  </div>
-  {#if !invalid && finalName !== trimmedName}
-    <div role="status" class="note">
-      {_('file_will_be_saved_as', { values: { name: finalName } })}
-    </div>
-  {/if}
-  <div role="none" class="error" id="{componentId}-error">
-    {#if invalid}
-      {_(`enter_new_name_for_asset_error.${error}`)}
-    {/if}
-  </div>
-</Dialog>
+  description={_('enter_new_name_for_asset', { values: { count: usedEntryCount } })}
+  {blockedMessage}
+  bind:value={newName}
+  bind:element={inputElement}
+  ariaLabel={title}
+  note={!invalid && finalName !== trimmedName
+    ? _('file_will_be_saved_as', { values: { name: finalName } })
+    : undefined}
+  error={invalid ? _(`enter_new_name_for_asset_error.${error}`) : undefined}
+/>
 
 <FileExtensionChangeDialog
   bind:open={confirmationOpen}
@@ -185,27 +173,3 @@
     open = true;
   }}
 />
-
-<style>
-  p {
-    margin: 0 0 8px;
-  }
-
-  div {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-  }
-
-  .note {
-    margin: 4px 0 0;
-    color: var(--sui-secondary-foreground-color);
-    font-size: var(--sui-font-size-small);
-  }
-
-  .error {
-    margin: 0;
-    color: var(--sui-error-foreground-color);
-    font-size: var(--sui-font-size-small);
-  }
-</style>

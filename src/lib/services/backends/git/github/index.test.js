@@ -8,8 +8,6 @@ import {
   DEFAULT_API_ROOT,
   DEFAULT_AUTH_PATH,
   DEFAULT_AUTH_ROOT,
-  DEFAULT_PKCE_AUTH_PATH,
-  DEFAULT_PKCE_AUTH_ROOT,
 } from '$lib/services/backends/git/github/constants';
 import { repository } from '$lib/services/backends/git/github/repository';
 import { apiConfig, graphqlVars } from '$lib/services/backends/git/shared/api';
@@ -24,9 +22,7 @@ vi.mock('$lib/services/config', () => ({
 vi.mock('$lib/services/user/prefs.svelte', () => ({
   prefs: mockPrefs,
 }));
-vi.mock('@sveltia/i18n', () => ({
-  _: vi.fn((key) => key),
-}));
+vi.mock('@sveltia/i18n', async () => (await import('$lib/test/i18n')).createI18nMock());
 vi.mock('$lib/services/backends/git/github/auth', () => ({
   getTokenPageURL: vi.fn(),
   signIn: vi.fn(),
@@ -45,6 +41,7 @@ vi.mock('$lib/services/backends/git/github/deployment', () => ({
 vi.mock('$lib/services/backends/git/github/files', () => ({
   fetchFiles: vi.fn(),
   fetchBlob: vi.fn(),
+  fetchDirSHA: vi.fn(),
 }));
 vi.mock('$lib/services/backends/git/github/repository', () => ({
   repository: {},
@@ -86,6 +83,7 @@ describe('GitHub backend service', () => {
       fetchFiles: expect.any(Function),
       fetchLastCommit: expect.any(Function),
       fetchBlob: expect.any(Function),
+      fetchDirSHA: expect.any(Function),
       commitChanges: expect.any(Function),
       fetchFileCommits: expect.any(Function),
       triggerDeployment: expect.any(Function),
@@ -118,6 +116,25 @@ describe('GitHub backend service', () => {
       expect(Object.assign).toHaveBeenCalledWith(
         apiConfig,
         expect.objectContaining({ authScope: 'public_repo,user' }),
+      );
+    });
+
+    test('requests each scope of a list', () => {
+      cmsConfig.current = /** @type {any} */ ({
+        backend: {
+          name: BACKEND_NAME,
+          repo: 'owner/repo',
+          branch: 'main',
+          open_authoring: true,
+          auth_scope: ['public_repo', 'workflow'],
+        },
+      });
+
+      init();
+
+      expect(Object.assign).toHaveBeenCalledWith(
+        apiConfig,
+        expect.objectContaining({ authScope: 'public_repo,workflow,user' }),
       );
     });
 
@@ -227,35 +244,6 @@ describe('GitHub backend service', () => {
           tokenURL: `${customAuthRoot}/${customAuthPath}`,
           restBaseURL: 'https://github.example.com/api/v3',
           graphqlBaseURL: 'https://github.example.com/api/graphql',
-        }),
-      );
-
-      expect(result).toBe(repository);
-    });
-
-    test('initializes with PKCE authentication type', () => {
-      const mockCmsConfig = {
-        backend: {
-          name: BACKEND_NAME,
-          repo: 'owner/repo',
-          branch: 'main',
-          auth_type: 'pkce',
-        },
-      };
-
-      cmsConfig.current = /** @type {any} */ (mockCmsConfig);
-
-      const result = init();
-      const expectedAuthURL = `${DEFAULT_PKCE_AUTH_ROOT}/${DEFAULT_PKCE_AUTH_PATH}`;
-
-      expect(Object.assign).toHaveBeenCalledWith(
-        apiConfig,
-        expect.objectContaining({
-          clientId: '',
-          authURL: expectedAuthURL,
-          tokenURL: expectedAuthURL.replace('/authorize', '/access_token'),
-          restBaseURL: DEFAULT_API_ROOT,
-          graphqlBaseURL: `${DEFAULT_API_ROOT}/graphql`,
         }),
       );
 

@@ -4,7 +4,7 @@
 
   import CopyMenuItems from '$lib/components/contents/details/editor/copy-menu-items.svelte';
   import { getEntryDraftContext } from '$lib/services/contents/draft/state.svelte';
-  import { copyFromLocale } from '$lib/services/contents/draft/update/copy';
+  import { copyFromLocale, isTranslationPending } from '$lib/services/contents/draft/update/copy';
   import { getLocaleLabel } from '$lib/services/contents/i18n';
   import { translator } from '$lib/services/integrations/translators';
   import { isPendingDeletion } from '$lib/services/workflow';
@@ -25,19 +25,17 @@
   const entryDraft = getEntryDraftContext();
 
   /** @type {Props} */
-  let {
-    /* eslint-disable prefer-const */
-    size = 'medium',
-    locale,
-    otherLocales,
-    keyPath = '',
-    /* eslint-enable prefer-const */
-  } = $props();
+  let { size = 'medium', locale, otherLocales, keyPath = '' } = $props();
 
   const sourceDisabled = $derived(
     !entryDraft.current?.currentLocales[locale] ||
       // An entry awaiting deletion is read-only, so there’s nothing to translate into
       isPendingDeletion(entryDraft.current?.originalEntry),
+  );
+
+  // A request in flight isn’t sent again until it’s settled
+  const translating = $derived(
+    isTranslationPending({ draft: entryDraft.current, targetLanguage: locale, keyPath }),
   );
 
   /**
@@ -55,11 +53,12 @@
    * @param {LanguagePair} languagePair Language pair.
    */
   const translate = (languagePair) => {
-    /* v8 ignore next 6 -- the button is only offered while the draft is there */
+    /* v8 ignore next 7 -- the button is only offered while the draft is there */
     if (entryDraft.current) {
       copyFromLocale({
         draft: entryDraft.current,
         options: { ...languagePair, keyPath, translate: true },
+        entryDraft,
       });
     }
   };
@@ -80,7 +79,7 @@
       popupPosition="bottom-right"
       aria-label={label}
       title={label}
-      {disabled}
+      disabled={disabled || translating}
       onclick={() => {
         translate(languagePair);
       }}

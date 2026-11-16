@@ -49,7 +49,6 @@ const LIST_KEY_PATH_MATCH_REGEX = /\.(\d+)$/;
  */
 export const analyzeListFields = (allFieldNames, getFieldArgs) => {
   const listFieldConfigs = new Map();
-  const baseFieldGroups = new Map();
 
   // Analyze all list fields and get their configurations
   allFieldNames
@@ -66,17 +65,7 @@ export const analyzeListFields = (allFieldNames, getFieldArgs) => {
     });
 
   // Group entries by base field name
-  [...listFieldConfigs.entries()].forEach(([fieldName, config]) => {
-    const { baseFieldName } = config;
-
-    if (!baseFieldGroups.has(baseFieldName)) {
-      baseFieldGroups.set(baseFieldName, []);
-    }
-
-    baseFieldGroups.get(baseFieldName).push([fieldName, config]);
-  });
-
-  return baseFieldGroups;
+  return Map.groupBy(listFieldConfigs.entries(), ([, { baseFieldName }]) => baseFieldName);
 };
 
 /**
@@ -106,7 +95,7 @@ const buildListItemOption = ({
    */
   const replaceWildcards = (template) =>
     replacements.reduce(
-      (result, [fieldName, itemValue]) => result.replaceAll(`{{${fieldName}}}`, itemValue),
+      (result, [fieldName, itemValue]) => result.replaceAll(`{{${fieldName}}}`, () => itemValue),
       template,
     );
 
@@ -121,10 +110,16 @@ const buildListItemOption = ({
     fallbackContext,
   );
 
+  // Like an empty field, an empty list item value can’t identify the item
+  const hasEmptyValueTag = replacements.some(
+    ([fieldName, itemValue]) =>
+      _valueField.includes(`{{${fieldName}}}`) && String(itemValue ?? '') === '',
+  );
+
   return {
-    label: label || '',
-    value: value || context.slug,
-    searchValue: searchValue || label || '',
+    label,
+    value: hasEmptyValueTag ? '' : value,
+    searchValue: searchValue || label,
   };
 };
 
@@ -274,7 +269,7 @@ export const processComplexListField = ({
           wildcardFieldName.match(COMPLEX_LIST_FIELD_REGEX) ?? [];
 
         return baseFieldName
-          ? [[wildcardFieldName, content[`${baseFieldName}.${index}.${subFieldKey}`] || '']]
+          ? [[wildcardFieldName, content[`${baseFieldName}.${index}.${subFieldKey}`] ?? '']]
           : [];
       }),
       staticFieldNames,

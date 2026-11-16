@@ -35,6 +35,7 @@ words:
   - astrolicious
   - astros
   - Backblaze
+  - backblazeb
   - backlink
   - backlinks
   - basehead
@@ -58,13 +59,19 @@ words:
   - deepmerge
   - DeepSeek
   - dialogs
+  - digitaloceanspaces
+  - DIRC
+  - discardable
   - dompurify
+  - Draggability
   - Effet
   - embeddable
   - esbuild
   - esrap
   - exif
   - exifr
+  - fanout
+  - fastify
   - FedRAMP
   - filechooser
   - Flavored
@@ -75,6 +82,7 @@ words:
   - Ghsas
   - gitdir
   - Gitea
+  - gitlink
   - goldmark
   - groupable
   - heim
@@ -94,6 +102,8 @@ words:
   - indexeddb
   - infobar
   - infobars
+  - Jaccard
+  - jbig
   - jfif
   - jsdoc
   - jSquash
@@ -101,8 +111,10 @@ words:
   - keyvalue
   - Kohei
   - kyoshino
+  - latlng
   - libheif
   - llms
+  - longtask
   - Lume
   - lvml
   - maxresults
@@ -110,15 +122,19 @@ words:
   - messageformat
   - mkdn
   - Monstre
+  - mstrl
   - Mtei
   - Mullvad
   - notranslate
+  - objectformat
+  - oids
   - onclickcapture
   - ondragovercapture
   - ondropcapture
   - onkeydowncapture
   - onpastecapture
   - onwheelcapture
+  - openjpeg
   - OPFS
   - oxlint
   - parseable
@@ -129,6 +145,7 @@ words:
   - pingable
   - Pixabay
   - PKCE
+  - plainify
   - plusplus
   - pnpm
   - popups
@@ -139,18 +156,25 @@ words:
   - programmatically
   - proxified
   - proxify
+  - qcms
   - qrcode
   - Ragdoll
   - rearchitect
   - rebranded
   - recentupdate
+  - reflog
+  - reflogs
+  - refstorage
+  - reftable
   - reimagined
+  - reparsed
   - rescanning
   - restype
   - Roadmap
   - safesearch
   - sandboxing
   - Scaleway
+  - sdir
   - sebousan
   - Shiki
   - shikijs
@@ -165,12 +189,15 @@ words:
   - stylelint
   - subfolders
   - subschema
+  - subtags
   - Supabase
   - sveltejs
   - Sveltia
   - templatized
   - Typecheck
+  - ucarecd
   - unadded
+  - unapprove
   - unflatten
   - unflattened
   - unflattening
@@ -178,9 +205,11 @@ words:
   - unlocalised
   - unlocalized
   - unpatched
+  - unproject
   - unproxify
   - unreviewed
   - unrs
+  - unsets
   - unsubscribers
   - Uploadcare
   - videoseries
@@ -190,6 +219,7 @@ words:
   - weba
   - webformat
   - whitespaces
+  - wikilink
   - worktree
   - worktrees
   - xhigh

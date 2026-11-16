@@ -46,7 +46,8 @@ describe('RenameDialog', () => {
     await expect.element(dialog.getByRole('button', { name: 'Rename' })).toBeDisabled();
     await expectFileNameSelected(dialog.getByRole('textbox'), 'photo.png');
 
-    await dialog.getByRole('textbox').fill('picture.png');
+    // The input is named after the dialog
+    await dialog.getByRole('textbox', { name: 'Rename \u2068photo.png\u2069' }).fill('picture.png');
     await dialog.getByRole('button', { name: 'Rename' }).click();
 
     // The handler runs once the dialog is closed
@@ -131,6 +132,59 @@ describe('RenameDialog', () => {
     await textbox.fill('picture.png');
     await expect.element(textbox).toHaveAttribute('aria-invalid', 'false');
     await expect.element(button).toBeEnabled();
+  });
+
+  test('refuses a name taken in another case, a folder name and a leading dot', async () => {
+    await renderDialog({ folderNames: ['sub'] });
+
+    const dialog = page.getByRole('dialog');
+    const textbox = dialog.getByRole('textbox');
+    const button = dialog.getByRole('button', { name: 'Rename' });
+
+    await expectFileNameSelected(textbox, 'photo.png');
+
+    // `LOGO.png` and `logo.png` clash on a case-insensitive file system like macOS’s or Windows’s
+    await textbox.fill('LOGO.png');
+    await expect
+      .element(dialog.getByText('This file name is used for another asset.'))
+      .toBeInTheDocument();
+    await expect.element(button).toBeDisabled();
+
+    // A Git tree can’t hold a file and a folder under one name
+    await textbox.fill('Sub');
+    await expect
+      .element(dialog.getByText('A folder with this name already exists here.'))
+      .toBeInTheDocument();
+    await expect.element(button).toBeDisabled();
+
+    // A dot file is hidden, so the asset would no longer be listed
+    await textbox.fill('.photo.png');
+    await expect
+      .element(dialog.getByText('File name cannot start with a dot.'))
+      .toBeInTheDocument();
+    await expect.element(button).toBeDisabled();
+
+    // Nor can a name be left with nothing once sanitized
+    await textbox.fill('???');
+    await expect
+      .element(dialog.getByText('File name cannot contain special characters.'))
+      .toBeInTheDocument();
+    await expect.element(button).toBeDisabled();
+  });
+
+  test('sanitizes the new name like an uploaded file’s, showing it below the input', async () => {
+    const { onRename } = await renderDialog();
+    const dialog = page.getByRole('dialog');
+    const textbox = dialog.getByRole('textbox');
+
+    await expectFileNameSelected(textbox, 'photo.png');
+    await textbox.fill('pic:ture.png');
+    await expect
+      .element(dialog.getByRole('status'))
+      .toHaveTextContent('The file will be saved as “\u2068picture.png\u2069”.');
+    await dialog.getByRole('button', { name: 'Rename' }).click();
+
+    await vi.waitFor(() => expect(onRename).toHaveBeenCalledWith('picture.png'));
   });
 
   test('asks for confirmation when the extension changes', async () => {

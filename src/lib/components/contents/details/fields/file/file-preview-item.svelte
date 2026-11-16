@@ -7,7 +7,7 @@
   import { watchAsync } from '$lib/services/utils/state.svelte';
 
   /**
-   * @import { AssetKind } from '$lib/types/private';
+   * @import { AssetKind, InternalLocaleCode } from '$lib/types/private';
    * @import { MediaField } from '$lib/types/public';
    */
 
@@ -16,18 +16,14 @@
    * @property {string} value Field value, either a URL or a file path.
    * @property {MediaField} fieldConfig Field configuration.
    * @property {string} [typedKeyPath] Field key path for field-level media folders.
+   * @property {InternalLocaleCode} [locale] Locale being previewed, which an entry-relative path is
+   * relative to.
    */
 
   const entryDraft = getEntryDraftContext();
 
   /** @type {Props} */
-  let {
-    /* eslint-disable prefer-const */
-    value,
-    fieldConfig,
-    typedKeyPath = undefined,
-    /* eslint-enable prefer-const */
-  } = $props();
+  let { value, fieldConfig, typedKeyPath = undefined, locale = undefined } = $props();
 
   /** @type {AssetKind | undefined} */
   let kind = $state();
@@ -59,6 +55,7 @@
               fileName,
               fieldConfig,
               typedKeyPath,
+              locale,
             })
           : { kind: undefined, src: undefined },
       );
@@ -73,15 +70,6 @@
   <p>
     <AssetPreview {kind} {src} controls={['audio', 'video'].includes(kind)} />
   </p>
-{:else if value.trim() && !value.startsWith('blob:')}
+{:else if typeof value === 'string' && value.trim() && !value.startsWith('blob:')}
   <p>{value}</p>
 {/if}
-
-<style>
-  /* Remove the padding to make the image full-width on small screens */
-  @media (width < 768px) {
-    :global([role='document'] section) > p:has(:global(img)) {
-      margin-inline: calc(var(--entry-preview-padding-inline) * -1);
-    }
-  }
-</style>

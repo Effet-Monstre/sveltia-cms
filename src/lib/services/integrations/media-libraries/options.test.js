@@ -4,6 +4,8 @@ import { beforeEach, describe, expect, test, vi } from 'vitest';
 import { cmsConfig } from '$lib/services/config/state';
 import {
   findLibraryOptions,
+  getPreferredLibraryNames,
+  mergeLibraryOptions,
   resolveLibraryOptions,
 } from '$lib/services/integrations/media-libraries/options';
 
@@ -52,6 +54,26 @@ describe('findLibraryOptions()', () => {
 
     cmsConfig.current = undefined;
     expect(findLibraryOptions('uploadcare', { media_library: legacy })).toBeUndefined();
+  });
+
+  test('applies the legacy option to the site default library only, given its name', () => {
+    const legacy = { config: { publicKey: 'legacy' } };
+    const named = { name: 'stock_assets', config: {} };
+
+    cmsConfig.current = { media_library: { config: {} } };
+    expect(findLibraryOptions('default', cmsConfig.current, 'default')).toBe(
+      cmsConfig.current.media_library,
+    );
+    expect(findLibraryOptions('default', { media_library: legacy }, 'default')).toBe(legacy);
+    expect(findLibraryOptions('stock_assets', { media_library: legacy }, 'default')).toBe(
+      undefined,
+    );
+    // A field-level legacy option can’t switch to another library than the site-level one
+    expect(findLibraryOptions('stock_assets', { media_library: named }, 'default')).toBe(undefined);
+    expect(findLibraryOptions('stock_assets', { media_library: named })).toBe(named);
+
+    cmsConfig.current = undefined;
+    expect(findLibraryOptions('default', { media_library: legacy }, 'default')).toBe(legacy);
   });
 
   test('ignores a `null` library in the `media_libraries` map', () => {
@@ -184,5 +206,153 @@ describe('resolveLibraryOptions()', () => {
     cmsConfig.current = undefined;
 
     expect(resolveLibraryOptions('uploadcare', { widget: 'image' })).toBeUndefined();
+  });
+});
+
+describe('mergeLibraryOptions()', () => {
+  test('returns the site options when the field sets none', () => {
+    const site = { config: { a: 1 } };
+
+    expect(mergeLibraryOptions(site, undefined)).toBe(site);
+    expect(mergeLibraryOptions(false, undefined)).toBe(false);
+    expect(mergeLibraryOptions(undefined, undefined)).toBeUndefined();
+  });
+
+  test('returns the field options as is when either side has nothing to merge', () => {
+    const field = { config: { a: 1 } };
+
+    expect(mergeLibraryOptions({ config: { b: 2 } }, false)).toBe(false);
+    expect(mergeLibraryOptions(false, field)).toBe(field);
+    expect(mergeLibraryOptions(undefined, field)).toBe(field);
+  });
+
+  test('merges the objects one level deep only', () => {
+    expect(
+      mergeLibraryOptions(
+        { max_file_size: 100, config: { a: 1, nested: { x: 1, y: 2 } } },
+        { config: { b: 2, nested: { x: 3 } } },
+      ),
+    ).toEqual({ max_file_size: 100, config: { a: 1, b: 2, nested: { x: 3 } } });
+  });
+
+  test('replaces an array rather than merging it', () => {
+    expect(mergeLibraryOptions({ formats: ['jpg', 'png'] }, { formats: ['webp'] })).toEqual({
+      formats: ['webp'],
+    });
+  });
+
+  test('leaves the given options untouched', () => {
+    const site = { config: { a: 1 } };
+    const field = { config: { b: 2 } };
+
+    mergeLibraryOptions(site, field);
+
+    expect(site).toEqual({ config: { a: 1 } });
+    expect(field).toEqual({ config: { b: 2 } });
+  });
+});
+
+describe('getPreferredLibraryNames()', () => {
+  beforeEach(() => {
+    cmsConfig.current = undefined;
+  });
+
+  test('returns nothing when no library is marked', () => {
+    expect(getPreferredLibraryNames()).toEqual([]);
+    cmsConfig.current = {
+      media_libraries: { all: { default: true }, aws_s3: { bucket: 'b' }, stock_assets: false },
+    };
+    expect(getPreferredLibraryNames({ widget: 'image' })).toEqual([]);
+  });
+
+  test('returns the library marked at the site level', () => {
+    cmsConfig.current = {
+      media_libraries: { default: {}, aws_s3: { bucket: 'b', default: true } },
+    };
+    expect(getPreferredLibraryNames()).toEqual(['aws_s3']);
+    expect(getPreferredLibraryNames({ widget: 'image' })).toEqual(['aws_s3']);
+  });
+
+  test('puts the libraries marked at the field level first', () => {
+    cmsConfig.current = { media_libraries: { aws_s3: { bucket: 'b', default: true } } };
+
+    expect(
+      getPreferredLibraryNames({
+        widget: 'image',
+        media_libraries: { cloudflare_r2: { bucket: 'r', default: true } },
+      }),
+    ).toEqual(['cloudflare_r2', 'aws_s3']);
+    // The default library can be marked to open a repository folder again
+    expect(
+      getPreferredLibraryNames({
+        widget: 'image',
+        media_libraries: { default: { default: true } },
+      }),
+    ).toEqual(['default', 'aws_s3']);
+  });
+
+  test('puts a library marked in the field before one inherited from the site', () => {
+    cmsConfig.current = {
+      media_libraries: {
+        aws_s3: { bucket: 'b', default: true },
+        cloudflare_r2: { bucket: 'r' },
+      },
+    };
+
+    expect(
+      getPreferredLibraryNames({
+        widget: 'image',
+        media_libraries: { aws_s3: { prefix: 'x/' }, cloudflare_r2: { default: true } },
+      }),
+    ).toEqual(['cloudflare_r2', 'aws_s3']);
+  });
+
+  test('keeps the order of the libraries marked at the site level', () => {
+    cmsConfig.current = {
+      media_libraries: {
+        aws_s3: { bucket: 'b', default: true },
+        cloudflare_r2: { bucket: 'r', default: true },
+      },
+    };
+
+    expect(
+      getPreferredLibraryNames({
+        widget: 'image',
+        media_libraries: { cloudflare_r2: { prefix: 'x/' } },
+      }),
+    ).toEqual(['aws_s3', 'cloudflare_r2']);
+  });
+
+  test('treats an empty field-level entry as not configured', () => {
+    cmsConfig.current = { media_libraries: { aws_s3: { bucket: 'b', default: true } } };
+
+    expect(
+      getPreferredLibraryNames({ widget: 'image', media_libraries: { aws_s3: null } }),
+    ).toEqual(['aws_s3']);
+  });
+
+  test('lets a field clear or disable the library marked at the site level', () => {
+    cmsConfig.current = { media_libraries: { aws_s3: { bucket: 'b', default: true } } };
+
+    expect(
+      getPreferredLibraryNames({
+        widget: 'image',
+        media_libraries: { aws_s3: { default: false } },
+      }),
+    ).toEqual([]);
+    expect(
+      getPreferredLibraryNames({ widget: 'image', media_libraries: { aws_s3: false } }),
+    ).toEqual([]);
+  });
+
+  test('ignores the legacy `media_library` option', () => {
+    cmsConfig.current = { media_libraries: { aws_s3: { bucket: 'b', default: true } } };
+
+    expect(
+      getPreferredLibraryNames({
+        widget: 'image',
+        media_library: { name: 'aws_s3', default: false },
+      }),
+    ).toEqual(['aws_s3']);
   });
 });

@@ -1,9 +1,14 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 
-import { fetchBranchHeadSHA, fetchDeployments } from '$lib/services/backends/git/gitlab/deployment';
+import {
+  fetchBranchHeadSHA,
+  fetchDeployments,
+  triggerDeployment,
+} from '$lib/services/backends/git/gitlab/deployment';
 import { repository } from '$lib/services/backends/git/gitlab/repository';
 import { fetchAPI } from '$lib/services/backends/git/shared/api';
 import { cmsConfig } from '$lib/services/config';
+import { createMockDeployTarget } from '$lib/test/factories';
 
 vi.mock('$lib/services/backends/git/gitlab/repository', () => {
   const mockRepository = { owner: 'group/sub', repo: 'project', branch: 'main' };
@@ -30,22 +35,32 @@ vi.mock('$lib/services/config', () => ({ cmsConfig: { current: undefined } }));
 
 const PROJECT_ID = encodeURIComponent('group/sub/project');
 
-/**
- * Create a deploy target.
- * @param {object} [overrides] Properties to override.
- * @returns {any} Target.
- */
-const createTarget = (overrides = {}) => ({
-  sha: 'abc123',
-  branch: 'cms/posts/hello',
-  kind: 'preview',
-  ...overrides,
-});
-
 describe('GitLab deployment service', () => {
   beforeEach(() => {
     vi.resetAllMocks();
     cmsConfig.current = /** @type {any} */ ({ backend: { name: 'gitlab' } });
+  });
+
+  describe('triggerDeployment', () => {
+    test('creates a pipeline on the configured branch', async () => {
+      const mockResponse = { status: 201, ok: true };
+
+      vi.mocked(fetchAPI).mockResolvedValue(mockResponse);
+
+      await expect(triggerDeployment()).resolves.toBe(mockResponse);
+
+      expect(fetchAPI).toHaveBeenCalledWith(`/projects/${PROJECT_ID}/pipeline`, {
+        method: 'POST',
+        body: { ref: 'main' },
+        responseType: 'raw',
+      });
+    });
+
+    test('propagates API errors', async () => {
+      vi.mocked(fetchAPI).mockRejectedValue(new Error('API Error'));
+
+      await expect(triggerDeployment()).rejects.toThrow('API Error');
+    });
   });
 
   describe('fetchBranchHeadSHA', () => {
@@ -100,14 +115,14 @@ describe('GitLab deployment service', () => {
 
     test('sends no request without a usable target', async () => {
       await expect(fetchDeployments([])).resolves.toEqual({});
-      await expect(fetchDeployments([createTarget({ sha: '' })])).resolves.toEqual({});
+      await expect(fetchDeployments([createMockDeployTarget({ sha: '' })])).resolves.toEqual({});
       expect(fetchAPI).not.toHaveBeenCalled();
     });
 
     test('requests the deployments within a seven-day window', async () => {
       mockAPI({});
 
-      await fetchDeployments([createTarget()]);
+      await fetchDeployments([createMockDeployTarget()]);
 
       expect(fetchAPI).toHaveBeenCalledWith(
         `/projects/${PROJECT_ID}/deployments?order_by=updated_at&sort=desc&per_page=100` +
@@ -130,7 +145,7 @@ describe('GitLab deployment service', () => {
         ],
       });
 
-      const result = await fetchDeployments([createTarget()]);
+      const result = await fetchDeployments([createMockDeployTarget()]);
 
       expect(result.abc123).toEqual({
         state: 'ready',
@@ -156,7 +171,7 @@ describe('GitLab deployment service', () => {
         ],
       });
 
-      const result = await fetchDeployments([createTarget()]);
+      const result = await fetchDeployments([createMockDeployTarget()]);
 
       expect(result.abc123).toEqual({ state: 'unknown', checkedTime: expect.any(Number) });
     });
@@ -181,7 +196,9 @@ describe('GitLab deployment service', () => {
         statuses: [{ name: 'pages', status: 'running', target_url: 'https://gitlab.com/job/1' }],
       });
 
-      const result = await fetchDeployments([createTarget({ branch: 'main', kind: 'production' })]);
+      const result = await fetchDeployments([
+        createMockDeployTarget({ branch: 'main', kind: 'production' }),
+      ]);
 
       expect(result.abc123).toEqual(
         expect.objectContaining({ state: 'pending', url: undefined, context: 'production' }),
@@ -212,7 +229,9 @@ describe('GitLab deployment service', () => {
         statuses: [{ name: 'pages', status: 'running', target_url: 'https://gitlab.com/job/1' }],
       });
 
-      const result = await fetchDeployments([createTarget({ branch: 'main', kind: 'production' })]);
+      const result = await fetchDeployments([
+        createMockDeployTarget({ branch: 'main', kind: 'production' }),
+      ]);
 
       expect(result.abc123).toEqual(
         expect.objectContaining({ state: 'pending', url: undefined, context: 'production' }),
@@ -230,7 +249,7 @@ describe('GitLab deployment service', () => {
         ],
       });
 
-      const result = await fetchDeployments([createTarget()]);
+      const result = await fetchDeployments([createMockDeployTarget()]);
 
       expect(result.abc123.state).toBe('unknown');
     });
@@ -240,7 +259,7 @@ describe('GitLab deployment service', () => {
         deployments: [{ sha: 'abc123', status: 'running', environment: null }],
       });
 
-      const result = await fetchDeployments([createTarget()]);
+      const result = await fetchDeployments([createMockDeployTarget()]);
 
       expect(result.abc123).toEqual(
         expect.objectContaining({ state: 'pending', url: undefined, context: '' }),
@@ -258,7 +277,7 @@ describe('GitLab deployment service', () => {
         ],
       });
 
-      const result = await fetchDeployments([createTarget()]);
+      const result = await fetchDeployments([createMockDeployTarget()]);
 
       expect(result.abc123).toEqual(
         expect.objectContaining({ state: 'ready', url: 'https://preview.netlify.app' }),
@@ -284,7 +303,7 @@ describe('GitLab deployment service', () => {
         ],
       });
 
-      const result = await fetchDeployments([createTarget()]);
+      const result = await fetchDeployments([createMockDeployTarget()]);
 
       expect(result.abc123.url).toBe('https://ready.example.com');
     });
@@ -294,7 +313,7 @@ describe('GitLab deployment service', () => {
         statuses: [{ name: 'lint', status: 'skipped', target_url: 'https://lint.example.com' }],
       });
 
-      const result = await fetchDeployments([createTarget()]);
+      const result = await fetchDeployments([createMockDeployTarget()]);
 
       expect(result.abc123.state).toBe('unknown');
     });
@@ -302,7 +321,7 @@ describe('GitLab deployment service', () => {
     test('tolerates a commit status without a name or URL', async () => {
       mockAPI({ statuses: [{ status: 'pending' }] });
 
-      const result = await fetchDeployments([createTarget()]);
+      const result = await fetchDeployments([createMockDeployTarget()]);
 
       expect(result.abc123).toEqual(
         expect.objectContaining({ state: 'pending', url: undefined, context: '' }),
@@ -326,7 +345,7 @@ describe('GitLab deployment service', () => {
         ],
       });
 
-      const result = await fetchDeployments([createTarget()]);
+      const result = await fetchDeployments([createMockDeployTarget()]);
 
       expect(result.abc123.url).toBe('https://new.example.com');
     });
@@ -342,7 +361,7 @@ describe('GitLab deployment service', () => {
         return [{ name: 'deploy', status: 'success', target_url: 'https://preview.example.com' }];
       });
 
-      const result = await fetchDeployments([createTarget()]);
+      const result = await fetchDeployments([createMockDeployTarget()]);
 
       expect(result.abc123).toEqual(
         expect.objectContaining({ state: 'ready', url: 'https://preview.example.com' }),
@@ -368,7 +387,7 @@ describe('GitLab deployment service', () => {
         ];
       });
 
-      const result = await fetchDeployments([createTarget()]);
+      const result = await fetchDeployments([createMockDeployTarget()]);
 
       expect(result.abc123.url).toBe('https://review.example.com');
       expect(warn).toHaveBeenCalled();
@@ -378,7 +397,7 @@ describe('GitLab deployment service', () => {
     test('tolerates an empty response body', async () => {
       vi.mocked(fetchAPI).mockResolvedValue(/** @type {any} */ (null));
 
-      const result = await fetchDeployments([createTarget()]);
+      const result = await fetchDeployments([createMockDeployTarget()]);
 
       expect(result.abc123.state).toBe('unknown');
     });
@@ -387,8 +406,8 @@ describe('GitLab deployment service', () => {
       mockAPI({});
 
       const result = await fetchDeployments([
-        createTarget({ branch: 'cms/posts/a' }),
-        createTarget({ branch: 'cms/posts/b' }),
+        createMockDeployTarget({ branch: 'cms/posts/a' }),
+        createMockDeployTarget({ branch: 'cms/posts/b' }),
       ]);
 
       const statusCalls = vi

@@ -9,7 +9,8 @@ import QuickSearchBar from './quick-search-bar.svelte';
 
 describe('QuickSearchBar', () => {
   beforeEach(() => {
-    window.location.hash = '#/collections';
+    // Without a `hashchange` event, which would come in once the next test has started
+    window.history.replaceState(null, '', '#/collections');
     searchTerms.current = '';
   });
 
@@ -40,6 +41,19 @@ describe('QuickSearchBar', () => {
     await expect.poll(() => window.location.hash).toBe('#/collections');
   });
 
+  test('goes back to the asset folder the search has started from when cleared', async () => {
+    searchMode.current = 'assets';
+    window.location.hash = '#/assets/static/uploads';
+
+    await render(QuickSearchBar, {});
+
+    await page.getByRole('searchbox').fill('photo');
+    await expect.poll(() => window.location.hash).toBe('#/search/photo');
+
+    await page.getByRole('button', { name: 'Clear' }).click();
+    await expect.poll(() => window.location.hash).toBe('#/assets/static/uploads');
+  });
+
   test('keeps the special characters of the search terms in the URL', async () => {
     searchMode.current = 'contents';
 
@@ -52,10 +66,39 @@ describe('QuickSearchBar', () => {
     expect(parseLocation().path).toBe('/search/50% off?#1');
   });
 
+  test('searches for terms that look like dot segments of a path', async () => {
+    searchMode.current = 'contents';
+
+    await render(QuickSearchBar, {});
+
+    const input = page.getByRole('searchbox');
+
+    await input.fill('.');
+    await expect.poll(() => window.location.hash).toBe('#/search/.');
+    expect(parseLocation().path).toBe('/search/.');
+
+    await input.fill('..');
+    await expect.poll(() => window.location.hash).toBe('#/search/..');
+    expect(parseLocation().path).toBe('/search/..');
+    expect(searchTerms.current).toBe('..');
+
+    // The results page has been replaced as the terms changed, so clearing them goes back to
+    // where the search started
+    await page.getByRole('button', { name: 'Clear' }).click();
+    await expect.poll(() => window.location.hash).toBe('#/collections');
+  });
+
   test('restores the current search terms', async () => {
+    const { origin, pathname } = window.location;
+
     searchMode.current = 'assets';
     searchTerms.current = 'photo';
-    window.location.hash = '#/assets';
+    // An asset opened from the search results
+    window.history.replaceState(
+      { from: `${origin}${pathname}#/search/photo` },
+      '',
+      '#/assets/static/uploads/a.png',
+    );
 
     await render(QuickSearchBar, {});
 
@@ -67,6 +110,22 @@ describe('QuickSearchBar', () => {
     // Clearing the terms away from the search page stays on the page
     await page.getByRole('button', { name: 'Clear' }).click();
     await expect.poll(() => searchTerms.current).toBe('');
-    expect(window.location.hash).toBe('#/assets');
+    expect(window.location.hash).toBe('#/assets/static/uploads/a.png');
+  });
+
+  test('forgets the search once the results have been left with the browser’s Back button', async () => {
+    searchMode.current = 'contents';
+
+    await render(QuickSearchBar, {});
+
+    const input = page.getByRole('searchbox');
+
+    await input.fill('hello');
+    await expect.poll(() => window.location.hash).toBe('#/search/hello');
+
+    window.history.back();
+    await expect.poll(() => window.location.hash).toBe('#/collections');
+    await expect.poll(() => searchTerms.current).toBe('');
+    await expect.element(input).toHaveValue('');
   });
 });

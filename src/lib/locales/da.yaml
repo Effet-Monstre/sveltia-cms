@@ -1091,7 +1091,7 @@ edit_slug_error:
   invalid: Slug må ikke indeholde specialtegn, herunder skråstreger og mellemrum.
   duplicate: Dette slug bruges allerede til et andet dokument.
 
-# Entry path editing in a nested collection
+# Entry path editing for nested entries
 # Heading for the parent folder picker shown when the `meta.path` option is enabled
 entry_parent_folder: Overordnet mappe
 new_parent_folder: Ny mappe
@@ -1488,6 +1488,10 @@ cloud_storage:
       requested: Logger ind…
       error: Brugernavnet eller adgangskoden er forkert. Kontrollér dem, og prøv igen.
 
+  # Shared by the S3-compatible services, unless overridden below
+  s3:
+    auth_key_label: Secret Access Key
+
   # Service-specific configurations
   cloudinary:
     iframe_title: Cloudinary-mediebibliotek
@@ -1499,15 +1503,6 @@ cloud_storage:
 
   uploadcare:
     auth_key_label: API Secret Key
-
-  aws_s3:
-    auth_key_label: Secret Access Key
-
-  cloudflare_r2:
-    auth_key_label: Secret Access Key
-
-  digitalocean_spaces:
-    auth_key_label: Secret Access Key
 
 # ==============================================================================
 # Configuration Validation
@@ -1565,7 +1560,7 @@ config:
     oauth_implicit_flow: Den konfigurerede autentificeringsmetode (implicit flow) understøttes ikke i Sveltia CMS. Brug en anden <a>autentificeringsmetode</a> i stedet.
     github_pkce_unsupported: PKCE-autorisation understøttes endnu ikke på grund af begrænsninger hos GitHub. Brug en anden <a>autentificeringsmetode</a> i stedet.
     oauth_no_app_id: OAuth-applikationens id er ikke defineret.
-    # Don’t localize `open_authoring` and `editorial_workflow`
+    # Don’t localize `open_authoring`, `editorial_workflow` and `preview`
     open_authoring_no_workflow: Indstillingen `open_authoring` kræver udgivelsestilstanden `editorial_workflow`. Se <a>dokumentationen</a> for detaljer.
     # Don’t localize `auth_methods`
     no_auth_methods: Indstillingen `auth_methods` skal indeholde mindst én metode.
@@ -1979,13 +1974,23 @@ prefs:
       description: Vis understregning af links i forhåndsvisningen af dokumenter og i brugerfladens tekster.
       switch_label: Understreg altid links
 
-  # Advanced panel
-  advanced:
-    title: Avanceret
-    beta:
-      title: Betafunktioner
-      description: Slå betafunktioner til. De kan være ustabile eller mangle oversættelse.
-      switch_label: Deltag i betaprogrammet
+  # Data Management panel
+  data:
+    clear_data:
+      title: Ryd data
+      # Clear File Cache button
+      file_cache:
+        description: Slet lokalt cachelagret filindhold og miniaturebilleder for at frigøre lagerplads eller løse problemer forårsaget af forældede data.
+        button_label: Ryd filcache
+        confirmation: Lokalt cachelagret filindhold og miniaturebilleder bliver slettet. Dine ikke-gemte kladder og indstillinger bevares, og slettede data bliver downloadet eller genereret igen efter behov. CMS’et genindlæses når det er færdigt.
+      # Erase All Data button
+      all_data:
+        description: Slet alt hvad CMS’et gemmer i denne browser, herunder cachelagrede filer, ikke-gemte kladder og indstillinger. Det der allerede er gemt i dit repositorium, bliver ikke påvirket.
+        button_label: Slet alle data
+        confirmation: Alle data der er gemt i denne browser, bliver slettet, herunder cachelagret filindhold, miniaturebilleder, ikke-gemte kladder, indstillinger og loginstatus. Dit repositorium bliver ikke påvirket, men alle ændringer du ikke har gemt, går tabt, og du skal logge ind igen. CMS’et genindlæses når det er færdigt.
+
+  # Developer panel
+  developer:
     developer_mode:
       title: Udviklertilstand
       description: Slå udviklerorienterede funktioner til, herunder detaljerede konsollogs og systemets egne kontekstmenuer.
@@ -2003,18 +2008,6 @@ prefs:
         field_label: Authorization-header (fx Bearer <token>) (valgfri)
         saved: Authorization-headeren er gemt.
         removed: Authorization-headeren er fjernet.
-    clear_data:
-      title: Ryd data
-      # Clear File Cache button
-      file_cache:
-        description: Slet lokalt cachelagret filindhold og miniaturebilleder for at frigøre lagerplads eller løse problemer forårsaget af forældede data.
-        button_label: Ryd filcache
-        confirmation: Lokalt cachelagret filindhold og miniaturebilleder bliver slettet. Dine ikke-gemte kladder og indstillinger bevares, og slettede data bliver downloadet eller genereret igen efter behov. CMS’et genindlæses når det er færdigt.
-      # Erase All Data button
-      all_data:
-        description: Slet alt hvad CMS’et gemmer i denne browser, herunder cachelagrede filer, ikke-gemte kladder og indstillinger. Det der allerede er gemt i dit repositorium, bliver ikke påvirket.
-        button_label: Slet alle data
-        confirmation: Alle data der er gemt i denne browser, bliver slettet, herunder cachelagret filindhold, miniaturebilleder, ikke-gemte kladder, indstillinger og loginstatus. Dit repositorium bliver ikke påvirket, men alle ændringer du ikke har gemt, går tabt, og du skal logge ind igen. CMS’et genindlæses når det er færdigt.
 
 # ==============================================================================
 # Keyboard Shortcuts

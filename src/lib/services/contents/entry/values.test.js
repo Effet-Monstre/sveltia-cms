@@ -11,6 +11,7 @@ import {
 } from '$lib/services/contents/entry/values';
 import { getDateTimeFieldDisplayValue } from '$lib/services/contents/fields/date-time/display';
 import { getReferencedOptionLabel } from '$lib/services/contents/fields/relation/helpers';
+import { getComponentDef } from '$lib/services/contents/fields/rich-text/components/definitions';
 import { getOptionLabel } from '$lib/services/contents/fields/select/helpers';
 
 // Mock dependencies
@@ -140,6 +141,9 @@ describe('Test getFieldDisplayValue()', () => {
       { name: 'floatNumber', widget: 'number', value_type: 'float' },
       { name: 'defaultNumber', widget: 'number' }, // Defaults to 'int'
       { name: 'customTypeNumber', widget: 'number', value_type: 'custom' },
+      // Compute fields for testing
+      { name: 'floatTotal', widget: 'compute', value: '1 + 1', value_type: 'float' },
+      { name: 'stringTotal', widget: 'compute', value: '{{index}}' },
     ],
   };
 
@@ -406,6 +410,57 @@ describe('Test getFieldDisplayValue()', () => {
           plainText: true,
         }),
       ).toBe('_svelte_');
+    });
+
+    test('should resolve each item of a list field with a non-string subfield', () => {
+      mockGetCollection.mockReturnValue(
+        // @ts-expect-error - Simplified mock for testing
+        {
+          ...mockCollection,
+          fields: [
+            { name: 'counts', widget: 'list', field: { name: 'count', widget: 'number' } },
+            { name: 'flags', widget: 'list', field: { name: 'flag', widget: 'boolean' } },
+            {
+              name: 'levels',
+              widget: 'list',
+              field: {
+                name: 'level',
+                widget: 'select',
+                options: [
+                  { label: 'Low', value: 1 },
+                  { label: 'High', value: 'high' },
+                ],
+              },
+            },
+          ],
+        },
+      );
+      mockGetOptionLabel.mockImplementation(
+        ({ valueMap, keyPath }) =>
+          /** @type {Record<string, string>} */ ({ 1: 'Low', high: 'High' })[valueMap[keyPath]],
+      );
+
+      const valueMap = {
+        'counts.0': 1200,
+        'counts.1': 3.5,
+        'flags.0': true,
+        'flags.1': false,
+        'levels.0': 1,
+        'levels.1': 'high',
+      };
+
+      /**
+       * Get the display value of a list field.
+       * @param {string} keyPath Key path.
+       * @returns {string} Display value.
+       */
+      const getValue = (keyPath) =>
+        // Another test checks that the formatter for `en` is created, so it mustn’t be cached here
+        getFieldDisplayValue({ collectionName: 'posts', valueMap, keyPath, locale: 'en-CA' });
+
+      expect(getValue('counts')).toBe('1,200, 3.5');
+      expect(getValue('flags')).toBe('true, false');
+      expect(getValue('levels')).toBe('Low, High');
     });
 
     test('should reuse cached regex when getFieldDisplayValue is called twice with the same keyPath', () => {
@@ -854,6 +909,58 @@ describe('Test getFieldDisplayValue()', () => {
 
       expect(result).toBe('some value');
     });
+
+    test('should apply the `default` transformation to a missing field value', () => {
+      const args = { collectionName: 'posts', keyPath: 'alt', locale: 'en' };
+      const transformations = [{ method: 'default', args: { defaultValue: 'Untitled' } }];
+
+      expect(getFieldDisplayValue({ ...args, valueMap: {}, transformations })).toBe('Untitled');
+      expect(getFieldDisplayValue({ ...args, valueMap: { alt: '' }, transformations })).toBe(
+        'Untitled',
+      );
+      expect(
+        getFieldDisplayValue({
+          ...args,
+          valueMap: {},
+          transformations: [{ method: 'upper', args: {} }],
+        }),
+      ).toBe('');
+    });
+
+    test('should not take an `Object.prototype` member for a missing field value', () => {
+      const result = getFieldDisplayValue({
+        collectionName: 'posts',
+        valueMap: { title: 'Hello' },
+        keyPath: 'toString',
+        locale: 'en',
+      });
+
+      // The source of `Object.prototype.toString` was displayed
+      expect(result).toBe('');
+    });
+  });
+
+  describe('Rich text editor component fields', () => {
+    test('should look up the field in the component definition', () => {
+      vi.mocked(getComponentDef).mockReturnValue(
+        /** @type {any} */ ({
+          fields: [{ name: 'title', widget: 'select', options: [{ label: 'Books', value: 'b' }] }],
+        }),
+      );
+      mockGetOptionLabel.mockReturnValue('Books');
+
+      // The entry’s `title` is a String field, but the component’s is a Select field
+      const result = getFieldDisplayValue({
+        collectionName: 'posts',
+        componentName: 'card',
+        valueMap: { title: 'b' },
+        keyPath: 'title',
+        locale: 'en',
+      });
+
+      expect(result).toBe('Books');
+      expect(getComponentDef).toHaveBeenCalledWith('card');
+    });
   });
 
   describe('Number field handling', () => {
@@ -892,7 +999,7 @@ describe('Test getFieldDisplayValue()', () => {
       });
 
       expect(result).toBe('1,234');
-      expect(Intl.NumberFormat).toHaveBeenCalledWith('en');
+      expect(Intl.NumberFormat).toHaveBeenCalledWith('en', { maximumFractionDigits: 20 });
     });
 
     test('should format float numbers using Intl.NumberFormat', () => {
@@ -923,6 +1030,28 @@ describe('Test getFieldDisplayValue()', () => {
       });
 
       expect(result).toBe('5,678');
+    });
+
+    test('should format the number of a numeric Compute field', () => {
+      expect(
+        getFieldDisplayValue({
+          collectionName: 'posts',
+          valueMap: { floatTotal: 1234.5 },
+          keyPath: 'floatTotal',
+          locale: 'en',
+        }),
+      ).toBe('1,234.5');
+    });
+
+    test('should not format the number of a string Compute field', () => {
+      expect(
+        getFieldDisplayValue({
+          collectionName: 'posts',
+          valueMap: { stringTotal: 1234 },
+          keyPath: 'stringTotal',
+          locale: 'en',
+        }),
+      ).toBe('1234');
     });
 
     test('should not format numbers for custom value_type', () => {
@@ -1048,7 +1177,28 @@ describe('Test getFieldDisplayValue()', () => {
       });
 
       expect(result).toBe('1234'); // Our mock returns toString() for non-en locales
-      expect(Intl.NumberFormat).toHaveBeenCalledWith('ja');
+      expect(Intl.NumberFormat).toHaveBeenCalledWith('ja', { maximumFractionDigits: 20 });
+    });
+
+    test('should keep every fraction digit of a float number', () => {
+      vi.restoreAllMocks();
+
+      // Use 'fr' which no other test uses, so the real formatter is created and cached
+      [
+        [35.681236, '35,681236'],
+        [0.0004, '0,0004'],
+        ['0.000123456', '0,000123456'],
+        [1234.5, '1\u202f234,5'],
+      ].forEach(([floatNumber, expected]) => {
+        expect(
+          getFieldDisplayValue({
+            collectionName: 'posts',
+            valueMap: { floatNumber },
+            keyPath: 'floatNumber',
+            locale: 'fr',
+          }),
+        ).toBe(expected);
+      });
     });
 
     test('should reuse the cached number formatter for the same locale', () => {
@@ -1107,7 +1257,8 @@ describe('Test getFieldDisplayValue()', () => {
       // These would be handled by Number() constructor and Intl.NumberFormat
       expect(nanResult).toBe('NaN');
       expect(infinityResult).toBe('∞'); // toLocaleString returns ∞ for Infinity
-      expect(invalidResult).toBe('NaN');
+      // Text that isn’t a number is shown as is
+      expect(invalidResult).toBe('invalid');
     });
   });
 });
@@ -1712,6 +1863,29 @@ describe('Test getPropertyValue()', () => {
     expect(getPropertyValue({ ...args, key: 'author.name' })).toBe('Jane');
     // Not an object field, whose name happens to share a prefix with one
     expect(getPropertyValue({ ...args, key: 'authors' })).toBe('Jane, John');
+  });
+
+  test('should not take an `Object.prototype` member for a field value', () => {
+    /** @type {any} */
+    const entry = { locales: { en: { content: { 'constructor.name': 'Jane' } } } };
+
+    mockGetCollection.mockReturnValue(
+      /** @type {any} */ ({
+        _type: 'entry',
+        fields: [
+          { name: 'constructor', widget: 'object', fields: [{ name: 'name', widget: 'string' }] },
+          { name: 'toString', widget: 'string' },
+        ],
+        _i18n: { i18nEnabled: false },
+      }),
+    );
+
+    // A collection name of its own, as the field configurations are cached by collection
+    const args = { entry, locale: 'en', collectionName: 'prototype-members' };
+
+    // `Object` and `Object.prototype.toString` were returned
+    expect(getPropertyValue({ ...args, key: 'constructor' })).toEqual(['Jane']);
+    expect(getPropertyValue({ ...args, key: 'toString' })).toBeUndefined();
   });
 
   test('should return raw field value for non-relation fields', () => {

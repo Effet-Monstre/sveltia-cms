@@ -1,3 +1,4 @@
+// @vitest-environment happy-dom
 // @ts-nocheck
 
 import { beforeEach, describe, expect, test, vi } from 'vitest';
@@ -7,8 +8,11 @@ import {
   getReferenceTargets,
   planAssetDeletion,
   removeAssetReferences,
-  removeMarkdownImages,
+  removeEmbeddedMedia,
 } from '$lib/services/assets/data/cascade';
+
+// Imported along the way; its initialization would run against the happy-dom globals
+vi.mock('$lib/services/user/env.svelte', () => ({ env: {} }));
 
 vi.mock('$lib/services/assets/state', () => ({
   allAssets: { current: [] },
@@ -30,11 +34,19 @@ vi.mock('$lib/services/config', () => ({
   cmsConfig: { current: {} },
 }));
 
-vi.mock('$lib/services/assets/references', () => ({
-  getAssetReferences: vi.fn(async () => []),
-  getComparableAssetURL: vi.fn((url) => url.replace('https://example.com', '')),
-  MARKDOWN_IMAGE_REGEX: /!\[.*?\]\((.+?)(?:\s+".*?")?\)/g,
-}));
+vi.mock('$lib/services/assets/references', async (importOriginal) => {
+  const mediaField = await import('$lib/services/assets/media-field');
+
+  return {
+    .../** @type {Record<string, any>} */ (await importOriginal()),
+    getAssetReferences: vi.fn(async () => []),
+    getComparableAssetURL: vi.fn((url) => url.replace('https://example.com', '')),
+    // Resolve a media URL with the mocked `getMediaFieldSource()`, given the context as is
+    createMediaSourceResolver: vi.fn(
+      (context) => (src) => mediaField.getMediaFieldSource({ ...context, value: src }),
+    ),
+  };
+});
 
 vi.mock('$lib/services/contents/collection/entries/index-file', () => ({
   isCollectionIndexFile: vi.fn(() => false),
@@ -71,7 +83,9 @@ const { getAssetPublicURL } = await import('$lib/services/assets/info');
 const { getMediaFieldSource } = await import('$lib/services/assets/media-field');
 const { cmsConfig } = await import('$lib/services/config');
 const { allEntries } = await import('$lib/services/contents');
-const { getAssetReferences } = await import('$lib/services/assets/references');
+
+const { createMediaSourceResolver, getAssetReferences } =
+  await import('$lib/services/assets/references');
 
 const { isCollectionIndexFile } =
   await import('$lib/services/contents/collection/entries/index-file');
@@ -89,12 +103,18 @@ const postsCollection = {
 const imageField = { name: 'image', label: 'Image', widget: 'image' };
 const galleryField = { name: 'gallery', label: 'Gallery', widget: 'image', multiple: true };
 const bodyField = { name: 'body', label: 'Body', widget: 'markdown' };
+
 /**
  * Create an asset.
  * @param {string} name File name.
  * @returns {object} Asset.
  */
-const createAsset = (name) => ({ name, path: `static/uploads/${name}`, sha: name });
+const createAsset = (name) => ({
+  name,
+  path: `static/uploads/${name}`,
+  sha: name,
+  folder: { internalPath: 'static/uploads', entryRelative: false },
+});
 
 /**
  * Create a blog post entry.
@@ -174,15 +194,30 @@ describe('getReferenceTargets()', () => {
       { asset },
     ]);
   });
+
+  test('matches an asset in an entry-relative folder by the asset itself', () => {
+    // A path relative to the entry, like `images/a.png`, would match the same path in any entry,
+    // which refers to a different file in that entry’s own folder
+    const asset = {
+      ...createAsset('a.png'),
+      path: 'content/posts/images/a.png',
+      folder: { internalPath: 'content/posts', entryRelative: true },
+    };
+
+    getAssetPublicURL.mockReturnValue('images/a.png');
+
+    expect(getReferenceTargets([asset])).toEqual([{ asset }]);
+    expect(getAssetPublicURL).not.toHaveBeenCalled();
+  });
 });
 
-describe('removeMarkdownImages()', () => {
+describe('removeEmbeddedMedia()', () => {
   const entry = createPost('a', {});
-  const baseArgs = { entry, collectionName: 'posts', fileName: undefined };
+  const baseArgs = { entry, collectionName: 'posts', fileName: undefined, format: 'markdown' };
 
   test('removes the images pointing at the deleted assets', async () => {
     expect(
-      await removeMarkdownImages({
+      await removeEmbeddedMedia({
         ...baseArgs,
         value: 'Hi ![a](/uploads/a.png) and ![b](/uploads/b.png "B") and ![c](/uploads/c.png)',
         urls: new Set(['/uploads/a.png', '/uploads/b.png']),
@@ -194,7 +229,7 @@ describe('removeMarkdownImages()', () => {
     const urls = new Set(['/uploads/a.png']);
 
     expect(
-      await removeMarkdownImages({
+      await removeEmbeddedMedia({
         ...baseArgs,
         value: 'Hello\n\n![a](/uploads/a.png)\n\nBye\n',
         urls,
@@ -203,18 +238,18 @@ describe('removeMarkdownImages()', () => {
 
     // At the start, at the end, and with nothing else
     expect(
-      await removeMarkdownImages({ ...baseArgs, value: '![a](/uploads/a.png)\n\nBye', urls }),
+      await removeEmbeddedMedia({ ...baseArgs, value: '![a](/uploads/a.png)\n\nBye', urls }),
     ).toBe('Bye');
     expect(
-      await removeMarkdownImages({ ...baseArgs, value: 'Hello\n\n![a](/uploads/a.png)', urls }),
+      await removeEmbeddedMedia({ ...baseArgs, value: 'Hello\n\n![a](/uploads/a.png)', urls }),
     ).toBe('Hello\n');
-    expect(await removeMarkdownImages({ ...baseArgs, value: '![a](/uploads/a.png)', urls })).toBe(
+    expect(await removeEmbeddedMedia({ ...baseArgs, value: '![a](/uploads/a.png)', urls })).toBe(
       '',
     );
 
     // Consecutive images each on a line of their own
     expect(
-      await removeMarkdownImages({
+      await removeEmbeddedMedia({
         ...baseArgs,
         value: 'Hello\n\n![a](/uploads/a.png)\n![a](/uploads/a.png)\n\nBye',
         urls,
@@ -224,7 +259,7 @@ describe('removeMarkdownImages()', () => {
 
   test('cuts an image sharing its line with text', async () => {
     expect(
-      await removeMarkdownImages({
+      await removeEmbeddedMedia({
         ...baseArgs,
         value: 'Hello\n![a](/uploads/a.png) there\nBye',
         urls: new Set(['/uploads/a.png']),
@@ -234,7 +269,7 @@ describe('removeMarkdownImages()', () => {
 
   test('cuts an image on a line of its own between paragraphs without blank lines', async () => {
     expect(
-      await removeMarkdownImages({
+      await removeEmbeddedMedia({
         ...baseArgs,
         value: 'Hello\n![a](/uploads/a.png)\nBye',
         urls: new Set(['/uploads/a.png']),
@@ -243,7 +278,7 @@ describe('removeMarkdownImages()', () => {
 
     // On the last line
     expect(
-      await removeMarkdownImages({
+      await removeEmbeddedMedia({
         ...baseArgs,
         value: 'Hello\n![a](/uploads/a.png)',
         urls: new Set(['/uploads/a.png']),
@@ -251,11 +286,59 @@ describe('removeMarkdownImages()', () => {
     ).toBe('Hello');
   });
 
+  test('removes an image whose source is encoded, wrapped or has a fragment', async () => {
+    // Matched the same way as the references are found: the CMS writes a space as `%20` in a body
+    const urls = new Set(['/uploads/My Photo.jpg', '/uploads/café.jpg']);
+
+    expect(
+      await removeEmbeddedMedia({
+        ...baseArgs,
+        value: [
+          'Hello',
+          '![a](/uploads/My%20Photo.jpg)',
+          '![b](</uploads/My Photo.jpg>) ![c](/uploads/caf%C3%A9.jpg#center)',
+          '<img src="/uploads/My%20Photo.jpg">',
+          'Bye',
+        ].join('\n\n'),
+        urls,
+      }),
+    ).toBe('Hello\n\nBye');
+  });
+
+  test('removes a linked image along with its link', async () => {
+    const urls = new Set(['/uploads/a.png']);
+
+    expect(
+      await removeEmbeddedMedia({
+        ...baseArgs,
+        value: 'Hello\n\n[![A](/uploads/a.png)](/uploads/a.png)\n\nBye',
+        urls,
+      }),
+    ).toBe('Hello\n\nBye');
+
+    // Linking elsewhere, with a title, sharing a line, or next to a linked image left alone
+    expect(
+      await removeEmbeddedMedia({
+        ...baseArgs,
+        value: [
+          'See [![A](/uploads/a.png "A")](https://example.com) here',
+          '[![B](/uploads/b.png)](/uploads/a.png) [x] ![A](/uploads/a.png)',
+        ].join('\n\n'),
+        urls,
+      }),
+    ).toBe('See  here\n\n[![B](/uploads/b.png)](/uploads/a.png) [x] ');
+
+    // An image in brackets that aren’t a link
+    expect(
+      await removeEmbeddedMedia({ ...baseArgs, value: '[![A](/uploads/a.png)] x', urls }),
+    ).toBe('[] x');
+  });
+
   test('leaves the author’s blank lines alone', async () => {
     const value = 'Hello\n\n\n\n![a](/uploads/a.png)\n\n```\nfoo\n\n\nbar\n```\n';
 
     expect(
-      await removeMarkdownImages({ ...baseArgs, value, urls: new Set(['/uploads/a.png']) }),
+      await removeEmbeddedMedia({ ...baseArgs, value, urls: new Set(['/uploads/a.png']) }),
     ).toBe('Hello\n\n\n\n```\nfoo\n\n\nbar\n```\n');
   });
 
@@ -263,7 +346,7 @@ describe('removeMarkdownImages()', () => {
     const value = '![c](/uploads/c.png)';
 
     expect(
-      await removeMarkdownImages({ ...baseArgs, value, urls: new Set(['/uploads/a.png']) }),
+      await removeEmbeddedMedia({ ...baseArgs, value, urls: new Set(['/uploads/a.png']) }),
     ).toBe(value);
     expect(getMediaFieldSource).not.toHaveBeenCalled();
   });
@@ -274,32 +357,179 @@ describe('removeMarkdownImages()', () => {
     );
 
     expect(
-      await removeMarkdownImages({
+      await removeEmbeddedMedia({
         ...baseArgs,
         value: '![a](a.png) ![b](b.png)',
         urls: new Set(),
         paths: new Set(['content/posts/a/a.png']),
+        locale: 'fr',
       }),
     ).toBe(' ![b](b.png)');
-    expect(getMediaFieldSource).toHaveBeenCalledWith({
-      entry,
-      collectionName: 'posts',
-      fileName: undefined,
-      value: 'a.png',
-    });
+    // The image is resolved relative to the locale’s entry file
+    expect(getMediaFieldSource).toHaveBeenCalledWith(
+      expect.objectContaining({
+        entry,
+        collectionName: 'posts',
+        fileName: undefined,
+        locale: 'fr',
+        value: 'a.png',
+      }),
+    );
   });
 
   test('leaves an image alone that resolves to nothing', async () => {
     const value = '![a](a.png)';
 
     expect(
-      await removeMarkdownImages({
+      await removeEmbeddedMedia({
         ...baseArgs,
         value,
         urls: new Set(),
         paths: new Set(['content/posts/a/a.png']),
       }),
     ).toBe(value);
+  });
+});
+
+describe('removeEmbeddedMedia() with raw HTML in Markdown', () => {
+  const entry = createPost('a', {});
+  const baseArgs = { entry, collectionName: 'posts', fileName: undefined, format: 'markdown' };
+  const urls = new Set(['/uploads/a.png', '/uploads/a.mp4']);
+
+  test('cuts an image or a `<source>` left with nothing to display', async () => {
+    expect(
+      await removeEmbeddedMedia({
+        ...baseArgs,
+        value: 'Hello\n\n<img src="/uploads/a.png" alt="A" />\n\nBye <IMG SRC=/uploads/a.png>!',
+        urls,
+      }),
+    ).toBe('Hello\n\nBye !');
+    expect(
+      await removeEmbeddedMedia({
+        ...baseArgs,
+        value: '<video controls>\n<source src="/uploads/a.mp4">\n<source src="b.webm">\n</video>',
+        urls,
+      }),
+    ).toBe('<video controls>\n<source src="b.webm">\n</video>');
+  });
+
+  test('removes only the URLs pointing at the deleted assets from other tags', async () => {
+    expect(
+      await removeEmbeddedMedia({
+        ...baseArgs,
+        value: [
+          '<img src="/uploads/a.png" srcset="/uploads/a.png 1x, b.png 2x">',
+          "<video src='/uploads/a.mp4' poster='/uploads/a.png' controls></video>",
+          '<audio src="/uploads/a.mp4"></audio>',
+          '<img src="c.png"> ![c](c.png)',
+        ].join('\n'),
+        urls,
+      }),
+    ).toBe(
+      [
+        '<img srcset="b.png 2x">',
+        '<video controls=""></video>',
+        '<audio></audio>',
+        '<img src="c.png"> ![c](c.png)',
+      ].join('\n'),
+    );
+  });
+
+  test('leaves a raw tag inside another tag alone', async () => {
+    const value = '<a title=\'<img src="/uploads/a.png">\'>x</a>';
+
+    expect(await removeEmbeddedMedia({ ...baseArgs, value, urls })).toBe(value);
+  });
+
+  test('matches an asset without a public path by the asset a tag’s URL resolves to', async () => {
+    getMediaFieldSource.mockImplementation(({ value }) =>
+      value === 'a.png' ? { asset: { path: 'content/posts/a/a.png' } } : { url: value },
+    );
+
+    expect(
+      await removeEmbeddedMedia({
+        ...baseArgs,
+        value: '<img src="a.png"> <img src="b.png">',
+        urls: new Set(),
+        paths: new Set(['content/posts/a/a.png']),
+      }),
+    ).toBe(' <img src="b.png">');
+  });
+});
+
+describe('removeEmbeddedMedia() with HTML', () => {
+  const entry = createPost('a', {});
+  const baseArgs = { entry, collectionName: 'posts', fileName: undefined, format: 'html' };
+  const urls = new Set(['/uploads/a.png', '/uploads/a.mp4']);
+
+  test('removes an element left with nothing to display, along with empty wrappers', async () => {
+    expect(
+      await removeEmbeddedMedia({
+        ...baseArgs,
+        value: [
+          '<p>Hello</p><p><a href="/x"><img src="/uploads/a.png"></a></p>',
+          '<figure><img src="/uploads/a.png"><figcaption>A</figcaption></figure>',
+          '<ul><li><img src="/uploads/a.png"></li></ul>',
+          '<p>Text <img src="/uploads/a.png"></p>',
+        ].join(''),
+        urls,
+      }),
+    ).toBe('<p>Hello</p><figure><figcaption>A</figcaption></figure><ul><li></li></ul><p>Text </p>');
+  });
+
+  test('removes an image whose source is encoded or has a fragment', async () => {
+    expect(
+      await removeEmbeddedMedia({
+        ...baseArgs,
+        value: '<p><img src="/uploads/My%20Photo.jpg"></p><p><img src="/uploads/a.png#x"></p>',
+        urls: new Set(['/uploads/My Photo.jpg', '/uploads/a.png']),
+      }),
+    ).toBe('');
+  });
+
+  test('removes a picture along with its image', async () => {
+    expect(
+      await removeEmbeddedMedia({
+        ...baseArgs,
+        value: '<p><picture><source srcset="b.avif"><img src="/uploads/a.png"></picture></p>Bye',
+        urls,
+      }),
+    ).toBe('Bye');
+  });
+
+  test('removes only the URLs pointing at the deleted assets from other elements', async () => {
+    expect(
+      await removeEmbeddedMedia({
+        ...baseArgs,
+        value: [
+          '<img src="/uploads/a.png" srcset="/uploads/a.png 1x, b.png 2x">',
+          '<img srcset="/uploads/a.png 1x" src="c.png">',
+          '<video poster="/uploads/a.png" src="b.mp4"></video>',
+        ].join(''),
+        urls,
+      }),
+    ).toBe('<img srcset="b.png 2x"><img src="c.png"><video src="b.mp4"></video>');
+  });
+
+  test('removes a video or audio once it has no source left', async () => {
+    expect(
+      await removeEmbeddedMedia({
+        ...baseArgs,
+        value: [
+          '<video controls><source src="/uploads/a.mp4"><source src="b.webm"></video>',
+          '<audio><source src="/uploads/a.mp4"></audio>',
+          '<video src="/uploads/a.mp4" poster="b.png"></video>',
+          '<video poster="/uploads/a.png"></video>',
+        ].join(''),
+        urls,
+      }),
+    ).toBe('<video controls=""><source src="b.webm"></video>');
+  });
+
+  test('leaves the HTML alone when no media points at the deleted assets', async () => {
+    const value = "<p class='a'><img src='c.png'><video></video><img></p>";
+
+    expect(await removeEmbeddedMedia({ ...baseArgs, value, urls })).toBe(value);
   });
 });
 
@@ -360,6 +590,75 @@ describe('removeAssetReferences()', () => {
     ).toEqual({
       content: { body: 'Hi  there' },
       fields: new Map([['body', bodyField]]),
+    });
+  });
+
+  test('removes the media from an HTML RichText field', async () => {
+    const htmlField = { name: 'body', widget: 'richtext', format: 'html' };
+    const content = { body: '<p>Hi</p><p><img src="/static/uploads/a.png"></p>' };
+    const entry = createPost('a', content);
+
+    expect(
+      await removeAssetReferences({
+        content,
+        references: [createReference(entry, 'body', htmlField)],
+        urls,
+      }),
+    ).toEqual({
+      content: { body: '<p>Hi</p>' },
+      fields: new Map([['body', htmlField]]),
+    });
+  });
+
+  test('resolves the images of a reference relative to its locale’s entry file', async () => {
+    getMediaFieldSource.mockImplementation(({ locale }) =>
+      locale === 'fr' ? { asset: { path: 'content/posts/fr/a/a.png' } } : undefined,
+    );
+
+    const content = { body: '![a](a.png)' };
+    const post = createPost('a', content);
+
+    expect(
+      await removeAssetReferences({
+        content,
+        references: [createReference(post, 'body', bodyField, { locale: 'fr' })],
+        urls: new Set(),
+        paths: new Set(['content/posts/fr/a/a.png']),
+      }),
+    ).toEqual({ content: { body: '' }, fields: new Map([['body', bodyField]]) });
+  });
+
+  test('resolves the images of a reference against the field’s own media folder', async () => {
+    const field = { ...bodyField, media_folder: 'images1' };
+    const content = { 'sections.0.body': '![a](a.png)', 'sections.0.type': 'text' };
+    const post = createPost('a', content);
+
+    isCollectionIndexFile.mockReturnValue(true);
+    getMediaFieldSource.mockImplementation(({ fieldConfig }) =>
+      fieldConfig === field ? { asset: { path: 'content/posts/a/images1/a.png' } } : undefined,
+    );
+
+    expect(
+      await removeAssetReferences({
+        content,
+        references: [createReference(post, 'sections.0.body', field)],
+        urls: new Set(),
+        paths: new Set(['content/posts/a/images1/a.png']),
+      }),
+    ).toEqual({
+      content: { 'sections.0.body': '', 'sections.0.type': 'text' },
+      fields: new Map([['sections.0.body', field]]),
+    });
+    // The key path and the content tell the typed key path the field’s folder is registered under
+    expect(createMediaSourceResolver).toHaveBeenCalledWith({
+      entry: post,
+      collectionName: 'posts',
+      fileName: undefined,
+      locale: '_default',
+      keyPath: 'sections.0.body',
+      valueMap: content,
+      isIndexFile: true,
+      fieldConfig: field,
     });
   });
 
@@ -576,10 +875,15 @@ describe('planAssetDeletion() with read-only entries', () => {
 
 describe('planAssetDeletion() with assets without a public path', () => {
   test('removes the images resolving to the assets, without loading them', async () => {
-    const asset = { name: 'a.png', path: 'content/posts/a/a.png', sha: 'a' };
+    const asset = {
+      name: 'a.png',
+      path: 'content/posts/a/a.png',
+      sha: 'a',
+      folder: { internalPath: 'content/posts', entryRelative: true },
+    };
+
     const post = createPost('a', { body: 'Hi ![a](a.png) ![b](b.png)' });
 
-    getAssetPublicURL.mockReturnValue(undefined);
     getMediaFieldSource.mockImplementation(({ value }) =>
       value === 'a.png' ? { asset } : undefined,
     );

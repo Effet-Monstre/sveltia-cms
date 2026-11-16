@@ -1,15 +1,21 @@
 // @vitest-environment happy-dom
 /* eslint-disable jsdoc/require-jsdoc */
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import {
+  escapeAlt,
+  escapeTitle,
+  followReadonly,
+  getParentComponentNames,
   getSelectorTagNames,
+  isInlineComponentDef,
   isMultiLinePattern,
   isValidSelector,
   normalizeProps,
-  replaceQuotes,
+  observeReadonly,
   supportsHTML,
+  unescapeTitle,
 } from './utils.js';
 
 describe('utils', () => {
@@ -78,7 +84,24 @@ describe('utils', () => {
     });
   });
 
+  describe('isInlineComponentDef', () => {
+    it('should tell a component with a single-line pattern', () => {
+      expect(isInlineComponentDef({ pattern: /\[\[(.+?)\]\]/ })).toBe(true);
+      expect(isInlineComponentDef({ pattern: /^<aside>[\s\S]*?<\/aside>$/m })).toBe(false);
+    });
+
+    it('should always tell a pattern-based inline component', () => {
+      expect(isInlineComponentDef({ pattern: /a[\s\S]b/s, inlinePattern: {} })).toBe(true);
+    });
+  });
+
   describe('normalizeProps', () => {
+    it('should keep the keys with a dot as they are', () => {
+      expect(normalizeProps({ kv: { 'example.com': 'a' }, __sc_component_name: 'x' })).toEqual({
+        kv: { 'example.com': 'a' },
+      });
+    });
+
     it('should remove properties starting with __sc_', () => {
       const props = {
         title: 'Test Title',
@@ -173,54 +196,64 @@ describe('utils', () => {
     });
   });
 
-  describe('replaceQuotes', () => {
-    it('should replace double quotes with single quotes', () => {
-      const input = 'Hello "world" and "everyone"';
-      const result = replaceQuotes(input);
-
-      expect(result).toBe("Hello 'world' and 'everyone'");
+  describe('unescapeTitle', () => {
+    it('should unescape the ASCII punctuation characters', () => {
+      expect(unescapeTitle('T \\"q\\" \\\\ \\* \\(x\\)')).toBe('T "q" \\ * (x)');
     });
 
-    it('should handle strings without quotes', () => {
-      const input = 'Hello world';
-      const result = replaceQuotes(input);
-
-      expect(result).toBe('Hello world');
+    it('should keep a backslash before any other character', () => {
+      expect(unescapeTitle('C:\\Users\\me é\\é')).toBe('C:\\Users\\me é\\é');
     });
 
-    it('should handle strings with only single quotes', () => {
-      const input = "Hello 'world'";
-      const result = replaceQuotes(input);
+    it('should handle a title without escapes', () => {
+      expect(unescapeTitle('')).toBe('');
+      expect(unescapeTitle("It's a title")).toBe("It's a title");
+    });
+  });
 
-      expect(result).toBe("Hello 'world'");
+  describe('escapeTitle', () => {
+    it('should escape double quotes', () => {
+      expect(escapeTitle('Hello "world"')).toBe('Hello \\"world\\"');
     });
 
-    it('should handle empty strings', () => {
-      const input = '';
-      const result = replaceQuotes(input);
-
-      expect(result).toBe('');
+    it('should escape a backslash before a punctuation character or at the end', () => {
+      expect(escapeTitle('a\\" b\\* c\\')).toBe('a\\\\\\" b\\\\* c\\\\');
     });
 
-    it('should handle strings with mixed quotes', () => {
-      const input = 'Hello "world" and \'everyone\'';
-      const result = replaceQuotes(input);
-
-      expect(result).toBe("Hello 'world' and 'everyone'");
+    it('should keep a backslash before any other character as is', () => {
+      expect(escapeTitle('C:\\Users\\me')).toBe('C:\\Users\\me');
     });
 
-    it('should handle multiple consecutive double quotes', () => {
-      const input = 'Test ""double"" quotes';
-      const result = replaceQuotes(input);
-
-      expect(result).toBe("Test ''double'' quotes");
+    it('should handle a title without quotes or backslashes', () => {
+      expect(escapeTitle('')).toBe('');
+      expect(escapeTitle("It's a title")).toBe("It's a title");
     });
 
-    it('should handle strings that are just quotes', () => {
-      const input = '"""';
-      const result = replaceQuotes(input);
+    it('should be the counterpart of unescapeTitle', () => {
+      ['T "q"', 'a\\"b', 'end\\', 'C:\\Users', '\\\\"', '"""'].forEach((title) => {
+        expect(unescapeTitle(escapeTitle(title))).toBe(title);
+      });
+    });
+  });
 
-      expect(result).toBe("'''");
+  describe('escapeAlt', () => {
+    it('should escape brackets', () => {
+      expect(escapeAlt('smile :] [1')).toBe('smile :\\] \\[1');
+    });
+
+    it('should escape a backslash before a punctuation character or at the end', () => {
+      expect(escapeAlt('a\\] b\\* c\\')).toBe('a\\\\\\] b\\\\* c\\\\');
+    });
+
+    it('should keep other characters as is', () => {
+      expect(escapeAlt('')).toBe('');
+      expect(escapeAlt('C:\\Users "it\'s"')).toBe('C:\\Users "it\'s"');
+    });
+
+    it('should be the counterpart of unescapeTitle', () => {
+      ['a]', '[b', 'end\\', 'C:\\Users', '\\]', '\\\\[', '![x](y)'].forEach((alt) => {
+        expect(unescapeTitle(escapeAlt(alt))).toBe(alt);
+      });
     });
   });
 });
@@ -269,5 +302,127 @@ describe('supportsHTML', () => {
     expect(supportsHTML({ ...def, ...htmlOptions, htmlSelector: undefined })).toBe(false);
     expect(supportsHTML({ ...def, ...htmlOptions, fromBlockHTML: undefined })).toBe(false);
     expect(supportsHTML({ ...def, ...htmlOptions, toBlockHTML: undefined })).toBe(false);
+  });
+});
+
+describe('getParentComponentNames', () => {
+  it('should read the names from the closest component’s fields, but not its own', () => {
+    // A YouTube component in a Details component, in a Callout component in a dialog: the dialog is
+    // rendered elsewhere, so only the elements holding the fields tell where a component is
+    document.body.innerHTML =
+      '<div data-component-path=\'["x-callout"]\'>' +
+      '<div data-component-path=\'["x-callout","x-details"]\'>' +
+      '<p><span id="youtube" data-component-path=\'["x-callout","x-details","x-youtube"]\'>' +
+      '</span></p></div></div>' +
+      '<span id="top" data-component-path=\'["x-image"]\'></span>';
+
+    expect(getParentComponentNames(document.querySelector('#youtube') ?? undefined)).toEqual([
+      'x-callout',
+      'x-details',
+    ]);
+    expect(getParentComponentNames(document.querySelector('#top') ?? undefined)).toEqual([]);
+    expect(getParentComponentNames(undefined)).toEqual([]);
+  });
+});
+
+describe('observeReadonly', () => {
+  it('should follow the read-only state of the editor the component is in', async () => {
+    document.body.innerHTML =
+      '<div role="textbox" aria-readonly="true"><p><span id="component"></span></p></div>';
+
+    const textbox = /** @type {HTMLElement} */ (document.querySelector('[role="textbox"]'));
+    const callback = vi.fn();
+    const observer = observeReadonly(document.querySelector('#component') ?? undefined, callback);
+
+    expect(callback).toHaveBeenLastCalledWith(true);
+
+    textbox.setAttribute('aria-readonly', 'false');
+    await vi.waitFor(() => {
+      expect(callback).toHaveBeenLastCalledWith(false);
+    });
+
+    observer?.disconnect();
+    textbox.setAttribute('aria-readonly', 'true');
+    await new Promise((resolve) => {
+      setTimeout(resolve, 10);
+    });
+    expect(callback).toHaveBeenCalledTimes(2);
+  });
+
+  it('should do nothing outside an editor', () => {
+    document.body.innerHTML = '<span id="component"></span>';
+
+    const callback = vi.fn();
+
+    expect(observeReadonly(document.querySelector('#component') ?? undefined, callback)).toBe(
+      undefined,
+    );
+    expect(observeReadonly(undefined, callback)).toBe(undefined);
+    expect(callback).not.toHaveBeenCalled();
+  });
+});
+
+describe('followReadonly', () => {
+  /**
+   * Wait for the next frame.
+   * @returns {Promise<void>} Promise.
+   */
+  const nextFrame = () =>
+    new Promise((resolve) => {
+      window.requestAnimationFrame(() => resolve(undefined));
+    });
+
+  it('should follow the read-only state from the next frame on', async () => {
+    document.body.innerHTML =
+      '<div role="textbox" aria-readonly="true"><p><span id="component"></span></p></div>';
+
+    const textbox = /** @type {HTMLElement} */ (document.querySelector('[role="textbox"]'));
+    const callback = vi.fn();
+    const stop = followReadonly(document.querySelector('#component') ?? undefined, callback);
+
+    expect(callback).not.toHaveBeenCalled();
+
+    await nextFrame();
+    expect(callback).toHaveBeenLastCalledWith(true);
+
+    textbox.setAttribute('aria-readonly', 'false');
+    await vi.waitFor(() => {
+      expect(callback).toHaveBeenLastCalledWith(false);
+    });
+
+    stop();
+    textbox.setAttribute('aria-readonly', 'true');
+    await new Promise((resolve) => {
+      setTimeout(resolve, 10);
+    });
+    expect(callback).toHaveBeenCalledTimes(2);
+  });
+
+  it('should never call the callback if stopped before the frame', async () => {
+    document.body.innerHTML =
+      '<div role="textbox" aria-readonly="true"><p><span id="component"></span></p></div>';
+
+    const textbox = /** @type {HTMLElement} */ (document.querySelector('[role="textbox"]'));
+    const callback = vi.fn();
+    const stop = followReadonly(document.querySelector('#component') ?? undefined, callback);
+
+    stop();
+    await nextFrame();
+    textbox.setAttribute('aria-readonly', 'false');
+    await new Promise((resolve) => {
+      setTimeout(resolve, 10);
+    });
+    expect(callback).not.toHaveBeenCalled();
+  });
+
+  it('should do nothing outside an editor', async () => {
+    document.body.innerHTML = '<span id="component"></span>';
+
+    const callback = vi.fn();
+    const stop = followReadonly(document.querySelector('#component') ?? undefined, callback);
+
+    await nextFrame();
+    stop();
+    expect(callback).not.toHaveBeenCalled();
   });
 });

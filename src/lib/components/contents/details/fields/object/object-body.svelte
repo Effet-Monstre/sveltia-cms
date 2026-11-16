@@ -9,16 +9,19 @@
 
   import Image from '$lib/components/assets/shared/image.svelte';
   import FieldEditor from '$lib/components/contents/details/editor/field-editor.svelte';
+  import { getLocalizedOption } from '$lib/services/contents/i18n/options';
   import { env } from '$lib/services/user/env.svelte';
+  import { sanitizeHelpText } from '$lib/services/utils/string';
 
   /**
+   * @import { Snippet } from 'svelte';
    * @import {
    * FieldContext,
    * InternalLocaleCode,
    * MediaFieldSource,
    * TypedFieldKeyPath,
    * } from '$lib/types/private';
-   * @import { Field, FieldKeyPath } from '$lib/types/public';
+   * @import { Field, FieldKeyPath, VariableFieldType } from '$lib/types/public';
    */
 
   /**
@@ -40,12 +43,16 @@
    * @property {() => string} getSummary Function returning the summary shown while collapsed.
    * @property {() => MediaFieldSource | undefined} getThumbnail Function returning the thumbnail
    * shown along with the summary.
+   * @property {Snippet} [summaryContent] Content drawn in place of the summary text while
+   * collapsed, e.g. by a custom field type’s summary component.
    * @property {string} [summaryId] `id` of the summary, so the value can be labelled by it.
+   * @property {VariableFieldType} [typeConfig] Configuration of the value’s variable type, whose
+   * help message is shown above the subfields unless the field is read-only.
+   * @property {boolean} [readonly] Whether the field is read-only.
    */
 
   /** @type {Props} */
   let {
-    /* eslint-disable prefer-const */
     locale,
     subFields,
     getSubFieldProps,
@@ -53,36 +60,69 @@
     unknownType,
     getSummary,
     getThumbnail,
+    summaryContent = undefined,
     summaryId = undefined,
-    /* eslint-enable prefer-const */
+    typeConfig = undefined,
+    readonly = false,
   } = $props();
+
+  const hint = $derived(
+    readonly || !typeConfig
+      ? undefined
+      : getLocalizedOption({ config: typeConfig, option: 'hint', locale }),
+  );
 </script>
 
 {#if unknownType}
   <Alert status="warning">{_('unknown_variable_type')}</Alert>
 {:else if expanded}
+  {#if hint}
+    <p class="type-hint">{@html sanitizeHelpText(hint)}</p>
+  {/if}
   {#each subFields as subField (subField.name)}
     <VisibilityObserver>
       <FieldEditor {...getSubFieldProps(subField)} {locale} fieldConfig={subField} />
     </VisibilityObserver>
   {/each}
 {:else}
-  <!-- The summary is only worked out while it’s shown -->
-  {@const summary = getSummary()}
+  <!-- The summary is only worked out while it’s shown, and only if it’s not drawn otherwise -->
+  {@const summary = summaryContent ? '' : getSummary()}
   {@const thumbnail = getThumbnail()}
-  {#if summary || thumbnail}
+  {#if summaryContent || summary || thumbnail}
     <div role="none" class="summary" id={summaryId}>
       {#if thumbnail}
         <Image asset={thumbnail.asset} src={thumbnail.url} variant="icon" cover />
       {/if}
-      <TruncatedText lines={env.isSmallScreen ? 2 : 1}>
-        {summary}
-      </TruncatedText>
+      {#if summaryContent}
+        {@render summaryContent()}
+      {:else}
+        <TruncatedText lines={env.isSmallScreen ? 2 : 1}>
+          {summary}
+        </TruncatedText>
+      {/if}
     </div>
   {/if}
 {/if}
 
 <style>
+  /* The warning fills the Object field value or the List field item, which clips its corners */
+  :global(.object-unknown-type) {
+    overflow: hidden;
+
+    :global(.sui.alert) {
+      border-width: 0;
+      border-radius: 0;
+    }
+  }
+
+  .type-hint {
+    margin: 0 !important;
+    padding: 12px var(--field-editor-padding) 0;
+    font-size: var(--sui-font-size-small);
+    line-height: var(--sui-line-height-compact);
+    color: var(--sui-tertiary-foreground-color);
+  }
+
   .summary {
     display: flex;
     align-items: center;

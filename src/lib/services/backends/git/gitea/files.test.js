@@ -1,8 +1,9 @@
 // @vitest-environment happy-dom
 
 import { decodeBase64, getPathInfo } from '@sveltia/utils/file';
-import { beforeEach, describe, expect, test, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 
+import { _resetApiSettings } from '$lib/services/backends/git/gitea/api';
 import { fetchLastCommit } from '$lib/services/backends/git/gitea/commits';
 import {
   getWorkflowRepository,
@@ -22,8 +23,10 @@ import { dataLoadedProgress } from '$lib/services/contents';
 import { forkedRepository, openAuthoringInitialized } from '$lib/services/workflow/open-authoring';
 
 import {
+  _resetDirLookup,
   createBatches,
   fetchBlob,
+  fetchDirSHA,
   fetchFileContents,
   fetchFileList,
   fetchFiles,
@@ -36,6 +39,9 @@ import {
  */
 
 // Mock dependencies
+const mockGetRootDir = vi.hoisted(() => vi.fn(() => ''));
+
+vi.mock('$lib/services/backends/root-dir', () => ({ getRootDir: mockGetRootDir }));
 vi.mock('@sveltia/utils/file', () => ({
   decodeBase64: vi.fn(),
   getPathInfo: vi.fn(),
@@ -45,11 +51,20 @@ vi.mock('$lib/services/backends/git/gitea/commits', () => ({
   fetchLastCommit: vi.fn(),
 }));
 
-vi.mock('$lib/services/backends/git/gitea/fork', () => ({
-  getWorkflowRepository: vi.fn(() => ({ owner: 'test-owner', repo: 'test-repo' })),
-  initOpenAuthoring: vi.fn(),
-  isOpenAuthoringConfigured: vi.fn(() => false),
-}));
+vi.mock('$lib/services/backends/git/gitea/fork', async () => {
+  const { parseForkBranchName } = await import('$lib/services/workflow/forks');
+  const getRepository = vi.fn(() => ({ owner: 'test-owner', repo: 'test-repo' }));
+
+  return {
+    getWorkflowRepository: getRepository,
+    // Resolve the repository a workflow branch lives in, as the real module does
+    getBranchRepository: vi.fn(
+      (branch) => parseForkBranchName(branch) ?? { ...getRepository(), branch },
+    ),
+    initOpenAuthoring: vi.fn(),
+    isOpenAuthoringConfigured: vi.fn(() => false),
+  };
+});
 
 vi.mock('$lib/services/backends/git/gitea/instance', () => ({
   checkInstanceVersion: vi.fn(),
@@ -100,6 +115,7 @@ vi.mock('$lib/services/contents', () => ({
 describe('Gitea Files Service', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    _resetApiSettings();
     progressValues.length = 0;
     // Reset instance to default state
     vi.mocked(instance).isForgejo = false;
@@ -139,6 +155,110 @@ describe('Gitea Files Service', () => {
       ]);
     });
 
+    describe('with a root directory', () => {
+      beforeEach(() => {
+        _resetDirLookup();
+        mockGetRootDir.mockReturnValue('apps/site');
+        vi.mocked(getPathInfo).mockImplementation((path) => {
+          const index = path.lastIndexOf('/');
+
+          return {
+            dirname: index > -1 ? path.slice(0, index) : undefined,
+            basename: path.slice(index + 1),
+            filename: path.slice(index + 1),
+          };
+        });
+      });
+
+      afterEach(() => {
+        mockGetRootDir.mockReturnValue('');
+      });
+
+      test('should list the tree of the root directory, found in its parent', async () => {
+        vi.mocked(fetchAPI)
+          .mockResolvedValueOnce([
+            { type: 'file', name: 'site', sha: 'file-sha' },
+            { type: 'dir', name: 'site', sha: 'tree-sha' },
+          ])
+          .mockResolvedValueOnce({
+            tree: [{ type: 'blob', path: 'content/a.md', sha: 'a', size: 1 }],
+            truncated: false,
+          });
+
+        await expect(fetchFileList('commit-sha')).resolves.toEqual([
+          { path: 'apps/site/content/a.md', sha: 'a', size: 1, name: 'a.md' },
+        ]);
+        expect(fetchAPI).toHaveBeenNthCalledWith(
+          1,
+          '/repos/test-owner/test-repo/contents/apps?ref=commit-sha',
+        );
+        expect(fetchAPI).toHaveBeenNthCalledWith(
+          2,
+          '/repos/test-owner/test-repo/git/trees/tree-sha?recursive=1&page=1',
+        );
+      });
+
+      test('should list the repository root to find a top-level root directory', async () => {
+        mockGetRootDir.mockReturnValue('site');
+        vi.mocked(fetchAPI)
+          .mockResolvedValueOnce([{ type: 'dir', name: 'site', sha: 'tree-sha' }])
+          .mockResolvedValueOnce({ tree: [], truncated: false });
+
+        await fetchFileList();
+
+        expect(fetchAPI).toHaveBeenNthCalledWith(
+          1,
+          '/repos/test-owner/test-repo/contents?ref=main',
+        );
+      });
+
+      test('should reuse the directory looked up at the same commit', async () => {
+        const commit = 'a'.repeat(40);
+
+        vi.mocked(fetchAPI)
+          .mockResolvedValueOnce([{ type: 'dir', name: 'site', sha: 'tree-sha' }])
+          .mockResolvedValueOnce({ tree: [], truncated: false });
+
+        // As the check for remote changes does, then the file list
+        await expect(fetchDirSHA(commit, 'apps/site')).resolves.toBe('tree-sha');
+        await fetchFileList(commit);
+
+        expect(fetchAPI).toHaveBeenCalledTimes(2);
+        expect(fetchAPI).toHaveBeenLastCalledWith(
+          '/repos/test-owner/test-repo/git/trees/tree-sha?recursive=1&page=1',
+        );
+      });
+
+      test('should return an empty list when the root directory doesn’t exist', async () => {
+        vi.mocked(fetchAPI).mockResolvedValueOnce([{ type: 'dir', name: 'other', sha: 'x' }]);
+
+        await expect(fetchFileList()).resolves.toEqual([]);
+        expect(fetchAPI).toHaveBeenCalledTimes(1);
+      });
+
+      test('should return an empty list when the parent directory doesn’t exist', async () => {
+        vi.mocked(fetchAPI).mockRejectedValueOnce(
+          new Error('Not Found', { cause: { status: 404 } }),
+        );
+
+        await expect(fetchFileList()).resolves.toEqual([]);
+      });
+
+      test('should return an empty list when the parent is a file', async () => {
+        vi.mocked(fetchAPI).mockResolvedValueOnce({ type: 'file', name: 'apps', sha: 'x' });
+
+        await expect(fetchFileList()).resolves.toEqual([]);
+      });
+
+      test('should pass on any other error', async () => {
+        const error = new Error('Server error', { cause: { status: 500 } });
+
+        vi.mocked(fetchAPI).mockRejectedValueOnce(error);
+
+        await expect(fetchFileList()).rejects.toBe(error);
+      });
+    });
+
     test('should fetch file list with pagination', async () => {
       const mockTree1 = [{ type: 'blob', path: 'file1.md', sha: 'abc123', size: 100 }];
       const mockTree2 = [{ type: 'blob', path: 'file2.txt', sha: 'def456', size: 200 }];
@@ -169,6 +289,90 @@ describe('Gitea Files Service', () => {
         '/repos/test-owner/test-repo/git/trees/commit-hash?recursive=1&page=2',
       );
       expect(result).toHaveLength(2);
+    });
+
+    test('should fetch the rest of the pages at the same time when the total is known', async () => {
+      /**
+       * Make a page of blobs.
+       * @param {number} start Index of the first blob.
+       * @param {number} count Number of blobs.
+       * @returns {any[]} Blobs.
+       */
+      const makeBlobs = (start, count) =>
+        Array.from({ length: count }, (_, index) => ({
+          type: 'blob',
+          path: `file${start + index}.md`,
+          sha: `sha${start + index}`,
+          size: 1,
+        }));
+
+      /** @type {((value: any) => void)[]} */
+      const pendingPages = [];
+
+      vi.mocked(fetchAPI)
+        .mockResolvedValueOnce({ tree: makeBlobs(0, 2), truncated: true, total_count: 5 })
+        .mockImplementation(
+          () =>
+            new Promise((resolve) => {
+              pendingPages.push(resolve);
+            }),
+        );
+
+      vi.mocked(getPathInfo).mockImplementation((path) => ({
+        basename: path.split('/').pop() || '',
+        filename: path.split('/').pop() || '',
+      }));
+
+      const resultPromise = fetchFileList('commit-hash');
+
+      // Both of the remaining pages are requested before either has come back
+      await vi.waitFor(() => expect(pendingPages).toHaveLength(2));
+      expect(fetchAPI).toHaveBeenNthCalledWith(
+        2,
+        '/repos/test-owner/test-repo/git/trees/commit-hash?recursive=1&page=2',
+      );
+      expect(fetchAPI).toHaveBeenNthCalledWith(
+        3,
+        '/repos/test-owner/test-repo/git/trees/commit-hash?recursive=1&page=3',
+      );
+
+      pendingPages[1]({ tree: makeBlobs(4, 1), truncated: false, total_count: 5 });
+      pendingPages[0]({ tree: makeBlobs(2, 2), truncated: true, total_count: 5 });
+
+      // The pages come out in order, whichever came back first
+      expect((await resultPromise).map(({ path }) => path)).toEqual([
+        'file0.md',
+        'file1.md',
+        'file2.md',
+        'file3.md',
+        'file4.md',
+      ]);
+    });
+
+    test('should page through an instance that doesn’t report the total', async () => {
+      vi.mocked(fetchAPI)
+        .mockResolvedValueOnce({
+          tree: [{ type: 'blob', path: 'a.md', sha: 'a', size: 1 }],
+          truncated: true,
+        })
+        .mockResolvedValueOnce({
+          tree: [{ type: 'blob', path: 'b.md', sha: 'b', size: 1 }],
+          truncated: true,
+        })
+        .mockResolvedValueOnce({
+          tree: [{ type: 'blob', path: 'c.md', sha: 'c', size: 1 }],
+          truncated: false,
+        });
+
+      vi.mocked(getPathInfo).mockImplementation((path) => ({
+        basename: path.split('/').pop() || '',
+        filename: path.split('/').pop() || '',
+      }));
+
+      const result = await fetchFileList('commit-hash');
+
+      expect(fetchAPI).toHaveBeenCalledTimes(3);
+      expect(result.map(({ path }) => path)).toEqual(['a.md', 'b.md', 'c.md']);
     });
 
     test('should handle empty tree response', async () => {
@@ -418,6 +622,26 @@ describe('Gitea Files Service', () => {
       expect(dataLoadedProgress.current).toBeUndefined();
     });
 
+    test('should clear the progress when a request fails', async () => {
+      /** @type {BaseFileListItem[]} */
+      const fetchingFiles = [
+        // @ts-ignore - Type compatibility in test
+        { path: 'file1.md', sha: 'abc123', size: 100, type: 'entry', name: 'file1.md' },
+      ];
+
+      const error = new Error('offline');
+
+      vi.mocked(fetchAPI)
+        .mockResolvedValueOnce({ default_paging_num: 30 })
+        .mockRejectedValueOnce(error);
+
+      await expect(fetchFileContents(fetchingFiles)).rejects.toThrow(error);
+
+      // The progress bar doesn’t stay on screen
+      expect(progressValues).toEqual([0, undefined]);
+      expect(dataLoadedProgress.current).toBeUndefined();
+    });
+
     test('should fetch file contents for Forgejo', async () => {
       // Mock Forgejo instance
       vi.mocked(instance).isForgejo = true;
@@ -583,6 +807,60 @@ describe('Gitea Files Service', () => {
         meta: {},
       });
       expect(progressValues).toContain(100);
+    });
+
+    test('should read the files at the commit the file list comes from', async () => {
+      /** @type {BaseFileListItem[]} */
+      const fetchingFiles = [
+        // @ts-ignore - Type compatibility in test
+        { path: 'content/small.md', sha: 'sha1', size: 100, type: 'entry', name: 'small.md' },
+        // @ts-ignore - Type compatibility in test
+        { path: 'content/large.md', sha: 'sha2', size: 2000, type: 'entry', name: 'large.md' },
+      ];
+
+      vi.mocked(fetchAPI).mockImplementation(async (path) => {
+        if (path === '/settings/api') {
+          return { default_max_blob_size: 1000 };
+        }
+
+        return path.includes('/raw/') ? 'Content' : [];
+      });
+
+      await fetchFileContents(fetchingFiles, 'last-commit-sha');
+
+      // Not at the tip of the branch, which may hold another version of a file by now, whose text
+      // would then be cached under the blob SHA from the file list
+      expect(fetchAPI).toHaveBeenCalledWith(
+        '/repos/test-owner/test-repo/file-contents?ref=last-commit-sha',
+        { method: 'POST', body: { files: ['content/small.md'] } },
+      );
+      expect(fetchAPI).toHaveBeenCalledWith(
+        '/repos/test-owner/test-repo/raw/content/large.md?ref=last-commit-sha',
+        { responseType: 'text' },
+      );
+    });
+
+    test('should read an oversized blob at the commit on Forgejo too', async () => {
+      vi.mocked(instance).isForgejo = true;
+
+      /** @type {BaseFileListItem[]} */
+      const fetchingFiles = [
+        // @ts-ignore - Type compatibility in test
+        { path: 'content/large.md', sha: 'sha2', size: 2000, type: 'entry', name: 'large.md' },
+      ];
+
+      vi.mocked(fetchAPI).mockImplementation(async (path) =>
+        path === '/settings/api' ? { default_max_blob_size: 1000 } : 'Content',
+      );
+
+      const result = await fetchFileContents(fetchingFiles, 'last-commit-sha');
+
+      // The raw endpoint goes by path, unlike the bulk one Forgejo reads by blob SHA
+      expect(fetchAPI).toHaveBeenCalledWith(
+        '/repos/test-owner/test-repo/raw/content/large.md?ref=last-commit-sha',
+        { responseType: 'text' },
+      );
+      expect(result['content/large.md'].text).toBe('Content');
     });
 
     test('should encode the path of an oversized blob segment by segment', async () => {
@@ -1006,6 +1284,23 @@ describe('Gitea Files Service', () => {
 
       expect(fetchAPI).toHaveBeenCalledWith(
         '/repos/me/fork/media/cms/me/fork/posts/hello/images/photo.jpg',
+        { responseType: 'blob' },
+      );
+    });
+
+    test('should read the asset of a contributor’s pull request from their fork', async () => {
+      vi.mocked(fetchAPI).mockResolvedValue(new Blob(['binary data']));
+
+      await fetchBlob(
+        /** @type {any} */ ({
+          path: 'images/photo.jpg',
+          workflow: { branch: 'alice/website:cms/alice/website/posts/hello' },
+        }),
+      );
+
+      // The branch goes by its own name in the fork
+      expect(fetchAPI).toHaveBeenCalledWith(
+        '/repos/alice/website/media/cms/alice/website/posts/hello/images/photo.jpg',
         { responseType: 'blob' },
       );
     });

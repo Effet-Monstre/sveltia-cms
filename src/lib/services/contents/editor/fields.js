@@ -1,8 +1,8 @@
 import { sleep } from '@sveltia/utils/misc';
-import { escapeRegExp } from '@sveltia/utils/string';
 
-import { getField, LIST_KEY_PATH_REGEX } from '$lib/services/contents/entry/fields';
-import { getOrCreate } from '$lib/services/utils/cache';
+import { getValueMapSnapshot } from '$lib/services/contents/draft/value-map.svelte';
+import { getField } from '$lib/services/contents/entry/fields';
+import { getKeysByPrefix, ITEM_INDEX_SUFFIX_REGEX } from '$lib/services/contents/entry/key-paths';
 
 /**
  * @import {
@@ -13,11 +13,6 @@ import { getOrCreate } from '$lib/services/utils/cache';
  * @import { FieldKeyPath, ObjectField, ListField } from '$lib/types/public';
  */
 
-/**
- * Cache of pre-compiled regexes keyed by cleaned key path.
- * @type {Map<string, RegExp>}
- */
-const expanderRegexCache = new Map();
 /**
  * Expander state changes accumulated by {@link syncExpanderStates}, waiting to be written to the
  * entry draft, keyed by draft. A draft has no entry when no flush is scheduled for it.
@@ -62,17 +57,15 @@ export const getInitialExpanderState = ({ draft, key, locale, collapsed = true }
   }
 
   if (collapsed === 'auto') {
-    const valueMap = draft.currentValues?.[locale] ?? {};
-    const cleanKey = key.replace(/#$/, '');
+    // This runs for every item of a list as it’s rendered, so the direct children are looked up in
+    // the shared snapshot’s sorted key index, rather than by going through every value of the
+    // draft’s live values each time
+    const valueMap = getValueMapSnapshot(draft, locale);
+    const prefix = `${key.replace(/#$/, '')}.`;
 
-    // Pre-compile and cache the regex — same key path is queried on every editor render.
-    const regex = getOrCreate(
-      expanderRegexCache,
-      cleanKey,
-      () => new RegExp(`^${escapeRegExp(cleanKey)}\\.[^\\.]+$`),
+    return !getKeysByPrefix(valueMap, prefix).some(
+      (keyPath) => !keyPath.slice(prefix.length).includes('.') && !!valueMap[keyPath],
     );
-
-    return !Object.entries(valueMap).some(([keyPath, value]) => regex.test(keyPath) && !!value);
   }
 
   return !collapsed;
@@ -150,7 +143,7 @@ export const getExpanderKeys = ({
   keyPath.split('.').forEach((_keyPart, index, arr) => {
     const _keyPath = arr.slice(0, index + 1).join('.');
     const config = getField({ ...getFieldArgs, keyPath: _keyPath });
-    const endingWithNumber = LIST_KEY_PATH_REGEX.test(_keyPath);
+    const endingWithNumber = ITEM_INDEX_SUFFIX_REGEX.test(_keyPath);
 
     if (config?.widget === 'object') {
       if (endingWithNumber) {
@@ -229,10 +222,13 @@ export const highlightEditorField = ({ locale, keyPath }) => {
 };
 
 /**
- * Get the last rendered field of the deepest rendered parent of the given field in an edit pane.
+ * Get the last rendered field of the deepest rendered parent of the given field in an edit pane,
+ * or the parent field itself if none of its subfields are rendered, e.g. a List field whose
+ * collapsed items have none.
  * @param {HTMLElement} pane Edit pane element.
  * @param {FieldKeyPath} keyPath Key path of the field.
  * @returns {HTMLElement | undefined} Field element.
+ * @see https://github.com/sveltia/sveltia-cms/issues/1070
  */
 const getLastRenderedParentField = (pane, keyPath) => {
   const parts = keyPath.split('.');
@@ -251,6 +247,17 @@ const getLastRenderedParentField = (pane, keyPath) => {
     if (fields.length) {
       return fields[fields.length - 1];
     }
+
+    // Moving up to the grandparent would scroll to its last subfield, which may be well past the
+    // field, e.g. a field below the List field the field is in
+    /** @type {HTMLElement | null} */
+    const parentField = parentKeyPath
+      ? pane.querySelector(`.field[data-key-path="${CSS.escape(parentKeyPath)}"]`)
+      : null;
+
+    if (parentField) {
+      return parentField;
+    }
   }
 
   return undefined;
@@ -260,8 +267,8 @@ const getLastRenderedParentField = (pane, keyPath) => {
  * Find the field with the given key path in the edit pane for the given locale. The pane renders
  * fields lazily as they scroll into view, so a field just revealed by expanding its parents may not
  * be rendered yet, especially near the bottom of the pane. In that case, scroll the pane towards
- * the field, to the last rendered field of its deepest rendered parent, until it’s rendered or no
- * more fields are rendered.
+ * the field, to the last rendered field of its deepest rendered parent or to that parent itself,
+ * until it’s rendered or no more fields are rendered.
  * @param {object} args Arguments.
  * @param {InternalLocaleCode} args.locale Locale of the edit pane.
  * @param {FieldKeyPath} args.keyPath Key path of the field. The path editor isn’t a field, so it’s

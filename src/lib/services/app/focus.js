@@ -1,6 +1,18 @@
 import { tick } from 'svelte';
 
 /**
+ * Move the focus to the page container, which is made focusable first.
+ */
+const focusPageContainer = () => {
+  const container = document.querySelector('#page-container');
+
+  if (container instanceof HTMLElement) {
+    container.tabIndex = -1;
+    container.focus();
+  }
+};
+
+/**
  * Remember the element that has the focus as an overlay opens, and return a function that gives it
  * the focus back once the overlay has closed. Without this, closing the entry editor or the asset
  * details drops the focus on `<body>`, and a keyboard or screen reader user has to work their way
@@ -20,13 +32,76 @@ export const rememberFocus = () => {
       return;
     }
 
-    const container = document.querySelector('#page-container');
+    focusPageContainer();
+  };
+};
 
-    if (container instanceof HTMLElement) {
+/**
+ * Watch where the focus is on every frame for a moment, while content is being replaced, so a focus
+ * dropped on `<body>` along with the old content can be moved back.
+ * @param {(activeElement: Element | null) => boolean} check Function that looks at the element
+ * having the focus, moves the focus if needed, and returns whether to keep watching.
+ * @param {number} timeout How long to watch, in milliseconds.
+ */
+const watchFocus = (check, timeout) => {
+  const startTime = performance.now();
+
+  /**
+   * Check the focus, and do it again on the next frame unless it’s done.
+   */
+  const step = () => {
+    if (check(document.activeElement) && performance.now() - startTime < timeout) {
+      window.requestAnimationFrame(step);
+    }
+  };
+
+  window.requestAnimationFrame(step);
+};
+
+/**
+ * Move the focus to the entry or asset list on the page. A control acting on the selected items,
+ * like the Delete button, is disabled once they are gone, which drops its focus on `<body>`, so a
+ * keyboard or screen reader user would have to work their way back from the top of the document.
+ * The row of the list that is in the tab order takes the focus, or the page container if the list
+ * is empty. The list may still be updated after that, e.g. the row of a deleted entry removed, so
+ * the page is watched for a moment to move the focus on to a row again if it has been dropped on
+ * `<body>`, or if a row shows up while the page container has it.
+ * @param {object} [options] Options.
+ * @param {number} [options.timeout] How long to watch the page, in milliseconds.
+ */
+export const focusList = ({ timeout = 2000 } = {}) => {
+  const container = document.querySelector('#page-container');
+
+  if (!(container instanceof HTMLElement)) {
+    return;
+  }
+
+  /**
+   * Focus the row in the tab order, or the page container if there is none.
+   */
+  const focus = () => {
+    const row = container.querySelector('[role="grid"] [tabindex="0"]');
+
+    if (row instanceof HTMLElement) {
+      row.focus();
+    } else {
       container.tabIndex = -1;
       container.focus();
     }
   };
+
+  focus();
+
+  watchFocus((activeElement) => {
+    if (activeElement === document.body || activeElement === container) {
+      focus();
+
+      return true;
+    }
+
+    // Stop once the user has moved the focus elsewhere
+    return container.contains(activeElement);
+  }, timeout);
 };
 
 /**
@@ -61,17 +136,10 @@ export const focusOverlay = async (getWrapper) => {
  * @param {number} [options.timeout] How long to watch the container, in milliseconds.
  */
 export const keepFocusIn = (container, { timeout = 2000 } = {}) => {
-  const startTime = performance.now();
-
-  /**
-   * Check where the focus is, once the content has been updated.
-   */
-  const check = () => {
-    const { activeElement } = document;
-
+  watchFocus((activeElement) => {
     // The focus has stayed within the new content, or the user has moved it elsewhere
     if (activeElement !== document.body && activeElement !== container) {
-      return;
+      return false;
     }
 
     const listbox = container.querySelector('[role="listbox"]');
@@ -79,7 +147,7 @@ export const keepFocusIn = (container, { timeout = 2000 } = {}) => {
     if (listbox instanceof HTMLElement) {
       listbox.focus();
 
-      return;
+      return false;
     }
 
     if (activeElement === document.body && container.isConnected) {
@@ -87,10 +155,6 @@ export const keepFocusIn = (container, { timeout = 2000 } = {}) => {
       container.focus();
     }
 
-    if (performance.now() - startTime < timeout) {
-      window.requestAnimationFrame(check);
-    }
-  };
-
-  window.requestAnimationFrame(check);
+    return true;
+  }, timeout);
 };

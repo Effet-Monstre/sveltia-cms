@@ -1,30 +1,82 @@
-import { beforeEach, describe, expect, test } from 'vitest';
+import { beforeEach, describe, expect, onTestFinished, test, vi } from 'vitest';
 
-import { backend, backendName } from '$lib/services/backends';
-import { mergeLockedBranch } from '$lib/services/backends/branch-access';
+import { backend, backendName, loadBackendService } from '$lib/services/backends';
+import { lockedBranch, mergeLockedBranch } from '$lib/services/backends/branch-access';
 import { cmsConfig } from '$lib/services/config';
 import { allEntries } from '$lib/services/contents';
+import { getCollection } from '$lib/services/contents/collection';
 import { createDerivedState } from '$lib/services/utils/state.svelte';
 import {
+  allUnpublishedEntries,
   canMergePullRequest,
+  canSkipReviewAlong,
   checkPublishedVersion,
+  findEditingUnpublishedEntry,
+  getCompanionEntries,
+  getDeletionSelection,
+  getEditedCompanionEntries,
+  getEditedCompanionPaths,
+  getForkUnpublishedEntry,
+  getPublishAction,
   getPublishedVersion,
+  getPullRequestEntries,
   getUnpublishedEntriesByCollection,
   getUnpublishedEntry,
   getUnpublishedEntryByBranch,
   getUnpublishedEntryByDraft,
+  getUnpublishedEntryById,
   getUnpublishedEntryBySlug,
   hasPublishedVersion,
+  isDirectPublishAllowed,
+  isDiscardableDraft,
+  isOrphanedForkDraft,
+  isPendingDeletion,
   isPublishAllowed,
   isWorkflowDraft,
   isWorkflowEnabled,
   mergeUnpublishedEntries,
+  swapUnpublishedEntries,
   unpublishedEntries,
   unpublishedEntriesLoaded,
   workflowDataReady,
   workflowEnabled,
 } from '$lib/services/workflow';
 import { forkedRepository } from '$lib/services/workflow/open-authoring';
+import { createMockForkPullRequest } from '$lib/test/factories';
+
+vi.mock('$lib/services/contents/collection', async (importOriginal) => {
+  const actual = /** @type {any} */ (await importOriginal());
+
+  return { ...actual, getCollection: vi.fn(actual.getCollection) };
+});
+
+/**
+ * Collections the entries riding along with another one can belong to: one without Editorial
+ * Workflow, one whose review can be skipped, and one whose review can’t.
+ * @type {Record<string, any>}
+ */
+const alongCollections = {
+  tags: { name: 'tags', publish_mode: 'simple' },
+  authors: { name: 'authors', publish_mode: { type: 'editorial_workflow', direct_publish: true } },
+  reviewed: { name: 'reviewed', publish_mode: 'editorial_workflow' },
+};
+
+/**
+ * Look the collections up in {@link alongCollections} for the current test.
+ */
+const mockAlongCollections = () => {
+  const { current: config } = cmsConfig;
+  const { current: name } = backendName;
+
+  backendName.current = 'github';
+  cmsConfig.current = /** @type {any} */ ({ publish_mode: 'editorial_workflow' });
+  vi.mocked(getCollection).mockImplementation((collectionName) => alongCollections[collectionName]);
+  onTestFinished(() => {
+    cmsConfig.current = config;
+    backendName.current = name;
+    vi.mocked(getCollection).mockReset();
+  });
+};
 
 /**
  * Create a minimal unpublished entry for testing.
@@ -47,7 +99,7 @@ const createEntry = ({ collectionName, subPath }) => ({
 
 describe('workflow/index', () => {
   beforeEach(() => {
-    unpublishedEntries.current = [];
+    allUnpublishedEntries.current = [];
     unpublishedEntriesLoaded.current = false;
     allEntries.current = [];
     cmsConfig.current = undefined;
@@ -88,7 +140,9 @@ describe('workflow/index', () => {
 
     test.each(['github', 'gitlab', 'gitea'])(
       'is true with the %s backend and the editorial_workflow publish mode',
-      (name) => {
+      async (name) => {
+        // GitLab and Gitea are kept in chunks, which are loaded before a backend is selected
+        await loadBackendService(name);
         backendName.current = name;
         cmsConfig.current = /** @type {any} */ ({ publish_mode: 'editorial_workflow' });
         expect(workflowEnabled.current).toBe(true);
@@ -193,7 +247,7 @@ describe('workflow/index', () => {
       // the unreviewed changes
       const entry = createEntry({ collectionName: 'posts', subPath: 'a' });
 
-      unpublishedEntries.current = [entry];
+      allUnpublishedEntries.current = [entry];
 
       expect(
         isWorkflowDraft({ collection: optedOut, collectionName: 'posts', originalEntry: entry }),
@@ -223,9 +277,106 @@ describe('workflow/index', () => {
     });
   });
 
+  describe('entries from contributors’ forks', () => {
+    /**
+     * Create an unpublished entry from the pull request a contributor opened from their fork.
+     * @param {object} args Arguments.
+     * @param {string} args.collectionName Collection name.
+     * @param {string} args.subPath Entry sub path.
+     * @param {number} args.number Pull request number.
+     * @returns {any} Unpublished entry.
+     */
+    const createForkEntry = ({ collectionName, subPath, number }) => {
+      const entry = createEntry({ collectionName, subPath });
+
+      entry.id = `fork-${number}`;
+      entry.workflow.pullRequest = /** @type {any} */ (
+        createMockForkPullRequest({ number, collectionName, slug: subPath })
+      );
+
+      return entry;
+    };
+
+    test('leave the list as it is when there are none', () => {
+      const own = createEntry({ collectionName: 'posts', subPath: 'a' });
+
+      allUnpublishedEntries.current = [own];
+
+      // The same array, so nothing downstream recomputes for nothing
+      expect(unpublishedEntries.current).toBe(allUnpublishedEntries.current);
+    });
+
+    test('are left out of the entries the rest of the CMS shows', () => {
+      const own = createEntry({ collectionName: 'posts', subPath: 'a' });
+      const fork = createForkEntry({ collectionName: 'posts', subPath: 'a', number: 7 });
+
+      allUnpublishedEntries.current = [fork, own];
+
+      expect(unpublishedEntries.current).toEqual([own]);
+      expect(getUnpublishedEntriesByCollection('posts')).toEqual([own]);
+      expect(getUnpublishedEntry({ collectionName: 'posts', subPath: 'a' })).toBe(own);
+
+      allUnpublishedEntries.current = [fork];
+
+      // Opening the published entry never lands in the contributor’s pull request
+      expect(getUnpublishedEntry({ collectionName: 'posts', subPath: 'a' })).toBeUndefined();
+      expect(
+        getUnpublishedEntryBySlug({
+          collectionName: 'posts',
+          slug: 'a',
+          entry: /** @type {any} */ (fork),
+        }),
+      ).toBeUndefined();
+    });
+
+    test('tell a draft whose pull request has gone from one still open', () => {
+      const fork = createForkEntry({ collectionName: 'posts', subPath: 'a', number: 7 });
+      const draft = /** @type {any} */ ({ collectionName: 'posts', originalEntry: fork });
+
+      allUnpublishedEntries.current = [fork];
+      expect(isOrphanedForkDraft(draft)).toBe(false);
+
+      allUnpublishedEntries.current = [];
+      expect(isOrphanedForkDraft(draft)).toBe(true);
+      // Nothing is gone from the maintainers’ own entries, nor from a missing draft
+      expect(
+        isOrphanedForkDraft(
+          /** @type {any} */ ({
+            collectionName: 'posts',
+            originalEntry: createEntry({ collectionName: 'posts', subPath: 'a' }),
+          }),
+        ),
+      ).toBe(false);
+      expect(isOrphanedForkDraft(undefined)).toBe(false);
+    });
+
+    test('are found by the number of their pull request', () => {
+      const own = createEntry({ collectionName: 'posts', subPath: 'a' });
+      const fork7 = createForkEntry({ collectionName: 'posts', subPath: 'a', number: 7 });
+      const fork8 = createForkEntry({ collectionName: 'posts', subPath: 'a', number: 8 });
+
+      allUnpublishedEntries.current = [own, fork7, fork8];
+
+      expect(getForkUnpublishedEntry({ collectionName: 'posts', subPath: 'a', number: 8 })).toBe(
+        fork8,
+      );
+      expect(
+        getForkUnpublishedEntry({ collectionName: 'posts', subPath: 'b', number: 8 }),
+      ).toBeUndefined();
+      expect(
+        getForkUnpublishedEntry({ collectionName: 'posts', subPath: 'a', number: 9 }),
+      ).toBeUndefined();
+      // The maintainers’ own pull request isn’t one, whatever its number
+      own.workflow.pullRequest = /** @type {any} */ ({ number: 1, branch: 'cms/posts/a' });
+      expect(
+        getForkUnpublishedEntry({ collectionName: 'posts', subPath: 'a', number: 1 }),
+      ).toBeUndefined();
+    });
+  });
+
   describe('getUnpublishedEntriesByCollection', () => {
     test('filters the entries by collection', () => {
-      unpublishedEntries.current = [
+      allUnpublishedEntries.current = [
         createEntry({ collectionName: 'posts', subPath: 'a' }),
         createEntry({ collectionName: 'pages', subPath: 'b' }),
       ];
@@ -236,14 +387,202 @@ describe('workflow/index', () => {
     });
 
     test('returns an empty array without a collection name', () => {
-      unpublishedEntries.current = [createEntry({ collectionName: 'posts', subPath: 'a' })];
+      allUnpublishedEntries.current = [createEntry({ collectionName: 'posts', subPath: 'a' })];
       expect(getUnpublishedEntriesByCollection(undefined)).toEqual([]);
+    });
+  });
+
+  describe('getCompanionEntries', () => {
+    const guides = /** @type {any} */ ({ id: 'guides' });
+    const help = /** @type {any} */ ({ id: 'help' });
+    const jane = /** @type {any} */ ({ id: 'jane' });
+
+    /**
+     * Create an entry with new entries riding along in its pull request.
+     * @param {any[]} [companions] Companion entries.
+     * @returns {any} Unpublished entry.
+     */
+    const createHost = (companions) => ({
+      ...createEntry({ collectionName: 'posts', subPath: 'a' }),
+      workflow: { collectionName: 'posts', companions },
+    });
+
+    test('collects the entries of the collection from every pull request', () => {
+      allUnpublishedEntries.current = [
+        createHost([
+          { collectionName: 'sections', entry: guides },
+          { collectionName: 'authors', entry: jane },
+        ]),
+        createHost(),
+        createHost([{ collectionName: 'sections', entry: help }]),
+      ];
+
+      expect(getCompanionEntries('sections')).toEqual([guides, help]);
+      expect(getCompanionEntries('tags')).toEqual([]);
+    });
+
+    test('looks in the given entries only', () => {
+      const host = createHost([{ collectionName: 'sections', entry: help }]);
+
+      allUnpublishedEntries.current = [createHost([{ collectionName: 'sections', entry: guides }])];
+
+      expect(getCompanionEntries('sections', [host])).toEqual([help]);
+    });
+
+    test('tells the existing entries changed in a pull request apart from the new ones', () => {
+      const ada = /** @type {any} */ ({ id: 'ada' });
+      const alan = /** @type {any} */ ({ id: 'alan' });
+
+      const host = createHost([
+        { collectionName: 'authors', entry: jane },
+        { collectionName: 'authors', entry: ada, edited: true },
+      ]);
+
+      allUnpublishedEntries.current = [
+        host,
+        createHost(),
+        createHost([{ collectionName: 'authors', entry: alan, edited: true }]),
+      ];
+
+      expect(getCompanionEntries('authors')).toEqual([jane]);
+      expect(getEditedCompanionEntries('authors')).toEqual([ada, alan]);
+      expect(getEditedCompanionEntries('authors', [host])).toEqual([ada]);
+      expect(getEditedCompanionEntries('sections')).toEqual([]);
+
+      expect(findEditingUnpublishedEntry(ada)).toBe(host);
+      // A new entry isn’t edited
+      expect(findEditingUnpublishedEntry(jane)).toBeUndefined();
+      expect(findEditingUnpublishedEntry(guides)).toBeUndefined();
+    });
+
+    test('collects the paths of the edited entries on both branches, found by ID', () => {
+      /**
+       * Create an entry with the given locale file paths.
+       * @param {string} id Entry ID.
+       * @param {string[]} paths File paths.
+       * @returns {any} Entry.
+       */
+      const createPathEntry = (id, paths) => ({
+        id,
+        locales: Object.fromEntries(paths.map((path, index) => [`l${index}`, { path }])),
+      });
+
+      allEntries.current = [
+        createPathEntry('ada', ['authors/ada.md', 'authors/ja/ada.md']),
+        createPathEntry('grace', ['authors/grace.md']),
+      ];
+
+      expect(
+        getEditedCompanionPaths([
+          // Renamed on the branch, and the Japanese locale turned off
+          {
+            collectionName: 'authors',
+            entry: createPathEntry('ada', ['authors/ada-l.md']),
+            edited: true,
+          },
+          // No longer on the configured branch
+          {
+            collectionName: 'authors',
+            entry: createPathEntry('alan', ['authors/alan.md']),
+            edited: true,
+          },
+          // A new one isn’t edited
+          { collectionName: 'authors', entry: createPathEntry('grace', ['authors/grace.md']) },
+        ]),
+      ).toEqual({
+        paths: ['authors/ada-l.md', 'authors/alan.md'],
+        publishedPaths: new Set(['authors/ada.md', 'authors/ja/ada.md']),
+      });
+    });
+  });
+
+  describe('getDeletionSelection', () => {
+    /**
+     * Get the pull request properties recording the given deletion group in the description.
+     * @param {string} group Deletion group ID.
+     * @returns {{ description: string }} Properties.
+     */
+    const recordGroup = (group) => ({
+      description: `Automatically generated\n\n<!-- sveltia-cms:deletion-group=${group} -->`,
+    });
+
+    /**
+     * Create an entry awaiting deletion.
+     * @param {string} subPath Sub path.
+     * @param {object} [workflow] Workflow property overrides.
+     * @param {object} [pullRequest] Pull request property overrides.
+     * @returns {any} Unpublished entry.
+     */
+    const createDeletion = (subPath, workflow = {}, pullRequest = recordGroup('group-1')) => {
+      const entry = createEntry({ collectionName: 'posts', subPath });
+
+      return {
+        ...entry,
+        workflow: {
+          ...entry.workflow,
+          status: 'pending_deletion',
+          pullRequest: { ...entry.workflow.pullRequest, ...pullRequest },
+          ...workflow,
+        },
+      };
+    };
+
+    test('lists the entry, then the others of its collection deleted with it', () => {
+      const entry = createDeletion('a');
+      const other = createDeletion('b');
+      const draft = createDeletion('c', { status: 'draft' });
+      // A selection is recorded per collection, or collection file, so another one has its own
+      const elsewhere = createDeletion('d', { collectionName: 'pages' }, recordGroup('group-3'));
+      const file = createDeletion('e', { fileName: 'home' }, recordGroup('group-4'));
+      // Deleted one at a time, or in another selection
+      const lone = createDeletion('f', {}, {});
+      const later = createDeletion('g', {}, recordGroup('group-2'));
+
+      allUnpublishedEntries.current = [other, entry, draft, elsewhere, file, lone, later];
+
+      expect(getDeletionSelection(entry)).toEqual([entry, other]);
+      expect(getDeletionSelection(file)).toEqual([file]);
+      expect(getDeletionSelection(later)).toEqual([later]);
+
+      // A copy of the entry the store has replaced since isn’t listed a second time
+      expect(getDeletionSelection({ ...entry })).toEqual([{ ...entry }, other]);
+    });
+
+    test('lists an entry deleted on its own alone', () => {
+      // Two entries deleted one at a time, or before the selection was recorded: each pull request
+      // removes only the references to its own entry
+      const entry = createDeletion('a', {}, {});
+      const other = createDeletion('b', {}, {});
+
+      allUnpublishedEntries.current = [other, entry];
+
+      expect(getDeletionSelection(entry)).toEqual([entry]);
+    });
+  });
+
+  describe('getPullRequestEntries', () => {
+    test('lists the unpublished entries of the collection, then the companions', () => {
+      const guides = /** @type {any} */ ({ id: 'guides' });
+      const section = createEntry({ collectionName: 'sections', subPath: 'about' });
+
+      const host = {
+        ...createEntry({ collectionName: 'posts', subPath: 'a' }),
+        workflow: {
+          collectionName: 'posts',
+          companions: [{ collectionName: 'sections', entry: guides }],
+        },
+      };
+
+      allUnpublishedEntries.current = [host, section];
+
+      expect(getPullRequestEntries('sections')).toEqual([section, guides]);
+      expect(getPullRequestEntries('tags')).toEqual([]);
     });
   });
 
   describe('getUnpublishedEntry', () => {
     test('finds the entry by collection name and sub path', () => {
-      unpublishedEntries.current = [
+      allUnpublishedEntries.current = [
         createEntry({ collectionName: 'posts', subPath: 'a' }),
         createEntry({ collectionName: 'posts', subPath: 'b' }),
       ];
@@ -257,7 +596,7 @@ describe('workflow/index', () => {
       const entry = createEntry({ collectionName: 'settings', subPath: 'data/site.yml' });
 
       entry.workflow.fileName = 'site';
-      unpublishedEntries.current = [entry];
+      allUnpublishedEntries.current = [entry];
 
       // The URL carries the file name, while the entry’s `subPath` is the whole file path
       expect(getUnpublishedEntry({ collectionName: 'settings', subPath: 'site' })).toBe(entry);
@@ -283,7 +622,7 @@ describe('workflow/index', () => {
       // The branch keeps the slug the entry had when the pull request was opened
       entry.slug = 'renamed';
       entry.subPath = 'renamed';
-      unpublishedEntries.current = [entry];
+      allUnpublishedEntries.current = [entry];
 
       expect(
         getUnpublishedEntryBySlug({ collectionName: 'posts', slug: 'hello', entry: published }),
@@ -301,7 +640,7 @@ describe('workflow/index', () => {
       const legacy = createEntry({ collectionName: 'pages', subPath: 'about/team' });
 
       encoded.workflow.pullRequest.branch = 'cms/pages/about%2Fethos';
-      unpublishedEntries.current = [encoded, legacy];
+      allUnpublishedEntries.current = [encoded, legacy];
 
       expect(
         getUnpublishedEntryBySlug({
@@ -332,7 +671,7 @@ describe('workflow/index', () => {
       const squatter = createEntry({ collectionName: 'posts', subPath: 'zzz' });
 
       squatter.workflow.pullRequest.branch = 'cms/posts/hello';
-      unpublishedEntries.current = [squatter];
+      allUnpublishedEntries.current = [squatter];
 
       expect(
         getUnpublishedEntryBySlug({
@@ -364,16 +703,30 @@ describe('workflow/index', () => {
     test('finds the entry by its branch name as is', () => {
       const entry = createEntry({ collectionName: 'posts', subPath: 'hello' });
 
-      unpublishedEntries.current = [entry];
+      allUnpublishedEntries.current = [entry];
 
       expect(getUnpublishedEntryByBranch('cms/posts/hello')).toBe(entry);
       expect(getUnpublishedEntryByBranch('cms/posts/hello-2')).toBeUndefined();
     });
   });
 
+  describe('getUnpublishedEntryById', () => {
+    test('finds the current entry in the store by its ID', () => {
+      const entry = createEntry({ collectionName: 'posts', subPath: 'hello' });
+
+      allUnpublishedEntries.current = [entry];
+
+      // A copy held since an action started resolves to the entry in the store now
+      expect(getUnpublishedEntryById(/** @type {any} */ ({ ...entry }).id)).toBe(entry);
+      // An entry that has left the board, or none at all
+      expect(getUnpublishedEntryById('posts/gone')).toBeUndefined();
+      expect(getUnpublishedEntryById(undefined)).toBeUndefined();
+    });
+  });
+
   describe('getUnpublishedEntryByDraft', () => {
     test('returns nothing for a new entry', () => {
-      unpublishedEntries.current = [createEntry({ collectionName: 'posts', subPath: 'hello' })];
+      allUnpublishedEntries.current = [createEntry({ collectionName: 'posts', subPath: 'hello' })];
 
       expect(getUnpublishedEntryByDraft({ collectionName: 'posts' })).toBeUndefined();
     });
@@ -385,7 +738,7 @@ describe('workflow/index', () => {
       // slug while the entry has the new one
       entry.slug = 'renamed';
       entry.subPath = 'renamed';
-      unpublishedEntries.current = [entry];
+      allUnpublishedEntries.current = [entry];
 
       expect(getUnpublishedEntryByDraft({ collectionName: 'posts', originalEntry: entry })).toBe(
         entry,
@@ -396,7 +749,7 @@ describe('workflow/index', () => {
       const entry = createEntry({ collectionName: 'posts', subPath: 'hello' });
       const updated = { ...entry, workflow: { ...entry.workflow, status: 'pending_review' } };
 
-      unpublishedEntries.current = [updated];
+      allUnpublishedEntries.current = [updated];
 
       expect(getUnpublishedEntryByDraft({ collectionName: 'posts', originalEntry: entry })).toBe(
         updated,
@@ -407,7 +760,7 @@ describe('workflow/index', () => {
       const entry = createEntry({ collectionName: 'posts', subPath: 'hello' });
       const { workflow, ...publishedEntry } = entry;
 
-      unpublishedEntries.current = [entry];
+      allUnpublishedEntries.current = [entry];
 
       expect(workflow).toBeDefined();
       // The editor opened the published version, e.g. before the pull request was found
@@ -425,7 +778,7 @@ describe('workflow/index', () => {
 
       entry.workflow.fileName = 'site';
       entry.workflow.pullRequest.branch = 'cms/settings/site';
-      unpublishedEntries.current = [entry];
+      allUnpublishedEntries.current = [entry];
 
       expect(workflow).toBeDefined();
       expect(
@@ -440,7 +793,7 @@ describe('workflow/index', () => {
     test('returns nothing once the pull request is gone', () => {
       const entry = createEntry({ collectionName: 'posts', subPath: 'hello' });
 
-      unpublishedEntries.current = [];
+      allUnpublishedEntries.current = [];
 
       expect(
         getUnpublishedEntryByDraft({ collectionName: 'posts', originalEntry: entry }),
@@ -569,6 +922,30 @@ describe('hasPublishedVersion', () => {
   });
 });
 
+describe('isDiscardableDraft', () => {
+  beforeEach(() => {
+    allEntries.current = [];
+  });
+
+  test('is true for an entry with a pull request that has never been published', () => {
+    const entry = createEntry({ collectionName: 'posts', subPath: 'hello' });
+
+    expect(isDiscardableDraft(entry)).toBe(true);
+
+    // The pull request changes a published entry, which deleting it takes off the site
+    allEntries.current = [
+      /** @type {any} */ ({ id: 'p1', locales: { _default: { path: 'content/posts/hello.md' } } }),
+    ];
+
+    expect(isDiscardableDraft(entry)).toBe(false);
+  });
+
+  test('is false for a published entry or no entry', () => {
+    expect(isDiscardableDraft(/** @type {any} */ ({ id: 'p1', locales: {} }))).toBe(false);
+    expect(isDiscardableDraft(undefined)).toBe(false);
+  });
+});
+
 describe('checkPublishedVersion', () => {
   beforeEach(() => {
     allEntries.current = [];
@@ -666,6 +1043,81 @@ describe('mergeUnpublishedEntries', () => {
   });
 });
 
+describe('swapUnpublishedEntries', () => {
+  /**
+   * Create an entry for testing.
+   * @param {string} id Entry ID.
+   * @param {Record<string, string>} paths File path of each locale.
+   * @param {object} [workflow] Workflow properties, for an unpublished entry.
+   * @returns {any} Entry.
+   */
+  const createEntryWithPaths = (id, paths, workflow) => ({
+    id,
+    locales: Object.fromEntries(
+      Object.entries(paths).map(([locale, path]) => [locale, { path, content: {} }]),
+    ),
+    ...(workflow ? { workflow } : {}),
+  });
+
+  test('returns the given array as is without any draft', () => {
+    const entries = [createEntryWithPaths('a', { _default: 'a.md' })];
+
+    expect(swapUnpublishedEntries(entries, [])).toBe(entries);
+  });
+
+  test('swaps in a draft and keeps the order of the published entries', () => {
+    const a = createEntryWithPaths('a', { _default: 'a.md' });
+    const b = createEntryWithPaths('b', { _default: 'b.md' });
+    const draft = createEntryWithPaths('b-draft', { _default: 'b.md' }, { status: 'draft' });
+    const result = swapUnpublishedEntries([a, b], [draft]);
+
+    expect(result).toEqual([a, draft]);
+    expect(result[0]).toBe(a);
+  });
+
+  test('does not append a draft that matches no published entry', () => {
+    const a = createEntryWithPaths('a', { _default: 'a.md' });
+    const draft = createEntryWithPaths('new', { _default: 'new.md' }, { status: 'draft' });
+
+    expect(swapUnpublishedEntries([a], [draft])).toEqual([a]);
+  });
+
+  test('matches a multi-file entry by the path of any locale', () => {
+    const published = createEntryWithPaths('a', { en: 'en/a.md', ja: 'ja/a.md' });
+    const draft = createEntryWithPaths('a-draft', { ja: 'ja/a.md' }, { status: 'draft' });
+
+    expect(swapUnpublishedEntries([published], [draft])).toEqual([draft]);
+  });
+
+  test('matches an entry by a path the pull request renamed it from', () => {
+    const published = createEntryWithPaths('a', { _default: 'old.md' });
+
+    const draft = createEntryWithPaths(
+      'a-draft',
+      { _default: 'new.md' },
+      { status: 'draft', previousPaths: ['old.md'] },
+    );
+
+    expect(swapUnpublishedEntries([published], [draft])).toEqual([draft]);
+  });
+});
+
+describe('isPendingDeletion', () => {
+  test('detects an entry whose pull request deletes it', () => {
+    expect(
+      isPendingDeletion(/** @type {any} */ ({ workflow: { status: 'pending_deletion' } })),
+    ).toBe(true);
+  });
+
+  test('ignores an entry at any other status, a published entry and no entry', () => {
+    expect(
+      isPendingDeletion(/** @type {any} */ ({ workflow: { status: 'pending_publish' } })),
+    ).toBe(false);
+    expect(isPendingDeletion(/** @type {any} */ ({ locales: {} }))).toBe(false);
+    expect(isPendingDeletion(undefined)).toBe(false);
+  });
+});
+
 describe('Test canMergePullRequest()', () => {
   const pullRequest = /** @type {any} */ ({ number: 1, branch: 'cms/posts/hello' });
 
@@ -676,6 +1128,16 @@ describe('Test canMergePullRequest()', () => {
 
   test('refuses a pull request the user can’t merge', () => {
     expect(canMergePullRequest({ ...pullRequest, canMerge: false })).toBe(false);
+  });
+
+  test('refuses a pull request from a contributor’s fork', () => {
+    expect(
+      canMergePullRequest({
+        ...pullRequest,
+        canMerge: true,
+        fork: { owner: 'alice', repo: 'website', editable: true },
+      }),
+    ).toBe(false);
   });
 
   test('refuses every pull request when the user can’t merge into the branch', () => {
@@ -734,5 +1196,167 @@ describe('Test isPublishAllowed()', () => {
     } finally {
       forkedRepository.current = undefined;
     }
+  });
+
+  test('allows publishing from the last configured stage', () => {
+    const noReview = {
+      ...collection,
+      publish_mode: { type: 'editorial_workflow', stages: ['draft', 'pending_publish'] },
+    };
+
+    expect(
+      isPublishAllowed(createWorkflowEntry('draft'), { ...collection, publish_mode: 'preview' }),
+    ).toBe(true);
+    expect(isPublishAllowed(createWorkflowEntry('draft'), noReview)).toBe(false);
+    // A pull request labelled In Review counts as a draft when the stage is left out
+    expect(isPublishAllowed(createWorkflowEntry('pending_review'), noReview)).toBe(false);
+    expect(isPublishAllowed(createWorkflowEntry('pending_publish'), noReview)).toBe(true);
+
+    // Direct publishing skips the review altogether
+    expect(
+      isPublishAllowed(createWorkflowEntry('draft'), {
+        ...collection,
+        publish_mode: { type: 'editorial_workflow', direct_publish: true },
+      }),
+    ).toBe(true);
+  });
+
+  test('refuses to skip the review of an entry riding along that has to be reviewed', () => {
+    mockAlongCollections();
+
+    const directPublish = {
+      ...collection,
+      publish_mode: { type: 'editorial_workflow', direct_publish: true },
+    };
+
+    /**
+     * Create a draft riding along with entries of the given collections.
+     * @param {string[]} names Collection names.
+     * @returns {any} Entry.
+     */
+    const createDraftWith = (names) => {
+      const entry = createWorkflowEntry('draft');
+
+      entry.workflow.companions = names.map((collectionName) => ({ collectionName }));
+
+      return entry;
+    };
+
+    expect(isPublishAllowed(createDraftWith(['tags', 'authors']), directPublish)).toBe(true);
+    expect(isPublishAllowed(createDraftWith(['tags', 'reviewed']), directPublish)).toBe(false);
+
+    // Once reviewed, the entries riding along are published with it
+    const ready = createDraftWith(['reviewed']);
+
+    ready.workflow.status = 'pending_publish';
+    expect(isPublishAllowed(ready, directPublish)).toBe(true);
+  });
+});
+
+describe('Test getPublishAction()', () => {
+  const collection = /** @type {any} */ ({ name: 'posts' });
+  const fork = { owner: 'alice', repo: 'website', editable: true };
+
+  /**
+   * Create an unpublished entry at the given status.
+   * @param {string} status Workflow status.
+   * @param {object} [overrides] Pull request overrides.
+   * @returns {any} Entry.
+   */
+  const createWorkflowEntry = (status, overrides = {}) => ({
+    workflow: {
+      status,
+      pullRequest: { number: 7, url: 'https://github.com/owner/repo/pull/7', fork, ...overrides },
+    },
+  });
+
+  test('offers the Publish button for the maintainers’ own pull request once it’s ready', () => {
+    expect(
+      getPublishAction(createWorkflowEntry('pending_publish', { fork: undefined }), collection),
+    ).toBe('publish');
+  });
+
+  test('offers the link where a pull request from a fork could otherwise be published', () => {
+    expect(getPublishAction(createWorkflowEntry('pending_publish'), collection)).toBe('review');
+    expect(getPublishAction(createWorkflowEntry('pending_deletion'), collection)).toBe('review');
+  });
+
+  test('offers nothing before the last stage, or when publishing is hidden', () => {
+    expect(getPublishAction(createWorkflowEntry('pending_review'), collection)).toBeUndefined();
+    expect(
+      getPublishAction(createWorkflowEntry('pending_publish'), { ...collection, publish: false }),
+    ).toBeUndefined();
+  });
+
+  test('offers nothing for a pull request from a fork without a URL', () => {
+    expect(
+      getPublishAction(createWorkflowEntry('pending_publish', { url: undefined }), collection),
+    ).toBeUndefined();
+  });
+});
+
+describe('Test canSkipReviewAlong()', () => {
+  test('allows skipping the review of the entries whose collections allow it', () => {
+    mockAlongCollections();
+
+    expect(canSkipReviewAlong([])).toBe(true);
+    expect(canSkipReviewAlong([{ collectionName: 'tags' }, { collectionName: 'authors' }])).toBe(
+      true,
+    );
+    expect(canSkipReviewAlong([{ collectionName: 'tags' }, { collectionName: 'reviewed' }])).toBe(
+      false,
+    );
+  });
+});
+
+describe('Test isDirectPublishAllowed()', () => {
+  const collection = /** @type {any} */ ({
+    name: 'posts',
+    publish_mode: { type: 'editorial_workflow', direct_publish: true },
+  });
+
+  const entry = /** @type {any} */ ({ workflow: { pullRequest: { branch: 'cms/posts/hello' } } });
+
+  beforeEach(() => {
+    lockedBranch.current = undefined;
+    mergeLockedBranch.current = undefined;
+    forkedRepository.current = undefined;
+  });
+
+  test('allows it when the option is enabled', () => {
+    expect(isDirectPublishAllowed(collection, undefined)).toBe(true);
+    expect(isDirectPublishAllowed(collection, entry)).toBe(true);
+  });
+
+  test('refuses it without the option or a collection', () => {
+    expect(isDirectPublishAllowed(undefined, undefined)).toBe(false);
+    expect(isDirectPublishAllowed(/** @type {any} */ ({ name: 'posts' }), undefined)).toBe(false);
+    expect(
+      isDirectPublishAllowed(
+        /** @type {any} */ ({ name: 'posts', publish_mode: { direct_publish: true } }),
+        undefined,
+      ),
+    ).toBe(false);
+  });
+
+  test('refuses it when publishing is disabled for the collection', () => {
+    expect(isDirectPublishAllowed({ ...collection, publish: false }, undefined)).toBe(false);
+  });
+
+  test('refuses it to an Open Authoring contributor', () => {
+    forkedRepository.current = { owner: 'me', repo: 'site' };
+    expect(isDirectPublishAllowed(collection, undefined)).toBe(false);
+    forkedRepository.current = undefined;
+  });
+
+  test('refuses it to a user who can’t push to the branch, or merge the pull request', () => {
+    lockedBranch.current = 'main';
+    expect(isDirectPublishAllowed(collection, undefined)).toBe(false);
+    expect(isDirectPublishAllowed(collection, entry)).toBe(true);
+
+    lockedBranch.current = undefined;
+    mergeLockedBranch.current = 'main';
+    expect(isDirectPublishAllowed(collection, undefined)).toBe(true);
+    expect(isDirectPublishAllowed(collection, entry)).toBe(false);
   });
 });

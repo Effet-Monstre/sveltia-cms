@@ -2,11 +2,16 @@
 
 import { beforeEach, describe, expect, test, vi } from 'vitest';
 
+import { version } from '$lib/services/app';
+import { cmsConfigVersion } from '$lib/services/config';
+import { hasCustomParser } from '$lib/services/contents/file/parse';
 import {
   arrayFileItems,
   createArrayItemEntry,
   extractPathInfo,
+  getParsedContentKey,
   getSlug,
+  hasCircularReference,
   isIndexFile,
   normalizeDefaultRootContent,
   parseFileContent,
@@ -20,6 +25,7 @@ import {
   transformRawContent,
   transformRoot,
 } from '$lib/services/contents/file/process';
+import { fileStates, updateFileState } from '$lib/services/contents/file/state';
 
 /**
  * @import { BaseEntryListItem, Entry, InternalCollection } from '$lib/types/private';
@@ -31,7 +37,7 @@ vi.mock('$lib/services/contents/collection', () => ({
 }));
 
 vi.mock('$lib/services/contents/collection/predicates', () => ({
-  // Used by the nested collection helpers, which the index file check runs through
+  // Used by the nested entry helpers, which the index file check runs through
   isEntryCollection: vi.fn(
     (collection) => typeof collection?.folder === 'string' && !Array.isArray(collection?.files),
   ),
@@ -39,9 +45,11 @@ vi.mock('$lib/services/contents/collection/predicates', () => ({
 
 vi.mock('$lib/services/contents/collection/entries/index-file', () => ({
   getIndexFile: vi.fn(),
+  isCollectionIndexFilePath: vi.fn(() => false),
 }));
 
 vi.mock('$lib/services/contents/file/parse', () => ({
+  hasCustomParser: vi.fn(() => false),
   parseEntryFile: vi.fn(),
 }));
 
@@ -53,10 +61,6 @@ vi.mock('$lib/services/contents/entry/fields', () => ({
       'root' in fields[0] &&
       fields[0].root === true,
   ),
-}));
-
-vi.mock('flat', () => ({
-  flatten: vi.fn((obj) => obj),
 }));
 
 vi.mock('@sveltia/utils/crypto', () => ({
@@ -332,6 +336,306 @@ describe('Test parseFileContent()', () => {
 
     consoleSpy.mockRestore();
   });
+  test('rejects content referring back to itself, e.g. through a YAML alias', async () => {
+    /** @type {Record<string, any>} */
+    const meta = {};
+
+    meta.self = meta;
+    parseEntryFile.mockResolvedValue({ title: 'Test', meta });
+
+    const file = /** @type {BaseEntryListItem} */ ({
+      name: 'loop.md',
+      path: 'posts/loop.md',
+      text: '---\\nmeta: &m\\n  self: *m\\n---',
+      sha: 'abc123',
+      size: 100,
+      type: 'entry',
+      folder: { collectionName: 'posts' },
+    });
+
+    const errors = /** @type {Error[]} */ ([]);
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const result = await parseFileContent(file, errors);
+
+    expect(result).toBeUndefined();
+    expect(errors).toHaveLength(1);
+    expect(errors[0].message).toBe(
+      'posts/loop.md could not be parsed, as it contains a circular reference.',
+    );
+
+    consoleSpy.mockRestore();
+  });
+});
+
+describe('Test parseFileContent() with cached content', () => {
+  /** @type {any} */
+  let parseEntryFile;
+
+  /**
+   * Create an entry file.
+   * @param {Record<string, any>} [props] Other properties.
+   * @returns {BaseEntryListItem} File.
+   */
+  const createFile = (props = {}) =>
+    /** @type {BaseEntryListItem} */ ({
+      name: 'a.md',
+      path: 'posts/a.md',
+      text: '---\\ntitle: Parsed\\n---',
+      sha: 'abc123',
+      size: 100,
+      type: 'entry',
+      folder: { collectionName: 'posts' },
+      ...props,
+    });
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    fileStates.clear();
+    fileStates.clear();
+    fileStates.clear();
+    cmsConfigVersion.current = 'config-hash';
+    parseEntryFile = (await import('$lib/services/contents/file/parse')).parseEntryFile;
+    parseEntryFile.mockResolvedValue({ title: 'Parsed' });
+  });
+
+  test('keys the content on the CMS version and configuration', () => {
+    expect(getParsedContentKey()).toBe(`${version}\nconfig-hash`);
+  });
+
+  test('uses the content parsed for the same CMS version and configuration', async () => {
+    const file = createFile({
+      parsed: {
+        key: getParsedContentKey(),
+        content: { title: 'Cached' },
+        format: 'toml-frontmatter',
+      },
+    });
+
+    const parsedFileMap = new Map();
+
+    expect(await parseFileContent(file, [], parsedFileMap)).toEqual({ title: 'Cached' });
+    expect(parseEntryFile).not.toHaveBeenCalled();
+    // The detected format is remembered, as when the file was parsed
+    expect(fileStates.get('posts/a.md')?.format).toBe('toml-frontmatter');
+    // It’s cached already
+    expect(parsedFileMap.size).toBe(0);
+  });
+
+  test('uses cached content without a detected format, as for a YAML file', async () => {
+    const file = createFile({
+      parsed: { key: getParsedContentKey(), content: { title: 'Cached' } },
+    });
+
+    // Remembered for an earlier version of the file
+    updateFileState('posts/a.md', { format: 'toml-frontmatter' });
+    updateFileState('posts/a.md', {
+      valueSources: { date: { value: '2024-01-01', source: '2024-01-01' } },
+    });
+
+    expect(await parseFileContent(file, [])).toEqual({ title: 'Cached' });
+    expect(parseEntryFile).not.toHaveBeenCalled();
+    expect(fileStates.get('posts/a.md')?.format).toBeUndefined();
+    expect(fileStates.get('posts/a.md')?.valueSources).toBeUndefined();
+  });
+
+  test('remembers the source text of the TOML dates cached with the content', async () => {
+    const sourceMap = { date: { value: '12:30:00.000', source: '12:30:00' } };
+
+    const file = createFile({
+      parsed: {
+        key: getParsedContentKey(),
+        content: { date: '12:30:00.000' },
+        valueSources: sourceMap,
+      },
+    });
+
+    expect(await parseFileContent(file, [])).toEqual({ date: '12:30:00.000' });
+    expect(parseEntryFile).not.toHaveBeenCalled();
+    expect(fileStates.get('posts/a.md')?.valueSources).toBe(sourceMap);
+  });
+
+  test('parses the file again for another CMS version or configuration', async () => {
+    const file = createFile({
+      parsed: { key: `${version}\nold-config-hash`, content: { title: 'Cached' } },
+    });
+
+    expect(await parseFileContent(file, [])).toEqual({ title: 'Parsed' });
+    expect(parseEntryFile).toHaveBeenCalledOnce();
+  });
+
+  test('parses the file again when it’s read with a custom parser', async () => {
+    vi.mocked(hasCustomParser).mockReturnValue(true);
+
+    const file = createFile({ parsed: { key: getParsedContentKey(), content: { title: 'X' } } });
+    const parsedFileMap = new Map();
+
+    expect(await parseFileContent(file, [], parsedFileMap)).toEqual({ title: 'Parsed' });
+    // Nor is what a custom parser returns cached
+    expect(parsedFileMap.size).toBe(0);
+
+    vi.mocked(hasCustomParser).mockReturnValue(false);
+  });
+
+  test('collects a copy of the parsed content, along with the detected format', async () => {
+    const parsedFileMap = new Map();
+
+    parseEntryFile.mockImplementation(async () => {
+      updateFileState('posts/a.md', { format: 'yaml-frontmatter' });
+
+      return { title: 'Parsed', tags: ['a'] };
+    });
+
+    const content = /** @type {any} */ (await parseFileContent(createFile(), [], parsedFileMap));
+
+    // Processing the content further doesn’t change what’s cached
+    content.tags.push('b');
+
+    expect(parsedFileMap.get('posts/a.md')).toEqual({
+      key: getParsedContentKey(),
+      content: { title: 'Parsed', tags: ['a'] },
+      format: 'yaml-frontmatter',
+    });
+  });
+
+  test('collects the source text of the values along with the content', async () => {
+    const parsedFileMap = new Map();
+    const sourceMap = { price: { value: 10, source: '10.0' } };
+
+    parseEntryFile.mockImplementation(async () => {
+      updateFileState('posts/a.md', { valueSources: sourceMap });
+
+      return { price: 10 };
+    });
+
+    await parseFileContent(createFile(), [], parsedFileMap);
+
+    expect(parsedFileMap.get('posts/a.md')).toEqual({
+      key: getParsedContentKey(),
+      content: { price: 10 },
+      valueSources: sourceMap,
+    });
+  });
+
+  test('restores the source text of the values from the cache', async () => {
+    const sourceMap = { price: { value: 10, source: '10.0' } };
+
+    await parseFileContent(
+      createFile({
+        parsed: { key: getParsedContentKey(), content: { price: 10 }, valueSources: sourceMap },
+      }),
+      [],
+    );
+
+    expect(fileStates.get('posts/a.md')?.valueSources).toEqual(sourceMap);
+
+    // Cached content without them forgets what was remembered before
+    await parseFileContent(
+      createFile({ parsed: { key: getParsedContentKey(), content: { price: 10 } } }),
+      [],
+    );
+
+    expect(fileStates.get('posts/a.md')?.valueSources).toBeUndefined();
+  });
+
+  test('collects the comments at the top of the file and restores them from the cache', async () => {
+    const parsedFileMap = new Map();
+
+    parseEntryFile.mockImplementation(async () => {
+      updateFileState('posts/a.md', { leadingComment: '# Note' });
+
+      return { title: 'Parsed' };
+    });
+
+    await parseFileContent(createFile(), [], parsedFileMap);
+
+    expect(parsedFileMap.get('posts/a.md')).toEqual({
+      key: getParsedContentKey(),
+      content: { title: 'Parsed' },
+      leadingComment: '# Note',
+    });
+
+    fileStates.clear();
+
+    await parseFileContent(createFile({ parsed: parsedFileMap.get('posts/a.md') }), []);
+
+    expect(fileStates.get('posts/a.md')?.leadingComment).toBe('# Note');
+
+    // Cached content without them forgets what was remembered before
+    await parseFileContent(
+      createFile({ parsed: { key: getParsedContentKey(), content: { title: 'Parsed' } } }),
+      [],
+    );
+
+    expect(fileStates.get('posts/a.md')?.leadingComment).toBeUndefined();
+  });
+
+  test('collects nothing for content that can’t be copied, but still uses it', async () => {
+    const parsedFileMap = new Map();
+    const content = { title: 'Parsed', render: () => '' };
+
+    parseEntryFile.mockResolvedValue(content);
+
+    expect(await parseFileContent(createFile(), [], parsedFileMap)).toBe(content);
+    expect(parsedFileMap.size).toBe(0);
+  });
+
+  test('collects nothing for a file that may hold an integer too large for a number', async () => {
+    const parsedFileMap = new Map();
+
+    parseEntryFile.mockResolvedValue({ id: 12345678901234567000 });
+
+    // Parsing it remembers the integer’s source text, which saving it depends on
+    await parseFileContent(createFile({ text: 'id: 12345678901234567890' }), [], parsedFileMap);
+
+    expect(parsedFileMap.size).toBe(0);
+  });
+
+  test('collects nothing for a file that couldn’t be parsed', async () => {
+    const parsedFileMap = new Map();
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    parseEntryFile.mockRejectedValue(new Error('Parsing failed'));
+
+    expect(await parseFileContent(createFile(), [], parsedFileMap)).toBeUndefined();
+    expect(parsedFileMap.size).toBe(0);
+
+    consoleSpy.mockRestore();
+  });
+
+  test('is passed the map by prepareEntries()', async () => {
+    const parsedFileMap = new Map();
+
+    await prepareEntries([createFile()], { parsedFileMap });
+
+    expect(parsedFileMap.has('posts/a.md')).toBe(true);
+  });
+});
+
+describe('Test hasCircularReference()', () => {
+  test('finds an object or array referring back to an ancestor', () => {
+    /** @type {Record<string, any>} */
+    const object = { a: { b: 1 } };
+
+    object.a.c = object;
+
+    /** @type {any[]} */
+    const array = [1, { list: [] }];
+
+    array[1].list.push(array);
+
+    expect(hasCircularReference(object)).toBe(true);
+    expect(hasCircularReference({ nested: array })).toBe(true);
+  });
+
+  test('accepts a value referred to from several places, and primitives', () => {
+    const shared = { name: 'shared' };
+
+    expect(hasCircularReference({ a: shared, b: [shared, { c: shared }] })).toBe(false);
+    expect(hasCircularReference({ date: new Date(0), empty: null, text: 'a' })).toBe(false);
+    expect(hasCircularReference('text')).toBe(false);
+    expect(hasCircularReference(null)).toBe(false);
+    expect(hasCircularReference(undefined)).toBe(false);
+  });
 });
 
 describe('Test transformRawContent()', () => {
@@ -416,6 +720,89 @@ describe('Test transformRawContent()', () => {
     expect(result).toEqual({
       en: { keyValues: { key1: 'value1' } },
       fr: { keyValues: { clé1: 'valeur1' } },
+    });
+  });
+
+  test('converts a List field stored as a map to list items', () => {
+    const fields = [
+      { name: 'title', widget: 'string' },
+      {
+        name: 'references',
+        widget: 'list',
+        map_key_field: 'key',
+        fields: [
+          { name: 'key', widget: 'string' },
+          { name: 'title', widget: 'string' },
+        ],
+      },
+    ];
+
+    const rawContent = {
+      title: 'Test',
+      references: { harry: { title: 'Harry' }, ron: { title: 'Ron' } },
+    };
+
+    expect(transformRawContent(rawContent, fields, false)).toEqual({
+      title: 'Test',
+      references: [
+        { key: 'harry', title: 'Harry' },
+        { key: 'ron', title: 'Ron' },
+      ],
+    });
+
+    // The parsed content may be cached, so it’s left alone
+    expect(rawContent.references).toEqual({ harry: { title: 'Harry' }, ron: { title: 'Ron' } });
+  });
+
+  test('converts a List field stored as a map in each locale of a single file', () => {
+    const fields = [
+      {
+        name: 'references',
+        widget: 'list',
+        i18n: true,
+        map_key_field: 'key',
+        fields: [{ name: 'key', widget: 'string' }],
+      },
+    ];
+
+    const rawContent = {
+      en: { references: { harry: {} } },
+      fr: { references: { henri: {} } },
+    };
+
+    expect(transformRawContent(rawContent, fields, true)).toEqual({
+      en: { references: [{ key: 'harry' }] },
+      fr: { references: [{ key: 'henri' }] },
+    });
+  });
+
+  test('converts a top-level List field stored as a map, or still stored as an array', () => {
+    const fields = [
+      {
+        name: 'references',
+        widget: 'list',
+        root: true,
+        map_key_field: 'key',
+        fields: [
+          { name: 'key', widget: 'string' },
+          { name: 'title', widget: 'string' },
+        ],
+      },
+    ];
+
+    expect(transformRawContent({ harry: { title: 'Harry' } }, fields, false)).toEqual({
+      references: [{ key: 'harry', title: 'Harry' }],
+    });
+
+    expect(
+      transformRawContent(/** @type {any} */ ([{ key: 'harry', title: 'Harry' }]), fields, false),
+    ).toEqual({ references: [{ key: 'harry', title: 'Harry' }] });
+
+    expect(transformRawContent(/** @type {any} */ ('harry'), fields, false)).toBeUndefined();
+
+    expect(transformRawContent({ en: { harry: {} }, fr: { henri: {} } }, fields, true)).toEqual({
+      en: { references: [{ key: 'harry' }] },
+      fr: { references: [{ key: 'henri' }] },
     });
   });
 
@@ -1116,6 +1503,22 @@ describe('Test processNonI18nEntry()', () => {
 
     expect(entry.slug).toBe('members');
   });
+
+  test('escapes the dots in object keys, so they aren’t split into nested objects on save', () => {
+    const entry = /** @type {Entry} */ ({ id: '', slug: '', subPath: 'nav', locales: {} });
+
+    processNonI18nEntry({
+      entry,
+      rawContent: { 'nav.home': 'Home', redirects: { 'example.com': 'a' } },
+      path: '/data/nav.json',
+      subPath: 'nav',
+    });
+
+    expect(entry.locales._default.content).toEqual({
+      'nav\uE000home': 'Home',
+      'redirects.example\uE000com': 'a',
+    });
+  });
 });
 
 describe('Test processI18nSingleFileEntry()', () => {
@@ -1192,6 +1595,21 @@ describe('Test processI18nSingleFileEntry()', () => {
 
     expect(Object.keys(entry.locales)).toEqual(['en']);
   });
+
+  test('escapes the dots in object keys', () => {
+    const entry = /** @type {Entry} */ ({ id: '', slug: '', subPath: 'nav', locales: {} });
+
+    processI18nSingleFileEntry({
+      entry,
+      rawContent: { en: { 'nav.home': 'Home' }, fr: { 'nav.home': 'Accueil' } },
+      path: '/data/nav.json',
+      subPath: 'nav',
+      allLocales: ['en', 'fr'],
+    });
+
+    expect(entry.locales.en.content).toEqual({ 'nav\uE000home': 'Home' });
+    expect(entry.locales.fr.content).toEqual({ 'nav\uE000home': 'Accueil' });
+  });
 });
 
 describe('Test processI18nMultiFileEntry()', () => {
@@ -1227,6 +1645,23 @@ describe('Test processI18nMultiFileEntry()', () => {
       path: '/posts/my-post.en.md',
       content: { title: 'My Post', body: 'Content' },
     });
+  });
+
+  test('escapes the dots in object keys', () => {
+    const entry = /** @type {Entry} */ ({ id: '', slug: '', subPath: 'nav', locales: {} });
+
+    processI18nMultiFileEntry({
+      entry,
+      rawContent: { 'nav.home': 'Home' },
+      path: '/data/nav.en.json',
+      subPath: 'nav',
+      locale: 'en',
+      defaultLocale: 'en',
+      collectionName: 'data',
+      entryMap: new Map(),
+    });
+
+    expect(entry.locales.en.content).toEqual({ 'nav\uE000home': 'Home' });
   });
 
   test('merges with existing entry', () => {
@@ -2003,6 +2438,75 @@ describe('Test prepareEntry()', () => {
     expect(entries[0].locales._default).toBeDefined();
   });
 
+  test('reads the special index file with its own fields', async () => {
+    const { getIndexFile, isCollectionIndexFilePath } =
+      await import('$lib/services/contents/collection/entries/index-file');
+
+    const keyedList = {
+      name: 'references',
+      widget: 'list',
+      map_key_field: 'key',
+      fields: [{ name: 'key', widget: 'string' }],
+    };
+
+    parseEntryFile.mockResolvedValue({ references: { harry: {} } });
+    vi.mocked(getIndexFile).mockReturnValue(
+      /** @type {any} */ ({ name: '_index', fields: [keyedList] }),
+    );
+    vi.mocked(isCollectionIndexFilePath).mockImplementation((_collection, path) =>
+      path.endsWith('/_index.md'),
+    );
+    getCollection.mockReturnValue({
+      name: 'posts',
+      // The regular entries store the list as an array
+      fields: [{ ...keyedList, map_key_field: undefined }],
+      _file: {
+        fullPathRegEx: /^\/posts\/(?<subPath>[^/]+?)\.md$/,
+        subPath: undefined,
+        extension: 'md',
+      },
+      _i18n: {
+        i18nEnabled: false,
+        allLocales: ['en'],
+        defaultLocale: 'en',
+        structureMap: { i18nSingleFile: false, i18nSingleFileDefaultRoot: false },
+        canonicalSlug: { key: undefined },
+      },
+    });
+
+    /**
+     * Load the file at the given path.
+     * @param {string} path File path.
+     * @returns {Promise<Entry[]>} Entries.
+     */
+    const load = async (path) => {
+      const entries = /** @type {Entry[]} */ ([]);
+
+      await prepareEntry({
+        file: /** @type {BaseEntryListItem} */ ({
+          name: path.split('/').pop(),
+          path,
+          text: '',
+          sha: 'abc123',
+          size: 100,
+          type: 'entry',
+          folder: { collectionName: 'posts' },
+        }),
+        entries,
+        entryMap: new Map(),
+        errors: [],
+      });
+
+      return entries;
+    };
+
+    const [indexEntry] = await load('/posts/_index.md');
+    const [regularEntry] = await load('/posts/my-post.md');
+
+    expect(indexEntry.locales._default.content).toEqual({ 'references.0.key': 'harry' });
+    expect(regularEntry.locales._default.content).toEqual({ 'references.harry': {} });
+  });
+
   test('processes i18n single file entry successfully', async () => {
     parseEntryFile.mockResolvedValue({
       en: { title: 'Test Post' },
@@ -2527,6 +3031,87 @@ describe('Test prepareEntries()', () => {
     expect(result.errors).toHaveLength(0);
   });
 
+  test('reports a file that can’t be processed, and loads the others', async () => {
+    generateUUID.mockImplementation(() => 'test-uuid');
+
+    /** @type {Record<string, any>} */
+    const meta = {};
+
+    meta.self = meta;
+    parseEntryFile.mockImplementation(async (/** @type {{ path: string }} */ { path }) =>
+      path === '/posts/loop.md' ? { title: 'Loop', meta } : { title: path },
+    );
+
+    getCollection.mockReturnValue({
+      name: 'posts',
+      fields: [],
+      _file: {
+        fullPathRegEx: /^\/posts\/(?<subPath>[^/]+?)\.md$/,
+        subPath: undefined,
+        extension: 'md',
+      },
+      _i18n: {
+        i18nEnabled: false,
+        allLocales: ['en'],
+        defaultLocale: 'en',
+        structureMap: {
+          i18nSingleFile: false,
+          i18nSingleFileDefaultRoot: false,
+          i18nMultiFile: false,
+          i18nMultiFolder: false,
+          i18nMultiRootFolder: false,
+        },
+        canonicalSlug: { key: undefined },
+      },
+    });
+
+    /**
+     * Create a file list item.
+     * @param {string} name File name.
+     * @returns {BaseEntryListItem} File.
+     */
+    const createFile = (name) =>
+      /** @type {BaseEntryListItem} */ ({
+        name,
+        path: `/posts/${name}`,
+        text: '',
+        sha: 'abc123',
+        size: 100,
+        type: 'entry',
+        folder: { collectionName: 'posts' },
+      });
+
+    const brokenError = new Error('broken');
+
+    // A file whose processing throws for any other reason
+    const broken = /** @type {BaseEntryListItem} */ (
+      Object.defineProperty({ ...createFile('broken.md') }, 'folder', {
+        get: () => {
+          throw brokenError;
+        },
+      })
+    );
+
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const result = await prepareEntries([
+      createFile('first.md'),
+      createFile('loop.md'),
+      broken,
+      createFile('last.md'),
+    ]);
+
+    expect(result.entries.map(({ slug }) => slug)).toEqual(['first', 'last']);
+    expect(result.errors).toHaveLength(2);
+    expect(result.errors[0].message).toBe(
+      '/posts/loop.md could not be parsed, as it contains a circular reference.',
+    );
+    expect(result.errors[1]).toBe(brokenError);
+    expect(consoleSpy).toHaveBeenCalledWith(brokenError);
+
+    consoleSpy.mockRestore();
+  });
+
   test('keeps the file order across chunks while yielding between them', async () => {
     let uuidCounter = 0;
 
@@ -2563,10 +3148,16 @@ describe('Test prepareEntries()', () => {
     });
 
     const yieldFn = vi.fn(async () => undefined);
+    let now = 0;
 
     vi.stubGlobal('scheduler', { yield: yieldFn });
+    // Each file takes a millisecond to parse, so the parser has to yield along the way
+    vi.spyOn(performance, 'now').mockImplementation(() => {
+      now += 1;
 
-    // More files than fit in one chunk, so the parser has to yield at least once
+      return now;
+    });
+
     const files = Array.from(
       { length: 450 },
       (_, index) =>
@@ -2583,6 +3174,7 @@ describe('Test prepareEntries()', () => {
 
     const result = await prepareEntries(files);
 
+    vi.mocked(performance.now).mockRestore();
     vi.unstubAllGlobals();
 
     expect(yieldFn).toHaveBeenCalled();

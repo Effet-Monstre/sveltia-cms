@@ -1,6 +1,7 @@
 import { createPNG } from '../fixtures/files.js';
 import { getBlobSHA } from '../fixtures/git.js';
 import { expect, GITEA_CONFIG, test } from '../fixtures/test.js';
+import { getEditor, getEntryRows, openFirstPost } from '../fixtures/ui.js';
 
 /**
  * @import { Locator, Page } from '@playwright/test';
@@ -14,20 +15,6 @@ test.use({ config: GITEA_CONFIG });
 test.beforeEach(async ({ gitea }) => {
   gitea.commit({ [POST_PATH]: FIRST_POST }, { message: 'Add the first post' });
 });
-
-/**
- * Open the first post in the entry editor.
- * @param {Page} page Page.
- * @returns {Promise<Locator>} Editor.
- */
-const openFirstPost = async (page) => {
-  const editor = page.getByRole('group', { name: 'Content Editor' });
-
-  await page.getByRole('row', { name: /First Post/ }).click();
-  await expect(editor.getByRole('textbox', { name: 'Body' })).toHaveValue('Hello, world!');
-
-  return editor;
-};
 
 /**
  * Decode the Base64 content of a file in a commit request.
@@ -96,7 +83,7 @@ test('lists the entries of a repository whose file tree spans several pages', as
   gitea.treePageSize = 2;
   await cms.open();
 
-  await expect(page.getByRole('group', { name: 'Entry List' }).getByRole('row')).toHaveCount(3);
+  await expect(getEntryRows(page)).toHaveCount(3);
 });
 
 test('refuses a user who can only read the repository', async ({ cms, gitea, page }) => {
@@ -104,7 +91,7 @@ test('refuses a user who can only read the repository', async ({ cms, gitea, pag
 
   await cms.open();
   await expect(page.getByRole('alert')).toContainText(
-    /You don’t have access to the .*e2e-site.* repository/,
+    /You don’t have write access to the .*e2e-site.* repository/,
   );
 });
 
@@ -160,7 +147,7 @@ test('creates an entry, then deletes it', async ({ cms, gitea, page }) => {
   await cms.open();
   await page.getByRole('button', { name: 'Create New Entry' }).click();
 
-  const editor = page.getByRole('group', { name: 'Content Editor' });
+  const editor = getEditor(page);
 
   await editor.getByRole('textbox', { name: 'Title' }).fill('Second Post');
   await editor.getByRole('textbox', { name: 'Body' }).fill('Hello!');
@@ -187,7 +174,7 @@ test('creates an entry, then deletes it', async ({ cms, gitea, page }) => {
     message: 'Delete Post “second-post”',
     files: [{ operation: 'delete', path: 'content/posts/second-post.md' }],
   });
-  await expect(page.getByRole('group', { name: 'Entry List' }).getByRole('row')).toHaveCount(1);
+  await expect(getEntryRows(page)).toHaveCount(1);
 });
 
 test('shows an image from the repository', async ({ cms, gitea, page }) => {
@@ -233,6 +220,29 @@ test('uploads an image along with the entry', async ({ cms, gitea, page }) => {
   ]);
 });
 
+test('saves a change while a colleague changes another file', async ({ cms, gitea, page }) => {
+  await cms.open();
+
+  const editor = await openFirstPost(page);
+
+  // Only the blob SHAs of the files being changed are checked, so a commit to another file doesn’t
+  // get in the way
+  // eslint-disable-next-line jsdoc/require-jsdoc
+  gitea.beforeCommit = () => {
+    gitea.commit({ 'content/posts/second-post.md': '---\ntitle: Second Post\n---\n' });
+  };
+
+  await editor.getByRole('textbox', { name: 'Body' }).fill('Hello from Mona!');
+  await editor.getByRole('button', { name: 'Save' }).click();
+
+  await expect
+    .poll(() => gitea.readFile(POST_PATH))
+    .toBe('---\ntitle: First Post\n---\n\nHello from Mona!\n');
+  expect(gitea.readFile('content/posts/second-post.md')).toBe('---\ntitle: Second Post\n---\n');
+  // The commit has landed on top of the colleague’s, which is fetched rather than skipped over
+  await expect(page.getByRole('row', { name: /Second Post/ })).toBeVisible();
+});
+
 test('lists an entry a colleague has added, on the next scheduled check', async ({
   cms,
   gitea,
@@ -271,31 +281,51 @@ test('warns before saving over a colleague’s change', async ({ cms, gitea, pag
     .toBe('---\ntitle: First Post\n---\n\nHello from Mona!\n');
 });
 
-test('lists the commits of an entry in the History panel', async ({ cms, gitea, page }) => {
-  gitea.commit({ [POST_PATH]: FIRST_POST.replace('Hello', 'Hi') }, { author: gitea.user });
-  // A commit to another file isn’t listed
-  gitea.commit({ 'content/posts/second-post.md': '---\ntitle: Second Post\n---\n' });
-  await cms.open();
-  await page.getByRole('row', { name: /First Post/ }).click();
-  await page
-    .getByRole('radiogroup', { name: 'Sidebar Panels' })
-    .getByRole('radio', { name: 'History' })
-    .click();
+test.describe('with `prompt_commit_messages` on', () => {
+  test.use({
+    config: {
+      ...GITEA_CONFIG,
+      backend: { ...GITEA_CONFIG.backend, prompt_commit_messages: 'prefix' },
+    },
+  });
 
-  const commits = page.getByRole('group', { name: 'History', exact: true }).getByRole('link');
+  test('lists the commits of an entry with their messages in the History panel', async ({
+    cms,
+    gitea,
+    page,
+  }) => {
+    gitea.commit(
+      { [POST_PATH]: FIRST_POST.replace('Hello', 'Hi') },
+      { author: gitea.user, message: 'Say hi\n\nThe greeting was too formal.' },
+    );
+    // A commit to another file isn’t listed
+    gitea.commit({ 'content/posts/second-post.md': '---\ntitle: Second Post\n---\n' });
+    await cms.open();
+    await page.getByRole('row', { name: /First Post/ }).click();
+    await page
+      .getByRole('radiogroup', { name: 'Sidebar Panels' })
+      .getByRole('radio', { name: 'History' })
+      .click();
 
-  await expect(commits).toHaveCount(2);
-  await expect(commits.first()).toContainText(gitea.user.name);
-  await expect(commits.last()).toContainText(gitea.colleague.name);
+    const commits = page.getByRole('group', { name: 'History', exact: true }).getByRole('link');
 
-  // A commit opens on Gitea in a new tab
-  await page
-    .context()
-    .route('https://gitea.com/sveltia/**', (route) => route.fulfill({ body: '' }));
+    await expect(commits).toHaveCount(2);
+    // Each commit is shown with the headline of its message
+    await expect(commits.first()).toContainText('Say hi');
+    await expect(commits.first()).not.toContainText('too formal');
+    await expect(commits.first()).toContainText(gitea.user.name);
+    await expect(commits.last()).toContainText('Add the first post');
+    await expect(commits.last()).toContainText(gitea.colleague.name);
 
-  const [popup] = await Promise.all([page.waitForEvent('popup'), commits.last().click()]);
+    // A commit opens on Gitea in a new tab
+    await page
+      .context()
+      .route('https://gitea.com/sveltia/**', (route) => route.fulfill({ body: '' }));
 
-  expect(popup.url()).toBe(
-    `https://gitea.com/sveltia/e2e-site/commit/${gitea.commits.at(-3)?.oid}`,
-  );
+    const [popup] = await Promise.all([page.waitForEvent('popup'), commits.last().click()]);
+
+    expect(popup.url()).toBe(
+      `https://gitea.com/sveltia/e2e-site/commit/${gitea.commits.at(-3)?.oid}`,
+    );
+  });
 });

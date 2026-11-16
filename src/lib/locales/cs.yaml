@@ -1124,7 +1124,7 @@ edit_slug_error:
   invalid: Slug nesmí obsahovat speciální znaky, včetně lomítek a mezer.
   duplicate: Tento slug je již použit u jiné položky.
 
-# Entry path editing in a nested collection
+# Entry path editing for nested entries
 # Heading for the parent folder picker shown when the `meta.path` option is enabled
 entry_parent_folder: Nadřazená složka
 new_parent_folder: Nová složka
@@ -1532,6 +1532,10 @@ cloud_storage:
       requested: Přihlašování…
       error: Uživatelské jméno nebo heslo je nesprávné. Zkontrolujte údaje a zkuste to znovu.
 
+  # Shared by the S3-compatible services, unless overridden below
+  s3:
+    auth_key_label: Secret Access Key
+
   # Service-specific configurations
   cloudinary:
     iframe_title: Knihovna médií Cloudinary
@@ -1543,15 +1547,6 @@ cloud_storage:
 
   uploadcare:
     auth_key_label: API Secret Key
-
-  aws_s3:
-    auth_key_label: Secret Access Key
-
-  cloudflare_r2:
-    auth_key_label: Secret Access Key
-
-  digitalocean_spaces:
-    auth_key_label: Secret Access Key
 
 # ==============================================================================
 # Configuration Validation
@@ -1609,7 +1604,7 @@ config:
     oauth_implicit_flow: Nakonfigurovaná metoda ověření (implicit flow) není ve Sveltia CMS podporována. Použijte jinou <a>metodu ověření</a>.
     github_pkce_unsupported: Autorizace PKCE zatím není podporována kvůli omezením služby GitHub. Použijte jinou <a>metodu ověření</a>.
     oauth_no_app_id: ID aplikace OAuth není definováno.
-    # Don’t localize `open_authoring` and `editorial_workflow`
+    # Don’t localize `open_authoring`, `editorial_workflow` and `preview`
     open_authoring_no_workflow: Možnost `open_authoring` vyžaduje režim publikování `editorial_workflow`. Podrobnosti najdete v <a>dokumentaci</a>.
     # Don’t localize `auth_methods`
     no_auth_methods: Možnost `auth_methods` musí obsahovat alespoň jednu metodu.
@@ -2026,13 +2021,23 @@ prefs:
       description: Zobrazovat podtržení odkazů v náhledu položky a v rozhraní.
       switch_label: Vždy podtrhávat odkazy
 
-  # Advanced panel
-  advanced:
-    title: Pokročilé
-    beta:
-      title: Beta funkce
-      description: Povolit některé beta funkce, které mohou být nestabilní nebo nepřeložené do češtiny.
-      switch_label: Zapojit se do programu Beta
+  # Data Management panel
+  data:
+    clear_data:
+      title: Vymazat data
+      # Clear File Cache button
+      file_cache:
+        description: Smazat lokálně uložený obsah souborů a miniatury obrázků z mezipaměti, aby se uvolnilo místo v úložišti nebo vyřešily problémy způsobené zastaralými daty.
+        button_label: Vymazat mezipaměť souborů
+        confirmation: Lokálně uložený obsah souborů a miniatury obrázků z mezipaměti budou smazány. Vaše neuložené koncepty a nastavení zůstanou zachovány a smazaná data se podle potřeby znovu stáhnou nebo vygenerují. Po dokončení bude CMS znovu načteno.
+      # Erase All Data button
+      all_data:
+        description: Smazat vše, co CMS uchovává v tomto prohlížeči, včetně souborů v mezipaměti, neuložených konceptů a nastavení. Nic, co je již uloženo ve vašem repozitáři, nebude ovlivněno.
+        button_label: Vymazat všechna data
+        confirmation: Všechna data uložená v tomto prohlížeči budou smazána, včetně obsahu souborů v mezipaměti, miniatur obrázků, neuložených konceptů, nastavení a stavu přihlášení. Váš repozitář nebude ovlivněn, ale všechny neuložené změny budou ztraceny a budete se muset znovu přihlásit. Po dokončení bude CMS znovu načteno.
+
+  # Developer panel
+  developer:
     developer_mode:
       title: Vývojářský režim
       description: Povolit funkce určené pro vývojáře, včetně podrobných protokolů konzole a nativních kontextových nabídek.
@@ -2050,18 +2055,6 @@ prefs:
         field_label: Autorizační hlavička (např. Bearer <token>) (volitelné)
         saved: Autorizační hlavička byla uložena.
         removed: Autorizační hlavička byla odebrána.
-    clear_data:
-      title: Vymazat data
-      # Clear File Cache button
-      file_cache:
-        description: Smazat lokálně uložený obsah souborů a miniatury obrázků z mezipaměti, aby se uvolnilo místo v úložišti nebo vyřešily problémy způsobené zastaralými daty.
-        button_label: Vymazat mezipaměť souborů
-        confirmation: Lokálně uložený obsah souborů a miniatury obrázků z mezipaměti budou smazány. Vaše neuložené koncepty a nastavení zůstanou zachovány a smazaná data se podle potřeby znovu stáhnou nebo vygenerují. Po dokončení bude CMS znovu načteno.
-      # Erase All Data button
-      all_data:
-        description: Smazat vše, co CMS uchovává v tomto prohlížeči, včetně souborů v mezipaměti, neuložených konceptů a nastavení. Nic, co je již uloženo ve vašem repozitáři, nebude ovlivněno.
-        button_label: Vymazat všechna data
-        confirmation: Všechna data uložená v tomto prohlížeči budou smazána, včetně obsahu souborů v mezipaměti, miniatur obrázků, neuložených konceptů, nastavení a stavu přihlášení. Váš repozitář nebude ovlivněn, ale všechny neuložené změny budou ztraceny a budete se muset znovu přihlásit. Po dokončení bude CMS znovu načteno.
 
 # ==============================================================================
 # Keyboard Shortcuts

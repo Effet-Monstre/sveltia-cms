@@ -13,6 +13,7 @@
   } from '$lib/services/assets/external/details';
   import { isMediaKind } from '$lib/services/assets/kinds';
   import { formatDate } from '$lib/services/utils/date';
+  import { createLatestGuard } from '$lib/services/utils/scheduling';
 
   /**
    * @import { ExternalAssetDetails } from '$lib/services/assets/external/details';
@@ -25,11 +26,7 @@
    */
 
   /** @type {Props} */
-  let {
-    /* eslint-disable prefer-const */
-    asset,
-    /* eslint-enable prefer-const */
-  } = $props();
+  let { asset } = $props();
 
   /** @type {ExternalAssetDetails} */
   let details = $state({});
@@ -44,12 +41,11 @@
   const unavailable = $derived(externalAssetAvailability.current[asset.id] === false);
 
   /**
-   * Asset the details were last requested for. The panel stays mounted while the focus moves from
-   * one asset to another, so a slow lookup for an asset focused earlier must not overwrite the
-   * details of the one focused now.
-   * @type {ExternalAsset | undefined}
+   * Guard for {@link updateProps}. The panel stays mounted while the focus moves from one asset
+   * to another, so a slow lookup for an asset focused earlier must not overwrite the details of the
+   * one focused now.
    */
-  let requestedAsset;
+  const requestGuard = createLatestGuard();
 
   /**
    * Update the properties above.
@@ -58,14 +54,15 @@
    * resize, while this is still awaiting the service.
    */
   const updateProps = async (_asset) => {
-    requestedAsset = _asset;
+    const isLatest = requestGuard.next();
+
     details = {};
     usedEntries = undefined;
 
     try {
       const _details = await getExternalAssetDetails(_asset);
 
-      if (requestedAsset !== _asset) {
+      if (!isLatest()) {
         return;
       }
 
@@ -74,10 +71,20 @@
       // The file could not be loaded; leave the media info out
     }
 
-    const _usedEntries = await getExternalAssetUsedEntries(_asset);
+    try {
+      const _usedEntries = await getExternalAssetUsedEntries(_asset);
 
-    if (requestedAsset === _asset) {
-      usedEntries = _usedEntries;
+      if (isLatest()) {
+        usedEntries = _usedEntries;
+      }
+    } catch (/** @type {any} */ ex) {
+      // eslint-disable-next-line no-console
+      console.error(ex);
+
+      if (isLatest()) {
+        // Stop showing the used entries as being loaded
+        usedEntries = [];
+      }
     }
   };
 

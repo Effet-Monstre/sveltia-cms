@@ -1,3 +1,4 @@
+import { createRawSnippet } from 'svelte';
 import { describe, expect, test, vi } from 'vitest';
 import { page } from 'vitest/browser';
 import { render } from 'vitest-browser-svelte';
@@ -23,11 +24,52 @@ const getProps = (overrides = {}) => ({
 describe('ObjectBody', () => {
   test('warns about a type the field doesn’t define instead of showing anything', async () => {
     const getSummary = vi.fn(() => 'Hello');
+    const { container } = await render(ObjectBody, getProps({ unknownType: true, getSummary }));
+    const alert = page.getByRole('alert');
 
-    await render(ObjectBody, getProps({ unknownType: true, getSummary }));
-
-    await expect.element(page.getByRole('alert')).toMatchTextContent(/due to an unknown type/);
+    await expect.element(alert).toMatchTextContent(/due to an unknown type/);
     expect(getSummary).not.toHaveBeenCalled();
+    // The warning fills the value or item marked with the `object-unknown-type` class
+    container.classList.add('object-unknown-type');
+    expect(getComputedStyle(container).overflow).toBe('hidden');
+    expect(getComputedStyle(alert.element()).borderWidth).toBe('0px');
+    expect(getComputedStyle(alert.element()).borderRadius).toBe('0px');
+  });
+
+  test('shows the type’s hint above the subfields while expanded', async () => {
+    const hint = 'Use a **landscape** image.\\nSee [docs](https://example.com).';
+
+    const { container } = await render(
+      ObjectBody,
+      getProps({ subFields: [], expanded: true, typeConfig: { name: 'hero', fields: [], hint } }),
+    );
+
+    const element = /** @type {HTMLElement} */ (container.querySelector('.type-hint'));
+
+    expect(element.innerHTML).toBe(
+      'Use a <strong>landscape</strong> image.<br>See <a href="https://example.com">docs</a>.',
+    );
+  });
+
+  test('shows no hint while collapsed, read-only, or without one', async () => {
+    const typeConfig = { name: 'hero', fields: [], hint: 'Hint' };
+    const { container } = await render(ObjectBody, getProps({ typeConfig }));
+
+    expect(container.querySelector('.type-hint')).toBeNull();
+
+    const { container: readonly } = await render(
+      ObjectBody,
+      getProps({ subFields: [], expanded: true, typeConfig, readonly: true }),
+    );
+
+    expect(readonly.querySelector('.type-hint')).toBeNull();
+
+    const { container: expanded } = await render(
+      ObjectBody,
+      getProps({ subFields: [], expanded: true }),
+    );
+
+    expect(expanded.querySelector('.type-hint')).toBeNull();
   });
 
   test('shows the summary while collapsed', async () => {
@@ -54,5 +96,31 @@ describe('ObjectBody', () => {
     const { container } = await render(ObjectBody, getProps({ getSummary: vi.fn(() => '') }));
 
     expect(container.querySelector('.summary')).toBeNull();
+  });
+
+  test('draws the given content in place of the summary text', async () => {
+    const getSummary = vi.fn(() => 'Hello');
+    const url = 'data:image/gif;base64,R0lGODlhAQABAAAAACw=';
+
+    const summaryContent = createRawSnippet(() => ({
+      /**
+       * Render the content.
+       * @returns {string} HTML.
+       */
+      render: () => '<strong class="custom">Custom summary</strong>',
+    }));
+
+    const { container } = await render(
+      ObjectBody,
+      getProps({ getSummary, getThumbnail: vi.fn(() => ({ url })), summaryContent }),
+    );
+
+    const summary = /** @type {HTMLElement} */ (container.querySelector('.summary'));
+
+    await expect.element(summary).toHaveTextContent('Custom summary');
+    expect(summary.querySelector('.custom')).not.toBeNull();
+    // The thumbnail is still shown beside it
+    await expect.poll(() => summary.querySelector('img')?.getAttribute('src')).toBe(url);
+    expect(getSummary).not.toHaveBeenCalled();
   });
 });

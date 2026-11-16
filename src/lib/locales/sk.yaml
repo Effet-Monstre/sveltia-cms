@@ -628,15 +628,6 @@ enter_new_name_for_folder: |
     one {{ Nižšie zadajte nový názov. Médium v priečinku sa presunie spolu s ním a všetky položky, ktoré ho používajú, sa aktualizujú. }}
     few {{ Nižšie zadajte nový názov. {$count} médiá v priečinku sa presunú spolu s ním a všetky položky, ktoré ich používajú, sa aktualizujú. }}
     *   {{ Nižšie zadajte nový názov. {$count} médií v priečinku sa presunie spolu s ním a všetky položky, ktoré ich používajú, sa aktualizujú. }}
-# Rename Folder dialog body text for a cloud storage service, whose files are hotlinked from the
-# entries, so a move changes the URLs and the entries aren’t updated
-enter_new_name_for_external_folder: |
-  .input {$count :integer}
-  .match $count
-    0   {{ Nižšie zadajte nový názov. }}
-    one {{ Nižšie zadajte nový názov. Súbor v priečinku sa presunie spolu s ním a jeho URL sa zmení, preto aktualizujte všetky položky, ktoré ho používajú. }}
-    few {{ Nižšie zadajte nový názov. {$count} súbory v priečinku sa presunú spolu s ním a ich URL sa zmenia, preto aktualizujte všetky položky, ktoré ich používajú. }}
-    *   {{ Nižšie zadajte nový názov. {$count} súborov v priečinku sa presunie spolu s ním a ich URL sa zmenia, preto aktualizujte všetky položky, ktoré ich používajú. }}
 # Delete Folder confirmation
 # {$name} is the folder name and {$count} is the number of assets in the folder
 confirm_deleting_folder: |
@@ -1280,7 +1271,7 @@ edit_slug_error:
   invalid: Slug nesmie obsahovať špeciálne znaky vrátane lomiek a medzier.
   duplicate: Tento slug už používa iná položka.
 
-# Entry path editing in a nested collection
+# Entry path editing for nested entries
 # Heading for the parent folder picker shown when the `meta.path` option is enabled
 entry_parent_folder: Nadradený priečinok
 new_parent_folder: Nový priečinok
@@ -1751,6 +1742,10 @@ cloud_storage:
       requested: Prihlasovanie…
       error: Používateľské meno alebo heslo je nesprávne. Skontrolujte údaje a skúste to znova.
 
+  # Shared by the S3-compatible services, unless overridden below
+  s3:
+    auth_key_label: Secret Access Key
+
   # Service-specific configurations
   cloudinary:
     iframe_title: Knižnica médií Cloudinary
@@ -1763,17 +1758,8 @@ cloud_storage:
   uploadcare:
     auth_key_label: API Secret Key
 
-  aws_s3:
-    auth_key_label: Secret Access Key
-
   bunny_storage:
     auth_key_label: Storage Zone Password
-
-  cloudflare_r2:
-    auth_key_label: Secret Access Key
-
-  digitalocean_spaces:
-    auth_key_label: Secret Access Key
 
 # ==============================================================================
 # Configuration Validation
@@ -1831,7 +1817,7 @@ config:
     oauth_implicit_flow: Nakonfigurovaná metóda overenia (implicit flow) nie je vo Sveltia CMS podporovaná. Namiesto nej použite inú <a>metódu overenia</a>.
     github_pkce_unsupported: Autorizácia PKCE zatiaľ nie je podporovaná kvôli obmedzeniam GitHubu. Namiesto nej použite inú <a>metódu overenia</a>.
     oauth_no_app_id: ID aplikácie OAuth nie je definované.
-    # Don’t localize `open_authoring` and `editorial_workflow`
+    # Don’t localize `open_authoring`, `editorial_workflow` and `preview`
     open_authoring_no_workflow: Možnosť `open_authoring` vyžaduje režim publikovania `editorial_workflow`. Podrobnosti nájdete v <a>dokumentácii</a>.
     # Don’t localize `auth_methods`
     no_auth_methods: Možnosť `auth_methods` musí obsahovať aspoň jednu metódu.
@@ -1961,7 +1947,7 @@ config:
     # {$min} and {$max} are option names such as `min` and `max` or `minlength` and `maxlength`
     invalid_range_options: Možnosť `{$min}` nesmie byť väčšia ako možnosť `{$max}`.
     # {$step} is the configured value; Don’t localize `step`
-    invalid_step: Možnosť `step` je nastavená na `{$step}`, ale musí byť väčšia ako nula.
+    invalid_step: Možnosť `step` je nastavená na `{$step}`, ale musí byť väčšia ako nula alebo `-1` na vypnutie krokovania.
     # Don’t localize `options`
     select_field_no_options: Pole typu Select musí mať v možnosti `options` aspoň jednu položku.
     # {$value} is the option value from the configuration; Don’t localize `options`
@@ -2356,13 +2342,23 @@ prefs:
       description: Zobrazovať podčiarknutie odkazov v náhľade položky a v textoch používateľského rozhrania.
       switch_label: Vždy podčiarkovať odkazy
 
-  # Advanced panel
-  advanced:
-    title: Rozšírené
-    beta:
-      title: Beta funkcie
-      description: Povoliť niektoré beta funkcie, ktoré môžu byť nestabilné alebo nepreložené.
-      switch_label: Zapojiť sa do beta programu
+  # Data Management panel
+  data:
+    clear_data:
+      title: Vymazať údaje
+      # Clear File Cache button
+      file_cache:
+        description: Odstrániť obsah súborov a miniatúry obrázkov uložené v lokálnej cache, aby sa uvoľnilo miesto v úložisku alebo vyriešili problémy spôsobené zastaranými údajmi.
+        button_label: Vymazať cache súborov
+        confirmation: Obsah súborov a miniatúry obrázkov uložené v lokálnej cache sa odstránia. Vaše neuložené koncepty a nastavenia zostanú zachované a odstránené údaje sa podľa potreby znova stiahnu alebo vygenerujú. Po dokončení sa CMS znova načíta.
+      # Erase All Data button
+      all_data:
+        description: Odstrániť všetko, čo CMS uchováva v tomto prehliadači, vrátane súborov v cache, neuložených konceptov a nastavení. Nič, čo je už uložené vo vašom repozitári, nebude ovplyvnené.
+        button_label: Vymazať všetky údaje
+        confirmation: Všetky údaje uložené v tomto prehliadači sa odstránia vrátane obsahu súborov v cache, miniatúr obrázkov, neuložených konceptov, nastavení a stavu prihlásenia. Váš repozitár nebude ovplyvnený, ale všetky neuložené zmeny sa stratia a budete sa musieť znova prihlásiť. Po dokončení sa CMS znova načíta.
+
+  # Developer panel
+  developer:
     developer_mode:
       title: Režim pre vývojárov
       description: Povoliť niektoré funkcie určené pre vývojárov vrátane podrobných záznamov v konzole a natívnych kontextových menu.
@@ -2380,18 +2376,6 @@ prefs:
         field_label: Autorizačná hlavička (napr. Bearer <token>) (voliteľné)
         saved: Autorizačná hlavička bola uložená.
         removed: Autorizačná hlavička bola odobraná.
-    clear_data:
-      title: Vymazať údaje
-      # Clear File Cache button
-      file_cache:
-        description: Odstrániť obsah súborov a miniatúry obrázkov uložené v lokálnej cache, aby sa uvoľnilo miesto v úložisku alebo vyriešili problémy spôsobené zastaranými údajmi.
-        button_label: Vymazať cache súborov
-        confirmation: Obsah súborov a miniatúry obrázkov uložené v lokálnej cache sa odstránia. Vaše neuložené koncepty a nastavenia zostanú zachované a odstránené údaje sa podľa potreby znova stiahnu alebo vygenerujú. Po dokončení sa CMS znova načíta.
-      # Erase All Data button
-      all_data:
-        description: Odstrániť všetko, čo CMS uchováva v tomto prehliadači, vrátane súborov v cache, neuložených konceptov a nastavení. Nič, čo je už uložené vo vašom repozitári, nebude ovplyvnené.
-        button_label: Vymazať všetky údaje
-        confirmation: Všetky údaje uložené v tomto prehliadači sa odstránia vrátane obsahu súborov v cache, miniatúr obrázkov, neuložených konceptov, nastavení a stavu prihlásenia. Váš repozitár nebude ovplyvnený, ale všetky neuložené zmeny sa stratia a budete sa musieť znova prihlásiť. Po dokončení sa CMS znova načíta.
 
 # ==============================================================================
 # Keyboard Shortcuts

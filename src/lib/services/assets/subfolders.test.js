@@ -6,13 +6,15 @@ import {
   canBrowseSubfolders,
   formatSubfolderName,
   getAssetsInDir,
-  getDirName,
   getFolderBreadcrumbItems,
+  getFolderNamesInDir,
+  getNonAssetFileNamesInDir,
   getRelativePath,
   getSubfolderPath,
   getSubfolders,
   getTakenNames,
   getUploadDirPath,
+  listSubfolders,
   resolveAssetFolderPath,
   selectedSubfolderPath,
   validateSubfolderName,
@@ -75,17 +77,6 @@ describe('assets/subfolders', () => {
     _gitConfigFiles.current = [];
     _config.slugify_filename = false;
     selectedSubfolderPath.current = '';
-  });
-
-  describe('getDirName', () => {
-    it('should return the directory of a file path', () => {
-      expect(getDirName('static/images/photo.jpg')).toBe('static/images');
-      expect(getDirName('static/photo.jpg')).toBe('static');
-    });
-
-    it('should return an empty string for a file at the root', () => {
-      expect(getDirName('photo.jpg')).toBe('');
-    });
   });
 
   describe('canBrowseSubfolders', () => {
@@ -169,6 +160,13 @@ describe('assets/subfolders', () => {
       expect(resolveAssetFolderPath('static/images/2024', global)).toEqual({
         folder: global,
         subfolderPath: '2024',
+      });
+    });
+
+    it('should keep the All Assets folder passed as history state for an asset folder path', () => {
+      expect(resolveAssetFolderPath('static/images/posts', allAssets)).toEqual({
+        folder: allAssets,
+        subfolderPath: '',
       });
     });
 
@@ -357,6 +355,53 @@ describe('assets/subfolders', () => {
     });
   });
 
+  describe('listSubfolders', () => {
+    it('should list the immediate subfolders of a directory, sorted by name', () => {
+      expect(
+        listSubfolders({
+          dirPath: 'static/images',
+          paths: [
+            'static/images/photo.jpg',
+            'static/images/zoo/lion.jpg',
+            'static/images/animals/cats/tabby.jpg',
+            'static/images/animals/dog.jpg',
+          ],
+        }),
+      ).toEqual([
+        { name: 'animals', path: 'static/images/animals' },
+        { name: 'zoo', path: 'static/images/zoo' },
+      ]);
+    });
+
+    it('should list the subfolders of the root', () => {
+      expect(
+        listSubfolders({ dirPath: '', paths: ['a.jpg', 'images/b.jpg', 'docs/c.pdf'] }),
+      ).toEqual([
+        { name: 'docs', path: 'docs' },
+        { name: 'images', path: 'images' },
+      ]);
+    });
+
+    it('should list an empty folder kept by a placeholder', () => {
+      expect(listSubfolders({ dirPath: 'uploads', paths: ['uploads/empty/'] })).toEqual([
+        { name: 'empty', path: 'uploads/empty' },
+      ]);
+    });
+
+    it('should leave out the paths outside the directory', () => {
+      expect(
+        listSubfolders({
+          dirPath: 'static/images',
+          paths: ['static/imagesets/a/b.jpg', 'static/other/c.jpg', 'static/images/'],
+        }),
+      ).toEqual([]);
+    });
+
+    it('should skip an empty path segment', () => {
+      expect(listSubfolders({ dirPath: 'uploads', paths: ['uploads//a.jpg'] })).toEqual([]);
+    });
+  });
+
   describe('getTakenNames', () => {
     const subfolders = [
       { name: 'archive', path: 'images/archive' },
@@ -380,6 +425,83 @@ describe('assets/subfolders', () => {
         'hero.png',
         'logo.svg',
       ]);
+    });
+
+    it('should take the names leading to the asset folders nested in the directory', () => {
+      _allAssetFolders.current = [
+        createFolder({ internalPath: undefined }),
+        createFolder({ internalPath: '' }),
+        createFolder({ internalPath: 'images' }),
+        createFolder({ internalPath: 'images/projects', collectionName: 'projects' }),
+        createFolder({ internalPath: 'images/blog/covers', collectionName: 'blog' }),
+        createFolder({ internalPath: 'images/{{slug}}', hasTemplateTags: true }),
+        createFolder({ internalPath: 'static/images', collectionName: 'pages' }),
+      ];
+
+      expect(getTakenNames({ subfolders, fileNames, dirPath: 'images' })).toEqual([
+        'archive',
+        '2024',
+        'hero.png',
+        'logo.svg',
+        'blog',
+        'projects',
+      ]);
+      // Nothing is nested in a directory without a configured folder below it
+      expect(getTakenNames({ subfolders: [], fileNames: [], dirPath: 'images/2024' })).toEqual([]);
+
+      _allAssetFolders.current = [];
+    });
+  });
+
+  describe('getFolderNamesInDir', () => {
+    it('should list the folders holding assets or Git config files, and nested asset folders', async () => {
+      const { allAssets } = await import('$lib/services/assets/state');
+
+      allAssets.current = [
+        createAsset('images/a.png'),
+        createAsset('images/2024/b.png'),
+        createAsset('images/blog/2023/c.png'),
+        createAsset('other/d.png'),
+      ];
+      _gitConfigFiles.current = [{ path: 'images/empty/.gitkeep' }];
+      _allAssetFolders.current = [
+        createFolder({ internalPath: 'images' }),
+        createFolder({ internalPath: 'images/projects', collectionName: 'projects' }),
+      ];
+
+      expect(getFolderNamesInDir('images')).toEqual(['2024', 'blog', 'empty', 'projects']);
+      expect(getFolderNamesInDir('images/2024')).toEqual([]);
+
+      allAssets.current = [];
+      _gitConfigFiles.current = [];
+      _allAssetFolders.current = [];
+    });
+  });
+
+  describe('getNonAssetFileNamesInDir', () => {
+    it('should list the entry and Git config files right in the directory', async () => {
+      const { allEntries } = await import('$lib/services/contents');
+
+      allEntries.current = /** @type {any[]} */ ([
+        {
+          locales: {
+            en: { path: 'content/posts/hello/index.md' },
+            ja: { path: 'content/posts/hello/index.ja.md' },
+          },
+        },
+        { locales: { _default: { path: 'content/posts/other/index.md' } } },
+      ]);
+      _gitConfigFiles.current = [{ path: 'content/posts/hello/.gitkeep' }];
+
+      expect(getNonAssetFileNamesInDir('content/posts/hello')).toEqual([
+        'index.md',
+        'index.ja.md',
+        '.gitkeep',
+      ]);
+      expect(getNonAssetFileNamesInDir('content/posts')).toEqual([]);
+
+      allEntries.current = [];
+      _gitConfigFiles.current = [];
     });
   });
 
@@ -473,6 +595,12 @@ describe('assets/subfolders', () => {
       expect(validateSubfolderName({ name: 'a/b', takenNames })).toBe('invalid');
       expect(validateSubfolderName({ name: '.hidden', takenNames })).toBe('invalid');
       expect(validateSubfolderName({ name: '???', takenNames })).toBe('invalid');
+    });
+
+    it('should reject a leading dot even when slugification removes it', () => {
+      _config.slugify_filename = true;
+      expect(validateSubfolderName({ name: '.hidden', takenNames })).toBe('invalid');
+      _config.slugify_filename = false;
     });
 
     it('should reject a name taken by a folder or file, regardless of case', () => {

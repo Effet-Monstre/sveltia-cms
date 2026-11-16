@@ -55,21 +55,24 @@ describe('parseNumberFieldConfig', () => {
     vi.resetAllMocks();
   });
 
-  test('accepts a positive step, any, or none', () => {
+  test('accepts a positive step, -1 to turn stepping off, any, or none', () => {
     check(1);
     check(0.5);
+    check(-1);
     check('any');
     check(undefined);
     expect(addMessage).not.toHaveBeenCalled();
   });
 
-  test('reports a step of zero or less', () => {
+  test('reports a step of zero or less other than -1', () => {
     check(0);
-    check(-1);
+    check(-2);
+    check(-0.5);
 
     expect(vi.mocked(addMessage).mock.calls.map(([args]) => args)).toEqual([
       { strKey: 'invalid_step', values: { step: '0' }, context, collectors },
-      { strKey: 'invalid_step', values: { step: '-1' }, context, collectors },
+      { strKey: 'invalid_step', values: { step: '-2' }, context, collectors },
+      { strKey: 'invalid_step', values: { step: '-0.5' }, context, collectors },
     ]);
   });
 
@@ -96,11 +99,16 @@ describe('parseNumberFieldConfig', () => {
     expectMessages([]);
   });
 
-  test('parses a string default the way the runtime does', () => {
-    // `parseInt()` and `parseFloat()` stop at the first character that is not part of a number
-    checkDefault('1.5', 'int');
+  test('parses a string default as a whole, the way the runtime does', () => {
+    // The runtime drops a default with trailing characters, which `parseInt()` would ignore
+    checkDefault('10px', 'int');
     checkDefault('3px', 'float');
-    expectMessages([]);
+    checkDefault('1.5', 'int');
+    expectMessages([
+      { strKey: 'number_field_default_not_integer', values: { value: '10px', valueType: 'int' } },
+      { strKey: 'number_field_default_not_number', values: { value: '3px', valueType: 'float' } },
+      { strKey: 'number_field_default_not_integer', values: { value: '1.5', valueType: 'int' } },
+    ]);
   });
 
   test('reports a default that is not an integer for the integer value types', () => {

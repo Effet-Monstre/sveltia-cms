@@ -4,14 +4,15 @@ import { lockedBranch, mergeLockedBranch } from '$lib/services/backends/branch-a
 import { REPOSITORY_INFO_PLACEHOLDER } from '$lib/services/backends/git/shared/repository';
 
 import {
+  _resetRepositoryInfoCache,
   checkBranchAccess,
   checkRepositoryAccess,
   fetchBranch,
   fetchDefaultBranchName,
+  fetchRepositoryAccess,
   getBaseURLs,
   getRepositoryInfo,
   repository,
-  resetRepositoryInfoCache,
 } from './repository.js';
 
 // Mock dependencies with vi.hoisted to ensure proper hoisting
@@ -22,9 +23,7 @@ const { mockUser } = vi.hoisted(() => ({
   mockUser: { account: /** @type {{ id: number } | undefined} */ ({ id: 1 }) },
 }));
 
-vi.mock('@sveltia/i18n', () => ({
-  _: vi.fn((key) => key),
-}));
+vi.mock('@sveltia/i18n', async () => (await import('$lib/test/i18n')).createI18nMock());
 
 vi.mock('$lib/services/backends/git/shared/api', () => ({
   fetchAPI: fetchAPIMock,
@@ -43,7 +42,7 @@ describe('Gitea Repository Service', () => {
     vi.clearAllMocks();
 
     // Reset the repository info cache
-    resetRepositoryInfoCache();
+    _resetRepositoryInfoCache();
     mockUser.account = { id: 1 };
 
     // Mock _ to return a translation function (following pattern from other tests)
@@ -88,6 +87,14 @@ describe('Gitea Repository Service', () => {
       });
     });
 
+    test('should encode a branch name with a character that ends a URL path', () => {
+      const repoURL = 'https://gitea.example.com/owner/repo';
+      const result = getBaseURLs(repoURL, 'cms/posts/c#');
+
+      expect(result.treeBaseURL).toBe(`${repoURL}/src/branch/cms/posts/c%23`);
+      expect(result.blobBaseURL).toBe(`${repoURL}/src/branch/cms/posts/c%23`);
+    });
+
     test('should generate correct URLs without branch', () => {
       const repoURL = 'https://gitea.example.com/owner/repo';
       const result = getBaseURLs(repoURL);
@@ -110,6 +117,21 @@ describe('Gitea Repository Service', () => {
     });
   });
 
+  describe('fetchRepositoryAccess', () => {
+    test('reports read and write access from the repository’s own permissions', async () => {
+      fetchAPIMock.mockResolvedValue({ permissions: { pull: true, push: true } });
+      await expect(fetchRepositoryAccess()).resolves.toEqual({ canRead: true, canWrite: true });
+
+      _resetRepositoryInfoCache();
+      fetchAPIMock.mockResolvedValue({ permissions: { pull: true } });
+      await expect(fetchRepositoryAccess()).resolves.toEqual({ canRead: true, canWrite: false });
+
+      _resetRepositoryInfoCache();
+      fetchAPIMock.mockResolvedValue({});
+      await expect(fetchRepositoryAccess()).resolves.toEqual({ canRead: false, canWrite: false });
+    });
+  });
+
   describe('checkRepositoryAccess', () => {
     test('should pass when user has push permissions', async () => {
       const mockRepoInfo = {
@@ -125,7 +147,7 @@ describe('Gitea Repository Service', () => {
       expect(fetchAPIMock).toHaveBeenCalledWith(`/repos/${mockOwner}/${mockRepo}`);
     });
 
-    test('should throw error when user has no pull permissions', async () => {
+    test('should report no access when user has no pull permissions', async () => {
       const mockRepoInfo = {
         permissions: {
           pull: false,
@@ -135,35 +157,53 @@ describe('Gitea Repository Service', () => {
 
       fetchAPIMock.mockResolvedValue(mockRepoInfo);
 
-      await expect(checkRepositoryAccess()).rejects.toThrow('Not a collaborator of the repository');
+      await expect(checkRepositoryAccess()).rejects.toMatchObject({
+        message: 'Not a collaborator of the repository',
+        cause: { message: 'repository_no_access' },
+      });
     });
 
-    test('should throw error when user can only read the repository', async () => {
+    test('should say write access is missing when user can only read the repository', async () => {
       fetchAPIMock.mockResolvedValue({ permissions: { pull: true, push: false } });
 
-      await expect(checkRepositoryAccess()).rejects.toThrow('Not a collaborator of the repository');
+      await expect(checkRepositoryAccess()).rejects.toMatchObject({
+        message: 'Not a collaborator of the repository',
+        cause: { message: 'repository_no_write_access' },
+      });
     });
 
-    test('should throw error when permissions are missing', async () => {
+    test('should report no access when permissions are missing', async () => {
       const mockRepoInfo = {};
 
       fetchAPIMock.mockResolvedValue(mockRepoInfo);
 
-      await expect(checkRepositoryAccess()).rejects.toThrow('Not a collaborator of the repository');
+      await expect(checkRepositoryAccess()).rejects.toMatchObject({
+        message: 'Not a collaborator of the repository',
+        cause: { message: 'repository_no_access' },
+      });
     });
 
-    test('should handle API fetch error', async () => {
-      fetchAPIMock.mockRejectedValue(new Error('Network error'));
+    // A private repository answers someone without access with a 404, as on GitHub
+    test.each([401, 403, 404])('should report no access on a %i', async (status) => {
+      fetchAPIMock.mockRejectedValue(new Error('Denied', { cause: { status } }));
 
-      await expect(checkRepositoryAccess()).rejects.toThrow('Failed to check repository access');
+      await expect(checkRepositoryAccess()).rejects.toMatchObject({
+        message: 'Not a collaborator of the repository',
+        cause: { message: 'repository_no_access' },
+      });
     });
 
-    test('should re-throw collaborator errors', async () => {
-      const collaboratorError = new Error('Not a collaborator of the repository');
+    test.each([
+      ['a server error', new Error('Server error', { cause: { status: 500 } })],
+      ['a rate limit', new Error('Too many requests', { cause: { status: 429 } })],
+      ['a network error', new Error('Failed to send the request', { cause: new TypeError() })],
+      ['a non-error rejection', undefined],
+    ])('should report a failed check rather than a missing repository on %s', async (_, error) => {
+      fetchAPIMock.mockRejectedValue(error);
 
-      fetchAPIMock.mockRejectedValue(collaboratorError);
-
-      await expect(checkRepositoryAccess()).rejects.toThrow('Not a collaborator of the repository');
+      await expect(checkRepositoryAccess()).rejects.toThrow(
+        'Failed to check the repository permission.',
+      );
     });
   });
 
@@ -487,7 +527,7 @@ describe('Gitea Repository Service', () => {
 
     test('should use cached data after successful fetch', async () => {
       // Reset cache first
-      resetRepositoryInfoCache();
+      _resetRepositoryInfoCache();
 
       const mockRepoInfo = {
         id: 456,

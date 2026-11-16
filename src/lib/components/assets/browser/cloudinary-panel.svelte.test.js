@@ -114,9 +114,23 @@ describe('CloudinaryPanel', () => {
     dialogOpen.current = true;
     receiveMessage({
       type: 'ML_WIDGET_INSERT_DATA',
-      data: { assets: [{ secure_url: 'https://res.cloudinary.com/demo/a.png' }] },
+      data: {
+        assets: [
+          {
+            public_id: 'blog/my hero',
+            format: 'png',
+            secure_url: 'https://res.cloudinary.com/demo/image/upload/v1/blog/my%20hero.png',
+          },
+          // A raw file has no format, as its public ID has the extension already
+          {
+            public_id: 'docs/guide.txt',
+            secure_url: 'https://res.cloudinary.com/demo/raw/upload/v1/docs/guide.txt',
+          },
+        ],
+      },
     });
-    expect(onSelect).toHaveBeenCalledWith([{ url: 'a.png' }]);
+    // The folder is kept, and the name isn’t percent-encoded, as with Decap CMS
+    expect(onSelect).toHaveBeenCalledWith([{ url: 'blog/my hero.png' }, { url: 'docs/guide.txt' }]);
 
     const onSelectOriginal = vi.fn();
 
@@ -164,14 +178,15 @@ describe('CloudinaryPanel', () => {
     const postMessage = vi.spyOn(/** @type {Window} */ (iframe.contentWindow), 'postMessage');
 
     try {
+      // The iframe component has received the `consoleLoaded` message before the panel is shown
+      consoleLoaded.current = true;
+
       await render(CloudinaryPanel, {
         onSelect: vi.fn(),
         kind: 'image',
         multiple: true,
         fieldConfig: /** @type {any} */ ({ name: 'image', widget: 'image', max: 3 }),
       });
-
-      receiveMessage({ type: 'consoleLoaded' });
 
       await vi.waitFor(() => expect(postMessage).toHaveBeenCalled());
       expect(JSON.parse(postMessage.mock.calls[0][0])).toEqual({
@@ -213,10 +228,12 @@ describe('CloudinaryPanel', () => {
         media_libraries: { cloudinary: { config: { cloud_name: 'demo', max_files: 5 } } },
       });
       await render(CloudinaryPanel, { onSelect: vi.fn() });
-      receiveMessage({ type: 'consoleLoaded' });
+      expect(postMessage).not.toHaveBeenCalled();
+      consoleLoaded.current = true;
       await vi.waitFor(() => expect(postMessage).toHaveBeenCalled());
+      // A File field shows every type of file, rather than the raw files only
       expect(getSentConfig()).toEqual({
-        folder: { path: '', resource_type: 'raw' },
+        folder: { path: '' },
         multiple: false,
         max_files: 5,
       });
@@ -228,9 +245,46 @@ describe('CloudinaryPanel', () => {
         onSelect: vi.fn(),
         fieldConfig: /** @type {any} */ ({ name: 'file', widget: 'file' }),
       });
-      receiveMessage({ type: 'consoleLoaded' });
       await vi.waitFor(() => expect(postMessage).toHaveBeenCalledTimes(3));
       expect(getSentConfig().max_files).toBe(20);
+    } finally {
+      iframe.remove();
+      optionCacheMap.clear();
+      await initTestConfig({
+        media_libraries: {
+          cloudinary: {
+            config: { cloud_name: 'demo', api_key: '123', folder: { path: 'photos' } },
+          },
+        },
+      });
+    }
+  });
+
+  test('keeps the configured resource type', async () => {
+    const iframe = document.createElement('iframe');
+
+    iframe.id = 'cloudinary-iframe';
+    document.body.appendChild(iframe);
+
+    const postMessage = vi.spyOn(/** @type {Window} */ (iframe.contentWindow), 'postMessage');
+
+    try {
+      optionCacheMap.clear();
+      await initTestConfig({
+        media_libraries: {
+          cloudinary: {
+            config: { cloud_name: 'demo', folder: { path: 'clips', resource_type: 'video' } },
+          },
+        },
+      });
+      // Even for an Image field, the configured type wins
+      consoleLoaded.current = true;
+      await render(CloudinaryPanel, { onSelect: vi.fn(), kind: 'image' });
+      await vi.waitFor(() => expect(postMessage).toHaveBeenCalled());
+      expect(JSON.parse(postMessage.mock.calls.at(-1)?.[0]).data.config.folder).toEqual({
+        path: 'clips',
+        resource_type: 'video',
+      });
     } finally {
       iframe.remove();
       optionCacheMap.clear();

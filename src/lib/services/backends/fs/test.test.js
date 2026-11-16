@@ -9,6 +9,12 @@ const mockLoadFiles = vi.fn();
 const mockReadFile = vi.fn();
 const mockSaveChanges = vi.fn();
 const mockGetDirectoryHandle = vi.fn();
+const mockGetScopedRootDirHandle = vi.fn(async (handle) => handle);
+const mockSeedTestRepository = vi.fn();
+
+vi.mock('$lib/services/backends/fs/seed', () => ({
+  seedTestRepository: mockSeedTestRepository,
+}));
 
 vi.mock('$lib/services/backends/fs/shared/save', () => ({
   saveChanges: mockSaveChanges,
@@ -21,12 +27,19 @@ vi.mock('$lib/services/backends/fs/shared/load', () => ({
 vi.mock('$lib/services/backends/fs/shared/handles', () => ({
   readFile: mockReadFile,
   getDirectoryHandle: mockGetDirectoryHandle,
+  getScopedRootDirHandle: mockGetScopedRootDirHandle,
 }));
 
 vi.mock('$lib/services/contents', () => ({
   dataLoaded: {
     set: vi.fn(),
   },
+}));
+
+const mockEnv = vi.hoisted(() => ({ isTestBackendSupported: true }));
+
+vi.mock('$lib/services/user/env.svelte', () => ({
+  env: mockEnv,
 }));
 
 describe('Test Backend Service', () => {
@@ -37,6 +50,7 @@ describe('Test Backend Service', () => {
 
   beforeEach(async () => {
     vi.clearAllMocks();
+    mockEnv.isTestBackendSupported = true;
 
     // Mock root directory handle
     mockRootHandle = {
@@ -107,6 +121,32 @@ describe('Test Backend Service', () => {
       expect(mockGetDirectoryHandle).toHaveBeenCalledWith(mockRootHandle, 'sveltia-cms-test');
     });
 
+    it('should seed the repository before getting its handle', async () => {
+      mockGetDirectoryHandle.mockResolvedValue(mockRootHandle);
+
+      // @ts-ignore - Testing actual implementation signature
+      await testBackend.signIn();
+
+      expect(mockSeedTestRepository).toHaveBeenCalledWith(mockRootHandle, 'sveltia-cms-test');
+      expect(mockSeedTestRepository.mock.invocationCallOrder[0]).toBeLessThan(
+        mockGetDirectoryHandle.mock.invocationCallOrder[0],
+      );
+    });
+
+    it('should create and use the configured root directory', async () => {
+      const scopedHandle = { name: 'site' };
+
+      mockGetDirectoryHandle.mockResolvedValue(mockRootHandle);
+      mockGetScopedRootDirHandle.mockResolvedValueOnce(scopedHandle);
+
+      // @ts-ignore - Testing actual implementation signature
+      await testBackend.signIn();
+      await testBackend.fetchFiles();
+
+      expect(mockGetScopedRootDirHandle).toHaveBeenCalledWith(mockRootHandle, { create: true });
+      expect(mockLoadFiles).toHaveBeenCalledWith(scopedHandle);
+    });
+
     it('should handle errors when getting directory handle fails', async () => {
       mockGetDirectoryHandle.mockRejectedValue(new Error('Security error'));
 
@@ -122,6 +162,18 @@ describe('Test Backend Service', () => {
 
       // @ts-ignore - Testing actual implementation signature
       await expect(testBackend.signIn()).resolves.toEqual({ backendName: 'test-repo' });
+    });
+
+    it('should throw without touching the OPFS when the browser can’t write files to it', async () => {
+      mockEnv.isTestBackendSupported = false;
+
+      // @ts-ignore - Testing actual implementation signature
+      await expect(testBackend.signIn()).rejects.toMatchObject({
+        message: 'Unsupported browser',
+        cause: { message: 'test_repo_unsupported_browser' },
+      });
+      expect(navigator.storage.getDirectory).not.toHaveBeenCalled();
+      expect(mockSeedTestRepository).not.toHaveBeenCalled();
     });
   });
 
@@ -376,5 +428,25 @@ describe('Test Backend Service', () => {
       // @ts-ignore - Testing actual implementation signature
       await expect(testBackend.commitChanges(changes)).rejects.toThrow('Save failed');
     });
+  });
+});
+
+describe('getBackupDatabaseName()', () => {
+  it('names a database of its own for the test backend, which has no repository', async () => {
+    const { default: testBackend, getBackupDatabaseName } = await import('./test');
+
+    expect(getBackupDatabaseName(testBackend)).toBe('test-repo:sveltia-cms-test');
+  });
+
+  it('uses the repository’s database for another backend', async () => {
+    const { getBackupDatabaseName } = await import('./test');
+
+    expect(
+      getBackupDatabaseName(
+        /** @type {any} */ ({ name: 'github', repository: { databaseName: 'github:a/b' } }),
+      ),
+    ).toBe('github:a/b');
+    expect(getBackupDatabaseName(/** @type {any} */ ({ name: 'local' }))).toBeUndefined();
+    expect(getBackupDatabaseName(undefined)).toBeUndefined();
   });
 });

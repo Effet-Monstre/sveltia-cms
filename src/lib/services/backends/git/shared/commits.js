@@ -61,28 +61,43 @@ const fillTemplate = (template, values) =>
   );
 
 /**
- * Create a Git commit message.
+ * Get the backend options of the current configuration.
+ * @returns {GitBackend} Options, which are empty if there is no configuration.
+ */
+const getBackendOptions = () => /** @type {GitBackend} */ (cmsConfig.current?.backend ?? {});
+
+/**
+ * Get the values of the author placeholders in a commit message template.
+ * @returns {Record<string, string>} Values keyed by placeholder name.
+ */
+const getAuthorValues = () => {
+  const { email = '', login = '', name = '' } = /** @type {User} */ (user.account);
+
+  return { 'author-email': email, 'author-login': login, 'author-name': name };
+};
+
+/**
+ * Create the part of a Git commit message that comes from the `commit_messages` template: the
+ * template filled in, followed by the number of the other files changed, if any. It’s what the
+ * user is shown when asked for a commit message.
  * @param {FileChange[]} changes File changes to be saved.
  * @param {CommitOptions} options Commit options.
+ * @param {GitBackend} [backendOptions] Backend options. Default: those of the current
+ * configuration.
  * @returns {string} Formatted message.
  */
-export const createCommitMessage = (
+export const createBaseCommitMessage = (
   changes,
-  { commitType = 'update', collection, skipCI = undefined },
+  { commitType = 'update', collection },
+  backendOptions = getBackendOptions(),
 ) => {
-  const {
-    commit_messages: customCommitMessages = {},
-    skip_ci: skipCIEnabled,
-    automatic_deployments: autoDeploy,
-  } = /** @type {GitBackend} */ (cmsConfig.current?.backend ?? {});
-
-  const { email = '', login = '', name = '' } = /** @type {User} */ (user.account);
+  const { commit_messages: customCommitMessages = {} } = backendOptions;
   const [firstSlug = ''] = changes.map((item) => item.slug).filter(Boolean);
   const [firstPath, ...remainingPaths] = changes.map(({ path }) => path);
   const collectionLabel = collection ? getCollectionLabel(collection, { useSingular: true }) : '';
   // @ts-ignore
   let message = customCommitMessages[commitType] || DEFAULT_COMMIT_MESSAGES[commitType] || '';
-  const authorValues = { 'author-email': email, 'author-login': login, 'author-name': name };
+  const authorValues = getAuthorValues();
 
   if (['create', 'update', 'delete'].includes(commitType)) {
     message = fillTemplate(message, {
@@ -101,30 +116,173 @@ export const createCommitMessage = (
     message += ` +${remainingPaths.length}`;
   }
 
+  return message;
+};
+
+/**
+ * Combine the message made from the template with the text the user has entered when asked for a
+ * commit message, as the `prompt_commit_messages` backend option says.
+ * @param {string} message Message made from the template.
+ * @param {string | undefined} userMessage Text the user has entered.
+ * @param {GitBackend['prompt_commit_messages']} mode Value of the `prompt_commit_messages` option.
+ * @returns {string} Combined message.
+ */
+const applyUserMessage = (message, userMessage, mode) => {
+  const text = userMessage?.trim();
+
+  if (!text) {
+    return message;
+  }
+
+  if (mode === true) {
+    return text;
+  }
+
+  if (mode === 'prefix') {
+    return `${text} ${message}`;
+  }
+
+  if (mode === 'suffix') {
+    return `${message} ${text}`;
+  }
+
+  return message;
+};
+
+/**
+ * Check whether a commit is expected to start a deployment, which is when its message goes without
+ * the skip-CI marker added by {@link createCommitMessage}. The commit’s own `skipCI` option takes
+ * precedence over the `skip_ci` and `automatic_deployments` backend options. To avoid unexpected
+ * data retention, deletions are always deployed.
+ * @param {Partial<CommitOptions>} options Commit options.
+ * @returns {boolean} Result.
+ */
+export const isDeployingCommit = ({ commitType, skipCI }) => {
+  // Read the options rather than `skipCIEnabled`, whose module imports the backends using this one
+  const { skip_ci: skipCIEnabled, automatic_deployments: autoDeploy } = getBackendOptions();
+
+  return (
+    commitType === 'delete' ||
+    commitType === 'deleteMedia' ||
+    !(skipCI ?? (skipCIEnabled === true || autoDeploy === false))
+  );
+};
+
+/**
+ * Create a Git commit message.
+ * @param {FileChange[]} changes File changes to be saved.
+ * @param {CommitOptions} options Commit options.
+ * @returns {string} Formatted message.
+ */
+export const createCommitMessage = (changes, options) => {
+  const { userMessage } = options;
+  const backendOptions = getBackendOptions();
+
+  const { commit_messages: customCommitMessages = {}, prompt_commit_messages: promptMode } =
+    backendOptions;
+
+  let message = applyUserMessage(
+    createBaseCommitMessage(changes, options, backendOptions),
+    userMessage,
+    promptMode,
+  );
+
   // With Open Authoring the commit is made by an outside contributor, so the message can be wrapped
   // to record who wrote it. The default template is the message on its own, which changes nothing
   if (openAuthoring.current) {
     message = fillTemplate(
       customCommitMessages.openAuthoring || DEFAULT_COMMIT_MESSAGES.openAuthoring,
-      { message, ...authorValues },
+      { message, ...getAuthorValues() },
     );
   }
 
   // If requested, disable automatic deployments by using the standard `[skip ci]` prefix supported
-  // by major CI/CD providers, including GitHub Actions and Cloudflare Pages. To avoid unexpected
-  // data retention, deployments for deletion commits are not skipped.
+  // by major CI/CD providers, including GitHub Actions and Cloudflare Pages
   // https://docs.github.com/en/actions/managing-workflow-runs/skipping-workflow-runs
   // https://docs.gitlab.com/ee/ci/pipelines/#skip-a-pipeline
   // https://developers.cloudflare.com/pages/platform/branch-build-controls/#skip-builds
-  if (
-    !['delete', 'deleteMedia'].includes(commitType) &&
-    // Cannot use the `skipCIEnabled` store here because it leads to an uninitialized store error
-    (skipCI ?? (skipCIEnabled === true || autoDeploy === false))
-  ) {
+  if (!isDeployingCommit(options)) {
     message = `[skip ci] ${message}`;
   }
 
   return message;
+};
+
+/**
+ * A Git trailer line: a token of letters, digits and hyphens, a colon and a value.
+ * @see https://git-scm.com/docs/git-interpret-trailers
+ */
+const TRAILER_LINE_REGEX = /^[A-Za-z0-9-]+:\s*\S/;
+/**
+ * Clean up a user profile value for a commit trailer. Line breaks and angle brackets would break
+ * the trailer, though a Git host doesn’t allow them in a name or an email.
+ * @param {string | null | undefined} value Value. A field the host leaves empty can be `null`.
+ * @returns {string} Cleaned value.
+ */
+const cleanTrailerValue = (value) => (value ?? '').replace(/[\s<>]+/g, ' ').trim();
+/**
+ * Signed-in user accounts that have been warned about their missing email, so the warning is only
+ * shown once per sign-in rather than for every commit.
+ * @type {WeakSet<User>}
+ */
+const accountsWarnedAboutEmail = new WeakSet();
+
+/**
+ * Add a `Signed-off-by` trailer with the signed-in user’s name and email to the given commit
+ * message, if the `signoff_commits` backend option is enabled. The trailer joins the trailer block
+ * the message already ends with, if any, and otherwise follows a blank line. A message that already
+ * carries a sign-off with the user’s email, e.g. from a custom `commit_messages` template, is left
+ * as it is. When the Git host doesn’t share the user’s email, as GitHub does for a user without a
+ * public email, the trailer is left out with a warning, shown once per sign-in.
+ * @param {string} message Commit message.
+ * @returns {string} Message, possibly with the trailer.
+ * @see https://github.com/decaporg/decap-cms/pull/7766
+ */
+export const signOffCommitMessage = (message) => {
+  if (!getBackendOptions().signoff_commits) {
+    return message;
+  }
+
+  const { account } = /** @type {{ account: User }} */ (user);
+  const { email, login, name } = account;
+  const cleanEmail = cleanTrailerValue(email);
+
+  if (!cleanEmail) {
+    if (!accountsWarnedAboutEmail.has(account)) {
+      accountsWarnedAboutEmail.add(account);
+      // eslint-disable-next-line no-console
+      console.warn(
+        'The `signoff_commits` option is enabled, but the Git host doesn’t share your email ' +
+          'address, so commits are made without a `Signed-off-by` trailer.',
+      );
+    }
+
+    return message;
+  }
+
+  const author = cleanTrailerValue(name) || cleanTrailerValue(login) || cleanEmail;
+  const text = message.trimEnd();
+  const emailSuffix = `<${cleanEmail}>`.toLowerCase();
+
+  // The user has already signed off if a trailer has their email, whichever name it goes with
+  if (
+    text.split(/\r?\n/).some((line) => {
+      const normalized = line.trim().toLowerCase();
+
+      return normalized.startsWith('signed-off-by:') && normalized.endsWith(emailSuffix);
+    })
+  ) {
+    return message;
+  }
+
+  const paragraphs = text.split(/\r?\n\s*\r?\n/);
+  const lastParagraph = /** @type {string} */ (paragraphs.at(-1));
+
+  const endsWithTrailers =
+    paragraphs.length > 1 &&
+    lastParagraph.split(/\r?\n/).every((line) => TRAILER_LINE_REGEX.test(line));
+
+  return `${text}${endsWithTrailers ? '\n' : '\n\n'}Signed-off-by: ${author} <${cleanEmail}>`;
 };
 
 /**
@@ -147,6 +305,17 @@ export const dedupeFileCommits = (commits) => {
 };
 
 /**
+ * Create the error to throw when the last commit on the configured branch can’t be retrieved,
+ * because the repository or the branch can’t be found.
+ * @param {'repository_not_found' | 'branch_not_found'} key I18n key of the message to show.
+ * @param {{ repo: string, branch?: string }} values Repository name, and the branch name for a
+ * missing branch, to show in the message.
+ * @returns {Error} Error.
+ */
+export const createLastCommitError = (key, values) =>
+  createLocalizedError('Failed to retrieve the last commit hash.', key, values);
+
+/**
  * Throw an error telling the user that the branch has moved, if its head is no longer the one a
  * refused commit was based on. This tells a commit refused over a moved head from any other
  * failure, so the user is told what happened and to try again, which picks up the other change
@@ -166,6 +335,11 @@ export const assertBranchNotMoved = async (expectedHead, fetchLastCommit) => {
     );
   }
 };
+
+/**
+ * Maximum number of commits to fetch for a file’s history, the same on every service.
+ */
+export const MAX_FILE_COMMITS = 100;
 
 /**
  * Fetch the commit history of each of the given files with a separate request, keeping only a few

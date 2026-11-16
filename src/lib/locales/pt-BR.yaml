@@ -1091,7 +1091,7 @@ edit_slug_error:
   invalid: O slug não pode conter caracteres especiais, incluindo barras e espaços.
   duplicate: Este slug já está em uso por outra entrada.
 
-# Entry path editing in a nested collection
+# Entry path editing for nested entries
 # Heading for the parent folder picker shown when the `meta.path` option is enabled
 entry_parent_folder: Pasta Pai
 new_parent_folder: Nova Pasta
@@ -1488,6 +1488,10 @@ cloud_storage:
       requested: Entrando…
       error: Nome de usuário ou senha incorretos. Verifique e tente novamente.
 
+  # Shared by the S3-compatible services, unless overridden below
+  s3:
+    auth_key_label: Secret Access Key
+
   # Service-specific configurations
   cloudinary:
     iframe_title: Biblioteca de mídia do Cloudinary
@@ -1499,15 +1503,6 @@ cloud_storage:
 
   uploadcare:
     auth_key_label: API Secret Key
-
-  aws_s3:
-    auth_key_label: Secret Access Key
-
-  cloudflare_r2:
-    auth_key_label: Secret Access Key
-
-  digitalocean_spaces:
-    auth_key_label: Secret Access Key
 
 # ==============================================================================
 # Configuration Validation
@@ -1565,7 +1560,7 @@ config:
     oauth_implicit_flow: O método de autenticação configurado (implicit flow) não é suportado no Sveltia CMS. Use um <a>método de autenticação</a> diferente.
     github_pkce_unsupported: A autorização PKCE ainda não é suportada devido a limitações do GitHub. Use um <a>método de autenticação</a> diferente.
     oauth_no_app_id: O ID do aplicativo OAuth não está definido.
-    # Don’t localize `open_authoring` and `editorial_workflow`
+    # Don’t localize `open_authoring`, `editorial_workflow` and `preview`
     open_authoring_no_workflow: A opção `open_authoring` requer o modo de publicação `editorial_workflow`. Consulte a <a>documentação</a> para mais detalhes.
     # Don’t localize `auth_methods`
     no_auth_methods: A opção `auth_methods` deve conter pelo menos um método.
@@ -1979,13 +1974,23 @@ prefs:
       description: Mostrar sublinhado para links na pré-visualização da entrada e nos rótulos da interface do usuário.
       switch_label: Sempre Sublinhar Links
 
-  # Advanced panel
-  advanced:
-    title: Avançado
-    beta:
-      title: Recursos Beta
-      description: Ativa alguns recursos beta que podem estar instáveis ou não localizados.
-      switch_label: Participar do Programa Beta
+  # Data Management panel
+  data:
+    clear_data:
+      title: Limpar Dados
+      # Clear File Cache button
+      file_cache:
+        description: Exclui o conteúdo de arquivos e as miniaturas de imagens armazenados em cache localmente para liberar espaço ou resolver problemas causados por dados desatualizados.
+        button_label: Limpar Cache de Arquivos
+        confirmation: O conteúdo de arquivos e as miniaturas de imagens armazenados em cache localmente serão excluídos. Seus rascunhos não salvos e suas configurações serão mantidos, e os dados excluídos serão baixados ou gerados novamente conforme necessário. O CMS será recarregado ao concluir.
+      # Erase All Data button
+      all_data:
+        description: Exclui tudo o que o CMS mantém neste navegador, incluindo os arquivos em cache, rascunhos não salvos e configurações. O que já estiver salvo no seu repositório não será afetado.
+        button_label: Apagar Todos os Dados
+        confirmation: Todos os dados armazenados neste navegador serão excluídos, incluindo o conteúdo de arquivos em cache, miniaturas de imagens, rascunhos não salvos, configurações e estado de login. Seu repositório não será afetado, mas qualquer alteração que você não tenha salvo será perdida e você precisará entrar novamente. O CMS será recarregado ao concluir.
+
+  # Developer panel
+  developer:
     developer_mode:
       title: Modo Desenvolvedor
       description: Ativa alguns recursos voltados para desenvolvedores, incluindo logs detalhados no console e menus de contexto nativos.
@@ -2003,18 +2008,6 @@ prefs:
         field_label: Cabeçalho de autorização (ex., Bearer <token>) (opcional)
         saved: Cabeçalho de autorização salvo.
         removed: Cabeçalho de autorização removido.
-    clear_data:
-      title: Limpar Dados
-      # Clear File Cache button
-      file_cache:
-        description: Exclui o conteúdo de arquivos e as miniaturas de imagens armazenados em cache localmente para liberar espaço ou resolver problemas causados por dados desatualizados.
-        button_label: Limpar Cache de Arquivos
-        confirmation: O conteúdo de arquivos e as miniaturas de imagens armazenados em cache localmente serão excluídos. Seus rascunhos não salvos e suas configurações serão mantidos, e os dados excluídos serão baixados ou gerados novamente conforme necessário. O CMS será recarregado ao concluir.
-      # Erase All Data button
-      all_data:
-        description: Exclui tudo o que o CMS mantém neste navegador, incluindo os arquivos em cache, rascunhos não salvos e configurações. O que já estiver salvo no seu repositório não será afetado.
-        button_label: Apagar Todos os Dados
-        confirmation: Todos os dados armazenados neste navegador serão excluídos, incluindo o conteúdo de arquivos em cache, miniaturas de imagens, rascunhos não salvos, configurações e estado de login. Seu repositório não será afetado, mas qualquer alteração que você não tenha salvo será perdida e você precisará entrar novamente. O CMS será recarregado ao concluir.
 
 # ==============================================================================
 # Keyboard Shortcuts

@@ -1,12 +1,33 @@
 import { getImmutable } from '$lib/services/api/immutable';
+import { getMetaDataPath } from '$lib/services/api/preview-data';
 import { isReactComponent } from '$lib/services/api/react';
+import { customFieldTypeRegistry } from '$lib/services/api/registries';
 import { getFieldConfigMap, getPreviewData } from '$lib/services/contents/fields/custom/helpers';
 
 /**
  * @import { MapOf } from 'immutable';
  * @import { EntryDraft } from '$lib/types/private';
- * @import { CustomField, CustomFieldPreviewProps, FieldKeyPath } from '$lib/types/public';
+ * @import {
+ * CustomField,
+ * CustomFieldPreviewProps,
+ * CustomFieldSummary,
+ * Field,
+ * FieldKeyPath,
+ * } from '$lib/types/public';
  */
+
+/**
+ * Get the summary component of a custom field type, which draws a collapsed List field item when
+ * the List field has a single subfield of the type.
+ * @param {Field | undefined} fieldConfig Configuration of the single subfield.
+ * @returns {CustomFieldSummary | undefined} React component, or `undefined` if the subfield isn’t
+ * of a custom field type registered with a summary component.
+ */
+export const getCustomFieldSummary = (fieldConfig) => {
+  const { widget } = fieldConfig ?? {};
+
+  return widget ? customFieldTypeRegistry.get(widget)?.summary : undefined;
+};
 
 /**
  * Build props for a custom field preview React component.
@@ -32,16 +53,14 @@ export const buildPreviewProps = ({
     return undefined;
   }
 
-  const { entryMap, fieldsMetaData, getAsset } = getPreviewData({ draft, locale });
-  // `getMetaData()` keys the metadata by the full key path, with any trailing list index removed
-  const metadataKey = keyPath.replace(/\.\d+$/, '');
+  const { entryMap, getFieldArgs, fieldsMetaData, getAsset } = getPreviewData({ draft, locale });
 
   /** @type {CustomFieldPreviewProps} */
   return {
     value: currentValue,
     field: getFieldConfigMap(fieldConfig),
     metadata: /** @type {MapOf<any>} */ (
-      fieldsMetaData.get(metadataKey) ?? getImmutable().fromJS({})
+      fieldsMetaData.getIn(getMetaDataPath({ getFieldArgs, keyPath })) ?? getImmutable().fromJS({})
     ),
     getAsset,
     entry: entryMap,

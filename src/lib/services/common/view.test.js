@@ -6,14 +6,17 @@ import { createRawState } from '$lib/services/utils/state.svelte';
 
 import {
   buildGroupMap,
+  compareSortKeys,
   COMPARISON_OPERATORS,
   getCollapsibleGroupNames,
   getConditionKey,
   getGroupingKey,
   getGroupLabel,
   getViewConditions,
+  groupItems,
   hasComparison,
   initViewSettingsStorage,
+  isCollapsedByDefault,
   isGroupCollapsed,
   matchesFilter,
   OTHER_GROUP_NAME,
@@ -198,6 +201,67 @@ describe('Test getGroupLabel()', () => {
   });
 });
 
+describe('Test groupItems()', () => {
+  const items = [
+    { title: 'A', category: 'news' },
+    { title: 'B', category: 'blog' },
+    { title: 'C', category: 'news' },
+    { title: 'D' },
+  ];
+
+  /**
+   * Get the value of the given field.
+   * @param {Record<string, any>} item Item.
+   * @param {string} field Field name.
+   * @returns {any} Value.
+   */
+  const getValue = (item, field) => item[field];
+
+  beforeEach(async () => {
+    const { getRegex } = await import('$lib/services/utils/regex');
+
+    vi.mocked(getRegex).mockReturnValue(undefined);
+  });
+
+  test('puts all the items in a single group without a field to group by', () => {
+    expect(groupItems(items, undefined, getValue)).toEqual({ '*': items });
+    expect(groupItems(items, null, getValue)).toEqual({ '*': items });
+    expect(groupItems(items, /** @type {any} */ ({ field: '' }), getValue)).toEqual({
+      '*': items,
+    });
+  });
+
+  test('returns no group for an empty list without a field to group by', () => {
+    expect(groupItems([], undefined, getValue)).toEqual({});
+  });
+
+  test('groups the items by the field value, in the order of the group labels', () => {
+    const getValueSpy = vi.fn(getValue);
+    const groups = groupItems(items, { field: 'category' }, getValueSpy);
+
+    expect(Object.keys(groups)).toEqual(['*other', 'blog', 'news']);
+    expect(groups.news.map(({ title }) => title)).toEqual(['A', 'C']);
+    expect(groups.blog.map(({ title }) => title)).toEqual(['B']);
+    expect(groups[OTHER_GROUP_NAME].map(({ title }) => title)).toEqual(['D']);
+    expect(getValueSpy).toHaveBeenCalledWith(items[0], 'category');
+  });
+
+  test('groups the items by the pattern match', async () => {
+    const { getRegex } = await import('$lib/services/utils/regex');
+
+    vi.mocked(getRegex).mockReturnValue(/^\w/);
+
+    const groups = groupItems(items, { field: 'category', pattern: '^\\w' }, getValue);
+
+    expect(getRegex).toHaveBeenCalledWith('^\\w');
+    expect(Object.keys(groups).sort()).toEqual(['*other', 'b', 'n']);
+  });
+
+  test('returns no group for an empty list with a field to group by', () => {
+    expect(groupItems([], { field: 'category' }, getValue)).toEqual({});
+  });
+});
+
 describe('Test matchesFilter()', () => {
   test('matches value against exact pattern', () => {
     expect(matchesFilter('hello', 'hello', undefined)).toBe(true);
@@ -260,6 +324,29 @@ describe('Test sortItemsByKey()', () => {
 
     expect(result.map((i) => i.v)).toEqual([30, 20, 10]);
   });
+
+  test.each(['ascending', 'descending'])(
+    'puts items without a key last in their original order when %s',
+    (order) => {
+      const items = [{ id: 1 }, { id: 2, v: 'b' }, { id: 3 }, { id: 4, v: 'a' }];
+
+      sortItemsByKey(items, (i) => i.v, true, order);
+
+      expect(items.map((i) => i.id)).toEqual(order === 'ascending' ? [4, 2, 1, 3] : [2, 4, 1, 3]);
+    },
+  );
+
+  test.each(['ascending', 'descending'])(
+    'puts numeric items without a key last when %s',
+    (order) => {
+      /** @type {{ id: number, v?: number }[]} */
+      const items = [{ id: 1 }, { id: 2, v: -5 }, { id: 3, v: 0 }];
+
+      sortItemsByKey(items, (i) => i.v, false, order);
+
+      expect(items.map((i) => i.id)).toEqual(order === 'ascending' ? [2, 3, 1] : [3, 2, 1]);
+    },
+  );
 
   test('mutates and returns the same array reference', () => {
     const items = [{ v: 'b' }, { v: 'a' }];
@@ -549,6 +636,86 @@ describe('Test setAllGroupsCollapsed()', () => {
   });
 });
 
+describe('Test isCollapsedByDefault()', () => {
+  test('checks the `collapsed` option of the view group the conditions came from', () => {
+    const options = [
+      { name: 'category', label: 'Category', field: 'category', collapsed: true },
+      { name: 'year', label: 'Year', field: 'date', pattern: '\\d{4}' },
+      { name: 'upcoming', label: 'Upcoming', field: 'date', gte: '{{today}}', collapsed: true },
+    ];
+
+    expect(isCollapsedByDefault(options, { field: 'category' })).toBe(true);
+    expect(isCollapsedByDefault(options, { field: 'date', pattern: '\\d{4}' })).toBe(false);
+    expect(isCollapsedByDefault(options, { field: 'date', gte: '{{today}}' })).toBe(true);
+    // A group that has been removed from the configuration
+    expect(isCollapsedByDefault(options, { field: 'author' })).toBe(false);
+    // Ungrouped, or no options
+    expect(isCollapsedByDefault(options, null)).toBe(false);
+    expect(isCollapsedByDefault(options, undefined)).toBe(false);
+    expect(isCollapsedByDefault(undefined, { field: 'category' })).toBe(false);
+    expect(isCollapsedByDefault([], { field: 'category' })).toBe(false);
+  });
+
+  test('only takes `true` as enabling the option', () => {
+    const options = [
+      { label: 'Category', field: 'category', collapsed: /** @type {any} */ ('yes') },
+    ];
+
+    expect(isCollapsedByDefault(options, { field: 'category' })).toBe(false);
+  });
+});
+
+describe('Group collapsing with groups collapsed by default', () => {
+  const group = { field: 'category' };
+
+  test('isGroupCollapsed() treats every group as collapsed unless expanded', () => {
+    const expandedGroups = { '["category"]': ['news'] };
+
+    expect(isGroupCollapsed({ group }, 'news', true)).toBe(true);
+    expect(isGroupCollapsed({ group, expandedGroups }, 'news', true)).toBe(false);
+    expect(isGroupCollapsed({ group, expandedGroups }, 'blog', true)).toBe(true);
+    // The collapsed groups saved for the default state don’t apply
+    expect(isGroupCollapsed({ group, collapsedGroups: expandedGroups }, 'news', true)).toBe(true);
+    // Nothing is collapsed without grouping
+    expect(isGroupCollapsed({ group: null, expandedGroups }, 'blog', true)).toBe(false);
+    // The `*` group, which has no expander, is never collapsed
+    expect(isGroupCollapsed({ group: { field: '' } }, '*', true)).toBe(false);
+  });
+
+  test('setGroupCollapsed() saves the expanded groups instead', () => {
+    const view = { type: 'list', group, collapsedGroups: { '["year"]': ['2010'] } };
+    const expanded = setGroupCollapsed(view, 'news', false, true);
+
+    expect(expanded).toEqual({
+      type: 'list',
+      group,
+      collapsedGroups: { '["year"]': ['2010'] },
+      expandedGroups: { '["category"]': ['news'] },
+    });
+    expect(setGroupCollapsed(expanded, 'news', false, true)).toEqual(expanded);
+    expect(setGroupCollapsed(expanded, 'news', true, true)).toEqual(view);
+    expect(setGroupCollapsed(view, 'news', true, true)).toEqual(view);
+  });
+
+  test('setAllGroupsCollapsed() saves the expanded groups instead', () => {
+    const view = { type: 'list', group, expandedGroups: { '["category"]': ['old'] } };
+    const expanded = setAllGroupsCollapsed(view, ['blog', 'news'], false, true);
+
+    expect(expanded).toEqual({
+      type: 'list',
+      group,
+      expandedGroups: { '["category"]': ['blog', 'news'] },
+    });
+    expect(isGroupCollapsed(expanded, 'blog', true)).toBe(false);
+    // A group that appears later starts collapsed
+    expect(isGroupCollapsed(expanded, 'misc', true)).toBe(true);
+    expect(setAllGroupsCollapsed(expanded, ['blog', 'news'], true, true)).toEqual({
+      type: 'list',
+      group,
+    });
+  });
+});
+
 describe('Test initViewSettingsStorage()', () => {
   /**
    * Wait for the effects to run.
@@ -576,6 +743,26 @@ describe('Test initViewSettingsStorage()', () => {
     expect(mockIndexedDB).toHaveBeenCalledWith('test-db', 'ui-settings');
     expect(mockDB.get).toHaveBeenCalledWith('contents-view');
     expect(settings.current).toEqual({ posts: { type: 'grid' } });
+  });
+
+  test('starts with the defaults if the settings can’t be read or aren’t an object', async () => {
+    /** @type {{ current: Record<string, any> | undefined }} */
+    const settings = createRawState();
+    const defaults = { showPreview: true };
+
+    mockDB.get.mockRejectedValueOnce(new Error('Internal error'));
+    await initViewSettingsStorage({ databaseName: 'test-db' }, 'entry-view', settings, {
+      defaults,
+    });
+
+    expect(settings.current).toEqual(defaults);
+
+    mockDB.get.mockResolvedValueOnce('corrupt');
+    await initViewSettingsStorage({ databaseName: 'test-db' }, 'entry-view', settings, {
+      defaults,
+    });
+
+    expect(settings.current).toEqual(defaults);
   });
 
   test('starts with empty settings without a database', async () => {
@@ -656,5 +843,15 @@ describe('Test initViewSettingsStorage()', () => {
     await wait();
 
     expect(mockDB.set).not.toHaveBeenCalled();
+  });
+});
+
+describe('compareSortKeys', () => {
+  test('compares strings locale-aware and numbers by subtraction', () => {
+    expect(compareSortKeys('a', 'b', true)).toBeLessThan(0);
+    expect(compareSortKeys('b', 'a', true)).toBeGreaterThan(0);
+    expect(compareSortKeys('a', 'a', true)).toBe(0);
+    expect(compareSortKeys(2, 10, false)).toBe(-8);
+    expect(compareSortKeys(10, 2, false)).toBe(8);
   });
 });

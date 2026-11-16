@@ -8,6 +8,7 @@
   import YouTubeEmbed from '$lib/components/contents/details/fields/string/youtube-embed.svelte';
   import { getPreviewType } from '$lib/services/contents/fields/string/preview';
   import { getCanonicalLocale, getDirection } from '$lib/services/contents/i18n';
+  import { encodeURLSafely } from '$lib/services/utils/url';
 
   /**
    * @import { FieldPreviewProps } from '$lib/types/private';
@@ -21,13 +22,7 @@
    */
 
   /** @type {FieldPreviewProps & Props} */
-  let {
-    /* eslint-disable prefer-const */
-    locale,
-    fieldConfig,
-    currentValue,
-    /* eslint-enable prefer-const */
-  } = $props();
+  let { locale, fieldConfig, currentValue } = $props();
 
   const { name: fieldName } = $derived(fieldConfig);
   /** The value to be shown. Empty if there is no value or it’s whitespace only. */
@@ -48,9 +43,9 @@
     {#if previewType === 'youtube'}
       <YouTubeEmbed url={value} />
     {:else if previewType === 'link'}
-      <a href={encodeURI(value)}>{value}</a>
+      <a href={encodeURLSafely(value)}>{value}</a>
     {:else if previewType === 'email'}
-      <a href="mailto:{encodeURI(value)}">{value}</a>
+      <a href={encodeURLSafely(`mailto:${value}`)}>{value}</a>
     {:else}
       {value}
     {/if}
@@ -61,12 +56,5 @@
   .title {
     font-size: var(--sui-font-size-xxx-large);
     font-weight: var(--sui-font-weight-bold);
-  }
-
-  /* Remove the padding to make the iframe full-width on small screens */
-  @media (width < 768px) {
-    :global([role='document'] section) > p:has(:global(iframe)) {
-      margin-inline: calc(var(--entry-preview-padding-inline) * -1);
-    }
   }
 </style>

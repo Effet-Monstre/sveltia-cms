@@ -1,12 +1,23 @@
-import { fetchBlobNodes } from '$lib/services/backends/git/gitlab/files';
-import { getWorkflowRepository, projectIds } from '$lib/services/backends/git/gitlab/fork';
+import { fetchBlobs, fetchTruncatedBlobs } from '$lib/services/backends/git/gitlab/files';
 import {
+  getBranchRepository,
+  getWorkflowRepository,
+  isOpenAuthoringConfigured,
+  projectIds,
+} from '$lib/services/backends/git/gitlab/fork';
+import {
+  fetchProjectBranchHead,
   getBranchPath,
   getProjectId,
   repository,
 } from '$lib/services/backends/git/gitlab/repository';
 import { fetchAPI, fetchGraphQL } from '$lib/services/backends/git/shared/api';
 import { runConcurrently } from '$lib/services/backends/git/shared/concurrency';
+import { toForkPullRequest } from '$lib/services/backends/git/shared/fork';
+import {
+  createDraftTitleCodec,
+  toCommitAuthor,
+} from '$lib/services/backends/git/shared/pull-requests';
 import { deleteRemoteBranch } from '$lib/services/backends/git/shared/workflow';
 import { splitIntoChunks } from '$lib/services/utils/array';
 import {
@@ -18,11 +29,21 @@ import { forkedRepository } from '$lib/services/workflow/open-authoring';
 
 /**
  * @import {
+ * CommitAuthor,
  * WorkflowFile,
  * WorkflowPullRequest,
  * WorkflowStatus,
  * } from '$lib/types/private';
  */
+
+/**
+ * Get the REST API path of the given merge request on the configured project, which is where a
+ * merge request opened from a fork lives as well.
+ * @param {number | undefined} number Merge request `iid`.
+ * @returns {string} Path.
+ */
+export const getMergeRequestPath = (number) =>
+  `/projects/${getProjectId()}/merge_requests/${number}`;
 
 /**
  * Maximum numbers of items to retrieve from the REST API: open merge requests, changed files per
@@ -40,32 +61,19 @@ export const MAX_ITEMS = {
 /**
  * Regular expression matching the draft indicators GitLab accepts at the beginning of a merge
  * request title. GitLab has no dedicated API field to toggle the draft state; the read-only `draft`
- * property is derived from the title instead.
+ * property is derived from the title instead. Only these three count: GitLab no longer reads `WIP`
+ * as one, and a title like `WIP notes` or `Draft notes` is an ordinary title, which is kept as it
+ * is, as it goes back to GitLab with a status change and into the merge commit message.
  * @see https://docs.gitlab.com/user/project/merge_requests/drafts/
  */
-const DRAFT_TITLE_REGEX =
-  /^\s*(?:\[draft\]|\(draft\)|draft:|draft\s|\[wip\]|\(wip\)|wip:|wip\s)\s*/i;
+const DRAFT_TITLE_REGEX = /^\s*(?:\[draft\]|\(draft\)|draft:)\s*/i;
 
 /**
- * Prefix added to a merge request title to mark it as a draft.
+ * Helpers to remove the draft indicators from a merge request title, and to add the `Draft:` prefix
+ * to the title of a draft. GitLab tolerates combinations such as `Draft: [Draft] Title`, which are
+ * all removed.
  */
-export const DRAFT_TITLE_PREFIX = 'Draft: ';
-
-/**
- * Remove any draft indicator from the given merge request title.
- * @param {string} title Raw title.
- * @returns {string} Title without a draft prefix.
- */
-export const stripDraftPrefix = (title) => {
-  let result = title;
-
-  // Repeat, because GitLab tolerates combinations such as `Draft: WIP: Title`
-  while (DRAFT_TITLE_REGEX.test(result)) {
-    result = result.replace(DRAFT_TITLE_REGEX, '');
-  }
-
-  return result;
-};
+export const draftTitle = createDraftTitleCodec({ regex: DRAFT_TITLE_REGEX, prefix: 'Draft: ' });
 
 /**
  * Get whether the signed-in user can merge the given merge request. A single merge request, like
@@ -78,29 +86,35 @@ const getCanMerge = (item) =>
   typeof item.user?.can_merge === 'boolean' ? item.user.can_merge : undefined;
 
 /**
+ * Parse the user who opened a merge request, as the REST API returns it, which leaves out the email
+ * address.
+ * @param {Record<string, any> | undefined} user User object.
+ * @returns {CommitAuthor | undefined} Author, or `undefined` if the user is unknown.
+ */
+export const parseAuthor = (user) =>
+  toCommitAuthor({ login: user?.username, name: user?.name, id: user?.id });
+
+/**
  * Convert a merge request returned by the REST API to a workflow pull request.
  * @param {Record<string, any>} item Merge request.
  * @param {WorkflowStatus} status Status of the merge request.
  * @returns {WorkflowPullRequest} Merge request.
  */
-export const toMergeRequest = (item, status) => {
-  const { name, username, id } = item.author ?? {};
-
-  return {
-    number: item.iid,
-    nodeId: String(item.id),
-    title: stripDraftPrefix(item.title),
-    url: item.web_url,
-    branch: item.source_branch,
-    headSHA: item.sha,
-    status,
-    createdDate: new Date(item.created_at),
-    updatedDate: new Date(item.updated_at),
-    author: username ? { name: name ?? username, email: '', id, login: username } : undefined,
-    files: [],
-    canMerge: getCanMerge(item),
-  };
-};
+export const toMergeRequest = (item, status) => ({
+  number: item.iid,
+  nodeId: String(item.id),
+  title: draftTitle.strip(item.title),
+  url: item.web_url,
+  branch: item.source_branch,
+  headSHA: item.sha,
+  status,
+  createdDate: new Date(item.created_at),
+  updatedDate: new Date(item.updated_at),
+  author: parseAuthor(item.author),
+  files: [],
+  canMerge: getCanMerge(item),
+  description: item.description ?? '',
+});
 
 /**
  * Parse a merge request returned by the REST API.
@@ -148,19 +162,61 @@ export const parseDiff = (diff) => ({
 });
 
 /**
- * Fetch the list of files changed in the given merge request.
+ * Fetch the commit the given workflow branch points at. Two editors working on the same entry
+ * share its branch, so this is how a save finds out that someone else has committed to it since
+ * the draft was opened. The branch is looked up in the project it lives in, which is the
+ * contributor’s fork with Open Authoring, or when a maintainer edits a contributor’s merge request.
+ * @param {string} branch Branch name.
+ * @returns {Promise<string | undefined>} Git object ID, or `undefined` if the branch is gone,
+ * which is what a merged or closed merge request leaves behind.
+ * @see https://docs.gitlab.com/api/branches/#get-single-repository-branch
+ */
+export const fetchBranchHead = (branch) => {
+  const { branch: name, ...repoPath } = getBranchRepository(branch);
+
+  return fetchProjectBranchHead(name, repoPath);
+};
+
+/**
+ * Fetch the list of files changed in the given merge request. GitLab refreshes a merge request in
+ * the background after a push to its branch, so for a while its head commit and its diff can trail
+ * the branch, e.g. right after a save. The branch head is read along with it, and while the merge
+ * request trails, the files are listed by comparing the configured branch with the branch head
+ * instead, which reflects the push right away. The branch head becomes the head on record either
+ * way: the contents are read at it, and a save checks the branch against it.
  * @param {WorkflowPullRequest} mergeRequest Merge request to complete.
  * @see https://docs.gitlab.com/api/merge_requests/#list-merge-request-diffs
+ * @see https://docs.gitlab.com/api/repositories/#compare-branches-tags-or-commits
  */
 export const fetchMergeRequestFileList = async (mergeRequest) => {
-  const diffs = /** @type {Record<string, any>[]} */ (
+  const { number, branch, headSHA } = mergeRequest;
+  const projectPath = `/projects/${getProjectId()}`;
+
+  const [branchHead, diffs] = await Promise.all([
+    fetchBranchHead(branch),
+    /** @type {Promise<Record<string, any>[]>} */ (
+      fetchAPI(`${getMergeRequestPath(number)}/diffs?per_page=${MAX_ITEMS.files}`)
+    ),
+  ]);
+
+  // A branch that’s gone leaves nothing to compare, so the merge request is all there is to go by.
+  // So does a contributor’s branch in their fork: a commit it has gained since the merge request
+  // was refreshed is only in the fork, which the comparison on the configured project can’t reach
+  if (!branchHead || branchHead === headSHA || mergeRequest.fork) {
+    mergeRequest.files = diffs.map(parseDiff);
+
+    return;
+  }
+
+  const { diffs: comparedDiffs = [] } = /** @type {{ diffs?: Record<string, any>[] }} */ (
     await fetchAPI(
-      `/projects/${getProjectId()}/merge_requests/${mergeRequest.number}` +
-        `/diffs?per_page=${MAX_ITEMS.files}`,
+      `${projectPath}/repository/compare` +
+        `?from=${encodeURIComponent(/** @type {string} */ (repository.branch))}` +
+        `&to=${encodeURIComponent(branchHead)}&straight=false`,
     )
   );
 
-  mergeRequest.files = diffs.map(parseDiff);
+  Object.assign(mergeRequest, { headSHA: branchHead, files: comparedDiffs.map(parseDiff) });
 };
 
 const FETCH_BLOBS_QUERY = `
@@ -246,24 +302,27 @@ export const fetchMergeRequestFileContents = async (mergeRequest) => {
 
   // A workflow branch lives in the contributor’s fork with Open Authoring, so that’s where the
   // blobs have to be read from
-  const { owner, repo } = getWorkflowRepository();
+  const workflowRepository = getWorkflowRepository();
+  const { owner, repo } = workflowRepository;
+  // Read at the head commit rather than the branch, so the content shown is that of the commit a
+  // publish is pinned to, even if the branch moves on while the board loads
+  const ref = mergeRequest.headSHA ?? mergeRequest.branch;
 
   // The blobs are fetched in batches, which are split further if the total size of a batch exceeds
   // the API’s limit. An asset committed to a workflow branch is easily large enough to hit it on
   // its own. @see https://docs.gitlab.com/api/graphql/#data-limits
-  const nodes = await fetchBlobNodes(
+  const blobs = await fetchBlobs(
     files.map(({ path }) => path),
     FETCH_BLOBS_QUERY,
-    // Read at the head commit rather than the branch, so the content shown is that of the commit a
-    // publish is pinned to, even if the branch moves on while the board loads
-    { fullPath: `${owner}/${repo}`, branch: mergeRequest.headSHA ?? mergeRequest.branch },
+    { fullPath: `${owner}/${repo}`, branch: ref },
   );
 
-  /** @type {Map<string, Record<string, any>>} */
-  const blobMap = new Map(nodes.map((/** @type {any} */ node) => [node.path, node]));
+  // The API also caps the data of each blob, and keeping a text cut short would commit the
+  // shortened file the next time the entry is saved, so read any such blob again in full
+  await fetchTruncatedBlobs(blobs, { ref, projectId: getProjectId(workflowRepository) });
 
   files.forEach((file) => {
-    const blob = blobMap.get(file.path);
+    const blob = Object.hasOwn(blobs, file.path) ? blobs[file.path] : undefined;
 
     if (blob) {
       Object.assign(file, {
@@ -276,6 +335,99 @@ export const fetchMergeRequestFileContents = async (mergeRequest) => {
       file.deleted = true;
     }
   });
+};
+
+/**
+ * Parse a merge request a contributor opened from their fork, for a maintainer to review. See
+ * `toForkPullRequest` in `$lib/services/backends/git/shared/fork`.
+ * @param {Record<string, any>} item Merge request returned by the REST API.
+ * @param {{ fullPath?: string, allowCollaboration?: boolean } | undefined} source Path of the fork,
+ * e.g. `alice/website` or `acme/docs/website`, and whether the contributor lets the maintainers
+ * push to its branch, as the GraphQL API reports them. The REST API gives neither.
+ * @returns {WorkflowPullRequest | undefined} Parsed merge request, or `undefined` if it isn’t one a
+ * contributor opened from their fork for an entry.
+ */
+export const parseForkMergeRequest = (item, source) => {
+  const fullPath = source?.fullPath ?? '';
+  const slash = fullPath.lastIndexOf('/');
+
+  // A merge request whose fork has been deleted has no branch left to read or push to
+  if (
+    item.source_project_id === item.target_project_id ||
+    item.target_branch !== repository.branch ||
+    slash < 1
+  ) {
+    return undefined;
+  }
+
+  return toForkPullRequest(
+    {
+      owner: fullPath.slice(0, slash),
+      repo: fullPath.slice(slash + 1),
+      headBranch: item.source_branch,
+      editable: !!source?.allowCollaboration,
+      draft: !!item.draft,
+      labels: item.labels ?? [],
+    },
+    ({ status }) => toMergeRequest(item, status),
+  );
+};
+
+const FETCH_FORK_SOURCES_QUERY = `
+  query($fullPath: ID!, $iids: [String!]) {
+    project(fullPath: $fullPath) {
+      mergeRequests(iids: $iids, first: 100) {
+        nodes {
+          iid
+          allowCollaboration
+          sourceProject {
+            fullPath
+          }
+        }
+      }
+    }
+  }
+`;
+
+/**
+ * Fetch the open merge requests to the configured branch that contributors have opened from their
+ * forks with Open Authoring, for the maintainers to review. A contributor can’t label a merge
+ * request on the configured project, so these are matched by target branch rather than by label,
+ * and the ones from forks picked out by {@link parseForkMergeRequest}. The project’s own merge
+ * requests share the item cap, so a busy project can crowd the oldest contributions out.
+ * @returns {Promise<WorkflowPullRequest[]>} Merge requests.
+ * @see https://docs.gitlab.com/api/merge_requests/#list-project-merge-requests
+ * @see https://docs.gitlab.com/api/graphql/reference/#mergerequest
+ */
+const fetchForkMergeRequests = async () => {
+  const items = /** @type {Record<string, any>[]} */ (
+    await fetchAPI(
+      `/projects/${getProjectId()}/merge_requests` +
+        `?state=opened&order_by=updated_at&per_page=${MAX_ITEMS.mergeRequests}` +
+        `&target_branch=${encodeURIComponent(/** @type {string} */ (repository.branch))}`,
+    )
+  ).filter((item) => item.source_project_id !== item.target_project_id);
+
+  if (!items.length) {
+    return [];
+  }
+
+  const result = /** @type {{ project?: { mergeRequests?: { nodes: Record<string, any>[] } } }} */ (
+    await fetchGraphQL(FETCH_FORK_SOURCES_QUERY, { iids: items.map(({ iid }) => String(iid)) })
+  );
+
+  const sources = new Map(
+    (result.project?.mergeRequests?.nodes ?? []).map(
+      ({ iid, allowCollaboration, sourceProject }) => [
+        String(iid),
+        { fullPath: sourceProject?.fullPath, allowCollaboration },
+      ],
+    ),
+  );
+
+  return /** @type {WorkflowPullRequest[]} */ (
+    items.map((item) => parseForkMergeRequest(item, sources.get(String(item.iid)))).filter(Boolean)
+  );
 };
 
 /**
@@ -292,24 +444,33 @@ export const fetchPullRequests = async () => {
   // ones, which could otherwise push the unpublished entries out of the result. Unlike GitHub’s,
   // GitLab’s label filter matches a merge request carrying all of the given labels, so each label
   // needs its own request and the results are merged here
-  await runConcurrently(getAllStatusLabels(), async (label) => {
-    const items = /** @type {Record<string, any>[]} */ (
-      await fetchAPI(
-        `/projects/${getProjectId()}/merge_requests` +
-          `?state=opened&order_by=updated_at&per_page=${MAX_ITEMS.mergeRequests}` +
-          `&labels=${encodeURIComponent(label)}`,
-      )
-    );
+  const [forkMergeRequests] = await Promise.all([
+    // With Open Authoring turned on, the merge requests contributors have opened from their forks
+    // are listed as well, for the maintainers to review
+    isOpenAuthoringConfigured() ? fetchForkMergeRequests() : [],
+    runConcurrently(getAllStatusLabels(), async (label) => {
+      const items = /** @type {Record<string, any>[]} */ (
+        await fetchAPI(
+          `/projects/${getProjectId()}/merge_requests` +
+            `?state=opened&order_by=updated_at&per_page=${MAX_ITEMS.mergeRequests}` +
+            `&labels=${encodeURIComponent(label)}`,
+        )
+      );
 
-    items.forEach((item) => {
-      const mergeRequest = parseMergeRequest(item);
+      items.forEach((item) => {
+        const mergeRequest = parseMergeRequest(item);
 
-      // A merge request can carry status labels with more than one prefix, so it can show up in
-      // several of these requests
-      if (mergeRequest) {
-        found.set(item.iid, mergeRequest);
-      }
-    });
+        // A merge request can carry status labels with more than one prefix, so it can show up in
+        // several of these requests
+        if (mergeRequest) {
+          found.set(item.iid, mergeRequest);
+        }
+      });
+    }),
+  ]);
+
+  forkMergeRequests.forEach((mergeRequest) => {
+    found.set(/** @type {number} */ (mergeRequest.number), mergeRequest);
   });
 
   const mergeRequests = [...found.values()].sort(
@@ -317,7 +478,8 @@ export const fetchPullRequests = async () => {
   );
 
   await Promise.all([
-    fetchMergePermissions(mergeRequests),
+    // A contributor’s merge request is never merged from the CMS, so its permissions don’t matter
+    fetchMergePermissions(mergeRequests.filter(({ fork }) => !fork)),
     runConcurrently(mergeRequests, async (mergeRequest) => {
       await fetchMergeRequestFileList(mergeRequest);
       await fetchMergeRequestFileContents(mergeRequest);
@@ -325,32 +487,6 @@ export const fetchPullRequests = async () => {
   ]);
 
   return mergeRequests;
-};
-
-/**
- * Fetch the commit the given workflow branch points at. Two editors working on the same entry
- * share its branch, so this is how a save finds out that someone else has committed to it since
- * the draft was opened. The branch is looked up in the project it lives in, which is the
- * contributor’s fork with Open Authoring.
- * @param {string} branch Branch name.
- * @returns {Promise<string | undefined>} Git object ID, or `undefined` if the branch is gone,
- * which is what a merged or closed merge request leaves behind.
- * @see https://docs.gitlab.com/api/branches/#get-single-repository-branch
- */
-export const fetchBranchHead = async (branch) => {
-  try {
-    const { commit } = /** @type {{ commit?: { id?: string } }} */ (
-      await fetchAPI(getBranchPath(branch, getWorkflowRepository()))
-    );
-
-    return commit?.id;
-  } catch (/** @type {any} */ ex) {
-    if (ex.cause?.status === 404) {
-      return undefined;
-    }
-
-    throw ex;
-  }
 };
 
 /**
@@ -375,10 +511,11 @@ export const deleteBranch = async (branch) => {
  * @param {string} args.branch Workflow branch name.
  * @param {string} args.title Merge request title.
  * @param {WorkflowStatus} args.status Status to open the merge request with.
+ * @param {string} args.description Merge request description.
  * @returns {Promise<WorkflowPullRequest>} Created merge request.
  * @see https://docs.gitlab.com/api/merge_requests/#create-merge-request
  */
-export const createPullRequest = async ({ branch, title, status }) => {
+export const createPullRequest = async ({ branch, title, status, description }) => {
   const isDraft = status === 'draft';
   const fork = forkedRepository.current;
 
@@ -388,10 +525,10 @@ export const createPullRequest = async ({ branch, title, status }) => {
     await fetchAPI(`/projects/${getProjectId(fork)}/merge_requests`, {
       method: 'POST',
       body: {
-        title: isDraft ? `${DRAFT_TITLE_PREFIX}${title}` : title,
+        title: draftTitle.format(title, isDraft),
         source_branch: branch,
         target_branch: repository.branch,
-        description: 'Automatically generated by Sveltia CMS',
+        description,
         remove_source_branch: true,
         ...(fork
           ? {
@@ -410,18 +547,23 @@ export const createPullRequest = async ({ branch, title, status }) => {
 
   // Keep the given title rather than stripping the draft prefix from the returned one, which would
   // also strip a title that happens to start with a draft indicator such as `WIP:`
-  return { ...toMergeRequest(result, status), title, branch };
+  return { ...toMergeRequest(result, status), title, branch, description };
 };
 
 /**
- * Fetch the open merge requests from the given branch of the configured project, whichever branch
- * they go to. A merge request from a fork can have a source branch of the same name, but it isn’t
- * from this branch, so it’s left out.
+ * Fetch the open merge requests from the given branch to the configured project, whichever branch
+ * they go to.
  * @param {string} branch Branch name.
+ * @param {(item: Record<string, any>) => boolean} [isWanted] Function to pick the merge requests to
+ * return. By default, only those from the configured project itself: a merge request from a fork
+ * can have a source branch of the same name, but it isn’t from this branch.
  * @returns {Promise<Record<string, any>[]>} Merge requests returned by the REST API.
  * @see https://docs.gitlab.com/api/merge_requests/#list-project-merge-requests
  */
-export const fetchOpenMergeRequests = async (branch) => {
+export const fetchOpenMergeRequests = async (
+  branch,
+  isWanted = (item) => item.source_project_id === item.target_project_id,
+) => {
   const items = /** @type {Record<string, any>[]} */ (
     await fetchAPI(
       `/projects/${getProjectId()}/merge_requests` +
@@ -430,9 +572,7 @@ export const fetchOpenMergeRequests = async (branch) => {
     )
   );
 
-  return items.filter(
-    ({ source_project_id: sourceId, target_project_id: targetId }) => sourceId === targetId,
-  );
+  return items.filter(isWanted);
 };
 
 /**
@@ -442,6 +582,24 @@ export const fetchOpenMergeRequests = async (branch) => {
  * @see https://docs.gitlab.com/api/merge_requests/#get-single-mr
  */
 export const fetchMergeRequest = async (pullRequest) =>
-  /** @type {Record<string, any>} */ (
-    await fetchAPI(`/projects/${getProjectId()}/merge_requests/${pullRequest.number}`)
-  );
+  /** @type {Record<string, any>} */ (await fetchAPI(getMergeRequestPath(pullRequest.number)));
+
+/**
+ * Update the description of a merge request. The current description is read first and passed to
+ * `transform`, so the rest of it is kept as it is.
+ * @param {WorkflowPullRequest} pullRequest Merge request.
+ * @param {(description: string) => string} transform Function to get the new description from the
+ * current one, which is an empty string if the merge request has none.
+ * @returns {Promise<string>} New description.
+ * @see https://docs.gitlab.com/api/merge_requests/#update-mr
+ */
+export const updateDescription = async (pullRequest, transform) => {
+  const description = transform((await fetchMergeRequest(pullRequest)).description ?? '');
+
+  await fetchAPI(getMergeRequestPath(pullRequest.number), {
+    method: 'PUT',
+    body: { description },
+  });
+
+  return description;
+};

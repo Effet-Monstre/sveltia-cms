@@ -5,6 +5,7 @@ import { commitChanges } from '$lib/services/backends/git/gitlab/commits';
 import { fetchBlobNodes } from '$lib/services/backends/git/gitlab/files';
 import { fetchPullRequests as fetchLabelledPullRequests } from '$lib/services/backends/git/gitlab/merge-requests';
 import gitlabWorkflow, {
+  approve,
   discard,
   fetchMergeState,
   fetchPullRequests,
@@ -12,6 +13,7 @@ import gitlabWorkflow, {
   publish,
   savePullRequest,
   updateStatus,
+  withdrawApproval,
 } from '$lib/services/backends/git/gitlab/workflow';
 import {
   fetchForkPullRequests,
@@ -21,9 +23,9 @@ import { fetchAPI, fetchGraphQL } from '$lib/services/backends/git/shared/api';
 import { cmsConfig } from '$lib/services/config';
 import { forkedRepository, openAuthoring } from '$lib/services/workflow/open-authoring';
 
-vi.mock('@sveltia/i18n', () => ({
-  _: vi.fn((key, { values } = {}) => (values ? `${key} ${JSON.stringify(values)}` : key)),
-}));
+vi.mock('@sveltia/i18n', async () =>
+  (await import('$lib/test/i18n')).createI18nMock({ values: true }),
+);
 vi.mock('@sveltia/utils/misc', () => ({ sleep: vi.fn() }));
 vi.mock('$lib/services/backends/git/gitlab/commits');
 vi.mock('$lib/services/backends/git/gitlab/files');
@@ -33,7 +35,8 @@ vi.mock('$lib/services/backends/git/gitlab/merge-requests', async (importOrigina
   .../** @type {any} */ (await importOriginal()),
   fetchPullRequests: vi.fn(),
 }));
-vi.mock('$lib/services/backends/git/gitlab/repository', () => {
+vi.mock('$lib/services/backends/git/gitlab/repository', async (importOriginal) => {
+  const { fetchProjectBranchHead } = /** @type {any} */ (await importOriginal());
   const mockRepository = { owner: 'group/sub', repo: 'project', branch: 'main' };
   /**
    * Get the project ID the same way the real module does.
@@ -53,6 +56,9 @@ vi.mock('$lib/services/backends/git/gitlab/repository', () => {
      */
     getBranchPath: (branch, repoPath) =>
       `/projects/${getProjectId(repoPath)}/repository/branches/${encodeURIComponent(branch)}`,
+    // The workflow branch is always looked up in a given project, so the real function, which
+    // only falls back to the configured project without one, can be used
+    fetchProjectBranchHead,
   };
 });
 vi.mock('$lib/services/backends/git/gitlab/workflow-fork');
@@ -142,6 +148,8 @@ describe('GitLab Editorial Workflow service', () => {
       fetchPullRequests: expect.any(Function),
       savePullRequest: expect.any(Function),
       updateStatus: expect.any(Function),
+      approve: expect.any(Function),
+      withdrawApproval: expect.any(Function),
       fetchBranchHead: expect.any(Function),
       fetchMergeState: expect.any(Function),
       fetchUnchangedPaths: expect.any(Function),
@@ -186,20 +194,142 @@ describe('GitLab Editorial Workflow service', () => {
       expect(result.pullRequest.number).toBe(5);
     });
 
-    test('reuses an existing merge request without creating a branch', async () => {
-      const pullRequest = /** @type {any} */ ({ number: 5, branch: 'cms/posts/hello' });
-
-      vi.mocked(commitChanges).mockResolvedValue({ sha: 'def', files: {} });
-
-      const result = await savePullRequest({ ...args, pullRequest });
-
-      expect(fetchAPI).not.toHaveBeenCalled();
-      expect(commitChanges).toHaveBeenCalledWith([], {
-        commitType: 'create',
+    describe('onto an existing merge request', () => {
+      const pullRequest = /** @type {any} */ ({
+        number: 5,
         branch: 'cms/posts/hello',
+        headSHA: 'mr-head',
       });
 
-      expect(result.pullRequest).toBe(pullRequest);
+      const BRANCH_PATH = `/projects/${PROJECT_ID}/repository/branches/cms%2Fposts%2Fhello`;
+      /**
+       * Mock the branch lookup response.
+       * @param {string} id Commit the branch points at.
+       * @returns {any} Response.
+       */
+      const branchResponse = (id) => ({ name: 'cms/posts/hello', commit: { id } });
+
+      /** GitLab’s response to a `last_commit_id` that no longer matches the file. */
+      const changedFileError = new Error('You are attempting to update a file that has changed', {
+        cause: { status: 400 },
+      });
+
+      test('commits onto the branch at the head on record', async () => {
+        vi.mocked(fetchAPI).mockResolvedValueOnce(branchResponse('mr-head'));
+        vi.mocked(commitChanges).mockResolvedValue({ sha: 'def', files: {} });
+
+        const result = await savePullRequest({ ...args, pullRequest });
+
+        expect(fetchAPI).toHaveBeenCalledTimes(1);
+        expect(fetchAPI).toHaveBeenCalledWith(BRANCH_PATH);
+        expect(commitChanges).toHaveBeenCalledWith([], {
+          commitType: 'create',
+          branch: 'cms/posts/hello',
+          headOid: 'mr-head',
+        });
+
+        expect(result.pullRequest).toBe(pullRequest);
+      });
+
+      test('commits onto a contributor’s branch in their fork', async () => {
+        const branch = 'alice/website:cms/alice/website/posts/hello';
+
+        vi.mocked(fetchAPI).mockResolvedValueOnce(branchResponse('mr-head'));
+        vi.mocked(commitChanges).mockResolvedValue({ sha: 'def', files: {} });
+
+        await savePullRequest({
+          ...args,
+          branch,
+          pullRequest: {
+            ...pullRequest,
+            branch,
+            fork: { owner: 'alice', repo: 'website', editable: true },
+          },
+        });
+
+        // The branch head is read in the fork, by the branch’s own name there
+        expect(fetchAPI).toHaveBeenCalledWith(
+          `/projects/alice%2Fwebsite/repository/branches/${encodeURIComponent('cms/alice/website/posts/hello')}`,
+        );
+        expect(commitChanges).toHaveBeenCalledWith([], {
+          commitType: 'create',
+          branch,
+          headOid: 'mr-head',
+        });
+      });
+
+      test('refuses to commit to a contributor’s branch they don’t let maintainers edit', async () => {
+        await expect(
+          savePullRequest({
+            ...args,
+            pullRequest: {
+              ...pullRequest,
+              fork: { owner: 'alice', repo: 'website', editable: false },
+            },
+          }),
+        ).rejects.toThrow('Failed to save the changes.');
+        expect(fetchAPI).not.toHaveBeenCalled();
+        expect(commitChanges).not.toHaveBeenCalled();
+      });
+
+      test('refuses to commit when the branch has moved', async () => {
+        vi.mocked(fetchAPI).mockResolvedValueOnce(branchResponse('someone-elses-sha'));
+
+        await expect(savePullRequest({ ...args, pullRequest })).rejects.toThrow(
+          'The workflow branch has moved since the entry was loaded.',
+        );
+        expect(commitChanges).not.toHaveBeenCalled();
+      });
+
+      test('refuses to commit without a head on record', async () => {
+        vi.mocked(fetchAPI).mockResolvedValueOnce(branchResponse('mr-head'));
+
+        await expect(
+          savePullRequest({ ...args, pullRequest: { ...pullRequest, headSHA: undefined } }),
+        ).rejects.toThrow('The workflow branch has moved since the entry was loaded.');
+        expect(commitChanges).not.toHaveBeenCalled();
+      });
+
+      test('reports a branch that is gone', async () => {
+        vi.mocked(fetchAPI).mockRejectedValueOnce(
+          new Error('404 Branch Not Found', { cause: { status: 404 } }),
+        );
+
+        await expect(savePullRequest({ ...args, pullRequest })).rejects.toThrow(
+          'Failed to save the changes.',
+        );
+        expect(commitChanges).not.toHaveBeenCalled();
+      });
+
+      test('reports a commit refused because the branch moved in the meantime', async () => {
+        vi.mocked(fetchAPI)
+          .mockResolvedValueOnce(branchResponse('mr-head'))
+          .mockResolvedValueOnce(branchResponse('someone-elses-sha'));
+        vi.mocked(commitChanges).mockRejectedValue(changedFileError);
+
+        await expect(savePullRequest({ ...args, pullRequest })).rejects.toThrow(
+          'The branch has moved since the site data was loaded.',
+        );
+      });
+
+      test('passes a refused commit on when the branch has not moved', async () => {
+        vi.mocked(fetchAPI)
+          .mockResolvedValueOnce(branchResponse('mr-head'))
+          .mockResolvedValueOnce(branchResponse('mr-head'));
+        vi.mocked(commitChanges).mockRejectedValue(changedFileError);
+
+        await expect(savePullRequest({ ...args, pullRequest })).rejects.toBe(changedFileError);
+      });
+
+      test('passes any other failure on without a head lookup', async () => {
+        const serverError = new Error('Server error', { cause: { status: 500 } });
+
+        vi.mocked(fetchAPI).mockResolvedValueOnce(branchResponse('mr-head'));
+        vi.mocked(commitChanges).mockRejectedValue(serverError);
+
+        await expect(savePullRequest({ ...args, pullRequest })).rejects.toBe(serverError);
+        expect(fetchAPI).toHaveBeenCalledTimes(1);
+      });
     });
 
     /** GitLab’s response to `start_branch` when the branch already exists. */
@@ -272,7 +402,7 @@ describe('GitLab Editorial Workflow service', () => {
       const error = await savePullRequest({ ...args, status: 'draft' }).catch((ex) => ex);
 
       expect(error.message).toBe('The workflow branch is in use by another merge request.');
-      expect(error.cause.message).toBe('workflow.branch_in_use {"number":"!7"}');
+      expect(error.cause.message).toBe('workflow.branch_in_use:{"number":"!7"}');
       expect(commitChanges).toHaveBeenCalledOnce();
       expect(fetchAPI).toHaveBeenCalledOnce();
     });
@@ -349,9 +479,16 @@ describe('GitLab Editorial Workflow service', () => {
   });
 
   describe('fetchMergeState', () => {
-    const pullRequest = /** @type {any} */ ({ number: 1, branch: 'cms/posts/hello' });
+    const pullRequest = /** @type {any} */ ({
+      number: 1,
+      branch: 'cms/posts/hello',
+      headSHA: 'abc123',
+    });
+
     const COMPARE_QUERY = 'from=main&to=abc123&straight=false';
     const COMPARE_PATH = `/projects/${PROJECT_ID}/repository/compare?${COMPARE_QUERY}`;
+    const MR_PATH = `/projects/${PROJECT_ID}/merge_requests/1`;
+    const BRANCH_PATH = `/projects/${PROJECT_ID}/repository/branches/cms%2Fposts%2Fhello`;
 
     /**
      * Create a single merge request as returned by the REST API.
@@ -361,10 +498,43 @@ describe('GitLab Editorial Workflow service', () => {
     const createMergeRequest = (overrides = {}) =>
       createItem({ source_project_id: 1, target_project_id: 1, changes_count: '4', ...overrides });
 
+    /**
+     * Mock the REST API.
+     * @param {object} args Arguments.
+     * @param {any[]} args.items Merge request returned by each read, the last one repeated.
+     * @param {string | null} [args.branchHead] Head of the branch, or `null` if it’s gone.
+     * @param {any} [args.comparison] Result of the comparison.
+     */
+    const mockAPI = ({ items, branchHead = 'abc123', comparison = {} }) => {
+      let reads = 0;
+
+      vi.mocked(fetchAPI).mockImplementation(async (path) => {
+        if (path === MR_PATH) {
+          reads += 1;
+
+          return items[Math.min(reads, items.length) - 1];
+        }
+
+        if (path === BRANCH_PATH) {
+          if (branchHead === null) {
+            throw new Error('Not Found', { cause: { status: 404 } });
+          }
+
+          return { commit: { id: branchHead } };
+        }
+
+        if (path.includes('/repository/compare?')) {
+          return comparison;
+        }
+
+        throw new Error(`Unexpected request: ${path}`);
+      });
+    };
+
     test('lists the files as of the head commit by comparing it with the configured branch', async () => {
-      vi.mocked(fetchAPI)
-        .mockResolvedValueOnce(createMergeRequest())
-        .mockResolvedValueOnce({
+      mockAPI({
+        items: [createMergeRequest()],
+        comparison: {
           diffs: [
             {
               new_path: 'content/posts/hello.md',
@@ -390,7 +560,8 @@ describe('GitLab Editorial Workflow service', () => {
               b_mode: '0',
             },
           ],
-        });
+        },
+      });
 
       await expect(fetchMergeState(pullRequest)).resolves.toEqual({
         headSHA: 'abc123',
@@ -416,9 +587,77 @@ describe('GitLab Editorial Workflow service', () => {
         complete: true,
       });
 
-      expect(fetchAPI).toHaveBeenNthCalledWith(1, `/projects/${PROJECT_ID}/merge_requests/1`);
+      expect(fetchAPI).toHaveBeenNthCalledWith(1, MR_PATH);
+      expect(fetchAPI).toHaveBeenNthCalledWith(2, BRANCH_PATH);
       // Pinned to the commit, so the list describes exactly what a merge pinned to it brings in
-      expect(fetchAPI).toHaveBeenNthCalledWith(2, COMPARE_PATH);
+      expect(fetchAPI).toHaveBeenNthCalledWith(3, COMPARE_PATH);
+      expect(sleep).not.toHaveBeenCalled();
+    });
+
+    test('waits for a merge request that trails the branch to catch up', async () => {
+      mockAPI({
+        items: [
+          createMergeRequest({ sha: 'old456', changes_count: '1' }),
+          createMergeRequest({ sha: 'old456', changes_count: '1' }),
+          createMergeRequest({ changes_count: '2' }),
+        ],
+        comparison: { diffs: [{ new_path: 'a.md' }, { new_path: 'b.md' }] },
+      });
+
+      await expect(fetchMergeState(pullRequest)).resolves.toMatchObject({
+        headSHA: 'abc123',
+        onConfiguredBranches: true,
+        complete: true,
+      });
+
+      expect(vi.mocked(fetchAPI).mock.calls.filter(([path]) => path === MR_PATH)).toHaveLength(3);
+      expect(sleep).toHaveBeenCalledTimes(2);
+      expect(fetchAPI).toHaveBeenLastCalledWith(COMPARE_PATH);
+    });
+
+    test('gives up waiting, and goes by the branch head and the comparison', async () => {
+      mockAPI({
+        // The stale count would otherwise flag the list as cut short
+        items: [createMergeRequest({ sha: 'old456', changes_count: '5' })],
+        comparison: { diffs: [{ new_path: 'a.md' }, { new_path: 'b.md' }] },
+      });
+
+      await expect(fetchMergeState(pullRequest)).resolves.toMatchObject({
+        headSHA: 'abc123',
+        onConfiguredBranches: true,
+        complete: true,
+      });
+
+      expect(vi.mocked(fetchAPI).mock.calls.filter(([path]) => path === MR_PATH)).toHaveLength(10);
+      expect(sleep).toHaveBeenCalledTimes(9);
+      expect(fetchAPI).toHaveBeenLastCalledWith(COMPARE_PATH);
+    });
+
+    test('doesn’t wait for a branch that has moved on from the commit on record', async () => {
+      mockAPI({
+        items: [createMergeRequest({ sha: 'old456' })],
+        branchHead: 'new789',
+      });
+
+      // The check before publishing refuses it, as the branch has moved on, so a commit that won’t
+      // be merged isn’t compared either
+      await expect(fetchMergeState(pullRequest)).resolves.toEqual({
+        headSHA: 'new789',
+        onConfiguredBranches: true,
+        files: [],
+        complete: true,
+      });
+
+      expect(sleep).not.toHaveBeenCalled();
+      expect(fetchAPI).not.toHaveBeenCalledWith(expect.stringContaining('/repository/compare'));
+    });
+
+    test('goes by the merge request’s head when the branch is gone', async () => {
+      mockAPI({ items: [createMergeRequest({ sha: 'old456' })], branchHead: null });
+
+      await expect(fetchMergeState(pullRequest)).resolves.toMatchObject({ headSHA: 'old456' });
+
+      expect(sleep).not.toHaveBeenCalled();
     });
 
     test.each([
@@ -427,19 +666,18 @@ describe('GitLab Editorial Workflow service', () => {
       ['a count past GitLab’s limit', '1000+', 1000],
       ['as many files as GitLab lists by default, with no count yet', null, 1000],
     ])('flags a list cut short: %s', async (_label, count, length) => {
-      vi.mocked(fetchAPI)
-        .mockResolvedValueOnce(createMergeRequest({ changes_count: count }))
-        .mockResolvedValueOnce({
+      mockAPI({
+        items: [createMergeRequest({ changes_count: count })],
+        comparison: {
           diffs: Array.from({ length }, (_, i) => ({ new_path: `${i}.md`, old_path: `${i}.md` })),
-        });
+        },
+      });
 
       await expect(fetchMergeState(pullRequest)).resolves.toMatchObject({ complete: false });
     });
 
     test('relies on the comparison while the merge request’s count is unknown', async () => {
-      vi.mocked(fetchAPI)
-        .mockResolvedValueOnce(createMergeRequest({ changes_count: null }))
-        .mockResolvedValueOnce({});
+      mockAPI({ items: [createMergeRequest({ changes_count: null })] });
 
       await expect(fetchMergeState(pullRequest)).resolves.toMatchObject({
         files: [],
@@ -452,7 +690,7 @@ describe('GitLab Editorial Workflow service', () => {
       ['comes from a fork', { source_project_id: 2 }],
       ['has no head', { sha: null }],
     ])('reports a merge request that %s without comparing it', async (_label, overrides) => {
-      vi.mocked(fetchAPI).mockResolvedValueOnce(createMergeRequest(overrides));
+      mockAPI({ items: [createMergeRequest(overrides)] });
 
       await expect(fetchMergeState(pullRequest)).resolves.toMatchObject({
         onConfiguredBranches: false,
@@ -594,6 +832,66 @@ describe('GitLab Editorial Workflow service', () => {
 
       /** A merge request that has been merged. */
       const mergedItem = { state: 'merged', merge_when_pipeline_succeeds: false };
+
+      test('takes a merge request merged on GitLab meanwhile as published', async () => {
+        // GitLab answers 405 for a merge request that can’t be merged for any reason, this one
+        // included
+        vi.mocked(fetchAPI)
+          .mockRejectedValueOnce(createError(405))
+          .mockResolvedValueOnce({ state: 'merged', detailed_merge_status: 'not_open' })
+          .mockResolvedValueOnce({});
+
+        await publish(pullRequest);
+
+        // The failed merge, the status read, and the branch deletion, with no auto-merge
+        expect(fetchAPI).toHaveBeenCalledTimes(3);
+        expect(fetchAPI).toHaveBeenNthCalledWith(
+          3,
+          `/projects/${PROJECT_ID}/repository/branches/cms%2Fposts%2Fhello`,
+          expect.objectContaining({ method: 'DELETE' }),
+        );
+      });
+
+      test('merges again once a mergeability check that held the merge has passed', async () => {
+        vi.mocked(fetchAPI)
+          .mockRejectedValueOnce(createError(405))
+          .mockResolvedValueOnce({ state: 'opened', detailed_merge_status: 'checking' })
+          .mockResolvedValueOnce({ state: 'opened', detailed_merge_status: 'mergeable' })
+          .mockResolvedValueOnce({})
+          .mockResolvedValueOnce({});
+
+        await publish(pullRequest);
+
+        // The failed merge, two status reads, the merge made again with the same commit pinned,
+        // and the branch deletion, with no auto-merge
+        expect(fetchAPI).toHaveBeenCalledTimes(5);
+        expect(getRequestBody(3)).toEqual(getRequestBody(0));
+        expect(getRequestBody(3)).toEqual({
+          squash: false,
+          should_remove_source_branch: true,
+          sha: 'abc123',
+          merge_commit_message: 'Create Post',
+        });
+        expect(fetchAPI).toHaveBeenNthCalledWith(
+          5,
+          `/projects/${PROJECT_ID}/repository/branches/cms%2Fposts%2Fhello`,
+          expect.objectContaining({ method: 'DELETE' }),
+        );
+      });
+
+      test('keeps failing when the merge made again fails', async () => {
+        const error = createError(405);
+
+        vi.mocked(fetchAPI)
+          .mockRejectedValueOnce(createError(405))
+          .mockResolvedValueOnce({ state: 'opened', detailed_merge_status: 'mergeable' })
+          .mockRejectedValueOnce(error);
+
+        await expect(publish(pullRequest)).rejects.toBe(error);
+
+        // The merge is made again only once, and the branch is kept
+        expect(fetchAPI).toHaveBeenCalledTimes(3);
+      });
 
       test('sets the merge request to auto-merge while the pipeline is running', async () => {
         vi.mocked(fetchAPI)
@@ -761,6 +1059,17 @@ describe('GitLab Editorial Workflow service', () => {
           );
         });
 
+        test('keeps waiting through a read without a body', async () => {
+          vi.mocked(fetchAPI)
+            .mockResolvedValueOnce(/** @type {any} */ (null))
+            .mockResolvedValueOnce(mergedItem);
+
+          await publish(pullRequest);
+
+          expect(fetchAPI).toHaveBeenCalledTimes(5);
+          expect(sleep).toHaveBeenCalledTimes(2);
+        });
+
         test.each([401, 403, 404])('gives up when a read fails with a %i', async (status) => {
           const error = createError(status);
 
@@ -846,7 +1155,79 @@ describe('GitLab Editorial Workflow service', () => {
     });
   });
 
+  describe('approve', () => {
+    test('approves the merge request pinned to its head commit', async () => {
+      vi.mocked(fetchAPI).mockResolvedValueOnce({
+        user_has_approved: false,
+        user_can_approve: true,
+      });
+
+      await approve(/** @type {any} */ ({ number: 1, headSHA: 'abc' }));
+
+      expect(fetchAPI).toHaveBeenNthCalledWith(
+        1,
+        `/projects/${PROJECT_ID}/merge_requests/1/approvals`,
+      );
+      expect(fetchAPI).toHaveBeenNthCalledWith(
+        2,
+        `/projects/${PROJECT_ID}/merge_requests/1/approve`,
+        { method: 'POST', body: { sha: 'abc' } },
+      );
+    });
+
+    test.each([
+      ['already approved it', { user_has_approved: true, user_can_approve: false }],
+      ['isn’t allowed to', { user_has_approved: false, user_can_approve: false }],
+    ])('doesn’t approve when the user %s', async (_label, state) => {
+      vi.mocked(fetchAPI).mockResolvedValueOnce(state);
+
+      await approve(/** @type {any} */ ({ number: 1, headSHA: 'abc' }));
+
+      expect(fetchAPI).toHaveBeenCalledOnce();
+    });
+  });
+
+  describe('withdrawApproval', () => {
+    test('withdraws the user’s approval of the merge request', async () => {
+      vi.mocked(fetchAPI).mockResolvedValueOnce({ user_has_approved: true });
+
+      await withdrawApproval(/** @type {any} */ ({ number: 1 }));
+
+      expect(fetchAPI).toHaveBeenNthCalledWith(
+        2,
+        `/projects/${PROJECT_ID}/merge_requests/1/unapprove`,
+        { method: 'POST' },
+      );
+    });
+
+    test('does nothing when the user hasn’t approved it', async () => {
+      vi.mocked(fetchAPI).mockResolvedValueOnce({ user_has_approved: false });
+
+      await withdrawApproval(/** @type {any} */ ({ number: 1 }));
+
+      expect(fetchAPI).toHaveBeenCalledExactlyOnceWith(
+        `/projects/${PROJECT_ID}/merge_requests/1/approvals`,
+      );
+    });
+  });
+
   describe('discard', () => {
+    test('closes a merge request from a fork without deleting the contributor’s branch', async () => {
+      await discard(
+        /** @type {any} */ ({
+          number: 7,
+          branch: 'alice/website:cms/alice/website/posts/hello',
+          fork: { owner: 'alice', repo: 'website', editable: true },
+        }),
+      );
+
+      expect(fetchAPI).toHaveBeenCalledTimes(1);
+      expect(fetchAPI).toHaveBeenCalledWith(`/projects/${PROJECT_ID}/merge_requests/7`, {
+        method: 'PUT',
+        body: { state_event: 'close' },
+      });
+    });
+
     test('closes the merge request and deletes the branch', async () => {
       await discard(/** @type {any} */ ({ number: 1, branch: 'cms/posts/hello' }));
 

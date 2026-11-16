@@ -1,5 +1,3 @@
-/* eslint-disable jsdoc/require-jsdoc */
-
 import { describe, expect, test, vi } from 'vitest';
 
 import { allEntries } from '$lib/services/contents';
@@ -20,10 +18,9 @@ import {
  * @import { InternalEntryCollection } from '$lib/types/private';
  */
 
-vi.mock('@sveltia/i18n', () => ({
-  _: (/** @type {string} */ key) => key,
-  locale: { current: 'en', set: vi.fn() },
-}));
+vi.mock('@sveltia/i18n', async () =>
+  (await import('$lib/test/i18n')).createI18nMock({ locale: 'en' }),
+);
 
 vi.mock('$lib/services/config');
 vi.mock('$lib/services/contents', () => ({ allEntries: { current: [] } }));
@@ -189,6 +186,27 @@ describe('Test getSortConfig()', async () => {
       }),
     ).toEqual({
       keys: ['title', 'date'],
+      default: { key: 'date', order: 'descending' },
+    });
+  });
+
+  test('Decap CMS sortable_fields with objects', () => {
+    expect(
+      getSortConfig({
+        collection: {
+          ...collectionBase,
+          sortable_fields: [
+            'title',
+            { field: 'date', label: 'Publish date', default_sort: 'desc' },
+            { field: 'description' },
+          ],
+        },
+        isCommitAuthorAvailable: false,
+        isCommitDateAvailable: false,
+      }),
+    ).toStrictEqual({
+      keys: ['title', 'date', 'description'],
+      labels: { date: 'Publish date' },
       default: { key: 'date', order: 'descending' },
     });
   });
@@ -1084,6 +1102,15 @@ describe('Test getSortKeyType()', () => {
     expect(getSortKeyType({ key: 'commit_date', fieldConfig: undefined })).toBe(Date);
   });
 
+  test('does not take a field named after an `Object.prototype` member for a special key', () => {
+    const fieldConfig = { name: 'constructor', widget: 'string' };
+
+    expect(getSortKeyType({ key: 'constructor', fieldConfig })).toBe(String);
+    expect(
+      getSortKeyType({ key: 'valueOf', fieldConfig: { ...fieldConfig, name: 'valueOf' } }),
+    ).toBe(String);
+  });
+
   test('returns Boolean for boolean fields', () => {
     const booleanField = { name: 'published', widget: 'boolean' };
 
@@ -1098,6 +1125,25 @@ describe('Test getSortKeyType()', () => {
     expect(getSortKeyType({ key: 'count', fieldConfig: intField })).toBe(Number);
     expect(getSortKeyType({ key: 'rating', fieldConfig: floatField })).toBe(Number);
     expect(getSortKeyType({ key: 'price', fieldConfig: defaultNumberField })).toBe(Number);
+  });
+
+  test('returns Number for a Compute field yielding a number', () => {
+    /**
+     * Get a Compute field configuration with the given value type.
+     * @param {any} [valueType] Value type.
+     * @returns {any} Field configuration.
+     */
+    const compute = (valueType) => ({
+      name: 'total',
+      widget: 'compute',
+      value: '',
+      value_type: valueType,
+    });
+
+    expect(getSortKeyType({ key: 'total', fieldConfig: compute('int') })).toBe(Number);
+    expect(getSortKeyType({ key: 'total', fieldConfig: compute('float') })).toBe(Number);
+    expect(getSortKeyType({ key: 'total', fieldConfig: compute('float/string') })).toBe(String);
+    expect(getSortKeyType({ key: 'total', fieldConfig: compute() })).toBe(String);
   });
 
   test('returns String for string fields and unknown fields', () => {
@@ -1281,5 +1327,68 @@ describe('Test sortKeys state', () => {
     // Clean up
     selectedCollection.current = undefined;
     allEntries.current = [];
+  });
+
+  test('marks a Number field key as a number, so the menu words its orders for one', async () => {
+    const { getField } = await import('$lib/services/contents/entry/fields');
+
+    /** @type {Record<string, any>} */
+    const fields = {
+      title: { name: 'title', widget: 'string' },
+      price: { name: 'price', label: 'Price', widget: 'number' },
+      code: { name: 'code', label: 'Code', widget: 'number', value_type: 'int/string' },
+    };
+
+    vi.mocked(getField).mockImplementation(({ keyPath }) => fields[keyPath]);
+
+    allEntries.current = [];
+    selectedCollection.current = /** @type {any} */ ({
+      name: 'products',
+      _type: 'entry',
+      folder: 'content/products',
+      sortable_fields: ['title', 'price', 'code'],
+      fields: Object.values(fields),
+      _i18n: { i18nEnabled: false },
+    });
+
+    // A Number field saving its value as a string is sorted as a string
+    expect(sortKeys.current).toEqual([
+      { key: 'title', label: 'title' },
+      { key: 'price', label: 'Price', type: 'number' },
+      { key: 'code', label: 'Code' },
+    ]);
+
+    // Clean up
+    selectedCollection.current = undefined;
+  });
+
+  test('uses the labels given in the Decap CMS format', async () => {
+    const { getField } = await import('$lib/services/contents/entry/fields');
+
+    /** @type {Record<string, any>} */
+    const fields = {
+      title: { name: 'title', label: 'Title', widget: 'string' },
+      date: { name: 'date', label: 'Date', widget: 'datetime' },
+    };
+
+    vi.mocked(getField).mockImplementation(({ keyPath }) => fields[keyPath]);
+
+    allEntries.current = [];
+    selectedCollection.current = /** @type {any} */ ({
+      name: 'posts',
+      _type: 'entry',
+      folder: 'content/posts',
+      sortable_fields: ['title', { field: 'date', label: 'Publish date', default_sort: 'desc' }],
+      fields: Object.values(fields),
+      _i18n: { i18nEnabled: false },
+    });
+
+    expect(sortKeys.current).toEqual([
+      { key: 'title', label: 'Title' },
+      { key: 'date', label: 'Publish date' },
+    ]);
+
+    // Clean up
+    selectedCollection.current = undefined;
   });
 });

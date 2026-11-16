@@ -2,7 +2,9 @@
   import { AppShell } from '@sveltia/ui';
   import { onMount } from 'svelte';
 
+  import ErrorBoundary from '$lib/components/common/error-boundary.svelte';
   import EntrancePage from '$lib/components/entrance/entrance-page.svelte';
+  import CommitMessageDialog from '$lib/components/global/commit-message-dialog.svelte';
   import BackendStatusIndicator from '$lib/components/global/infobars/backend-status-indicator.svelte';
   import UpdateNotification from '$lib/components/global/infobars/update-notification.svelte';
   import LocaleLoadErrorToast from '$lib/components/global/locale-load-error-toast.svelte';
@@ -16,9 +18,12 @@
     appManifestURL,
     appTitle,
   } from '$lib/services/app/branding';
+  import { missingBrowserFeatures } from '$lib/services/app/browser-support';
   import { initAppLocale } from '$lib/services/app/i18n';
+  import { initAppInstallDetection } from '$lib/services/app/install';
   import {
     announcedPageStatus,
+    hasOverlay,
     mainAreaTitle,
     overlayTitle,
     startViewTransition,
@@ -41,11 +46,7 @@
    */
 
   /** @type {Props} */
-  let {
-    /* eslint-disable prefer-const */
-    config,
-    /* eslint-enable prefer-const */
-  } = $props();
+  let { config } = $props();
 
   // The strings for the default locale are always bundled with the app, so the UI can be rendered
   // right away, even while the strings for another locale are being fetched from the CDN
@@ -56,8 +57,21 @@
   });
 
   onMount(() => {
+    // An outdated browser would fail while loading the configuration; the entrance page asks the
+    // user to update it instead
+    if (missingBrowserFeatures.current.length) {
+      // eslint-disable-next-line no-console
+      console.error('Unsupported browser. Missing features:', missingBrowserFeatures.current);
+
+      return;
+    }
+
     initCmsConfig(config);
   });
+
+  // Listen from the start: the browser offers to install the app only once, shortly after the
+  // page loads, when the account menu holding the Install as App item is usually closed
+  onMount(() => initAppInstallDetection());
 
   // The fork signs the user in with the configured backend as soon as the configuration is known,
   // so no sign-in screen is shown; see `docs/fork.md`
@@ -149,22 +163,33 @@
 
 <AppShell>
   <div role="none" class="outer">
-    <LocaleLoadErrorToast />
-    <UpdateNotification />
-    <ForkPermissionDialog />
-    {#if backend.current}
-      <BackendStatusIndicator />
-    {/if}
-    {#if user.account && dataLoaded.current}
-      <OpenAuthoringIndicator />
-    {/if}
-    <div role="none" class="main">
-      {#if user.account && dataLoaded.current && transitioned}
-        <MainRouter />
-      {:else}
-        <EntrancePage />
-      {/if}
-    </div>
+    <!-- The page has a boundary of its own, so a failing page leaves the infobars and dialogs
+    around it working; this one catches a failure in those -->
+    <ErrorBoundary scope="page">
+      <LocaleLoadErrorToast />
+      <ForkPermissionDialog />
+      <CommitMessageDialog />
+      <!-- The infobars are covered by the content and asset overlays, so they mustn’t take the
+      focus then. The dialogs stay outside: the commit message one is opened from the editor -->
+      <div role="none" class="infobars" inert={hasOverlay.current}>
+        <UpdateNotification />
+        {#if backend.current}
+          <BackendStatusIndicator />
+        {/if}
+        {#if user.account && dataLoaded.current}
+          <OpenAuthoringIndicator />
+        {/if}
+      </div>
+      <div role="none" class="main">
+        <ErrorBoundary scope="page">
+          {#if user.account && dataLoaded.current && transitioned}
+            <MainRouter />
+          {:else}
+            <EntrancePage />
+          {/if}
+        </ErrorBoundary>
+      </div>
+    </ErrorBoundary>
   </div>
   <div role="status">{announcedPageStatus.current}</div>
 </AppShell>
@@ -292,6 +317,14 @@
   }
 
   :global {
+    /* The dragged item of a sortable list is left as a faint placeholder marking the gap it would
+      drop into. The pointer already carries the browser’s own drag image of it, so showing it
+      twice at full strength would just be confusing. */
+
+    .drag-placeholder {
+      opacity: 0.25;
+    }
+
     html:active-view-transition-type(forwards) {
       @media (width < 768px) {
         &::view-transition-old(page-root) {
@@ -317,10 +350,18 @@
         &:dir(rtl) {
           &::view-transition-old(page-root) {
             animation: 100ms ease-in both slide-out-to-right-rtl;
+
+            @media (prefers-reduced-motion) {
+              animation: none;
+            }
           }
 
           &::view-transition-new(page-root) {
             animation: 100ms ease-in both slide-in-from-left-rtl;
+
+            @media (prefers-reduced-motion) {
+              animation: none;
+            }
           }
         }
       }
@@ -349,10 +390,18 @@
         &:dir(rtl) {
           &::view-transition-old(page-root) {
             animation: 100ms ease-in both slide-out-to-left-rtl;
+
+            @media (prefers-reduced-motion) {
+              animation: none;
+            }
           }
 
           &::view-transition-new(page-root) {
             animation: 100ms ease-in both slide-in-from-right-rtl;
+
+            @media (prefers-reduced-motion) {
+              animation: none;
+            }
           }
         }
       }
@@ -404,6 +453,10 @@
     position: absolute;
     inset: 0;
     overflow: hidden;
+  }
+
+  .infobars {
+    display: contents;
   }
 
   .main {

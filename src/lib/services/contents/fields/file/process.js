@@ -1,18 +1,26 @@
 import equal from 'fast-deep-equal';
 import { sanitize } from 'isomorphic-dompurify';
 
+import { getEntryAssetFolderPath } from '$lib/services/assets/entry-folder';
+import { isSameFileName } from '$lib/services/assets/file-name';
 import { createDisplayBlobURL, getAssetPublicURL } from '$lib/services/assets/info';
 import { getAssetKind } from '$lib/services/assets/kinds';
 import { createAssetNameTemplate, getPendingFileName } from '$lib/services/assets/name';
 import { processFile } from '$lib/services/assets/process';
 import { allAssets } from '$lib/services/assets/state';
-import { getEntryAssetFolderPath } from '$lib/services/contents/draft/save/assets';
 import { getSlugs } from '$lib/services/contents/draft/slugs';
+import { isAcceptedFile } from '$lib/services/integrations/media-libraries/default';
 import { createPath, getGitHash } from '$lib/services/utils/file';
 import { LINK_SANITIZE_OPTIONS } from '$lib/services/utils/string';
 
 /**
- * @import { Asset, AssetFolderInfo, EntryDraft, SelectedResource } from '$lib/types/private';
+ * @import {
+ * Asset,
+ * AssetFolderInfo,
+ * EntryDraft,
+ * InternalLocaleCode,
+ * SelectedResource,
+ * } from '$lib/types/private';
  * @import { DefaultMediaLibraryConfig } from '$lib/types/public';
  */
 
@@ -26,6 +34,8 @@ import { LINK_SANITIZE_OPTIONS } from '$lib/services/utils/string';
  * @property {string | undefined} oversizedFileName File name if the file exceeds the size limit.
  * @property {string | undefined} invalidFileName File name if the file is corrupt or mislabeled and
  * therefore cannot be decoded.
+ * @property {string | undefined} [mismatchedFileName] File name if the file, once processed, is not
+ * one of the accepted file types.
  */
 
 /**
@@ -37,9 +47,18 @@ import { LINK_SANITIZE_OPTIONS } from '$lib/services/utils/string';
  * entry-relative, only files in the same folder are considered a match.
  * @param {string} [args.subfolderPath] Subfolder the file is saved to. The same file pending for
  * another subfolder is a different upload.
+ * @param {boolean} [args.replace] Whether the file replaces an existing asset with the same name.
+ * Such a file must be saved under its own name, so only a pending file replacing one under the same
+ * name is a match.
  * @returns {Promise<string | undefined>} Blob URL.
  */
-export const getExistingBlobURL = async ({ draft, file, folder, subfolderPath = '' }) => {
+export const getExistingBlobURL = async ({
+  draft,
+  file,
+  folder,
+  subfolderPath = '',
+  replace = false,
+}) => {
   // The Git hash is memoized per file, so the files already in the draft aren’t read again
   const hash = await getGitHash(file);
   /** @type {string | undefined} */
@@ -51,7 +70,8 @@ export const getExistingBlobURL = async ({ draft, file, folder, subfolderPath = 
         !foundURL &&
         (await getGitHash(f.file)) === hash &&
         (!folder?.entryRelative || equal(f.folder, folder)) &&
-        (f.subfolderPath ?? '') === subfolderPath
+        (f.subfolderPath ?? '') === subfolderPath &&
+        (!replace || (!!f.replace && isSameFileName(f.file.name, file.name)))
       ) {
         foundURL = blobURL;
       }
@@ -141,9 +161,11 @@ export const getUnsavedAssets = async ({ draft, targetFolderPath }) => {
  * the rest of the collection, as determined by {@link getEntryAssetFolderPath}.
  * @param {EntryDraft} draft Entry draft.
  * @param {AssetFolderInfo | undefined} folder Asset folder associated with the field.
+ * @param {InternalLocaleCode} [locale] Locale being edited, whose entry file the assets are stored
+ * beside. Default: the default locale.
  * @returns {Asset[]} Filtered saved assets.
  */
-const getSavedAssetsForEntry = (draft, folder) => {
+const getSavedAssetsForEntry = (draft, folder, locale) => {
   const savedAssets = allAssets.current;
 
   if (!folder?.entryRelative) {
@@ -151,7 +173,10 @@ const getSavedAssetsForEntry = (draft, folder) => {
   }
 
   const { originalEntry, defaultLocale, collection } = draft;
-  const entryFilePath = originalEntry?.locales[defaultLocale]?.path;
+
+  const entryFilePath = (
+    (locale ? originalEntry?.locales[locale] : undefined) ?? originalEntry?.locales[defaultLocale]
+  )?.path;
 
   if (!entryFilePath) {
     // New entry — no saved assets exist for this entry yet
@@ -171,14 +196,34 @@ const getSavedAssetsForEntry = (draft, folder) => {
 };
 
 /**
+ * Get the result of processing a file that is not one of the accepted file types.
+ * @param {File} file File.
+ * @returns {ProcessResourceResult} Result.
+ */
+const getMismatchedResult = (file) => ({
+  value: undefined,
+  credit: '',
+  oversizedFileName: undefined,
+  invalidFileName: undefined,
+  mismatchedFileName: file.name,
+});
+
+/**
  * Process a selected resource.
  * @param {object} args Arguments.
  * @param {EntryDraft} args.draft Entry draft containing the resource.
  * @param {SelectedResource} args.resource Resource to be processed.
  * @param {DefaultMediaLibraryConfig} args.libraryConfig Configuration for the media library.
+ * @param {string} [args.accept] File types the field accepts, as given by `getAcceptedFileTypes()`.
+ * A file to be uploaded is checked against them once it’s transformed, which can change its format,
+ * e.g. a PNG image converted to WebP fits a field only taking WebP images. A file picked in the
+ * browser’s file picker is checked as well as a dropped one, as a picker can offer every file.
+ * @param {InternalLocaleCode} [args.locale] Locale the resource is selected for. An existing asset
+ * in an entry-relative folder is referenced with a path relative to that locale’s entry file.
+ * Default: the default locale.
  * @returns {Promise<ProcessResourceResult>} Result of processing the resource.
  */
-export const processResource = async ({ draft, resource, libraryConfig }) => {
+export const processResource = async ({ draft, resource, libraryConfig, accept, locale }) => {
   const { url, folderPath, credit, replace = false, subfolderPath } = resource;
   let { asset, file } = resource;
   /** @type {string | undefined} */
@@ -202,7 +247,7 @@ export const processResource = async ({ draft, resource, libraryConfig }) => {
     let existingBlobURL;
 
     try {
-      existingBlobURL = await getExistingBlobURL({ draft, file, folder, subfolderPath });
+      existingBlobURL = await getExistingBlobURL({ draft, file, folder, subfolderPath, replace });
     } catch {
       // The file can’t be read any more, e.g. it was moved or deleted after being picked. It can’t
       // be uploaded either way, so it’s reported along with the corrupt files rather than failing
@@ -216,6 +261,12 @@ export const processResource = async ({ draft, resource, libraryConfig }) => {
     }
 
     if (existingBlobURL) {
+      // The file is already pending, as processed for another field maybe, which can accept other
+      // file types
+      if (!isAcceptedFile(file, accept)) {
+        return getMismatchedResult(file);
+      }
+
       value = existingBlobURL;
     } else {
       const {
@@ -235,14 +286,26 @@ export const processResource = async ({ draft, resource, libraryConfig }) => {
         };
       }
 
+      // The original file is named, as the user knows it by that name
+      if (!isAcceptedFile(file, accept)) {
+        return getMismatchedResult(/** @type {File} */ (resource.file));
+      }
+
       const sha = await getGitHash(file);
+      const { name } = file;
 
       // Check if the selected file has already been uploaded or is pending upload, otherwise
-      // duplicate files lead to an `each_key_duplicate` error in Svelte
+      // duplicate files lead to an `each_key_duplicate` error in Svelte. A file replacing an
+      // existing one must keep its name, so an identical file under another name doesn’t count
       const existingAsset = [
-        ...getSavedAssetsForEntry(draft, folder),
+        ...getSavedAssetsForEntry(draft, folder, locale),
         ...(await getUnsavedAssets({ draft })),
-      ].find((a) => a.sha === sha && equal(a.folder, folder));
+      ].find(
+        (a) =>
+          a.sha === sha &&
+          equal(a.folder, folder) &&
+          (!replace || ((!a.unsaved || a.replace) && isSameFileName(a.name, name))),
+      );
 
       if (existingAsset) {
         // If the selected file has already been uploaded, use the existing asset instead of
@@ -288,6 +351,7 @@ export const processResource = async ({ draft, resource, libraryConfig }) => {
         pathOnly: true,
         allowSpecial: true,
         entry: draft.originalEntry,
+        locale,
       });
     } else if (asset.blobURL) {
       // A pending file listed by `getUnsavedAssets()` is referenced with its blob URL. It can’t be

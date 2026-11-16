@@ -1,4 +1,5 @@
 import { expect, test } from '../../fixtures/test.js';
+import { getEditor } from '../../fixtures/ui.js';
 
 /**
  * @import { Locator, Page } from '@playwright/test';
@@ -62,8 +63,10 @@ test('opens and closes the Settings dialog', async ({ cms, page }) => {
     /Language/,
     /Contents/,
     /Media/,
+    /AI/,
     /Accessibility/,
-    /Advanced/,
+    /Developer/,
+    /Data Management/,
   ]);
   // The Appearance panel is shown first
   await expect(dialog.getByRole('tab', { name: 'Appearance' })).toHaveAttribute(
@@ -165,7 +168,7 @@ test('keeps the editor open after saving when Close the Editor is off', async ({
 
   await page.getByRole('row', { name: /First Post/ }).click();
 
-  const editor = page.getByRole('group', { name: 'Content Editor' });
+  const editor = getEditor(page);
 
   await editor.getByRole('textbox', { name: 'Title' }).fill('Updated Post');
   await editor.getByRole('button', { name: 'Save' }).click();
@@ -191,7 +194,7 @@ test('keeps the editor open on Escape when Close with Escape is off', async ({ c
 
   await page.getByRole('row', { name: /First Post/ }).click();
 
-  const editor = page.getByRole('group', { name: 'Content Editor' });
+  const editor = getEditor(page);
   const title = editor.getByRole('textbox', { name: 'Title' });
 
   await expect(title).toHaveValue('First Post');
@@ -215,7 +218,7 @@ test('shows the developer tools once Developer Mode is on', async ({ cms, page }
   await expect(page.getByRole('menuitem', { name: 'CMS Configuration' })).toBeHidden();
   await page.keyboard.press('Escape');
 
-  const dialog = await openSettings(cms, page, 'Advanced');
+  const dialog = await openSettings(cms, page, 'Developer');
   const devMode = dialog.getByRole('switch', { name: 'Enable Developer Mode' });
 
   await devMode.click();
@@ -237,4 +240,10 @@ test('shows the developer tools once Developer Mode is on', async ({ cms, page }
     page.getByRole('menuitem', { name: 'CMS Configuration' }),
   );
   await expect(page).toHaveURL(/#\/config$/);
+
+  // The page shows the configuration as YAML
+  const config = page.getByRole('blockquote', { name: 'CMS Configuration' });
+
+  await expect(config).toContainText('name: test-repo');
+  await expect(config).toContainText('folder: content/posts');
 });

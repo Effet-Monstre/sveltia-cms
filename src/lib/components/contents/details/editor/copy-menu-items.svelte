@@ -4,6 +4,7 @@
 
   import { getEntryDraftContext } from '$lib/services/contents/draft/state.svelte';
   import { getCopyingFieldMap } from '$lib/services/contents/draft/update/copy';
+  import { updateObject } from '$lib/services/contents/draft/update/list';
   import { getLocaleLabel } from '$lib/services/contents/i18n';
   import { translator } from '$lib/services/integrations/translators';
 
@@ -26,15 +27,7 @@
   const entryDraft = getEntryDraftContext();
 
   /** @type {Props} */
-  let {
-    /* eslint-disable prefer-const */
-    locale,
-    otherLocales,
-    keyPath = '',
-    translate = false,
-    submenu = false,
-    /* eslint-enable prefer-const */
-  } = $props();
+  let { locale, otherLocales, keyPath = '', translate = false, submenu = false } = $props();
 
   const useSubmenu = $derived(submenu && otherLocales.length > 1);
 
@@ -71,13 +64,15 @@
       return;
     }
 
-    draft.currentValues[locale] = structuredClone($state.snapshot(sourceValues));
+    // Write into the locale’s values rather than replacing them, so they stay in the proxy that
+    // validates them and copies them to the other locales as each field’s i18n strategy requires
+    updateObject(draft.currentValues[locale], structuredClone($state.snapshot(sourceValues)));
   };
 </script>
 
 {#snippet localeItems()}
   {#each otherLocales as otherLocale (otherLocale)}
-    {@const localeLabel = getLocaleLabel(otherLocale)}
+    {@const localeLabel = getLocaleLabel(otherLocale) ?? otherLocale}
     {@const languagePair = { sourceLanguage: otherLocale, targetLanguage: locale }}
     {#await isMenuDisabled(languagePair) then disabled}
       <MenuItem

@@ -1,9 +1,8 @@
-import { getPathInfo } from '@sveltia/utils/file';
 import { escapeRegExp } from '@sveltia/utils/string';
-import mime from 'mime';
 
+import { getExistingEntryAssetFolderPath } from '$lib/services/assets/entry-folder';
 import { getAssetFoldersByPath, globalAssetFolder } from '$lib/services/assets/folders';
-import { canCreateThumbnail, hasPDFThumbnail } from '$lib/services/assets/kinds';
+import { canCreateThumbnail, isPDF } from '$lib/services/assets/kinds';
 import { allAssets } from '$lib/services/assets/state';
 import { backend } from '$lib/services/backends';
 import {
@@ -11,24 +10,32 @@ import {
   TEMPLATE_TAG_REPLACE_REGEX,
 } from '$lib/services/common/template/constants';
 import { cmsConfig } from '$lib/services/config';
-import { shareInFlight } from '$lib/services/utils/cache';
+import { createLRUMap, shareInFlight } from '$lib/services/utils/cache';
 import { getRepositoryDatabase } from '$lib/services/utils/database';
-import { createPath, createPathRegEx, encodeFilePath } from '$lib/services/utils/file';
+import { createPath, createPathRegEx, encodeFilePath, getDirName } from '$lib/services/utils/file';
 import { createInertSVG } from '$lib/services/utils/media/image/svg';
 import {
   THUMBNAIL_TRANSFORM_OPTIONS,
   transformImage,
 } from '$lib/services/utils/media/image/transform';
 import { renderPDF } from '$lib/services/utils/media/pdf';
+import mime from '$lib/services/utils/mime';
+import { createConcurrencyLimiter } from '$lib/services/utils/scheduling';
 
 /**
  * @import { IndexedDB } from '@sveltia/utils/storage';
+ * @import { LRUMap } from '$lib/services/utils/cache';
  * @import {
  * Asset,
  * AssetFolderInfo,
  * Entry,
  * InternalCmsConfig,
+ * InternalLocaleCode,
  * } from '$lib/types/private';
+ */
+
+/**
+ * @typedef {Pick<IndexedDB, 'get' | 'set'> | LRUMap<string, Blob>} ThumbnailStore
  */
 
 /**
@@ -177,6 +184,22 @@ const downloadAssetBlob = async (asset) => {
 const fetchAssetBlob = async (asset) => cacheAssetBlob(asset, await downloadAssetBlob(asset));
 
 /**
+ * Read the file behind the given handle.
+ * @param {FileSystemFileHandle} handle File handle.
+ * @param {(file: File) => Promise<Blob>} [transform] Function to process the file with, whose
+ * failure is reported the same way as a failed read.
+ * @returns {Promise<Blob>} File, or the result of `transform`.
+ * @throws {Error} When the file cannot be read or processed.
+ */
+const readHandle = async (handle, transform = async (file) => file) => {
+  try {
+    return await transform(await handle.getFile());
+  } catch {
+    throw new Error('Failed to retrieve blob from file handle');
+  }
+};
+
+/**
  * Get the blob for the given asset, from wherever it’s available: the file it was created from, the
  * object URL already cached on it, a file system handle, or the backend.
  * @param {Asset} asset Asset.
@@ -202,11 +225,7 @@ export const getAssetBlob = async (asset) => {
   }
 
   if (handle) {
-    try {
-      return await cacheAssetBlob(asset, await handle.getFile());
-    } catch {
-      throw new Error('Failed to retrieve blob from file handle');
-    }
+    return readHandle(handle, (blob) => cacheAssetBlob(asset, blob));
   }
 
   return downloadOnce(path, () => fetchAssetBlob(asset));
@@ -240,11 +259,7 @@ const getThumbnailSourceBlob = async (asset) => {
   }
 
   if (handle) {
-    try {
-      return await handle.getFile();
-    } catch {
-      throw new Error('Failed to retrieve blob from file handle');
-    }
+    return readHandle(handle);
   }
 
   return downloadAssetBlob(asset);
@@ -263,8 +278,12 @@ export const getAssetBlobURL = async (asset) => {
   return asset.blobURL;
 };
 
-/** @type {IndexedDB | null | undefined} */
-let thumbnailDB = undefined;
+/**
+ * Where the thumbnails are cached, keyed by asset SHA: the database if the backend has one, the
+ * {@link memoryThumbnailCache} otherwise. It’s picked by {@link initThumbnailStore}.
+ * @type {ThumbnailStore | undefined}
+ */
+let thumbnailStore = undefined;
 /**
  * Thumbnail blob resolutions currently in flight, keyed by asset SHA. Generating a thumbnail means
  * a database read and, on a miss, decoding and transforming the full-size image, so concurrent
@@ -273,44 +292,72 @@ let thumbnailDB = undefined;
  * @type {Map<string, Promise<Blob | undefined>>}
  */
 const pendingThumbnailBlobs = new Map();
+/**
+ * Maximum number of thumbnails kept in {@link memoryThumbnailCache}. A thumbnail is a few dozen
+ * kilobytes, so this stays within a few dozen megabytes.
+ */
+const MEMORY_THUMBNAIL_CACHE_SIZE = 500;
+/**
+ * Thumbnails kept in memory, keyed by asset SHA, for a backend without a database to cache them in,
+ * like the test backend. Without it, a thumbnail would be generated again each time a list row
+ * showing it is rendered. The least recently used one is dropped first.
+ * @type {LRUMap<string, Blob>}
+ */
+const memoryThumbnailCache = createLRUMap(MEMORY_THUMBNAIL_CACHE_SIZE);
+/**
+ * Get the cached thumbnail of the given asset, once {@link initThumbnailStore} has been called.
+ * @param {string} sha Asset SHA.
+ * @returns {Promise<Blob | undefined>} Thumbnail blob, if cached.
+ */
+const getCachedThumbnail = async (sha) => /** @type {ThumbnailStore} */ (thumbnailStore).get(sha);
 
 /* v8 ignore next */
 /**
  * Reset the thumbnail database. This is used in tests to reset the state of the thumbnail database
  * between tests.
  */
-export const _resetThumbnailDB = () => {
-  thumbnailDB = undefined;
+export const _resetThumbnailStore = () => {
+  thumbnailStore = undefined;
   pendingThumbnailBlobs.clear();
+  memoryThumbnailCache.clear();
 };
 
 /**
- * Initialize {@link thumbnailDB} if it hasn’t been initialized yet.
+ * Initialize {@link thumbnailStore} if it hasn’t been initialized yet.
  */
-const initThumbnailDB = () => {
-  if (thumbnailDB === undefined) {
-    thumbnailDB = getRepositoryDatabase(backend.current?.repository, 'asset-thumbnails') ?? null;
-  }
+const initThumbnailStore = () => {
+  thumbnailStore ??=
+    getRepositoryDatabase(backend.current?.repository, 'asset-thumbnails') ?? memoryThumbnailCache;
 };
+
+/**
+ * Limit the thumbnails being generated at the same time. Each one decodes the full-size image, so a
+ * folder of photos shown for the first time would otherwise hold all of them in memory at once. The
+ * latest request goes first: in a list being scrolled, that’s a thumbnail now on screen, which
+ * would otherwise wait behind every one requested for the rows scrolled past.
+ */
+const limitThumbnailGeneration = createConcurrencyLimiter(4, { lastInFirstOut: true });
 
 /**
  * Get a thumbnail blob for the given asset, generating it from the original file if it’s not in the
  * cache database yet.
  * @param {Asset} asset Asset.
- * @param {boolean} isPDF Whether the asset is a PDF file.
  * @returns {Promise<Blob | undefined>} Thumbnail blob.
  */
-const resolveThumbnailBlob = async (asset, isPDF) => {
+const resolveThumbnailBlob = async (asset) => {
+  const { sha } = asset;
   /** @type {Blob | undefined} */
-  let thumbnailBlob = await thumbnailDB?.get(asset.sha);
+  let thumbnailBlob = await getCachedThumbnail(sha);
 
   if (!thumbnailBlob) {
-    const blob = await getThumbnailSourceBlob(asset);
-    const transform = isPDF ? renderPDF : transformImage;
+    const transform = isPDF(asset.name) ? renderPDF : transformImage;
 
-    thumbnailBlob = await transform(blob, THUMBNAIL_TRANSFORM_OPTIONS);
+    thumbnailBlob = await limitThumbnailGeneration(
+      async () => transform(await getThumbnailSourceBlob(asset), THUMBNAIL_TRANSFORM_OPTIONS),
+      { key: sha },
+    );
 
-    await thumbnailDB?.set(asset.sha, thumbnailBlob);
+    await /** @type {ThumbnailStore} */ (thumbnailStore).set(sha, thumbnailBlob);
   }
 
   return thumbnailBlob;
@@ -325,7 +372,7 @@ const resolveThumbnailBlob = async (asset, isPDF) => {
  * flight is awaited, as the outcome is what matters.
  */
 export const hasCachedThumbnail = async (sha) => {
-  initThumbnailDB();
+  initThumbnailStore();
 
   const pending = pendingThumbnailBlobs.get(sha);
 
@@ -333,7 +380,7 @@ export const hasCachedThumbnail = async (sha) => {
     return !!(await pending.catch(() => undefined));
   }
 
-  return !!(await thumbnailDB?.get(sha));
+  return !!(await getCachedThumbnail(sha));
 };
 
 /**
@@ -349,23 +396,28 @@ export const getAssetThumbnailURL = async (asset, { cacheOnly = false } = {}) =>
     return undefined;
   }
 
-  const isPDF = hasPDFThumbnail(asset.name);
-
-  initThumbnailDB();
+  initThumbnailStore();
 
   const { sha } = asset;
 
   if (cacheOnly && !pendingThumbnailBlobs.has(sha)) {
     // Nothing is being generated for this asset, so stick to a cache lookup as requested
-    const cachedBlob = await thumbnailDB?.get(sha);
+    const cachedBlob = await getCachedThumbnail(sha);
 
     return cachedBlob ? URL.createObjectURL(cachedBlob) : undefined;
+  }
+
+  // The generation of a thumbnail asked for again, e.g. by a row now on screen after one scrolled
+  // past, is moved up the queue. As the latest request goes first, it would otherwise wait behind
+  // every one made since it was first queued
+  if (!cacheOnly && pendingThumbnailBlobs.has(sha)) {
+    limitThumbnailGeneration.prioritize(sha);
   }
 
   // A `cacheOnly` caller joins an in-flight resolution rather than reading the database again: the
   // work is already happening, so waiting for it costs nothing extra
   const thumbnailBlob = await shareInFlight(pendingThumbnailBlobs, sha, () =>
-    resolveThumbnailBlob(asset, isPDF),
+    resolveThumbnailBlob(asset),
   );
 
   return thumbnailBlob ? URL.createObjectURL(thumbnailBlob) : undefined;
@@ -376,6 +428,22 @@ export const getAssetThumbnailURL = async (asset, { cacheOnly = false } = {}) =>
  * @type {Set<string>}
  */
 const pendingRevocations = new Set();
+/**
+ * Blob URLs of the assets preloaded with {@link preloadAssets}, which a revocation leaves alone
+ * until they’re no longer preloaded, although no element displays them yet.
+ * @type {Set<string>}
+ */
+const preloadedURLs = new Set();
+/**
+ * Assets most recently passed to {@link preloadAssets}, including the ones to keep.
+ * @type {Asset[]}
+ */
+let preloadedAssets = [];
+/**
+ * Assets most recently passed to {@link preloadAssets} to be loaded, excluding the ones to keep.
+ * @type {Asset[]}
+ */
+let loadedAssets = [];
 
 /* v8 ignore next */
 /**
@@ -384,6 +452,9 @@ const pendingRevocations = new Set();
  */
 export const _resetRevocationQueue = () => {
   pendingRevocations.clear();
+  preloadedURLs.clear();
+  preloadedAssets = [];
+  loadedAssets = [];
 };
 
 /**
@@ -397,6 +468,10 @@ const flushRevocations = () => {
   // One query for every blob URL on the page, rather than one per asset
   document.querySelectorAll('[src^="blob:"]').forEach((element) => {
     urls.delete(/** @type {string} */ (element.getAttribute('src')));
+  });
+
+  preloadedURLs.forEach((url) => {
+    urls.delete(url);
   });
 
   if (!urls.size) {
@@ -519,6 +594,67 @@ const replaceTemplatePath = ({ path, internalPath, publicPath }) => {
 };
 
 /**
+ * Get the asset folder whose public path applies to the given asset.
+ * @param {Asset} asset Asset.
+ * @returns {AssetFolderInfo} Asset folder.
+ */
+const resolvePublicFolder = (asset) =>
+  asset.folder.collectionName === undefined
+    ? // Use the global asset folder
+      asset.folder
+    : // Search for the asset folder instead of using `asset.folder` directly, as an asset can be
+      // used for multiple collections, and the public path can be different for each
+      (getAssetFoldersByPath(asset.path).find(
+        ({ collectionName }) => collectionName !== undefined,
+      ) ??
+      globalAssetFolder.current ??
+      // There is no global folder without the global `media_folder` option
+      asset.folder);
+
+/**
+ * Get the path of the given asset in an entry-relative folder, relative to the folder holding the
+ * entry’s relative assets, which is where the value is resolved against when the asset is found
+ * for it; see `getAssetByRelativePathAndCollection()`.
+ * @param {Asset} asset Asset.
+ * @param {Entry} [entry] Associated entry. Can be `undefined` when editing a new draft.
+ * @param {InternalLocaleCode} [locale] Locale whose entry file the path is relative to.
+ * @param {string} [collectionName] Name of the collection the asset folder belongs to.
+ * @returns {string | undefined} Relative path, e.g. `images/photo.jpg`, or `undefined` if it
+ * cannot be determined.
+ */
+const getEntryRelativePath = (asset, entry, locale, collectionName) => {
+  // A file at the repository root has no folder path
+  const assetFolderPath = getDirName(asset.path);
+
+  const entryFolderPath = entry
+    ? getExistingEntryAssetFolderPath({ entry, locale, collectionName })
+    : undefined;
+
+  if (entryFolderPath !== undefined) {
+    // If the asset is in the same folder as the entry, return the file name only
+    if (assetFolderPath === entryFolderPath) {
+      return asset.name;
+    }
+
+    // Return the path relative to the entry’s folder, e.g. `images/photo.jpg`, or `undefined` if
+    // the path cannot be determined
+    const prefix = entryFolderPath ? `${entryFolderPath}/` : '';
+
+    return asset.path.startsWith(prefix) ? asset.path.slice(prefix.length) : undefined;
+  }
+
+  const { internalPath, internalSubPath } = asset.folder;
+
+  // Resolve simple entry-relative paths like `images/photo.jpg` if the asset is in the same folder
+  // as the entry, which can be the repository root
+  if (asset.path === createPath([internalPath, internalSubPath, asset.name])) {
+    return internalPath ? asset.path.slice(internalPath.length + 1) : asset.path;
+  }
+
+  return undefined;
+};
+
+/**
  * Get the public URL for the given asset.
  * @param {Asset} asset Asset file, such as an image.
  * @param {object} [options] Options.
@@ -528,58 +664,20 @@ const replaceTemplatePath = ({ path, internalPath, publicPath }) => {
  * starting with `@`, etc.
  * @param {Entry} [options.entry] Associated entry to be used to help locate an asset from a
  * relative path. Can be `undefined` when editing a new draft.
+ * @param {InternalLocaleCode} [options.locale] Locale whose entry file an entry-relative path is
+ * relative to. Default: the entry’s first locale.
  * @returns {string | undefined} URL or `undefined` if it cannot be determined.
  */
 export const getAssetPublicURL = (
   asset,
-  { pathOnly = false, allowSpecial = false, entry = undefined } = {},
+  { pathOnly = false, allowSpecial = false, entry = undefined, locale = undefined } = {},
 ) => {
-  const { publicPath, entryRelative, hasTemplateTags } =
-    asset.folder.collectionName === undefined
-      ? // Use the global asset folder
-        asset.folder
-      : // Search for the asset folder instead of using `asset.folder` directly, as an asset can be
-        // used for multiple collections, and the public path can be different for each
-        (getAssetFoldersByPath(asset.path).find(
-          ({ collectionName }) => collectionName !== undefined,
-        ) ??
-        globalAssetFolder.current ??
-        // There is no global folder without the global `media_folder` option
-        asset.folder);
+  const { publicPath, entryRelative, hasTemplateTags, collectionName } = resolvePublicFolder(asset);
 
   // Try to determine an entry-relative path if the asset is in the same folder as the entry, or a
   // sub-folder of it
   if (entryRelative) {
-    if (pathOnly) {
-      const assetFolderPath = getPathInfo(asset.path).dirname;
-
-      const entryFolderPath = entry
-        ? getPathInfo(Object.values(entry.locales)[0].path).dirname
-        : undefined;
-
-      if (assetFolderPath !== undefined && entryFolderPath !== undefined) {
-        // If the asset is in the same folder as the entry, return the file name only
-        if (assetFolderPath === entryFolderPath) {
-          return asset.name;
-        }
-
-        // Return the path relative to the entry’s folder, e.g. `images/photo.jpg`, or `undefined`
-        // if the path cannot be determined
-        const prefix = `${entryFolderPath}/`;
-
-        return asset.path.startsWith(prefix) ? asset.path.slice(prefix.length) : undefined;
-      }
-
-      const { internalPath, internalSubPath } = asset.folder;
-
-      // Resolve simple entry-relative paths like `images/photo.jpg` if the asset is in the same
-      // folder as the entry
-      if (asset.path === createPath([internalPath, internalSubPath, asset.name])) {
-        return asset.path.slice(/** @type {string} */ (internalPath).length + 1);
-      }
-    }
-
-    return undefined;
+    return pathOnly ? getEntryRelativePath(asset, entry, locale, collectionName) : undefined;
   }
 
   const { _baseURL: baseURL = '', output: { encode_file_path: encodingEnabled = false } = {} } =
@@ -594,6 +692,12 @@ export const getAssetPublicURL = (
       ? asset.path.replace(internalPath, publicBasePath)
       : // An asset in a root media folder has no folder path to swap for the public path
         `${publicBasePath}/${asset.path}`;
+
+  // An empty public folder stores a bare path relative to the media folder, e.g. `photo.jpg`, as
+  // Netlify/Decap CMS does, which can’t be linked
+  if (publicPath === '') {
+    path = path.replace(/^\//, '');
+  }
 
   if (encodingEnabled) {
     path = encodeFilePath(path);
@@ -629,4 +733,68 @@ export const getFolderPublicPath = ({ folder, subfolderPath }) => {
   const path = (subfolderPath ? `${basePath}/${subfolderPath}` : basePath) || '/';
 
   return encodingEnabled ? encodeFilePath(path) : path;
+};
+
+/**
+ * Load the given assets ahead of time, so they can be shown at once when the user moves to them,
+ * e.g. the assets right before and after the one shown in the details overlay. An image is decoded
+ * as well, and an asset already passed to the previous call isn’t loaded again. The assets passed
+ * to the previous call that aren’t passed again are released: their
+ * blob URLs are revoked unless an element displays them. Pass an empty array to release them all.
+ * @param {Asset[]} assets Assets to preload.
+ * @param {object} [options] Options.
+ * @param {Asset[]} [options.keep] Assets that are being loaded elsewhere, e.g. the one shown in the
+ * overlay, whose blob URLs are kept like those of the preloaded assets but which aren’t loaded
+ * here. This keeps a preloaded asset the user has just moved to from being released before its
+ * preview displays it.
+ */
+export const preloadAssets = (assets, { keep = [] } = {}) => {
+  const retained = [...assets, ...keep];
+  const released = preloadedAssets.filter((asset) => !retained.includes(asset));
+  const added = assets.filter((asset) => !loadedAssets.includes(asset));
+
+  preloadedAssets = retained;
+  loadedAssets = assets;
+
+  keep.forEach((asset) => {
+    if (asset.blobURL) {
+      preloadedURLs.add(asset.blobURL);
+    }
+  });
+
+  released.forEach((asset) => {
+    if (asset.blobURL) {
+      preloadedURLs.delete(asset.blobURL);
+    }
+
+    revokeAssetBlobURLIfNeeded(asset);
+  });
+
+  added.forEach(async (asset) => {
+    try {
+      const url = await getAssetBlobURL(asset);
+
+      if (!url) {
+        return;
+      }
+
+      // The asset may have been released while its blob was being read
+      if (!preloadedAssets.includes(asset)) {
+        revokeAssetBlobURLIfNeeded(asset);
+
+        return;
+      }
+
+      preloadedURLs.add(url);
+
+      if (asset.kind === 'image') {
+        const image = new Image();
+
+        image.src = url;
+        await image.decode();
+      }
+    } catch {
+      // The preview will try again and show the error, if any, once the asset is shown
+    }
+  });
 };

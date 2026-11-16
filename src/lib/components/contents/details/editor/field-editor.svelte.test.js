@@ -2,6 +2,7 @@ import { createElement } from 'react';
 import { beforeAll, describe, expect, test, vi } from 'vitest';
 import { page, userEvent } from 'vitest/browser';
 
+import { editors } from '$lib/components/contents/details/fields';
 import { customFieldTypeRegistry } from '$lib/services/api/registries';
 import { initTestConfig } from '$lib/test/config';
 import { createMockDraft, renderWithDraft } from '$lib/test/draft';
@@ -49,7 +50,38 @@ const renderEditor = async ({
   return { container, draft };
 };
 
+/**
+ * Component that throws while it’s rendered, standing in for a field editor or preview with a bug.
+ * @throws {TypeError} Always.
+ */
+const BrokenComponent = () => {
+  throw new TypeError('boom');
+};
+
 describe('FieldEditor', () => {
+  test('shows a message in place of an editor that fails, keeping the header', async () => {
+    const { string } = editors;
+    const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    editors.string = /** @type {any} */ (BrokenComponent);
+
+    try {
+      const { container } = await renderEditor({
+        fieldConfig: { name: 'title', widget: 'string', label: 'Title' },
+      });
+
+      const group = page.getByRole('group', { name: /“.Title.” Field/ });
+
+      await expect
+        .element(group.getByRole('alert'))
+        .toMatchTextContent(/this field can’t be displayed\. .*boom/);
+      expect(container.querySelector('h4')).toHaveTextContent('Title');
+    } finally {
+      editors.string = string;
+      consoleErrorSpy.mockRestore();
+    }
+  });
+
   test('renders the editor for the field type under a labelled header', async () => {
     const { container } = await renderEditor({
       fieldConfig: { name: 'title', widget: 'string', label: 'Title', hint: 'Keep it *short*' },
@@ -67,6 +99,30 @@ describe('FieldEditor', () => {
     expect(container.querySelector('h4')).toHaveTextContent('Title');
     expect(container.querySelector('.required')).toHaveTextContent('*');
     expect(container.querySelector('.hint')?.innerHTML).toBe('Keep it <em>short</em>');
+  });
+
+  test('shows the label and hint in the locale of the pane', async () => {
+    /** @type {Field} */
+    const fieldConfig = {
+      name: 'title',
+      widget: 'string',
+      i18n: true,
+      label: 'Title',
+      label_localized: { ja: 'タイトル' },
+      hint: 'Keep it short',
+      hint_localized: { ja: '短くしてください' },
+    };
+
+    const { container } = await renderEditor({ fieldConfig, locale: 'ja', i18nEnabled: true });
+
+    await expect.element(page.getByRole('group', { name: /“.タイトル.” Field/ })).toBeVisible();
+    expect(container.querySelector('.hint')).toHaveTextContent('短くしてください');
+
+    // The default locale has no localized values, so the options themselves are used
+    const { container: container2 } = await renderEditor({ fieldConfig, i18nEnabled: true });
+
+    expect(container2.querySelector('h4')).toHaveTextContent('Title');
+    expect(container2.querySelector('.hint')).toHaveTextContent('Keep it short');
   });
 
   test('writes an edited value to the draft', async () => {
@@ -307,6 +363,60 @@ describe('FieldEditor', () => {
       .not.toHaveAttribute('aria-readonly', 'true');
   });
 
+  test('lets the `read_only` option unlock a UUID field, but not a locked one', async () => {
+    /** @type {Field} */
+    const fieldConfig = { name: 'id', widget: 'uuid', read_only: false };
+    const { container } = await renderEditor({ fieldConfig, values: { id: 'abc' } });
+
+    await expect
+      .element(/** @type {HTMLElement} */ (container.querySelector('[role="textbox"], input')))
+      .not.toHaveAttribute('aria-readonly', 'true');
+
+    const draft = createMockDraft({
+      fields: [fieldConfig],
+      i18n: { i18nEnabled: false, defaultLocale: 'en', allLocales: ['en'] },
+      values: { en: { id: 'def' } },
+    });
+
+    /** @type {any} */ (draft.collection).readonly = true;
+
+    const { container: locked } = await renderWithDraft(FieldEditor, {
+      draft,
+      props: { locale: 'en', keyPath: 'id', typedKeyPath: 'id', fieldConfig },
+    });
+
+    await expect
+      .element(/** @type {HTMLElement} */ (locked.querySelector('[role="textbox"], input')))
+      .toHaveAttribute('aria-readonly', 'true');
+  });
+
+  test.each([
+    [
+      'List',
+      { name: 'items', widget: 'list', fields: [{ name: 'name', widget: 'string' }] },
+      { 'items.0.name': 'Hello' },
+    ],
+    [
+      'Object',
+      { name: 'author', widget: 'object', fields: [{ name: 'name', widget: 'string' }] },
+      { 'author.name': 'Hello' },
+    ],
+  ])('locks the subfields of a read-only %s field', async (_type, config, values) => {
+    // A subfield can’t opt out of it
+    const fieldConfig = /** @type {Field} */ ({
+      ...config,
+      readonly: true,
+      fields: [{ name: 'name', widget: 'string', readonly: false }],
+      // The fork starts the expanders collapsed, which would hide the subfield; see `docs/fork.md`
+      collapsed: false,
+    });
+
+    await renderEditor({ fieldConfig, values });
+
+    await expect.element(page.getByRole('textbox')).toHaveValue('Hello');
+    await expect.element(page.getByRole('textbox')).toHaveAttribute('aria-readonly', 'true');
+  });
+
   // Upstream tells whether a field has changed by the state of its Revert command, which the fork
   // hides; see `docs/fork.md`. What’s left to check is that the field options menu is still
   // offered in a locale enabled later. `isFieldChanged` keeps its own coverage in
@@ -324,6 +434,8 @@ describe('FieldEditor', () => {
 
     const optionsButton = page.getByRole('button', { name: 'Show Field Options' });
 
+    // A value entered there can be cleared, but its changes can’t be reverted
+    await page.getByRole('textbox').fill('Konnichiwa');
     await optionsButton.click();
     await expect.element(page.getByRole('menuitem', { name: 'Clear' })).toBeVisible();
     expect(page.getByRole('menuitem', { name: 'Revert Changes' }).elements()).toHaveLength(0);
@@ -396,6 +508,60 @@ describe('FieldEditor', () => {
     expect(container.querySelector('.required')).toBeNull();
   });
 
+  test('hides a Number field numbered automatically on save while the entry is new', async () => {
+    const { container } = await renderEditor({
+      fieldConfig: { name: 'number', widget: 'number', auto_increment: true },
+      values: { number: null },
+    });
+
+    expect(container.querySelector('section')).toHaveAttribute('hidden');
+  });
+
+  test('shows a Number field numbered automatically on save as read-only once saved', async () => {
+    const { container } = await renderEditor({
+      fieldConfig: {
+        name: 'number',
+        label: 'Number',
+        widget: 'number',
+        required: true,
+        auto_increment: true,
+      },
+      values: { number: 42 },
+      draft: { isNew: false },
+    });
+
+    const group = page.getByRole('group', { name: /“.Number.” Field/ });
+
+    await expect.element(group).toBeVisible();
+    await expect.element(group.getByRole('spinbutton')).toHaveValue('42');
+    await expect.element(group.getByRole('spinbutton')).toHaveAttribute('aria-readonly', 'true');
+    // Nothing to fill in, so it isn’t marked as required
+    expect(container.querySelector('.required')).toBeNull();
+  });
+
+  test('ignores `auto_increment` on a Number field in a rich text editor component', async () => {
+    const draft = createMockDraft({
+      fields: [{ name: 'body', widget: 'richtext' }],
+      i18n: { i18nEnabled: false, defaultLocale: 'en', allLocales: ['en'] },
+      values: { en: {} },
+    });
+
+    await renderWithDraft(FieldEditor, {
+      draft,
+      props: {
+        locale: 'en',
+        keyPath: 'number',
+        typedKeyPath: 'number',
+        fieldConfig: { name: 'number', label: 'Number', widget: 'number', auto_increment: true },
+        context: 'rich-text-editor-component',
+        valueStoreKey: 'extraValues',
+      },
+    });
+
+    await expect.element(page.getByRole('spinbutton')).toBeVisible();
+    await expect.element(page.getByRole('spinbutton')).not.toHaveAttribute('aria-readonly', 'true');
+  });
+
   test('ignores `auto_now` on a DateTime field in a rich text editor component', async () => {
     const draft = createMockDraft({
       fields: [{ name: 'body', widget: 'richtext' }],
@@ -411,10 +577,44 @@ describe('FieldEditor', () => {
         typedKeyPath: 'published',
         fieldConfig: { name: 'published', label: 'Published', widget: 'datetime', auto_now: true },
         context: 'rich-text-editor-component',
+        valueStoreKey: 'extraValues',
       },
     });
 
     // The field isn’t set on save there, so it stays an editable input, shown even in a new entry
+    await expect.element(page.getByRole('textbox')).toBeVisible();
+    await expect.element(page.getByRole('textbox')).not.toHaveAttribute('aria-readonly', 'true');
+  });
+
+  test('ignores `auto_now` under a single-subfield List in a rich text editor component', async () => {
+    const draft = createMockDraft({
+      fields: [{ name: 'body', widget: 'richtext' }],
+      i18n: { i18nEnabled: false, defaultLocale: 'en', allLocales: ['en'] },
+      values: { en: {} },
+      draft: { extraValues: { en: { 'body:c1:dates.0': '' } } },
+    });
+
+    // The List gives its only subfield a context of its own, which mustn’t hide the component
+    await renderWithDraft(FieldEditor, {
+      draft,
+      props: {
+        locale: 'en',
+        keyPath: 'body:c1:dates',
+        typedKeyPath: 'body:c1:dates',
+        fieldConfig: {
+          name: 'dates',
+          label: 'Dates',
+          widget: 'list',
+          field: { name: 'date', label: 'Date', widget: 'datetime', auto_now: true },
+          // The fork starts the expanders collapsed, which would hide the subfield; see
+          // `docs/fork.md`
+          collapsed: false,
+        },
+        context: 'rich-text-editor-component',
+        valueStoreKey: 'extraValues',
+      },
+    });
+
     await expect.element(page.getByRole('textbox')).toBeVisible();
     await expect.element(page.getByRole('textbox')).not.toHaveAttribute('aria-readonly', 'true');
   });
@@ -621,6 +821,7 @@ describe('FieldEditor (nested in a duplicated field)', () => {
         typedKeyPath: 'caption',
         fieldConfig: { name: 'caption', widget: 'string', i18n: 'duplicate' },
         context: 'rich-text-editor-component',
+        valueStoreKey: 'extraValues',
       },
     });
 
@@ -631,6 +832,37 @@ describe('FieldEditor (nested in a duplicated field)', () => {
     await renderSubField(venueField.fields[2]);
 
     await expect.element(page.getByRole('checkbox', { name: /Add\W+address/ })).toBeDisabled();
+  });
+
+  // The parent is read-only there, but only because its value follows the default locale
+  test('lets a translatable subfield of a duplicated field be edited within it', async () => {
+    const draft = createMockDraft({
+      fields: [venueField],
+      i18n: { i18nEnabled: true, defaultLocale: 'en', allLocales: ['en', 'ja'] },
+      values: {
+        en: { 'venue.name': 'Hall', 'venue.note': 'Big' },
+        ja: { 'venue.name': 'Hall', 'venue.note': '大' },
+      },
+    });
+
+    await renderWithDraft(FieldEditor, {
+      draft,
+      props: {
+        locale: 'ja',
+        keyPath: 'venue',
+        typedKeyPath: 'venue',
+        // The fork starts the expanders collapsed, which would hide the subfields; see
+        // `docs/fork.md`
+        fieldConfig: { ...venueField, collapsed: false },
+      },
+    });
+
+    const name = page.getByRole('group', { name: /“.name.” Field/ }).getByRole('textbox');
+    const note = page.getByRole('group', { name: /“.note.” Field/ }).getByRole('textbox');
+
+    await expect.element(name).toHaveAttribute('aria-readonly', 'true');
+    await expect.element(note).toHaveValue('大');
+    await expect.element(note).not.toHaveAttribute('aria-readonly', 'true');
   });
 
   test('lets a subfield with its own translatable option be edited in another locale', async () => {

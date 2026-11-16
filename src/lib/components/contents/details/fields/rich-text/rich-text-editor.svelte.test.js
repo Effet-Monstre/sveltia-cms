@@ -6,7 +6,8 @@ import { globalAssetFolder } from '$lib/services/assets/folders';
 import { cmsConfig } from '$lib/services/config';
 import { trackPendingFieldUpdate } from '$lib/services/contents/editor/pending';
 import { createMockImageFile, initTestConfig } from '$lib/test/config';
-import { createMockDraft, renderWithDraft } from '$lib/test/draft';
+import { createMockDraft } from '$lib/test/draft';
+import { renderFieldEditor } from '$lib/test/field.svelte';
 
 import RichTextEditor from './rich-text-editor.svelte';
 
@@ -39,17 +40,6 @@ const renderEditor = async (
   /** @type {RichTextField} */
   const fieldConfig = { name: 'body', widget: 'richtext', ...config };
 
-  const props = $state({
-    locale: 'en',
-    keyPath: 'body',
-    typedKeyPath: 'body',
-    fieldId: 'body',
-    fieldLabel: 'Body',
-    fieldConfig,
-    currentValue,
-    ...extra,
-  });
-
   const draft = createMockDraft({
     collectionName,
     fields: [fieldConfig],
@@ -57,9 +47,12 @@ const renderEditor = async (
     values: { en: { body: currentValue } },
   });
 
-  const { container } = await renderWithDraft(RichTextEditor, {
+  const { props, container } = await renderFieldEditor(RichTextEditor, {
+    fieldConfig,
+    fieldLabel: 'Body',
+    currentValue,
+    props: extra,
     draft,
-    props,
     // The editor is always rendered within a field editor
     context: {
       'field-editor': { parentComponentNames: [], valueStoreKey: 'currentValues', ...context },
@@ -82,6 +75,35 @@ describe('RichTextEditor', () => {
     await expect.poll(() => editor.element().querySelector('h1')?.textContent).toBe('Title');
     expect(editor.element().querySelector('strong')).toHaveTextContent('bold');
     await expect.element(page.getByRole('button', { name: 'Bold' })).toBeVisible();
+  });
+
+  test('lets each paragraph take the direction of its own text without i18n', async () => {
+    // An Arabic paragraph, “Hello”, followed by an English one
+    const value = 'مرحبا\n\nHello'; // cspell:disable-line
+    const { container } = await renderEditor(value, {}, { props: { locale: '_default' } });
+    const editor = page.getByRole('textbox');
+
+    await expect
+      .poll(() =>
+        [...editor.element().querySelectorAll('p')].map((p) => getComputedStyle(p).direction),
+      )
+      .toEqual(['rtl', 'ltr']);
+
+    const textarea = /** @type {HTMLTextAreaElement} */ (container.querySelector('textarea'));
+
+    // The hidden `<textarea>` gets the value on every change, which `dir="auto"` would make slow
+    expect(textarea.dir).toBe('');
+  });
+
+  test('applies the direction of the locale', async () => {
+    const { container } = await renderEditor('Hello', {}, { props: { locale: 'ar' } });
+    const editor = page.getByRole('textbox');
+
+    await expect.poll(() => editor.element().getAttribute('dir')).toBe('rtl');
+
+    const textarea = /** @type {HTMLTextAreaElement} */ (container.querySelector('textarea'));
+
+    expect(textarea.dir).toBe('rtl');
   });
 
   test('stores the edited content as Markdown', async () => {
@@ -170,9 +192,46 @@ describe('RichTextEditor', () => {
       minimal: true,
     });
 
-    expect(container.querySelector('.wrapper')).toHaveClass('minimal');
     await expect.element(page.getByRole('button', { name: 'Bold' })).toBeVisible();
+    // Sveltia UI makes the editor compact
+    expect(container.querySelector('.sui.text-editor')).toHaveClass('minimal');
     expect(page.getByRole('button', { name: 'Italic' }).elements()).toHaveLength(0);
+  });
+
+  test('keeps a single-line field on one line, with the inline buttons only', async () => {
+    const { props, container } = await renderEditor('One', {
+      multiline: false,
+      buttons: ['bold', 'heading-one', 'quote'],
+    });
+
+    const editor = page.getByRole('textbox');
+
+    await expect.element(editor).toHaveTextContent('One');
+    expect(container.querySelector('.sui.text-editor')).toHaveClass('single-line');
+    await expect.element(editor).toHaveAttribute('aria-multiline', 'false');
+    await expect.element(page.getByRole('button', { name: 'Bold' })).toBeVisible();
+    expect(page.getByRole('button', { name: 'Show Text Style Options' }).elements()).toHaveLength(
+      0,
+    );
+
+    await userEvent.click(editor);
+    await userEvent.keyboard('{End}{Enter} two');
+    await expect.poll(() => props.currentValue).toBe('One two');
+  });
+
+  test('takes the compact and single-line options from the field defaults', async () => {
+    cmsConfig.current = /** @type {any} */ ({
+      field_defaults: { richtext: { minimal: true, multiline: false } },
+    });
+
+    const { container } = await renderEditor('One');
+
+    await expect.element(page.getByRole('textbox')).toHaveTextContent('One');
+
+    const wrapper = container.querySelector('.sui.text-editor');
+
+    expect(wrapper).toHaveClass('minimal');
+    expect(wrapper).toHaveClass('single-line');
   });
 
   test('tracks a pending update while typing', async () => {
@@ -321,32 +380,141 @@ describe('RichTextEditor', () => {
     await expect.poll(() => props.currentValue).not.toContain('plain');
   });
 
-  test('offers no components when nested ones are disabled by the parent field', async () => {
+  test('inserts a pasted image within the paragraph of a single-line field', async () => {
+    const { props } = await renderEditor('Hello', { multiline: false });
+    const editor = page.getByRole('textbox');
+
+    await expect.poll(() => editor.element().textContent).toBe('Hello');
+    await userEvent.click(editor);
+    await userEvent.keyboard('{End}');
+
+    const dataTransfer = new DataTransfer();
+
+    dataTransfer.items.add(await createMockImageFile({ name: 'pasted.png' }));
+    editor.element().dispatchEvent(
+      new ClipboardEvent('paste', {
+        bubbles: true,
+        cancelable: true,
+        clipboardData: dataTransfer,
+      }),
+    );
+
+    await expect.poll(() => props.currentValue).toMatch(/^Hello!\[\]\(blob:[^)]+\)$/);
+    expect(editor.element().querySelectorAll('p')).toHaveLength(1);
+  });
+
+  test('inserts no dropped or pasted image into a read-only field', async () => {
     await initTestConfig({
       collections: [
         {
-          name: 'nested-off',
+          name: 'posts',
           label: 'Posts',
           folder: 'content/posts',
-          fields: [{ name: 'body', widget: 'richtext', allow_nested_components: false }],
+          fields: [{ name: 'body', widget: 'richtext' }],
         },
       ],
     });
 
-    await renderEditor(
-      'Hi',
-      {},
-      {
-        // The field config is cached per collection, so each test uses its own one
-        collectionName: 'nested-off',
-        context: { fieldContext: 'rich-text-editor-component', parentComponentNames: ['card'] },
-        props: { keyPath: 'body:c1:content', typedKeyPath: 'body:c1:content' },
-      },
-    );
+    const { props, draft } = await renderEditor('Hello', {}, { props: { readonly: true } });
+    const editor = page.getByRole('textbox');
 
-    await expect.element(page.getByRole('button', { name: 'Bold' })).toBeVisible();
-    expect(page.getByRole('button', { name: /Insert/ }).elements()).toHaveLength(0);
+    await expect.poll(() => editor.element().textContent).toBe('Hello');
+
+    const dropped = new DataTransfer();
+
+    dropped.items.add(await createMockImageFile({ name: 'photo.png' }));
+    editor
+      .element()
+      .dispatchEvent(
+        new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: dropped }),
+      );
+
+    const pasted = new DataTransfer();
+
+    pasted.items.add(await createMockImageFile({ name: 'pasted.png' }));
+    editor
+      .element()
+      .dispatchEvent(
+        new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: pasted }),
+      );
+
+    await new Promise((resolve) => {
+      setTimeout(resolve, 300);
+    });
+    expect(props.currentValue).toBe('Hello');
+    expect(Object.keys(draft.files)).toHaveLength(0);
   });
+
+  test('locks the components in a read-only field', async () => {
+    await initTestConfig({
+      collections: [
+        {
+          name: 'posts',
+          label: 'Posts',
+          folder: 'content/posts',
+          fields: [{ name: 'body', widget: 'richtext' }],
+        },
+      ],
+    });
+
+    const { props } = await renderEditor('![Cat](/cat.png)', {}, { props: { readonly: true } });
+    const component = page.getByRole('group', { name: 'Image', exact: true });
+
+    // The component learns that the field is read-only once it’s in place
+    await expect.element(component).toBeVisible();
+    await expect
+      .poll(() => component.getByRole('button', { name: 'Remove' }).elements())
+      .toEqual([]);
+
+    // The component isn’t removed with the Backspace key either
+    component
+      .element()
+      .dispatchEvent(new KeyboardEvent('keydown', { key: 'Backspace', bubbles: true }));
+    await new Promise((resolve) => {
+      setTimeout(resolve, 300);
+    });
+    expect(props.currentValue).toBe('![Cat](/cat.png)');
+  });
+
+  // A List with a single subfield gives it a context of its own, which mustn’t hide the component
+  test.each([
+    ['rich-text-editor-component', 'nested-off', 'body:c1:content', 'body:c1:content'],
+    ['single-subfield-list-field', 'nested-off-list', 'body:c1:notes.0', 'body:c1:notes.*'],
+  ])(
+    'offers no components when nested ones are disabled by the parent field (%s)',
+    async (fieldContext, collectionName, keyPath, typedKeyPath) => {
+      await initTestConfig({
+        collections: [
+          {
+            name: collectionName,
+            label: 'Posts',
+            folder: 'content/posts',
+            fields: [{ name: 'body', widget: 'richtext', allow_nested_components: false }],
+          },
+        ],
+      });
+
+      await renderEditor(
+        'Hi',
+        {},
+        {
+          // The field config is cached per collection, so each test uses its own one
+          collectionName,
+          context: {
+            fieldContext,
+            parentComponentNames: ['card'],
+            valueStoreKey: 'extraValues',
+          },
+          props: { keyPath, typedKeyPath },
+        },
+      );
+
+      await expect.element(page.getByRole('button', { name: 'Bold' })).toBeVisible();
+      // The fork enables the Insert Table button by default, which is a toolbar button rather than
+      // an editor component, so it isn’t counted here; see `docs/fork.md`
+      expect(page.getByRole('button', { name: /^Insert$|Image/ }).elements()).toHaveLength(0);
+    },
+  );
 
   test('leaves the current component out of the nested ones', async () => {
     await initTestConfig({
@@ -370,6 +538,7 @@ describe('RichTextEditor', () => {
         context: {
           fieldContext: 'rich-text-editor-component',
           parentComponentNames: ['linked-image'],
+          valueStoreKey: 'extraValues',
         },
         props: { keyPath: 'body:c1:content', typedKeyPath: 'body:c1:content' },
       },
@@ -429,6 +598,7 @@ describe('RichTextEditor', () => {
           context: {
             fieldContext: 'rich-text-editor-component',
             parentComponentNames: ['x-youtube'],
+            valueStoreKey: 'extraValues',
           },
           props: { keyPath: 'body:c1:content', typedKeyPath: 'body:c1:content' },
         },
@@ -514,5 +684,65 @@ describe('RichTextEditor', () => {
     await expect
       .poll(() => props.currentValue)
       .toContain('![Photo](https://example.com/photo.png)');
+  });
+
+  test('edits and inserts a pattern-based inline component', async () => {
+    const onEdit = vi.fn(async () => ({ page: 'About' }));
+    const onInsert = vi.fn(async () => ({ page: 'Now' }));
+
+    customComponentRegistry.set('wikilink', {
+      id: 'wikilink',
+      label: 'Wikilink',
+      type: 'inline',
+      pattern: /\[\[(?<page>[^\]]+)\]\]/,
+      trigger: '[[',
+      // eslint-disable-next-line jsdoc/require-jsdoc
+      toInline: ({ page: name = '' }) => `[[${name}]]`,
+      // eslint-disable-next-line jsdoc/require-jsdoc
+      toPreview: ({ page: name = '' }) => `<a href="/${name}">${name}</a>`,
+      onEdit,
+      onInsert,
+    });
+
+    try {
+      const { props } = await renderEditor('See [[Home]] now');
+      const editor = page.getByRole('textbox');
+      // The button is named after its preview, which changes, and described with the label
+      const wikilink = editor.getByTitle('Wikilink');
+
+      await expect.element(wikilink).toHaveTextContent('Home');
+
+      // Clicking the component edits its data
+      await wikilink.click();
+      await expect.element(wikilink).toHaveTextContent('About');
+      expect(onEdit).toHaveBeenCalledExactlyOnceWith({ data: { page: 'Home' } });
+      await expect.poll(() => props.currentValue).toBe('See [[About]] now');
+
+      // Select the last word, and let the editor pick up the selection
+      const textNode = /** @type {Text} */ (
+        [...editor.element().querySelectorAll('span[data-lexical-text]')].at(-1)?.firstChild
+      );
+
+      const range = document.createRange();
+
+      range.setStart(textNode, 1);
+      range.setEnd(textNode, 4);
+      window.getSelection()?.removeAllRanges();
+      window.getSelection()?.addRange(range);
+      document.dispatchEvent(new Event('selectionchange'));
+      await new Promise((resolve) => {
+        requestAnimationFrame(resolve);
+      });
+
+      // The component inserted from the toolbar replaces the selected text
+      await page.getByRole('button', { name: 'Insert' }).click();
+      await page.getByRole('menuitem', { name: 'Wikilink' }).click();
+      await vi.waitFor(() =>
+        expect(onInsert).toHaveBeenCalledExactlyOnceWith({ selectedText: 'now' }),
+      );
+      await expect.poll(() => props.currentValue).toBe('See [[About]] [[Now]]');
+    } finally {
+      customComponentRegistry.delete('wikilink');
+    }
   });
 });

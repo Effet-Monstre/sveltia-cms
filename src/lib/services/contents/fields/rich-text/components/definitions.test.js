@@ -15,19 +15,7 @@ import {
 } from './definitions.js';
 
 // Mock dependencies
-vi.mock('@sveltia/i18n', () => ({
-  _: vi.fn((key) => key),
-}));
-
-vi.mock('./utils.js', () => ({
-  encodeQuotes: vi.fn((str) => str.replace(/"/g, '&quot;')),
-  replaceQuotes: vi.fn((str) => str.replace(/"/g, "'")),
-}));
-
-vi.mock('$lib/services/contents/fields/rich-text/constants', () => ({
-  IMAGE_OR_LINKED_IMAGE_REGEX: /!\[([^\]]*)\]\(([^)]+)\)/g,
-  IMAGE_REGEX: /!\[([^\]]*)\]\(([^)]+)\)/,
-}));
+vi.mock('@sveltia/i18n', async () => (await import('$lib/test/i18n')).createI18nMock());
 
 describe('definitions', () => {
   beforeEach(() => {
@@ -79,7 +67,7 @@ describe('definitions', () => {
       expect(IMAGE_COMPONENT.id).toBe('image');
       expect(IMAGE_COMPONENT.label).toBe('Image');
       expect(Array.isArray(IMAGE_COMPONENT.fields)).toBe(true);
-      expect(IMAGE_COMPONENT.fields).toHaveLength(3);
+      expect(IMAGE_COMPONENT.fields).toHaveLength(4);
       expect(typeof IMAGE_COMPONENT.toBlock).toBe('function');
       expect(typeof IMAGE_COMPONENT.toPreview).toBe('function');
     });
@@ -136,6 +124,72 @@ describe('definitions', () => {
       });
     });
 
+    describe('fromBlock method', () => {
+      it('should unescape the title', () => {
+        const match = { groups: { src: '/a.png', alt: 'A', title: 'T \\"q\\" C:\\d' } };
+
+        expect(IMAGE_COMPONENT.fromBlock(match)).toEqual({
+          src: '/a.png',
+          alt: 'A',
+          title: 'T "q" C:\\d',
+        });
+      });
+
+      it('should read a title in single quotes', () => {
+        const groups = { src: '/a.png', alt: 'A [1]', singleQuotedTitle: "It\\'s" };
+
+        expect(IMAGE_COMPONENT.fromBlock({ groups })).toEqual({
+          src: '/a.png',
+          alt: 'A [1]',
+          title: "It's",
+        });
+        // It’s written back in double quotes, with the brackets in the alt text escaped
+        expect(IMAGE_COMPONENT.toBlock({ src: '/a.png', alt: 'A [1]', title: "It's" })).toBe(
+          '![A \\[1\\]](/a.png "It\'s")',
+        );
+      });
+
+      it('should keep alt text with brackets or backslashes across a round trip', async () => {
+        const { IMAGE_REGEX } = await vi.importActual(
+          '$lib/services/contents/fields/rich-text/constants',
+        );
+
+        [
+          ['smile :]', '![smile :\\]](/a.png)'],
+          ['Figure [1', '![Figure \\[1](/a.png)'],
+          ['C:\\', '![C:\\\\](/a.png)'],
+          ['a\\]b', '![a\\\\\\]b](/a.png)'],
+          ['C:\\Users', '![C:\\Users](/a.png)'],
+          ['A [1]', '![A \\[1\\]](/a.png)'],
+        ].forEach(([alt, markdown]) => {
+          expect(IMAGE_COMPONENT.toBlock({ src: '/a.png', alt })).toBe(markdown);
+          expect(IMAGE_COMPONENT.fromBlock(markdown.match(IMAGE_REGEX)).alt).toBe(alt);
+        });
+      });
+
+      it('should handle a missing title or missing groups', () => {
+        expect(IMAGE_COMPONENT.fromBlock({ groups: { src: '/a.png', alt: '' } })).toEqual({
+          src: '/a.png',
+          alt: '',
+          title: undefined,
+        });
+        expect(IMAGE_COMPONENT.fromBlock({ groups: undefined })).toEqual({
+          src: undefined,
+          alt: undefined,
+          title: undefined,
+        });
+      });
+
+      it('should keep a title with quotes across a round trip', () => {
+        const title = 'T "q" and \\" and end\\';
+        const markdown = '![A](/a.png "T \\"q\\" and \\\\\\" and end\\\\")';
+        const groups = { src: '/a.png', alt: 'A', title: markdown.slice(13, -2) };
+
+        expect(IMAGE_COMPONENT.toBlock({ src: '/a.png', alt: 'A', title })).toBe(markdown);
+        expect(IMAGE_COMPONENT.fromBlock({ groups }).title).toBe(title);
+      });
+    });
+
     describe('toPreview method', () => {
       it('should generate HTML for image with all properties', () => {
         const props = {
@@ -165,7 +219,7 @@ describe('definitions', () => {
       expect(LINKED_IMAGE_COMPONENT.id).toBe('linked-image');
       expect(LINKED_IMAGE_COMPONENT.label).toBe('Image');
       expect(Array.isArray(LINKED_IMAGE_COMPONENT.fields)).toBe(true);
-      expect(LINKED_IMAGE_COMPONENT.fields).toHaveLength(4);
+      expect(LINKED_IMAGE_COMPONENT.fields).toHaveLength(5);
       expect(typeof LINKED_IMAGE_COMPONENT.toBlock).toBe('function');
       expect(typeof LINKED_IMAGE_COMPONENT.toPreview).toBe('function');
       expect(typeof LINKED_IMAGE_COMPONENT.fromBlock).toBe('function');
@@ -243,6 +297,14 @@ describe('definitions', () => {
       });
     });
 
+    describe('toBlock method with quotes', () => {
+      it('should escape the double quotes in the title', () => {
+        const props = { src: '/a.png', alt: 'A', title: 'T "q"', link: '/b' };
+
+        expect(LINKED_IMAGE_COMPONENT.toBlock(props)).toBe('[![A](/a.png "T \\"q\\"")](/b)');
+      });
+    });
+
     describe('toPreview method', () => {
       it('should generate HTML for linked image', () => {
         const props = {
@@ -295,6 +357,40 @@ describe('definitions', () => {
         });
       });
 
+      it('should read a title in single quotes', () => {
+        expect(
+          LINKED_IMAGE_COMPONENT.fromBlock({ groups: { src: '/a.png', singleQuotedTitle: 'T' } })
+            .title,
+        ).toBe('T');
+        expect(
+          LINKED_IMAGE_COMPONENT.fromBlock({
+            groups: { src2: '/a.png', singleQuotedTitle2: "It\\'s", link: '/b' },
+          }).title,
+        ).toBe("It's");
+      });
+
+      it('should unescape the title', () => {
+        const match = { groups: { src2: '/a.png', alt2: 'A', title2: 'T \\"q\\"', link: '/b' } };
+
+        expect(LINKED_IMAGE_COMPONENT.fromBlock(match).title).toBe('T "q"');
+      });
+
+      it('should keep alt text with brackets or backslashes across a round trip', async () => {
+        const { IMAGE_OR_LINKED_IMAGE_REGEX } = await vi.importActual(
+          '$lib/services/contents/fields/rich-text/constants',
+        );
+
+        ['smile :]', 'Figure [1', 'C:\\', ' [a] '].forEach((alt) => {
+          const markdown = LINKED_IMAGE_COMPONENT.toBlock({ src: '/a.png', alt, link: '/b' });
+
+          const props = LINKED_IMAGE_COMPONENT.fromBlock(
+            markdown.match(IMAGE_OR_LINKED_IMAGE_REGEX),
+          );
+
+          expect(props).toEqual({ src: '/a.png', alt: alt.trim(), title: '', link: '/b' });
+        });
+      });
+
       it('should handle missing groups', () => {
         const match = { groups: undefined };
         const result = LINKED_IMAGE_COMPONENT.fromBlock(match);
@@ -337,7 +433,7 @@ describe('definitions', () => {
     });
 
     it('should read an image from an element, with decoded values', () => {
-      expect(IMAGE_COMPONENT.htmlSelector).toBe('img');
+      expect(IMAGE_COMPONENT.htmlSelector).toBe('figure, img');
       expect(
         IMAGE_COMPONENT.fromBlockHTML(
           parse('<img alt=\'x > &amp; y\' src="/a.png" class="wide" title="T&nbsp;!">'),
@@ -374,7 +470,7 @@ describe('definitions', () => {
     });
 
     it('should read a linked image or a bare image from an element', () => {
-      expect(LINKED_IMAGE_COMPONENT.htmlSelector).toBe('a:has(> img:only-child), img');
+      expect(LINKED_IMAGE_COMPONENT.htmlSelector).toBe('figure, a:has(> img:only-child), img');
       expect(
         LINKED_IMAGE_COMPONENT.fromBlockHTML(
           parse('<a href="/?a=1&amp;b=2" target="_blank">\n  <img src="a.png" alt="A">\n</a>'),
@@ -409,6 +505,199 @@ describe('definitions', () => {
           parse(LINKED_IMAGE_COMPONENT.toBlockHTML(props).outerHTML),
         ),
       ).toEqual(props);
+    });
+  });
+
+  describe('captions', () => {
+    const parse = (html) => {
+      const template = document.createElement('template');
+
+      template.innerHTML = html;
+
+      return template.content.firstElementChild;
+    };
+
+    const CAPTION = 'Photo by <a href="https://example.com/?a=1&amp;b=2">Jane</a>';
+
+    it('should have a Caption field last', () => {
+      expect(IMAGE_COMPONENT.fields.map(({ name }) => name)).toEqual([
+        'src',
+        'alt',
+        'title',
+        'caption',
+      ]);
+      expect(LINKED_IMAGE_COMPONENT.fields.map(({ name }) => name)).toEqual([
+        'src',
+        'alt',
+        'title',
+        'link',
+        'caption',
+      ]);
+      getBuiltInComponentDefs().forEach(({ fields }) => {
+        expect(fields.at(-1)).toEqual({
+          name: 'caption',
+          label: 'editor_components.caption',
+          required: false,
+        });
+      });
+    });
+
+    it('should write an image with a caption as a figure', () => {
+      expect(
+        IMAGE_COMPONENT.toBlock({ src: 'a.png', alt: 'x > "y"', title: 'T', caption: CAPTION }),
+      ).toBe(
+        '<figure><img src="a.png" alt="x > &quot;y&quot;" title="T">' +
+          `<figcaption>${CAPTION}</figcaption></figure>`,
+      );
+      // A line break would end the HTML block
+      expect(IMAGE_COMPONENT.toBlock({ src: 'a.png', caption: 'A\n  B' })).toBe(
+        '<figure><img src="a.png" alt=""><figcaption>A B</figcaption></figure>',
+      );
+      // Nothing without a source, and the preview shows the empty image as usual
+      expect(IMAGE_COMPONENT.toBlock({ caption: 'A' })).toBe('');
+      expect(IMAGE_COMPONENT.toPreview({ caption: 'A' })).toBe('<img src="" alt="" title="">');
+      expect(LINKED_IMAGE_COMPONENT.toPreview({ caption: 'A' })).toBe(
+        '<img src="" alt="" title="">',
+      );
+      expect(IMAGE_COMPONENT.toPreview({ src: 'a.png', caption: 'A' })).toBe(
+        '<figure><img src="a.png" alt=""><figcaption>A</figcaption></figure>',
+      );
+    });
+
+    it('should write a linked image with a caption as a figure', () => {
+      expect(LINKED_IMAGE_COMPONENT.toBlock({ src: 'a.png', link: '/x?a&b', caption: 'A' })).toBe(
+        '<figure><a href="/x?a&amp;b"><img src="a.png" alt=""></a><figcaption>A</figcaption></figure>',
+      );
+      expect(LINKED_IMAGE_COMPONENT.toBlock({ src: 'a.png', caption: 'A' })).toBe(
+        '<figure><img src="a.png" alt=""><figcaption>A</figcaption></figure>',
+      );
+      expect(LINKED_IMAGE_COMPONENT.toBlock({ link: '/x', caption: 'A' })).toBe('');
+      expect(LINKED_IMAGE_COMPONENT.toPreview({ src: 'a.png', link: '/x', caption: 'A' })).toBe(
+        '<figure><a href="/x"><img src="a.png" alt=""></a><figcaption>A</figcaption></figure>',
+      );
+    });
+
+    it('should round-trip a figure in Markdown', () => {
+      const props = { src: 'a b.png', alt: 'x > "y" & z', title: 'T', caption: CAPTION };
+      const markdown = IMAGE_COMPONENT.toBlock(props);
+      const match = markdown.match(IMAGE_COMPONENT.pattern);
+
+      expect(match[0]).toBe(markdown);
+      expect(IMAGE_COMPONENT.fromBlock(match)).toEqual({ ...props, alt: 'x > "y" & z' });
+
+      const linkedProps = { ...props, link: 'https://example.com/' };
+      const linkedMarkdown = LINKED_IMAGE_COMPONENT.toBlock(linkedProps);
+      const linkedMatch = linkedMarkdown.match(LINKED_IMAGE_COMPONENT.pattern);
+
+      expect(linkedMatch[0]).toBe(linkedMarkdown);
+      expect(LINKED_IMAGE_COMPONENT.fromBlock(linkedMatch)).toEqual(linkedProps);
+
+      // A figure without a link
+      expect(
+        LINKED_IMAGE_COMPONENT.fromBlock(
+          '<figure><img src="a.png" alt="A"><figcaption>C</figcaption></figure>'.match(
+            LINKED_IMAGE_COMPONENT.pattern,
+          ),
+        ),
+      ).toEqual({ src: 'a.png', alt: 'A', title: '', caption: 'C', link: '' });
+    });
+
+    it('should keep the caption of a figure in Markdown as written', () => {
+      const markdown =
+        '<figure><img src="a.png" alt=""><figcaption> Tom & Jerry &copy; <b>x</figcaption></figure>';
+
+      const props = IMAGE_COMPONENT.fromBlock(markdown.match(IMAGE_COMPONENT.pattern));
+
+      expect(props.caption).toBe(' Tom & Jerry &copy; <b>x');
+      expect(IMAGE_COMPONENT.toBlock(props)).toBe(markdown);
+    });
+
+    it('should not take a figure the components don’t write for an image with a caption', () => {
+      // A linked image is only matched by the linked image component
+      expect(
+        '<figure><a href="/x"><img src="a.png"></a><figcaption>C</figcaption></figure>'.match(
+          IMAGE_COMPONENT.pattern,
+        )?.groups.figureContent,
+      ).toBeUndefined();
+      // A caption can’t close the figure, which would end the caption early
+      expect(
+        '<figure><img src="a.png"><figcaption>a</figure>b</figcaption></figure>'.match(
+          IMAGE_COMPONENT.pattern,
+        ),
+      ).toBeNull();
+      // A figure spanning multiple lines is left as HTML
+      expect(
+        '<figure><img src="a.png">\n<figcaption>C</figcaption></figure>'.match(
+          IMAGE_COMPONENT.pattern,
+        ),
+      ).toBeNull();
+    });
+
+    it('should write an image with a caption as a figure element', () => {
+      expect(IMAGE_COMPONENT.toBlockHTML({ src: 'a.png', caption: CAPTION }).outerHTML).toBe(
+        `<figure><img src="a.png" alt=""><figcaption>${CAPTION}</figcaption></figure>`,
+      );
+      expect(
+        LINKED_IMAGE_COMPONENT.toBlockHTML({ src: 'a.png', link: '/x', caption: 'A' }).outerHTML,
+      ).toBe(
+        '<figure><a href="/x"><img src="a.png" alt=""></a><figcaption>A</figcaption></figure>',
+      );
+      expect(LINKED_IMAGE_COMPONENT.toBlockHTML({ src: 'a.png', caption: 'A' }).outerHTML).toBe(
+        '<figure><img src="a.png" alt=""><figcaption>A</figcaption></figure>',
+      );
+      // The caption is sanitized
+      expect(
+        IMAGE_COMPONENT.toBlockHTML({ src: 'a.png', caption: 'A<img src=x onerror=alert(1)>' })
+          .outerHTML,
+      ).toBe('<figure><img src="a.png" alt=""><figcaption>A<img src="x"></figcaption></figure>');
+    });
+
+    it('should read an image with a caption from a figure element', () => {
+      expect(
+        IMAGE_COMPONENT.fromBlockHTML(
+          parse(
+            '<figure>\n  <img src="a.png" alt="A">\n' +
+              `  <figcaption> ${CAPTION} </figcaption>\n</figure>`,
+          ),
+        ),
+      ).toEqual({ src: 'a.png', alt: 'A', title: '', caption: CAPTION });
+      expect(
+        LINKED_IMAGE_COMPONENT.fromBlockHTML(
+          parse('<figure><a href="/x"><img src="a.png"></a><figcaption>C</figcaption></figure>'),
+        ),
+      ).toEqual({ src: 'a.png', alt: '', title: '', caption: 'C', link: '/x' });
+      expect(
+        LINKED_IMAGE_COMPONENT.fromBlockHTML(
+          parse('<figure><a><img src="a.png"></a><figcaption>C</figcaption></figure>'),
+        ),
+      ).toEqual({ src: 'a.png', alt: '', title: '', caption: 'C', link: '' });
+      expect(
+        LINKED_IMAGE_COMPONENT.fromBlockHTML(
+          parse('<figure><img src="a.png"><figcaption>C</figcaption></figure>'),
+        ),
+      ).toEqual({ src: 'a.png', alt: '', title: '', caption: 'C', link: '' });
+    });
+
+    it('should not take any other figure for an image with a caption', () => {
+      [
+        '<figure></figure>',
+        '<figure><img src="a.png"></figure>',
+        '<figure><img src="a.png"><p>C</p></figure>',
+        '<figure><img src="a.png"><figcaption>C</figcaption><p>D</p></figure>',
+        // Text outside the image and the caption would be lost
+        '<figure>Note: <img src="a.png"><figcaption>C</figcaption></figure>',
+        '<figure><pre>x</pre><figcaption>C</figcaption></figure>',
+        '<figure><a href="/x">See <img src="a.png"></a><figcaption>C</figcaption></figure>',
+        '<figure><a href="/x"><img src="a.png"><img src="b.png"></a><figcaption>C</figcaption></figure>',
+      ].forEach((html) => {
+        expect(LINKED_IMAGE_COMPONENT.fromBlockHTML(parse(html))).toBeUndefined();
+      });
+      // A linked image is only taken by the linked image component
+      expect(
+        IMAGE_COMPONENT.fromBlockHTML(
+          parse('<figure><a href="/x"><img src="a.png"></a><figcaption>C</figcaption></figure>'),
+        ),
+      ).toBeUndefined();
     });
   });
 
@@ -521,6 +810,32 @@ describe('definitions', () => {
       expect(result?.pattern).toEqual(/custom/);
       expect(result?.toBlock).toBe(customComponent.toBlock);
       expect(result?.toPreview).toBe(customComponent.toPreview);
+    });
+
+    it('should resolve a pattern-based inline component', () => {
+      const onInsert = vi.fn();
+
+      customComponentRegistry.set('wikilink', {
+        id: 'wikilink',
+        type: 'inline',
+        pattern: /^\[\[(.+?)\]\]/,
+        trigger: '[[',
+        fromInline: (match) => ({ page: match[1] }),
+        toInline: ({ page = '' }) => `[[${page}]]`,
+        onInsert,
+      });
+
+      const result = getComponentDef('wikilink');
+
+      expect(result?.id).toBe('x-wikilink');
+      expect(result?.label).toBe('wikilink');
+      expect(result?.fields).toEqual([]);
+      expect(result?.pattern).toEqual(/\[\[(.+?)\]\]/);
+      // The trigger text is no toolbar UI
+      expect(result?.trigger).toBeUndefined();
+      expect(result?.inlinePattern).toEqual({ trigger: '[[', onInsert, onEdit: undefined });
+      expect(result?.fromBlock?.(/** @type {any} */ (['[[A]]', 'A']))).toEqual({ page: 'A' });
+      expect(result?.toBlock({ page: 'A' })).toBe('[[A]]');
     });
 
     it('should fall back to the registered name for a custom component without a label', () => {

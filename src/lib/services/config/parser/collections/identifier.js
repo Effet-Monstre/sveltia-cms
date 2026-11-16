@@ -1,17 +1,12 @@
 import { hasField } from '$lib/services/config/parser/utils/fields';
 import { addMessage } from '$lib/services/config/parser/utils/validator';
+import { DEFAULT_IDENTIFIER_FIELD } from '$lib/services/contents/collection/identifier';
 import { getConfiguredSlugTemplate, getSlugOptions } from '$lib/services/contents/collection/slug';
 
 /**
  * @import { ConfigParserCollectors, ConfigParserContext } from '$lib/types/private';
  * @import { EntryCollection } from '$lib/types/public';
  */
-
-/**
- * Name of the field an entry is identified by when the `identifier_field` option isn’t set. The
- * default slug template is `{{title}}` accordingly.
- */
-const DEFAULT_IDENTIFIER_FIELD = 'title';
 
 /**
  * Check the field an entry collection identifies its entries by. The field names the entry in the
@@ -47,15 +42,18 @@ export const checkIdentifierField = ({ collection, context, collectors }) => {
     return;
   }
 
+  const slugOptions = getSlugOptions(collection);
+
   // Without the option, the default is only relied on to make the slug of a new entry, which a
-  // custom slug template, or a slug that has to be typed in, makes its own way. Netlify/Decap CMS
-  // refuses to save such an entry, but its collections can’t be created in by default, so a
-  // configuration that worked there may simply never have needed the field; it’s a warning rather
-  // than an error for that reason
+  // custom slug template, a slug that has to be typed in, or a numbered slug makes its own way.
+  // Netlify/Decap CMS refuses to save such an entry, but its collections can’t be created in by
+  // default, so a configuration that worked there may simply never have needed the field; it’s a
+  // warning rather than an error for that reason
   if (
     create &&
     getConfiguredSlugTemplate(collection) === undefined &&
-    !getSlugOptions(collection).editorRequired &&
+    !slugOptions.editorRequired &&
+    !slugOptions.autoIncrement &&
     !hasField(fields, DEFAULT_IDENTIFIER_FIELD)
   ) {
     addMessage({

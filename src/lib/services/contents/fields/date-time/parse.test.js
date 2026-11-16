@@ -1,7 +1,12 @@
 import dayjs from 'dayjs';
 import { beforeEach, describe, expect, test, vi } from 'vitest';
 
-import { getDate, getParser, isValidDate } from '$lib/services/contents/fields/date-time/parse';
+import {
+  getDate,
+  getParser,
+  isValidDate,
+  parseWithFormatFallback,
+} from '$lib/services/contents/fields/date-time/parse';
 
 /**
  * @import { DateTimeField } from '$lib/types/public';
@@ -206,6 +211,250 @@ describe('getDate', () => {
   });
 });
 
+describe('getDate in the time zone of the field', () => {
+  /**
+   * Run a function in the given browser time zone.
+   * @param {string} timeZone IANA time zone name.
+   * @param {() => void} fn Function to run.
+   */
+  const withTimeZone = (timeZone, fn) => {
+    const { TZ } = process.env;
+
+    process.env.TZ = timeZone;
+
+    try {
+      fn();
+    } finally {
+      process.env.TZ = TZ;
+    }
+  };
+
+  test('reads a value without an offset in UTC in a UTC field', () => {
+    withTimeZone('America/New_York', () => {
+      [{ input_timezone: 'utc' }, { picker_utc: true }].forEach((options) => {
+        /** @type {DateTimeField} */
+        const fieldConfig = { ...baseFieldConfig, ...options };
+
+        expect(getDate('2026-01-15T10:30:00', fieldConfig)?.toISOString()).toBe(
+          '2026-01-15T10:30:00.000Z',
+        );
+        expect(getDate('2026-01-15T10:30', fieldConfig)?.toISOString()).toBe(
+          '2026-01-15T10:30:00.000Z',
+        );
+        expect(getDate('2026-01-15T10:30:00.000', fieldConfig)?.toISOString()).toBe(
+          '2026-01-15T10:30:00.000Z',
+        );
+      });
+    });
+  });
+
+  test('reads a value without an offset in an IANA time zone set to the field', () => {
+    withTimeZone('America/New_York', () => {
+      /** @type {DateTimeField} */
+      const fieldConfig = { ...baseFieldConfig, input_timezone: 'Asia/Tokyo' };
+
+      expect(getDate('2026-01-15T10:30:00', fieldConfig)?.toISOString()).toBe(
+        '2026-01-15T01:30:00.000Z',
+      );
+      // `output_utc` writes a value with `Z`, but one without an offset is read in the field’s zone
+      expect(
+        getDate('2026-01-15T10:30:00', { ...fieldConfig, output_utc: true })?.toISOString(),
+      ).toBe('2026-01-15T01:30:00.000Z');
+    });
+  });
+
+  test('reads a value with an offset as is in any field', () => {
+    withTimeZone('America/New_York', () => {
+      [
+        { input_timezone: 'local' },
+        { input_timezone: 'utc' },
+        { input_timezone: 'Asia/Tokyo' },
+      ].forEach((options) => {
+        /** @type {DateTimeField} */
+        const fieldConfig = { ...baseFieldConfig, ...options };
+
+        expect(getDate('2026-01-15T10:30:00Z', fieldConfig)?.toISOString()).toBe(
+          '2026-01-15T10:30:00.000Z',
+        );
+        expect(getDate('2026-01-15T10:30:00+09:00', fieldConfig)?.toISOString()).toBe(
+          '2026-01-15T01:30:00.000Z',
+        );
+        expect(getDate('2026-01-15T10:30:00.000-0500', fieldConfig)?.toISOString()).toBe(
+          '2026-01-15T15:30:00.000Z',
+        );
+      });
+    });
+  });
+
+  test('reads a value without an offset in the browser’s time zone in a local field', () => {
+    withTimeZone('America/New_York', () => {
+      [{}, { input_timezone: 'local' }, { output_utc: true }].forEach((options) => {
+        /** @type {DateTimeField} */
+        const fieldConfig = { ...baseFieldConfig, ...options };
+
+        expect(getDate('2026-01-15T10:30:00', fieldConfig)?.toISOString()).toBe(
+          '2026-01-15T15:30:00.000Z',
+        );
+      });
+    });
+  });
+
+  test('reads a time without an offset in the time zone of the field', () => {
+    vi.useFakeTimers({ now: new Date('2026-01-15T12:00:00Z'), toFake: ['Date'] });
+
+    try {
+      withTimeZone('America/New_York', () => {
+        expect(
+          getDate('10:30:00', {
+            ...baseFieldConfig,
+            type: 'time',
+            input_timezone: 'Asia/Tokyo',
+          })?.toISOString(),
+        ).toBe('2026-01-15T01:30:00.000Z');
+        expect(
+          getDate('10:30:00', {
+            ...baseFieldConfig,
+            type: 'time',
+            input_timezone: 'utc',
+          })?.toISOString(),
+        ).toBe('2026-01-15T10:30:00.000Z');
+        expect(
+          getDate('10:30:00Z', {
+            ...baseFieldConfig,
+            type: 'time',
+            input_timezone: 'Asia/Tokyo',
+          })?.toISOString(),
+        ).toBe('2026-01-15T10:30:00.000Z');
+        expect(getDate('10:30:00', { ...baseFieldConfig, type: 'time' })?.toISOString()).toBe(
+          '2026-01-15T15:30:00.000Z',
+        );
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test('reads a date without a time as is', () => {
+    withTimeZone('America/New_York', () => {
+      expect(
+        getDate('2026-01-15', {
+          ...baseFieldConfig,
+          type: 'date',
+          input_timezone: 'Asia/Tokyo',
+        })?.toISOString(),
+      ).toBe('2026-01-15T00:00:00.000Z');
+    });
+  });
+
+  test('reads a value in a custom format in an IANA time zone set to the field', () => {
+    withTimeZone('America/New_York', () => {
+      /** @type {DateTimeField} */
+      const fieldConfig = {
+        ...baseFieldConfig,
+        format: 'DD.MM.YYYY HH:mm',
+        input_timezone: 'Asia/Tokyo',
+      };
+
+      expect(getDate('15.01.2026 10:30', fieldConfig)?.toISOString()).toBe(
+        '2026-01-15T01:30:00.000Z',
+      );
+      // With `output_utc`, the value is stored in UTC
+      expect(getDate('15.01.2026 10:30', { ...fieldConfig, output_utc: true })?.toISOString()).toBe(
+        '2026-01-15T10:30:00.000Z',
+      );
+      // An ISO 8601 value not in the format is read in the field’s time zone unless it has an
+      // offset
+      expect(getDate('2026-01-15T01:30:00Z', fieldConfig)?.toISOString()).toBe(
+        '2026-01-15T01:30:00.000Z',
+      );
+      expect(getDate('2026-01-15T10:30:00', fieldConfig)?.toISOString()).toBe(
+        '2026-01-15T01:30:00.000Z',
+      );
+    });
+  });
+
+  test('reads an ISO 8601 value with an offset as is in a custom format without one', () => {
+    withTimeZone('America/Los_Angeles', () => {
+      [
+        {},
+        { input_timezone: 'Asia/Tokyo' },
+        { output_utc: true },
+        { input_timezone: 'Asia/Tokyo', output_utc: true },
+      ].forEach((options) => {
+        /** @type {DateTimeField} */
+        const fieldConfig = { ...baseFieldConfig, format: 'YYYY-MM-DD HH:mm', ...options };
+
+        expect(getDate('2026-01-15T01:30:00Z', fieldConfig)?.toISOString()).toBe(
+          '2026-01-15T01:30:00.000Z',
+        );
+        expect(getDate('2026-01-15T10:30:00.000+09:00', fieldConfig)?.toISOString()).toBe(
+          '2026-01-15T01:30:00.000Z',
+        );
+      });
+
+      // A value written in the format exactly, with an escaped `Z`, is still read in the format
+      expect(
+        getDate('2026-01-15T10:30:00Z', {
+          ...baseFieldConfig,
+          format: 'YYYY-MM-DDTHH:mm:ss[Z]',
+          input_timezone: 'Asia/Tokyo',
+        })?.toISOString(),
+      ).toBe('2026-01-15T01:30:00.000Z');
+    });
+  });
+
+  test('reads a value in a custom format with an offset as is', () => {
+    withTimeZone('America/New_York', () => {
+      /** @type {DateTimeField} */
+      const fieldConfig = {
+        ...baseFieldConfig,
+        format: '[Zone] YYYY-MM-DD HH:mm Z',
+        input_timezone: 'Asia/Tokyo',
+      };
+
+      expect(getDate('Zone 2026-01-15 10:30 +01:00', fieldConfig)?.toISOString()).toBe(
+        '2026-01-15T09:30:00.000Z',
+      );
+    });
+  });
+
+  test('returns undefined for an unparseable value in an IANA time zone', () => {
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    [{}, { format: 'DD.MM.YYYY HH:mm' }].forEach((options) => {
+      /** @type {DateTimeField} */
+      const fieldConfig = { ...baseFieldConfig, input_timezone: 'Asia/Tokyo', ...options };
+
+      expect(getDate('invalid', fieldConfig)).toBeUndefined();
+    });
+
+    expect(consoleSpy).toHaveBeenCalledWith('Invalid Date', 'invalid');
+    consoleSpy.mockRestore();
+  });
+});
+
+describe('getDate with advanced Day.js tokens', () => {
+  test('reads a Unix timestamp as an instant in any time zone', () => {
+    [undefined, 'utc', 'Asia/Tokyo'].forEach((inputTimeZone) => {
+      [
+        ['X', '1782865800'],
+        ['x', '1782865800000'],
+      ].forEach(([format, currentValue]) => {
+        /** @type {DateTimeField} */
+        const fieldConfig = { ...baseFieldConfig, format, input_timezone: inputTimeZone };
+
+        expect(getDate(currentValue, fieldConfig)?.toISOString()).toBe('2026-07-01T00:30:00.000Z');
+      });
+    });
+  });
+
+  test('reads an ordinal day', () => {
+    expect(
+      getDate('July 1st, 2026', { ...baseFieldConfig, format: 'MMMM Do, YYYY' })?.toISOString(),
+    ).toBe('2026-07-01T00:00:00.000Z');
+  });
+});
+
 describe('isValidDate', () => {
   test('should return true for valid Date objects', () => {
     const validDate = new Date('2023-12-25T14:30:00.000Z');
@@ -314,5 +563,77 @@ describe('getParser', () => {
 
     expect(result.isValid()).toBe(true);
     expect(result.format('YYYY-MM-DD')).toBe('2023-12-25');
+  });
+});
+
+describe('Test parseWithFormatFallback()', () => {
+  test('should parse a value with the given format', () => {
+    const parsed = parseWithFormatFallback({
+      value: '31/12/2024 23:30',
+      format: 'DD/MM/YYYY HH:mm',
+      parseAsUTC: true,
+    });
+
+    expect(parsed.isValid()).toBe(true);
+    expect(parsed.toISOString()).toBe('2024-12-31T23:30:00.000Z');
+  });
+
+  test('should fall back to the default parser when the format does not match', () => {
+    const parsed = parseWithFormatFallback({
+      value: '2024-12-31T23:30:00Z',
+      format: 'DD/MM/YYYY',
+      parseAsUTC: true,
+    });
+
+    expect(parsed.isValid()).toBe(true);
+    expect(parsed.toISOString()).toBe('2024-12-31T23:30:00.000Z');
+  });
+
+  test('should read a value with an offset as an instant unless it’s in the format exactly', () => {
+    const { TZ } = process.env;
+
+    process.env.TZ = 'America/Los_Angeles';
+
+    try {
+      [true, false].forEach((parseAsUTC) => {
+        expect(
+          parseWithFormatFallback({
+            value: '2024-12-31T23:30:00+09:00',
+            format: 'YYYY-MM-DD HH:mm',
+            parseAsUTC,
+          }).toISOString(),
+        ).toBe('2024-12-31T14:30:00.000Z');
+        expect(
+          parseWithFormatFallback({
+            value: '2024-12-31 23:30Z',
+            format: 'YYYY-MM-DD HH:mm[Z]',
+            parseAsUTC,
+          }).toISOString(),
+        ).toBe(parseAsUTC ? '2024-12-31T23:30:00.000Z' : '2025-01-01T07:30:00.000Z');
+      });
+    } finally {
+      process.env.TZ = TZ;
+    }
+  });
+
+  test('should parse in local time unless UTC is requested', () => {
+    const parsed = parseWithFormatFallback({
+      value: '2024-12-31 23:30',
+      format: 'YYYY-MM-DD HH:mm',
+      parseAsUTC: false,
+    });
+
+    expect(parsed.isUTC()).toBe(false);
+    expect(parsed.format('YYYY-MM-DD HH:mm')).toBe('2024-12-31 23:30');
+  });
+
+  test('should return an invalid result when neither parser can read the value', () => {
+    expect(
+      parseWithFormatFallback({
+        value: 'not a date',
+        format: 'YYYY-MM-DD',
+        parseAsUTC: true,
+      }).isValid(),
+    ).toBe(false);
   });
 });

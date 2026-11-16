@@ -3,8 +3,8 @@
   import { SearchBar } from '@sveltia/ui';
   import { untrack } from 'svelte';
 
-  import { goBack, goto, parseLocation } from '$lib/services/app/navigation';
   import { searchMode, searchTerms } from '$lib/services/search';
+  import { resetSearchAfterLeaving, updateSearchTerms } from '$lib/services/search/input';
 
   /**
    * @typedef {object} Props
@@ -12,31 +12,7 @@
    */
 
   /** @type {Props} */
-  let {
-    /* eslint-disable prefer-const */
-    onclick = undefined,
-    /* eslint-enable prefer-const */
-  } = $props();
-
-  /**
-   * Navigate to the search results page if search terms are given, or go back the previous page.
-   * @param {string} terms New search terms.
-   */
-  const navigate = (terms) => {
-    const hadTerms = !!searchTerms.current;
-    const { path } = parseLocation();
-    const searching = path.startsWith('/search/');
-
-    searchTerms.current = terms;
-
-    if (terms) {
-      // Encode the terms, or a `?` or `#` would cut them short in the URL, and a stray `%` would
-      // make the path impossible to decode
-      goto(`/search/${encodeURIComponent(terms)}`, { replaceState: searching });
-    } else if (hadTerms && searching) {
-      goBack('/collections');
-    }
-  };
+  let { onclick = undefined } = $props();
 
   let inputValue = $state('');
 
@@ -53,6 +29,12 @@
   });
 </script>
 
+<svelte:window
+  onhashchange={() => {
+    resetSearchAfterLeaving();
+  }}
+/>
+
 <div role="none" class="wrapper">
   {#if searchMode.current}
     <SearchBar
@@ -65,10 +47,10 @@
       {onclick}
       oninput={({ target }) => {
         // @todo Implement quick search dropdown.
-        navigate(/** @type {HTMLInputElement} */ (target).value.trim());
+        updateSearchTerms(/** @type {HTMLInputElement} */ (target).value.trim());
       }}
       onClear={() => {
-        navigate('');
+        updateSearchTerms('');
       }}
     />
   {/if}

@@ -1,9 +1,9 @@
 import { getPathInfo } from '@sveltia/utils/file';
 
-import { TEMPLATE_TAG_REPLACE_REGEX } from '$lib/services/common/template/constants';
+import { getTemplateTags } from '$lib/services/common/template/tags';
 import { addMessage } from '$lib/services/config/parser/utils/validator';
 import { hasLocalePlaceholder } from '$lib/services/contents/i18n/placeholder';
-import { getPublishMode } from '$lib/services/workflow/config';
+import { getPublishMode, isWorkflowMode } from '$lib/services/workflow/config';
 
 /**
  * @import { CmsConfig, EntryCollection, GitHubBackend } from '$lib/types/public';
@@ -35,9 +35,7 @@ const UNSUPPORTED_OPTIONS = [
  */
 export const hasSlugTag = (template) =>
   // A tag can come with transformations, e.g. `{{slug | upper}}`
-  [...template.matchAll(TEMPLATE_TAG_REPLACE_REGEX)].some(
-    ([, tag]) => tag.split('|')[0].trim() === 'slug',
-  );
+  getTemplateTags(template).some(({ name }) => name === 'slug');
 
 /**
  * Validate an entry collection storing all the entries in one file, defined with the `file` option.
@@ -98,11 +96,11 @@ export const checkArrayFileOptions = (context, collectors) => {
     }
   });
 
-  // Editorial Workflow saves each entry on a branch of its own, so two entries would be two pull
+  // A workflow saves each entry on a branch of its own, so two entries would be two pull
   // requests changing the same file, and merging or deleting one could remove the other entries.
   // An Open Authoring contributor always goes through the workflow
   if (
-    getPublishMode({ cmsConfig, collection }) === 'editorial_workflow' ||
+    isWorkflowMode(getPublishMode({ cmsConfig, collection })) ||
     /** @type {GitHubBackend | undefined} */ (cmsConfig.backend)?.open_authoring
   ) {
     addMessage({ strKey: 'collection_data_file_workflow', context, collectors });
