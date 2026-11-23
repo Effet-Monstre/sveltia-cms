@@ -9,6 +9,7 @@ import {
   updateListField as _updateListField,
   updateListFieldForLocales as _updateListFieldForLocales,
   getItemList,
+  moveListExpanderStates,
   updateObject,
 } from './list';
 
@@ -90,6 +91,28 @@ describe('draft/update/list', () => {
       });
     });
 
+    it('should keep the escaped keys of the items', () => {
+      mockEntryDraft.currentValues.en = {
+        list: [],
+        'list.0.kv.a\uE000b': '1',
+        'list.1.kv.c\uE000d': '2',
+      };
+      mockEntryDraft.expanderStates._ = {};
+
+      updateListField({
+        locale: 'en',
+        keyPath: 'list',
+        manipulate: ({ valueList }) => {
+          valueList.reverse();
+        },
+      });
+
+      expect(mockEntryDraft.currentValues.en).toEqual({
+        'list.0.kv.c\uE000d': '2',
+        'list.1.kv.a\uE000b': '1',
+      });
+    });
+
     it('should remove item from list', () => {
       updateListField({
         locale: 'en',
@@ -120,6 +143,44 @@ describe('draft/update/list', () => {
           valueList.push('tag4');
           expanderStateList.push(false);
         },
+      });
+    });
+
+    it('should keep the expander states nested in the items when one is removed', () => {
+      mockEntryDraft.currentValues.en = {
+        'authors.0.name': 'A',
+        'authors.0.details.bio': 'a',
+        'authors.1.name': 'B',
+        'authors.1.details.bio': 'b',
+        'authors.2.name': 'C',
+        'authors.2.details.bio': 'c',
+      };
+      mockEntryDraft.expanderStates._ = {
+        'authors#': true,
+        'authors.0': true,
+        'authors.1': false,
+        'authors.1.details#': false,
+        'authors.2': true,
+        'authors.2.details#': false,
+        'authors.2.books.0': false,
+      };
+
+      updateListField({
+        locale: 'en',
+        keyPath: 'authors',
+        manipulate: ({ valueList, expanderStateList }) => {
+          valueList.splice(0, 1);
+          expanderStateList.splice(0, 1);
+        },
+      });
+
+      expect(mockEntryDraft.expanderStates._).toEqual({
+        'authors#': true,
+        'authors.0': false,
+        'authors.0.details#': false,
+        'authors.1': true,
+        'authors.1.details#': false,
+        'authors.1.books.0': false,
       });
     });
 
@@ -220,6 +281,42 @@ describe('draft/update/list', () => {
       expect(mockEntryDraft.currentValues.en).toEqual({ 'tags.0': 'tag2', 'tags.1': 'tag3' });
       expect(mockEntryDraft.currentValues.ja).toEqual({ tags: [] });
       expect(mockEntryDraft.expanderStates._).toEqual({ 'tags.0': false, 'tags.1': true });
+    });
+
+    // https://github.com/sveltia/sveltia-cms/issues/1065
+    it('should update every locale for paired items edited in the default locale', () => {
+      const manipulate = vi.fn(({ valueList, expanderStateList }) => {
+        valueList.splice(0, 1);
+        expanderStateList.splice(0, 1);
+      });
+
+      updateListFieldForLocales({
+        locale: 'en',
+        i18n: true,
+        pairedItems: true,
+        keyPath: 'tags',
+        manipulate,
+      });
+
+      expect(mockEntryDraft.currentValues.en).toEqual({ 'tags.0': 'tag2', 'tags.1': 'tag3' });
+      expect(mockEntryDraft.currentValues.ja).toEqual({ tags: [] });
+      // The manipulation is told which locale the values are for
+      expect(manipulate.mock.calls.map(([{ locale }]) => locale)).toEqual(['en', 'ja']);
+    });
+
+    it('should only update the given locale for paired items edited in another locale', () => {
+      updateListFieldForLocales({
+        locale: 'ja',
+        i18n: true,
+        pairedItems: true,
+        keyPath: 'tags',
+        manipulate: ({ valueList }) => {
+          valueList.push('タグ2');
+        },
+      });
+
+      expect(mockEntryDraft.currentValues.ja).toEqual({ 'tags.0': 'タグ1', 'tags.1': 'タグ2' });
+      expect(mockEntryDraft.currentValues.en['tags.3']).toBeUndefined();
     });
 
     it('should use the given value store', () => {
@@ -635,6 +732,27 @@ describe('draft/update/list', () => {
       });
     });
 
+    it('should only add as many values as fit within the maximum', () => {
+      addMultiValueItems({
+        locale: 'en',
+        keyPath: 'tags',
+        newValues: ['tag4', 'tag5', 'tag6'],
+        max: 4,
+      });
+
+      expect(mockEntryDraft.currentValues.en).toEqual({
+        'tags.0': 'tag1',
+        'tags.1': 'tag2',
+        'tags.2': 'tag3',
+        'tags.3': 'tag4',
+      });
+
+      // Nothing is added once the list is full, or already over the maximum
+      addMultiValueItems({ locale: 'en', keyPath: 'tags', newValues: ['tag7'], max: 4 });
+      addMultiValueItems({ locale: 'en', keyPath: 'tags', newValues: ['tag8'], max: 2 });
+      expect(Object.keys(mockEntryDraft.currentValues.en)).toHaveLength(4);
+    });
+
     it('should start a new list at the first index', () => {
       addMultiValueItems({ locale: 'en', keyPath: 'photos', newValues: ['a.png'] });
 
@@ -660,6 +778,49 @@ describe('draft/update/list', () => {
       addMultiValueItems({ locale: 'en', keyPath: 'tags', newValues: [], replaceIndex: 1 });
 
       expect(mockEntryDraft.currentValues.en['tags.1']).toBe('tag2');
+    });
+  });
+
+  describe('moveListExpanderStates', () => {
+    const states = {
+      'authors#': false,
+      'authors-extra#': false,
+      'authors.name#': false,
+      'authors.0': false,
+      'authors.0#': false,
+      'authors.0.details#': false,
+      'authors.1': true,
+      'authors.1.books.0': false,
+      'authors.10': false,
+    };
+
+    it('should move the states of each item along with the item', () => {
+      expect(moveListExpanderStates(states, 'authors', [1, true, 0])).toEqual({
+        'authors#': false,
+        'authors-extra#': false,
+        'authors.name#': false,
+        'authors.0': true,
+        'authors.0.books.0': false,
+        'authors.1': true,
+        'authors.2': false,
+        'authors.2#': false,
+        'authors.2.details#': false,
+      });
+    });
+
+    it('should drop the states of a removed item', () => {
+      expect(moveListExpanderStates(states, 'authors', [false])).toEqual({
+        'authors#': false,
+        'authors-extra#': false,
+        'authors.name#': false,
+        'authors.0': false,
+      });
+    });
+
+    it('should leave the item without states as it is', () => {
+      expect(moveListExpanderStates({ 'tags#': true }, 'tags', [0, 1])).toEqual({
+        'tags#': true,
+      });
     });
   });
 });

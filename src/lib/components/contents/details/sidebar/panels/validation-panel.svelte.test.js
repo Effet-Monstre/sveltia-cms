@@ -223,10 +223,10 @@ describe('ValidationPanel', () => {
       draft: { currentPath: '../x' },
     });
 
-    // The folder is only validated in a nested collection with the path editor
+    // The folder is only validated in a collection of nested entries with the path editor
     Object.assign(/** @type {any} */ (draft.collection), {
       nested: { depth: 3 },
-      meta: { path: { widget: 'string' } },
+      meta: { path: {} },
     });
 
     await renderWithDraft(ValidationPanel, { draft, props: { onSelectField } });

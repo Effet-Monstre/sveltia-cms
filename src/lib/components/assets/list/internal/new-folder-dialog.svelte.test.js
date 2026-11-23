@@ -2,12 +2,17 @@ import { beforeAll, beforeEach, describe, expect, test, vi } from 'vitest';
 import { page } from 'vitest/browser';
 import { render } from 'vitest-browser-svelte';
 
+import AssetUpdatesToast from '$lib/components/assets/shared/asset-updates-toast.svelte';
 import { createSubfolder } from '$lib/services/assets/data/subfolder';
-import { globalAssetFolder, selectedAssetFolder } from '$lib/services/assets/folders';
+import {
+  allAssetFolders,
+  globalAssetFolder,
+  selectedAssetFolder,
+} from '$lib/services/assets/folders';
 import { selectedSubfolderPath } from '$lib/services/assets/subfolders';
 import { showNewSubfolderDialog } from '$lib/services/assets/view';
 import { createMockAsset, initTestConfig, setAssets } from '$lib/test/config';
-import { waitForToastsToHide } from '$lib/test/toast';
+import { getShownToastAlert, getShownToastText, waitForToastsToHide } from '$lib/test/toast';
 
 import NewFolderDialog from './new-folder-dialog.svelte';
 
@@ -87,7 +92,40 @@ describe('NewFolderDialog', () => {
     expect(window.location.hash).toBe('#/assets/static/uploads');
   });
 
+  test('refuses the name of a folder leading to another asset folder nested in the directory', async () => {
+    const folders = allAssetFolders.current;
+
+    // A collection’s own folder nested in the global one, which is browsed as a folder of its own
+    allAssetFolders.current = [
+      ...folders,
+      /** @type {import('$lib/types/private').AssetFolderInfo} */ ({
+        ...globalAssetFolder.current,
+        collectionName: 'posts',
+        internalPath: 'static/uploads/projects',
+      }),
+    ];
+    showNewSubfolderDialog.current = true;
+
+    try {
+      await render(NewFolderDialog);
+
+      const dialog = page.getByRole('dialog', { name: 'New Folder' });
+
+      // A placeholder file would otherwise be added to the collection’s folder
+      await dialog.getByRole('textbox', { name: 'Folder Name' }).fill('projects');
+      await expect
+        .element(dialog.getByText('A folder or file with this name already exists here.'))
+        .toBeVisible();
+      await expect.element(dialog.getByRole('button', { name: 'Create' })).toBeDisabled();
+    } finally {
+      allAssetFolders.current = folders;
+    }
+  });
+
   test('creates the folder in the subfolder being browsed, reporting the progress', async () => {
+    // The toasts reporting the commit are rendered by the shared component
+    await render(AssetUpdatesToast, {});
+
     /**
      * Settle the pending commit.
      * @type {() => void}
@@ -121,18 +159,11 @@ describe('NewFolderDialog', () => {
     );
     // The commit can take a while, and the dialog is gone by now, so a toast says it’s under way
     await expect
-      .poll(() =>
-        document
-          .querySelector('.sui.toast:not([aria-hidden="true"]) .sui.alert.info')
-          ?.textContent?.replace(/\s+/g, ' ')
-          .trim(),
-      )
+      .poll(() => getShownToastText('info'))
       .toBe('info Information Creating the folder…');
 
     resolve();
-    await expect
-      .poll(() => document.querySelector('.sui.toast:not([aria-hidden="true"]) .sui.alert.info'))
-      .toBeNull();
+    await expect.poll(() => getShownToastAlert('info')).toBeNull();
     expect(window.location.hash).toBe('#/assets/static/uploads');
   }, 15000);
 
@@ -152,6 +183,9 @@ describe('NewFolderDialog', () => {
   });
 
   test('reports a failure to create the folder', async () => {
+    // The toasts reporting the commit are rendered by the shared component
+    await render(AssetUpdatesToast, {});
+
     const error = vi.spyOn(console, 'error').mockImplementation(() => {});
 
     vi.mocked(createSubfolder).mockRejectedValue(new Error('offline'));
@@ -168,12 +202,7 @@ describe('NewFolderDialog', () => {
       await vi.waitFor(() => expect(createSubfolder).toHaveBeenCalledWith('static/uploads/new'));
       // A toast stays in the DOM while hidden, so look for the one that is shown
       await expect
-        .poll(() =>
-          document
-            .querySelector('.sui.toast:not([aria-hidden="true"]) .sui.alert.error')
-            ?.textContent?.replace(/\s+/g, ' ')
-            .trim(),
-        )
+        .poll(() => getShownToastText('error'))
         .toBe('error Error Couldn’t create the folder.');
       expect(window.location.hash).toBe('#/assets/static/uploads');
       await waitForToastsToHide();

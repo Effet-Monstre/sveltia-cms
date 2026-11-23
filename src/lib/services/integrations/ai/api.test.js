@@ -114,7 +114,7 @@ describe('AI API Utilities', () => {
         const body = JSON.parse(/** @type {string} */ (vi.mocked(fetch).mock.calls[0][1]?.body));
 
         expect(body.model).toBe(defaultOptions.model);
-        expect(body.max_tokens).toBe(4000);
+        expect(body.max_tokens).toBe(16_000);
         expect(body).not.toHaveProperty('temperature');
         expect(body.system).toBe(defaultOptions.systemPrompt);
         expect(body.messages).toEqual([{ role: 'user', content: defaultOptions.userMessage }]);
@@ -434,6 +434,21 @@ describe('AI API Utilities', () => {
         expect(result).toBe('response text');
       });
 
+      it('should throw when the response is cut off at the token limit', async () => {
+        vi.mocked(fetch).mockResolvedValueOnce(
+          new Response(
+            JSON.stringify({
+              choices: [{ message: { content: '["Bonjour", "Comment' }, finish_reason: 'length' }],
+            }),
+            { status: 200 },
+          ),
+        );
+
+        await expect(chatCompletions(defaultOptions)).rejects.toThrow(
+          'The response from the Chat Completions API was cut off at the token limit.',
+        );
+      });
+
       it('should throw on missing choices array', async () => {
         vi.mocked(fetch).mockResolvedValueOnce(new Response(JSON.stringify({}), { status: 200 }));
 
@@ -522,7 +537,20 @@ describe('AI API Utilities', () => {
         expect(body.instructions).toBe(defaultOptions.systemPrompt);
         expect(body.input).toBe(defaultOptions.userMessage);
         expect(body.store).toBe(false);
-        expect(body.max_output_tokens).toBe(4000);
+        expect(body.max_output_tokens).toBe(16_000);
+        expect(body).not.toHaveProperty('reasoning');
+      });
+
+      it('should pass the reasoning effort', async () => {
+        vi.mocked(fetch).mockResolvedValueOnce(
+          new Response(JSON.stringify({ output_text: 'response' }), { status: 200 }),
+        );
+
+        await responses({ ...defaultOptions, reasoning: 'low' });
+
+        const body = JSON.parse(/** @type {string} */ (vi.mocked(fetch).mock.calls[0][1]?.body));
+
+        expect(body.reasoning).toEqual({ effort: 'low' });
       });
     });
 
@@ -555,6 +583,40 @@ describe('AI API Utilities', () => {
         const result = await responses(defaultOptions);
 
         expect(result).toBe('text content');
+      });
+
+      it('should throw when the response is cut off at the token limit', async () => {
+        vi.mocked(fetch).mockResolvedValueOnce(
+          new Response(
+            JSON.stringify({
+              status: 'incomplete',
+              incomplete_details: { reason: 'max_output_tokens' },
+              output_text: '["Bonjour", "Comment',
+            }),
+            { status: 200 },
+          ),
+        );
+
+        await expect(responses(defaultOptions)).rejects.toThrow(
+          'The response from the Responses API was cut off at the token limit.',
+        );
+      });
+
+      it('should not report an incomplete response for another reason as cut off', async () => {
+        vi.mocked(fetch).mockResolvedValueOnce(
+          new Response(
+            JSON.stringify({
+              status: 'incomplete',
+              incomplete_details: { reason: 'content_filter' },
+              output: [],
+            }),
+            { status: 200 },
+          ),
+        );
+
+        await expect(responses(defaultOptions)).rejects.toThrow(
+          'Invalid response format from Responses API.',
+        );
       });
 
       it('should throw when output_text is not found', async () => {
@@ -658,13 +720,16 @@ describe('AI API Utilities', () => {
 describe('API key patterns', () => {
   // A key is saved as soon as it matches the selected service’s pattern, so a pattern that also
   // matched another service’s key would send that key to the wrong API
-  const keys = {
-    anthropic: `sk-ant-api03-${'aB3_-x'.repeat(15)}AA`,
-    deepseek: `sk-${'0123456789abcdef'.repeat(2)}`,
-    google: `AIza${'SyAbCdEfGh'.repeat(3)}IjKlM`,
-    mistral: 'abcdefghijklmnopqrstuvwxyz123456',
-    openai: `sk-proj-${'aB3_-x'.repeat(10)}`,
-  };
+  /** @type {[string, string][]} */
+  const keys = [
+    ['anthropic', `sk-ant-api03-${'aB3_-x'.repeat(15)}AA`],
+    ['deepseek', `sk-${'0123456789abcdef'.repeat(2)}`],
+    ['google', `AIza${'SyAbCdEfGh'.repeat(3)}IjKlM`],
+    ['google', `AQ.Ab8RN6${'aB3_-x.'.repeat(6)}`],
+    ['mistral', 'abcdefghijklmnopqrstuvwxyz123456'],
+    ['mistral', `mstrl_${'aB3x'.repeat(8)}_${'cD4y'.repeat(2)}`],
+    ['openai', `sk-proj-${'aB3_-x'.repeat(10)}`],
+  ];
 
   const patterns = {
     anthropic: anthropicKeyPattern,
@@ -675,7 +740,7 @@ describe('API key patterns', () => {
   };
 
   it.each(Object.keys(patterns))('should accept only a %s key', (service) => {
-    Object.entries(keys).forEach(([keyService, key]) => {
+    keys.forEach(([keyService, key]) => {
       expect(patterns[/** @type {keyof typeof patterns} */ (service)].test(key)).toBe(
         keyService === service,
       );
@@ -683,7 +748,7 @@ describe('API key patterns', () => {
   });
 
   it('should not accept a key with extra text around it', () => {
-    Object.entries(keys).forEach(([service, key]) => {
+    keys.forEach(([service, key]) => {
       expect(patterns[/** @type {keyof typeof patterns} */ (service)].test(`x ${key}`)).toBe(false);
     });
   });

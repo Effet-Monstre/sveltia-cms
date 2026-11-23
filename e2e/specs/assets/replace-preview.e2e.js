@@ -1,5 +1,6 @@
 import { createPNG } from '../../fixtures/files.js';
 import { expect, GITHUB_CONFIG, test } from '../../fixtures/test.js';
+import { getEditor } from '../../fixtures/ui.js';
 
 /**
  * @import { Locator, Page } from '@playwright/test';
@@ -33,13 +34,18 @@ test.beforeEach(async ({ github }) => {
 
 /**
  * Get the color of the centre pixel of an image, with each channel rounded to 0 or 255, as the
- * thumbnail can be slightly off the original color.
+ * thumbnail can be slightly off the original color. The preview sets its `src` once it has been
+ * looked up, which takes a frame or two, so this returns `null` until the image has loaded instead
+ * of throwing, which would stop `expect.poll()` rather than have it try again. `decode()` isn’t
+ * used for the same reason: Chrome rejects it for an image whose loading is still settling.
  * @param {Locator} image Image.
- * @returns {Promise<number[]>} Red, green and blue values.
+ * @returns {Promise<number[] | null>} Red, green and blue values, or `null` if not loaded yet.
  */
 const getColor = (image) =>
-  image.evaluate(async (/** @type {HTMLImageElement} */ img) => {
-    await img.decode();
+  image.evaluate((/** @type {HTMLImageElement} */ img) => {
+    if (!img.complete || !img.naturalWidth) {
+      return null;
+    }
 
     const canvas = document.createElement('canvas');
     const context = /** @type {CanvasRenderingContext2D} */ (canvas.getContext('2d'));
@@ -106,7 +112,7 @@ test('shows the preview of a restored unsaved image replacing a saved one', asyn
   await cms.open();
 
   const row = page.getByRole('row', { name: /Kite/ });
-  const editor = page.getByRole('group', { name: 'Content Editor' });
+  const editor = getEditor(page);
   const cover = editor.getByRole('group', { name: '“\u2068Cover\u2069” Field' });
   const preview = cover.locator('img');
 

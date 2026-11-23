@@ -3,10 +3,13 @@ import { page } from 'vitest/browser';
 import { render } from 'vitest-browser-svelte';
 
 import { appIconURLs } from '$lib/services/app/branding';
+import { missingBrowserFeatures } from '$lib/services/app/browser-support';
+import { installPrompt } from '$lib/services/app/install';
 import { announcedPageStatus, mainAreaTitle, overlayTitle } from '$lib/services/app/navigation';
 import { backendName } from '$lib/services/backends';
-import { cmsConfigLoaded } from '$lib/services/config';
+import { cmsConfig, cmsConfigLoaded } from '$lib/services/config';
 import { dataLoaded } from '$lib/services/contents';
+import { showContentOverlay } from '$lib/services/contents/editor';
 import { user } from '$lib/services/user/account.svelte';
 import { auth } from '$lib/services/user/auth.svelte';
 import { env } from '$lib/services/user/env.svelte';
@@ -66,10 +69,40 @@ describe('App', () => {
       announcedPageStatus.current,
     );
 
+    // The dragged item of a sortable list is left faint
+    const dragged = document.createElement('div');
+
+    dragged.className = 'drag-placeholder';
+    container.append(dragged);
+    expect(getComputedStyle(dragged).opacity).toBe('0.25');
+    dragged.remove();
+
     // Neither is there until the logo has been processed
     appIconURLs.current = undefined;
     await expect.poll(() => document.querySelector('link[rel="apple-touch-icon"]')).toBeNull();
     expect(document.querySelector('link[rel="manifest"]')).toBeNull();
+  });
+
+  test('doesn’t load the configuration in an unsupported browser', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    missingBrowserFeatures.current = ['Iterator helpers'];
+    cmsConfig.current = undefined;
+
+    try {
+      await render(App, { config });
+
+      await expect
+        .element(page.getByRole('alert'))
+        .toMatchTextContent('Your browser is not supported.');
+      expect(cmsConfigLoaded.current).toBe(false);
+      expect(consoleError).toHaveBeenCalledWith('Unsupported browser. Missing features:', [
+        'Iterator helpers',
+      ]);
+    } finally {
+      missingBrowserFeatures.current = [];
+      consoleError.mockRestore();
+    }
   });
 
   test('shows the app once signed in and the data is loaded', async () => {
@@ -99,6 +132,22 @@ describe('App', () => {
     dataLoaded.current = false;
     await expect.element(page.getByRole('heading', { name: 'Acme CMS' })).toBeVisible();
     await expect.poll(() => document.title).toBe('Acme CMS');
+  });
+
+  test('keeps the infobars out of the focus order while an overlay covers them', async () => {
+    const { container } = await render(App, { config });
+    const infobars = /** @type {HTMLElement} */ (container.querySelector('.infobars'));
+
+    expect(infobars).not.toHaveAttribute('inert');
+
+    try {
+      showContentOverlay.current = true;
+      await expect.poll(() => infobars.inert).toBe(true);
+    } finally {
+      showContentOverlay.current = false;
+    }
+
+    await expect.poll(() => infobars.inert).toBe(false);
   });
 
   test('opens external links in a new tab', async () => {
@@ -174,6 +223,28 @@ describe('App', () => {
     } finally {
       header.remove();
       ncRoot.remove();
+    }
+  });
+
+  test('keeps the install prompt the browser offers before the account menu is opened', async () => {
+    const { unmount } = await render(App, { config });
+
+    const event = Object.assign(new Event('beforeinstallprompt', { cancelable: true }), {
+      prompt: vi.fn(),
+    });
+
+    try {
+      window.dispatchEvent(event);
+      expect(event.defaultPrevented).toBe(true);
+      expect(installPrompt.current).toBe(event);
+
+      // The listeners are removed with the app
+      unmount();
+      installPrompt.current = null;
+      window.dispatchEvent(event);
+      expect(installPrompt.current).toBeNull();
+    } finally {
+      installPrompt.current = null;
     }
   });
 });

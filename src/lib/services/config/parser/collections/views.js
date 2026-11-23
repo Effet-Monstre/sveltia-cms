@@ -1,16 +1,26 @@
 import { isObject } from '@sveltia/utils/object';
 
 import { hasComparison } from '$lib/services/common/view';
+import { SUMMARY_SPECIAL_TAGS } from '$lib/services/config/parser/collections/templates';
 import {
   getCanonicalSlugKey,
   hasField,
-  METADATA_KEYS,
+  isNonFieldSortKey,
 } from '$lib/services/config/parser/utils/fields';
+import { checkFieldReferences } from '$lib/services/config/parser/utils/references';
 import { addMessage, checkName } from '$lib/services/config/parser/utils/validator';
+import { getOrderFieldKey } from '$lib/services/contents/collection/entries/reorder/config';
 import {
+  hasDefaultSort,
   parseCustomSortableFields,
   parseViewOptions,
 } from '$lib/services/contents/collection/view/options';
+import {
+  getConfiguredTableColumns,
+  isTemplateColumnKey,
+  METADATA_KEYS,
+  SUMMARY_COLUMN_KEY,
+} from '$lib/services/contents/collection/view/table-keys';
 
 /**
  * @import { ConfigParserCollectors } from '$lib/types/private';
@@ -24,13 +34,6 @@ import {
  * ViewGroups,
  * } from '$lib/types/public';
  */
-
-/**
- * Internal sort keys added by `getSortConfig()` that don’t map to a field: `_summary` for the
- * generated entry summary and `_manual` for the reorder field.
- * @type {string[]}
- */
-const INTERNAL_SORT_KEYS = ['_summary', '_manual'];
 
 /**
  * Validate the name and field key path of each option in the `view_groups` or `view_filters`
@@ -138,6 +141,7 @@ export const checkViewOptions = (context, collectors) => {
   const {
     fields,
     sortable_fields: sortableFields,
+    table_columns: tableColumns,
     view_groups: viewGroups,
     view_filters: viewFilters,
   } = context.collection;
@@ -159,13 +163,66 @@ export const checkViewOptions = (context, collectors) => {
 
   if (sortableFields) {
     const { keys, defaultKey } = parseCustomSortableFields(sortableFields);
-    const sortKeys = [...specialKeys, ...INTERNAL_SORT_KEYS];
+    const orderFieldKey = getOrderFieldKey(context.collection);
 
-    [...keys, defaultKey].forEach((key) => {
-      if (key && !sortKeys.includes(key) && !hasField(fields, key)) {
+    // `_summary` sorts by the generated entry summary, which only the entry list has. The default
+    // key is also in the list in the Decap CMS format, so it’s checked once
+    new Set([...keys, defaultKey]).forEach((key) => {
+      if (
+        key &&
+        key !== SUMMARY_COLUMN_KEY &&
+        !isNonFieldSortKey(key, { canonicalSlugKey, orderFieldKey }) &&
+        !hasField(fields, key)
+      ) {
         addMessage({
           strKey: 'invalid_sortable_field',
           values: { name: key },
+          context,
+          collectors,
+        });
+      }
+    });
+
+    // Only one item in the Decap CMS format can have `default_sort`; the first one is used
+    if (Array.isArray(sortableFields) && sortableFields.filter(hasDefaultSort).length > 1) {
+      addMessage({ strKey: 'multiple_sortable_field_defaults', context, collectors });
+    }
+  }
+
+  // The columns of the table view, given with `table_columns` or its Static CMS alias
+  // `summary_fields`. The entry summary is `_summary`, the same as its sort key, or `summary` in
+  // the alias. A column naming no field would be silently left out of the table. The option types
+  // are checked against the JSON schema
+  const columns = getConfiguredTableColumns(context.collection);
+
+  if (columns) {
+    const columnOption = Array.isArray(tableColumns) ? 'table_columns' : 'summary_fields';
+
+    columns.forEach(({ key }) => {
+      // A template, e.g. `{{dirname}}/{{filename}}`, can use the same tags as a summary template
+      if (typeof key === 'string' && isTemplateColumnKey(key)) {
+        checkFieldReferences({
+          option: columnOption,
+          template: key,
+          specialTags: SUMMARY_SPECIAL_TAGS,
+          fields,
+          context,
+          collectors,
+        });
+
+        return;
+      }
+
+      if (
+        typeof key === 'string' &&
+        key &&
+        key !== SUMMARY_COLUMN_KEY &&
+        !specialKeys.includes(key) &&
+        !hasField(fields, key)
+      ) {
+        addMessage({
+          strKey: 'invalid_table_column_field',
+          values: { option: columnOption, name: key },
           context,
           collectors,
         });

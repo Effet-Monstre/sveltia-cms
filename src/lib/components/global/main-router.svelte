@@ -1,18 +1,22 @@
 <script>
   import { onMount } from 'svelte';
 
+  import AdminPage from '$lib/components/admin/admin-page.svelte';
   import AssetsPage from '$lib/components/assets/assets-page.svelte';
   import CloudinaryIframe from '$lib/components/assets/browser/cloudinary-iframe.svelte';
   import AssetUpdatesToast from '$lib/components/assets/shared/asset-updates-toast.svelte';
   import UploadAssetsConfirmDialog from '$lib/components/assets/shared/upload-assets-confirm-dialog.svelte';
   import UploadAssetsDialog from '$lib/components/assets/shared/upload-assets-dialog.svelte';
-  import ConfigPage from '$lib/components/config/config-page.svelte';
   import ContentsPage from '$lib/components/contents/contents-page.svelte';
   import TranslatorApiKeyDialog from '$lib/components/contents/details/editor/translator-api-key-dialog.svelte';
   import ContentUpdatesToast from '$lib/components/contents/shared/content-updates-toast.svelte';
   import EntryParseErrorsToast from '$lib/components/contents/shared/entry-parse-errors-toast.svelte';
+  import CustomPage from '$lib/components/custom-pages/custom-page.svelte';
+  import DemoWelcomeDialog from '$lib/components/global/demo-welcome-dialog.svelte';
+  import LiveReloadInfobar from '$lib/components/global/infobars/live-reload-infobar.svelte';
   import MobilePromoInfobar from '$lib/components/global/infobars/mobile-promo-infobar.svelte';
   import NewLanguageInfobar from '$lib/components/global/infobars/new-language-infobar.svelte';
+  import LocalGitNoticeToast from '$lib/components/global/local-git-notice-toast.svelte';
   import NotFoundPage from '$lib/components/global/not-found-page.svelte';
   import BottomNavigation from '$lib/components/global/toolbar/bottom-navigation.svelte';
   import GlobalToolbar from '$lib/components/global/toolbar/global-toolbar.svelte';
@@ -21,6 +25,9 @@
   import SearchPage from '$lib/components/search/search-page.svelte';
   import SettingsPage from '$lib/components/settings/settings-page.svelte';
   import WorkflowPage from '$lib/components/workflow/workflow-page.svelte';
+  import { getAdditions } from '$lib/services/app/additions';
+  import { getAdminSections } from '$lib/services/app/admin';
+  import { getCustomPageId, selectedCustomPageId } from '$lib/services/app/custom-pages';
   import {
     parseLocation,
     redirectLegacyEntryLink,
@@ -47,17 +54,25 @@
         ? { contents: ContentsPage, assets: AssetsPage }[searchMode.current]
         : SearchPage,
     workflow: WorkflowPage,
-    config: ConfigPage,
+    pages: CustomPage,
+    // Only for those who can see any of its sections; for anyone else, it’s a dead link
+    ...(getAdminSections().length ? { admin: AdminPage } : {}),
     // For small screens
     menu: MenuPage,
     settings: SettingsPage,
   });
 
-  const SelectedPage = $derived(
-    selectedPageName.current === NOT_FOUND_PAGE_NAME
-      ? NotFoundPage
-      : pages[selectedPageName.current],
-  );
+  const SelectedPage = $derived.by(() => {
+    const name = selectedPageName.current;
+
+    if (name === NOT_FOUND_PAGE_NAME) {
+      return NotFoundPage;
+    }
+
+    // A page that’s no longer offered, e.g. Administration once developer mode is turned off, can’t
+    // be found any more. Nothing is selected until the route is first resolved
+    return pages[name] ?? (name ? NotFoundPage : undefined);
+  });
 
   /**
    * Select one of the pages given the URL path.
@@ -70,7 +85,12 @@
       return;
     }
 
-    const route = resolveRoute(parseLocation().path, Object.keys(pages));
+    const { path } = parseLocation();
+    const route = resolveRoute(path, Object.keys(pages));
+
+    // The custom page is looked up by the page itself, as it may be registered after the app has
+    // been mounted
+    selectedCustomPageId.current = getCustomPageId(path);
 
     if ('redirect' in route) {
       window.location.replace(route.redirect);
@@ -96,6 +116,11 @@
 
   onMount(() => {
     selectPage();
+
+    // With Sveltia CMS Additions, entry locks, comment counts and credentials are shared, and the
+    // GitHub token kept fresh, while the user is signed in, which is while this is mounted. Its
+    // chunk was loaded along with the backend, before the user could sign in
+    return getAdditions()?.startSession();
   });
 </script>
 
@@ -105,6 +130,7 @@
   }}
 />
 
+<LiveReloadInfobar />
 <NewLanguageInfobar />
 
 {#if canShowMobileSignInDialog.current}
@@ -130,6 +156,8 @@
 <ContentUpdatesToast />
 <TranslatorApiKeyDialog />
 <EntryParseErrorsToast />
+<LocalGitNoticeToast />
+<DemoWelcomeDialog />
 <CloudinaryIframe />
 
 <style>

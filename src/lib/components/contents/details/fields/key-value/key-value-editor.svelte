@@ -9,29 +9,35 @@
 -->
 <script>
   import { _ } from '@sveltia/i18n';
-  import { Button, Icon, TextInput } from '@sveltia/ui';
-  import equal from 'fast-deep-equal';
-  import { getContext } from 'svelte';
+  import { TextInput } from '@sveltia/ui';
+  import { tick } from 'svelte';
   import { flip } from 'svelte/animate';
 
+  import RemoveButton from '$lib/components/common/remove-button.svelte';
   import ReorderControls from '$lib/components/common/reorder-controls.svelte';
   import ValidationError from '$lib/components/contents/details/editor/validation-error.svelte';
   import AddItemButton from '$lib/components/contents/details/fields/object/add-item-button.svelte';
   import { getEntryDraftContext } from '$lib/services/contents/draft/state.svelte';
-  import { getValueMapSnapshot } from '$lib/services/contents/draft/value-map.svelte';
+  import { deferDraftWrite } from '$lib/services/contents/draft/update/deferred';
+  import { getFieldValueMapSnapshot } from '$lib/services/contents/draft/value-map.svelte';
+  import { getFieldEditorContext } from '$lib/services/contents/editor/field-context';
   import {
     getPairs,
+    getPairsToSave,
+    haveStoredPairsChanged,
     savePairs,
+    shouldStorePlaceholder,
     validatePairs,
   } from '$lib/services/contents/fields/key-value/helpers';
+  import { getPairsFromContent } from '$lib/services/contents/fields/key-value/pairs';
   import { getDirection } from '$lib/services/contents/i18n';
-  import { moveListItem } from '$lib/services/utils/drag-sorting';
+  import { focusAfterRemoval, moveListItem } from '$lib/services/utils/drag-sorting';
   import { createDragSorter } from '$lib/services/utils/drag-sorting.svelte';
   import { createKeyedRows } from '$lib/services/utils/keyed-rows.svelte';
-  import { watch } from '$lib/services/utils/state.svelte';
+  import { createStableDerivedState, watch } from '$lib/services/utils/state.svelte';
 
   /**
-   * @import { FieldEditorContext, FieldEditorProps } from '$lib/types/private';
+   * @import { FieldEditorProps } from '$lib/types/private';
    * @import { KeyValueField } from '$lib/types/public';
    */
 
@@ -43,19 +49,10 @@
 
   const entryDraft = getEntryDraftContext();
 
-  /** @type {FieldEditorContext} */
-  const { valueStoreKey = 'currentValues' } = getContext('field-editor') ?? {};
+  const { valueStoreKey = 'currentValues' } = getFieldEditorContext();
 
   /** @type {FieldEditorProps & Props} */
-  let {
-    /* eslint-disable prefer-const */
-    locale,
-    keyPath,
-    fieldId,
-    fieldConfig,
-    readonly = false,
-    /* eslint-enable prefer-const */
-  } = $props();
+  let { locale, keyPath, fieldId, fieldConfig, readonly = false } = $props();
 
   const {
     i18n = false,
@@ -83,8 +80,11 @@
   let tableBody = $state();
   /** @type {boolean[]} */
   let edited = $state([]);
-  /** @type {('empty' | 'duplicate' | undefined)[]} */
-  let validations = $state([]);
+  /**
+   * Validation results of the {@link rows}, one per row.
+   * @type {('empty' | 'duplicate' | undefined)[]}
+   */
+  const validations = $derived(validatePairs({ pairs: rows.values, edited }));
 
   // Removing the blank row offered for an empty field would just bring it back
   const isOnlyBlankRow = $derived(
@@ -114,11 +114,9 @@
     }
 
     const updatedPairs = getPairs({ draft, valueStoreKey, keyPath, locale });
-    // A pair whose key is still empty hasn’t been written to the draft — adding one removes the
-    // `null` placeholder from the draft, which is what runs this — so it doesn’t count as a change
-    const savedPairs = rows.values.filter(([key]) => key.trim());
+    const valueStore = draft[valueStoreKey][locale];
 
-    if (!equal(savedPairs, updatedPairs)) {
+    if (haveStoredPairsChanged({ rows: rows.values, storedPairs: updatedPairs })) {
       // Preserve existing IDs for unchanged positions; assign new IDs for new pairs
       rows.replace([...updatedPairs], { keepIds: true });
       edited = updatedPairs.map(() => false);
@@ -126,14 +124,11 @@
 
     ensureBlankRow();
 
-    // A blank row isn’t stored, so the field holds nothing until a key is filled in
-    if (!updatedPairs.length && draft[valueStoreKey][locale][keyPath] !== null) {
-      const valueStore = draft[valueStoreKey][locale];
+    if (shouldStorePlaceholder({ storedPairs: updatedPairs, storedValue: valueStore[keyPath] })) {
       const _keyPath = keyPath;
 
-      // Enable validation. This runs from an effect, so the write is deferred like the one in
-      // `updateStore()`
-      queueMicrotask(() => {
+      // Enable validation. This runs from an effect, so the write is deferred
+      deferDraftWrite(() => {
         valueStore[_keyPath] = null;
       });
     }
@@ -157,10 +152,36 @@
    * Remove a pair from {@link rows}.
    * @param {number} index Row index.
    */
-  const removePair = (index) => {
+  const removePair = async (index) => {
     rows.remove(index);
     edited.splice(index, 1);
     ensureBlankRow();
+    await tick();
+
+    // The focused Remove button is gone along with the row, so move the focus to the Remove button
+    // of the row now at the same position, or the previous row if the last one was removed. The
+    // blank row left once the last pair is removed can’t be removed, so its key takes the focus
+    // There’s always a row left, as the blank row takes the place of the last pair
+    const { rows: rowList } = /** @type {HTMLTableSectionElement} */ (tableBody);
+
+    focusAfterRemoval({
+      index,
+      /**
+       * Get the Remove button of a row, or the key input if the row can’t be removed.
+       * @param {number} _index Row index.
+       * @returns {HTMLElement | null | undefined} Element.
+       */
+      getTarget: (_index) => {
+        const row = rowList[_index];
+
+        return (
+          row &&
+          /** @type {HTMLElement | null} */ (
+            row.querySelector('td.action button:enabled') ?? row.querySelector('td.key input')
+          )
+        );
+      },
+    });
   };
 
   /**
@@ -185,6 +206,12 @@
      */
     getListElement: () => tableBody,
     onMove: movePair,
+    /**
+     * Get the key of a pair, to be attached to its drag.
+     * @param {number} index Row index.
+     * @returns {string} Key.
+     */
+    getItemData: (index) => rows.values[index][0],
   });
 
   /**
@@ -193,25 +220,22 @@
   const updateStore = () => {
     const draft = entryDraft.current;
 
-    validations = validatePairs({ pairs: rows.values, edited });
-
-    const keyedPairs = rows.values.filter(([key]) => key.trim());
-
-    if (!draft || validations.some(Boolean)) {
+    /* v8 ignore next 3 -- the editor is only rendered while the draft is there */
+    if (!draft) {
       return;
     }
 
-    if (keyedPairs.length) {
-      // Wait until every row has a key before saving
-      if (keyedPairs.length !== rows.values.length) {
-        return;
-      }
-    } else if (
-      // With no key in any row, the field holds no pairs, which only has to be saved when the last
-      // pair has just been removed, leaving a blank row that isn’t stored. A blank pair stored as
-      // the default value of a required field is left alone, so opening an entry changes nothing
-      !getPairs({ draft, valueStoreKey, keyPath, locale }).some(([key]) => key.trim())
-    ) {
+    const pairs = getPairsToSave({
+      rows: rows.values,
+      validations,
+      /**
+       * Get the pairs stored in the draft.
+       * @returns {[string, string][]} Pairs.
+       */
+      getStoredPairs: () => getPairs({ draft, valueStoreKey, keyPath, locale }),
+    });
+
+    if (!pairs) {
       return;
     }
 
@@ -221,19 +245,29 @@
       fieldConfig,
       keyPath,
       locale,
-      pairs: $state.snapshot(keyedPairs),
+      pairs: $state.snapshot(pairs),
     };
 
-    // This runs from an effect, so defer the write to the draft like `<FieldEditor>` does: a write
-    // made while an effect is running makes Svelte walk the derived graph below the value map
-    // without memoizing, which takes exponentially longer with each level of nesting
-    queueMicrotask(() => {
+    // This runs from an effect, so the write to the draft is deferred
+    deferDraftWrite(() => {
       savePairs(args);
     });
   };
 
+  /**
+   * The pairs stored in the draft and the value at the field’s key path, which is all
+   * {@link updatePairs} reads. It only changes when the field does, rather than whenever anything
+   * else in the entry is changed, e.g. on every keystroke in another field.
+   */
+  const storedField = createStableDerivedState(() => {
+    const valueMap = getFieldValueMapSnapshot(entryDraft.current, locale, keyPath, valueStoreKey);
+
+    // A snapshot isn’t mutated, so its key paths are read from the index kept for it
+    return [getPairsFromContent(valueMap, keyPath, { live: false }), valueMap[keyPath]];
+  });
+
   watch(
-    () => [getValueMapSnapshot(entryDraft.current, locale, valueStoreKey)],
+    () => [storedField.current],
     () => {
       updatePairs();
     },
@@ -261,18 +295,12 @@
         {/if}
       </tr>
     </thead>
-    <tbody
-      bind:this={tableBody}
-      ondragovercapture={sorter.onDragOver}
-      ondropcapture={sorter.onDrop}
-    >
+    <tbody bind:this={tableBody} {...sorter.listProps}>
       {#each sorter.displayOrder as index (rows.ids[index])}
         <tr
           bind:this={rowElements[index]}
-          class:dragging={sorter.dragIndex === index}
-          draggable={sorter.grabbedIndex === index}
-          ondragstart={(event) => sorter.onDragStart(index, event, rows.values[index][0])}
-          ondragend={sorter.onDragEnd}
+          class:drag-placeholder={sorter.dragIndex === index}
+          {...sorter.itemProps(index)}
           animate:flip={{ duration: 200 }}
         >
           {#if !keysReadonly}
@@ -282,9 +310,7 @@
                   {index}
                   itemCount={rows.values.length}
                   disabled={rows.values.length < 2}
-                  onGrab={() => sorter.grab(index)}
-                  onRelease={sorter.release}
-                  onMove={(to, action) => sorter.move(index, to, action)}
+                  {...sorter.reorderControlProps(index)}
                 />
               </div>
             </td>
@@ -337,20 +363,13 @@
           </td>
           {#if !keysReadonly}
             <td class="action">
-              <Button
+              <RemoveButton
                 variant="ghost"
-                size="small"
-                iconic
-                aria-label={_('remove')}
                 disabled={isOnlyBlankRow}
                 onclick={() => {
                   removePair(index);
                 }}
-              >
-                {#snippet startIcon()}
-                  <Icon name="close" />
-                {/snippet}
-              </Button>
+              />
             </td>
           {/if}
         </tr>
@@ -375,6 +394,7 @@
     <AddItemButton
       disabled={keysReadonly}
       {fieldConfig}
+      {locale}
       items={rows.values}
       addItem={() => {
         addPair();
@@ -430,15 +450,6 @@
     &.reorder div {
       display: flex;
       align-items: center;
-    }
-  }
-
-  tr {
-    /* The dragged row is left as a faint placeholder marking the gap it would drop into, like the
-      items of a List field */
-
-    &.dragging {
-      opacity: 0.25;
     }
   }
 </style>

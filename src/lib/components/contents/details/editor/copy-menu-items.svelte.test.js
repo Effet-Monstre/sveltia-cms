@@ -85,6 +85,18 @@ describe('CopyMenuItems', () => {
     await expect.poll(() => draft.currentValues.de.title).toBe('');
   });
 
+  test('names a locale by its code when it has no display name', async () => {
+    // `en_US` isn’t a valid language tag, so `Intl.DisplayNames` can’t name it
+    await renderItems({ locale: 'de', otherLocales: ['en_US'], keyPath: 'title' });
+
+    const items = page.getByRole('menuitem');
+
+    await expect.poll(() => items.elements().length).toBe(1);
+    expect(items.elements().map((el) => el.textContent?.trim())).toEqual([
+      'Copy from \u2068en_US\u2069',
+    ]);
+  });
+
   test('disables copying from a locale with the same or no value', async () => {
     await renderItems(
       { locale: 'fr', otherLocales: ['en', 'de'], keyPath: 'title' },
@@ -155,6 +167,23 @@ describe('CopyMenuItems', () => {
     // `docs/fork.md`
     expect(copyFromLocale).not.toHaveBeenCalled();
     await expect.poll(() => draft.currentValues.de.title).toBe('Hello');
+  });
+
+  test('copies the whole entry into the values object the locale already holds', async () => {
+    const draft = await renderItems(
+      { locale: 'de', otherLocales: ['en', 'fr'] },
+      { currentValues: { en: { title: 'Hello' }, fr: { title: 'Bonjour' }, de: { extra: 'x' } } },
+    );
+
+    // The locale’s values are held in a proxy that validates them and copies them to the other
+    // locales as the i18n strategy of each field requires, so the copy writes into it rather than
+    // replacing it; see `docs/fork.md`
+    const target = draft.currentValues.de;
+
+    await page.getByRole('menuitem', { name: 'Copy from \u2068French\u2069' }).click();
+    await expect.poll(() => draft.currentValues.de.title).toBe('Bonjour');
+    expect(draft.currentValues.de).toBe(target);
+    expect(draft.currentValues.de).not.toHaveProperty('extra');
   });
 
   test('groups the locales in a submenu', async () => {

@@ -2,15 +2,22 @@ import { describe, expect, test, vi } from 'vitest';
 
 import { getFolderPublicPath } from '$lib/services/assets/info';
 import { getStockAssetMediaLibraryOptions } from '$lib/services/integrations/media-libraries/stock';
+import { createMockAssetFolder } from '$lib/test/factories';
 
 import {
+  getDroppedResources,
   getFirstDefaultLibraryName,
+  getInitialLibraryName,
   getInsertedResources,
+  getLocationResources,
   getPickedFolderPublicPaths,
+  getSelectionWithResource,
   getStockAssetProviderEntries,
   getUnsavedAssetSubfolderPath,
   isFolderOffered,
+  processUniqueFiles,
   sortServicesByName,
+  trackInsertedExternalAssets,
 } from './select-assets-dialog.svelte';
 
 vi.mock('$lib/services/assets/info', () => ({
@@ -31,17 +38,19 @@ vi.mock('$lib/services/integrations/media-libraries/stock', () => ({
 }));
 
 /**
- * @import { Asset, AssetFolderInfo, AssetLibraryFolderMap } from '$lib/types/private';
+ * @import {
+ * Asset,
+ * AssetFolderInfo,
+ * AssetLibraryFolderMap,
+ * MediaLibraryService,
+ * } from '$lib/types/private';
  */
 
 /** @type {AssetFolderInfo} */
-const browsableFolder = {
-  collectionName: undefined,
+const browsableFolder = createMockAssetFolder({
   internalPath: 'static/images',
   publicPath: '/images',
-  entryRelative: false,
-  hasTemplateTags: false,
-};
+});
 
 /** @type {AssetFolderInfo} */
 const entryRelativeFolder = { ...browsableFolder, collectionName: 'posts', entryRelative: true };
@@ -111,6 +120,105 @@ describe('getFirstDefaultLibraryName()', () => {
         selectFolder: false,
       }),
     ).toBeUndefined();
+  });
+});
+
+describe('getInitialLibraryName()', () => {
+  /** @type {AssetLibraryFolderMap} */
+  const assetLibraryFolderMap = {
+    field: { folder: undefined, enabled: false },
+    entry: { folder: undefined, enabled: false },
+    global: { folder: browsableFolder, enabled: true },
+  };
+
+  const cloud = /** @type {[string, MediaLibraryService]} */ (['cloudinary', {}]);
+  const stock = /** @type {[string, MediaLibraryService]} */ (['pexels', {}]);
+
+  const args = {
+    assetLibraryFolderMap,
+    isDefaultLibraryEnabled: true,
+    selectFolder: false,
+    hasPendingFiles: false,
+    cloudServiceEntries: [cloud],
+    externalServiceEntries: [cloud, stock].reverse(),
+  };
+
+  test('selects the first repository folder offered', () => {
+    expect(getInitialLibraryName({ ...args, hasPendingFiles: true })).toBe('default-global');
+  });
+
+  test('selects the first cloud storage service for pending files', () => {
+    expect(
+      getInitialLibraryName({ ...args, isDefaultLibraryEnabled: false, hasPendingFiles: true }),
+    ).toBe('cloudinary');
+    // Without a cloud storage service, the first external service is selected
+    expect(
+      getInitialLibraryName({
+        ...args,
+        isDefaultLibraryEnabled: false,
+        hasPendingFiles: true,
+        cloudServiceEntries: [],
+      }),
+    ).toBe('pexels');
+  });
+
+  test('selects the first external service otherwise', () => {
+    expect(getInitialLibraryName({ ...args, isDefaultLibraryEnabled: false })).toBe('pexels');
+  });
+
+  test('selects the first location marked as the default that’s offered', () => {
+    expect(getInitialLibraryName({ ...args, preferredLibraryNames: ['cloudinary'] })).toBe(
+      'cloudinary',
+    );
+    // The default library stands for the first repository folder
+    expect(
+      getInitialLibraryName({ ...args, preferredLibraryNames: ['default', 'cloudinary'] }),
+    ).toBe('default-global');
+    // A location that isn’t offered, e.g. when a folder is to be selected, is skipped
+    expect(
+      getInitialLibraryName({ ...args, preferredLibraryNames: ['aws_s3', 'cloudinary'] }),
+    ).toBe('cloudinary');
+    expect(
+      getInitialLibraryName({
+        ...args,
+        isDefaultLibraryEnabled: false,
+        preferredLibraryNames: ['default', 'cloudinary'],
+      }),
+    ).toBe('cloudinary');
+    expect(
+      getInitialLibraryName({
+        ...args,
+        cloudServiceEntries: [],
+        preferredLibraryNames: ['cloudinary'],
+      }),
+    ).toBe('default-global');
+  });
+
+  test('skips a marked service that can’t take the pending files', () => {
+    const uploader = /** @type {[string, MediaLibraryService]} */ (
+      /** @type {unknown} */ (['aws_s3', { upload: vi.fn() }])
+    );
+
+    expect(
+      getInitialLibraryName({
+        ...args,
+        isDefaultLibraryEnabled: false,
+        hasPendingFiles: true,
+        cloudServiceEntries: [uploader, cloud],
+        preferredLibraryNames: ['cloudinary', 'aws_s3'],
+      }),
+    ).toBe('aws_s3');
+  });
+
+  test('selects nothing without any location', () => {
+    expect(
+      getInitialLibraryName({
+        ...args,
+        isDefaultLibraryEnabled: false,
+        cloudServiceEntries: [],
+        externalServiceEntries: [],
+      }),
+    ).toBe('');
   });
 });
 
@@ -213,6 +321,40 @@ describe('getUnsavedAssetSubfolderPath()', () => {
   });
 });
 
+describe('processUniqueFiles()', () => {
+  test('should run the task once per content', async () => {
+    const files = [
+      new File(['a'], 'a.png'),
+      new File(['b'], 'b.png'),
+      new File(['a'], 'a-copy.png'),
+    ];
+
+    const task = vi.fn(async (/** @type {File} */ file) => file.name);
+
+    // The copy shares the result of the first file with the same content
+    expect(await processUniqueFiles(files, task)).toEqual(['a.png', 'b.png', 'a.png']);
+    expect(task.mock.calls).toEqual([[files[0]], [files[1]]]);
+  });
+});
+
+describe('getDroppedResources()', () => {
+  test('should select each asset once', () => {
+    const pending = /** @type {any} */ ({ unsaved: true, blobURL: 'blob:pending', path: 'a.png' });
+    const dropped = /** @type {any} */ ({ unsaved: true, blobURL: 'blob:dropped', path: 'a.png' });
+
+    expect(
+      getDroppedResources([
+        { asset: pending, replace: false },
+        { asset: dropped, replace: true },
+        { asset: pending, replace: false },
+      ]),
+    ).toEqual([
+      { asset: pending, replace: false },
+      { asset: dropped, replace: true },
+    ]);
+  });
+});
+
 describe('getInsertedResources()', () => {
   test('copies the resources other than unsaved assets', () => {
     const savedAsset = /** @type {Asset} */ ({
@@ -251,5 +393,109 @@ describe('getInsertedResources()', () => {
     // The file is passed as is rather than cloned
     expect(result.file).toBe(file);
     expect(result.folder).not.toBe(browsableFolder);
+  });
+});
+
+describe('getSelectionWithResource()', () => {
+  const a = { url: 'https://example.com/a.jpg' };
+  const b = { url: 'https://example.com/b.jpg' };
+  const c = { url: 'https://example.com/c.jpg' };
+  /**
+   * Check if a resource is the same as `b`.
+   * @param {{ url?: string }} r Resource.
+   * @returns {boolean} Result.
+   */
+  const isSameAsB = (r) => r.url === b.url;
+
+  test('replaces a single selection, including picks no longer listed', () => {
+    expect(getSelectionWithResource({ resources: [a], resource: b, isSame: isSameAsB })).toEqual([
+      b,
+    ]);
+    expect(
+      getSelectionWithResource({
+        resources: [a, c],
+        resource: b,
+        isSame: isSameAsB,
+        multiple: false,
+      }),
+    ).toEqual([b]);
+  });
+
+  test('adds to a multiple selection without listing the resource twice', () => {
+    expect(
+      getSelectionWithResource({
+        resources: [a, b, c],
+        resource: b,
+        isSame: isSameAsB,
+        multiple: true,
+      }),
+    ).toEqual([a, c, b]);
+    expect(
+      getSelectionWithResource({ resources: [], resource: b, isSame: isSameAsB, multiple: true }),
+    ).toEqual([b]);
+  });
+});
+
+describe('getLocationResources()', () => {
+  test('selects the URL entered earlier on coming back to Enter URL', () => {
+    expect(
+      getLocationResources({ libraryName: 'enter-url', enteredURL: ' https://example.com/a.png ' }),
+    ).toEqual([{ url: 'https://example.com/a.png' }]);
+  });
+
+  test('selects nothing without a URL', () => {
+    expect(getLocationResources({ libraryName: 'enter-url', enteredURL: ' ' })).toEqual([]);
+  });
+
+  test('selects nothing on another location', () => {
+    expect(
+      getLocationResources({ libraryName: 'default-global', enteredURL: 'https://example.com/' }),
+    ).toEqual([]);
+  });
+});
+
+describe('trackInsertedExternalAssets()', () => {
+  const asset = /** @type {any} */ ({ id: '1', downloadURL: 'https://example.com/1.jpg' });
+  const assets = new Map([[asset.downloadURL, asset]]);
+  const options = /** @type {any} */ ({ apiKey: 'key' });
+
+  test('reports the inserted assets the service has listed', () => {
+    const trackDownload = vi.fn().mockResolvedValue(undefined);
+
+    trackInsertedExternalAssets({
+      trackDownload,
+      resources: [{ url: asset.downloadURL }, { url: 'https://example.com/other.jpg' }, {}],
+      assets,
+      options,
+    });
+
+    expect(trackDownload).toHaveBeenCalledTimes(1);
+    expect(trackDownload).toHaveBeenCalledWith(asset, options);
+  });
+
+  test('ignores a failure', async () => {
+    const trackDownload = vi.fn().mockRejectedValue(new Error('Boom'));
+
+    expect(() =>
+      trackInsertedExternalAssets({
+        trackDownload,
+        resources: [{ url: asset.downloadURL }],
+        assets,
+        options,
+      }),
+    ).not.toThrow();
+    await Promise.resolve();
+    expect(trackDownload).toHaveBeenCalledTimes(1);
+  });
+
+  test('does nothing for a service that doesn’t track downloads', () => {
+    expect(() =>
+      trackInsertedExternalAssets({
+        trackDownload: undefined,
+        resources: [{ url: asset.downloadURL }],
+        assets,
+        options,
+      }),
+    ).not.toThrow();
   });
 });

@@ -3,6 +3,9 @@ import { beforeEach, describe, expect, test, vi } from 'vitest';
 import { deleteEntries, updateStores } from './delete';
 
 // Mock dependencies
+const { additions } = vi.hoisted(() => ({ additions: { deleteEntryComments: vi.fn() } }));
+
+vi.mock('$lib/services/app/additions', () => ({ getAdditions: vi.fn(() => additions) }));
 vi.mock('$lib/services/assets/state', () => ({
   allAssets: { current: [] },
 }));
@@ -54,11 +57,33 @@ vi.mock('$lib/services/contents/collection/entries', () => ({
   getEntriesByCollection: vi.fn(() => []),
 }));
 
-vi.mock('$lib/services/contents/entry/relations/cascade/delete', () => ({
-  EMPTY_CASCADE_DELETE_PLAN: { targets: [], blockers: [] },
-  planCascadeDelete: vi.fn(() => ({ targets: [], blockers: [] })),
-  buildCascadeDeleteChanges: vi.fn().mockResolvedValue({ changes: [], savingEntries: [] }),
-}));
+vi.mock('$lib/services/contents/entry/relations/cascade/delete', () => {
+  /** @type {import('vitest').Mock<(args: any) => any>} */
+  const planMock = vi.fn(() => ({ targets: [], blockers: [] }));
+
+  /**
+   * Mirror the real wrapper so that the tests can drive it through `planCascadeDelete()`.
+   * @param {any} args Arguments.
+   * @param {string} message Error message.
+   * @returns {any[]} Targets.
+   * @throws {Error} When the plan has blockers.
+   */
+  const planCascadeDeleteOrThrow = (args, message) => {
+    const { targets, blockers } = planMock(args);
+
+    if (blockers.length) {
+      throw new Error(message, { cause: blockers });
+    }
+
+    return targets;
+  };
+
+  return {
+    planCascadeDelete: planMock,
+    planCascadeDeleteOrThrow,
+    buildCascadeDeleteChanges: vi.fn().mockResolvedValue({ changes: [], savingEntries: [] }),
+  };
+});
 
 const { planCascadeDelete, buildCascadeDeleteChanges } =
   await import('$lib/services/contents/entry/relations/cascade/delete');
@@ -174,6 +199,9 @@ describe('Test deleteEntries()', () => {
     selectedCollection.current = /** @type {any} */ ({ name: 'posts' });
 
     await deleteEntries(/** @type {any} */ (mockEntries));
+
+    // Their comments go with them
+    expect(additions.deleteEntryComments).toHaveBeenCalledTimes(2);
 
     expect(vi.mocked(saveChanges)).toHaveBeenCalledWith({
       changes: [

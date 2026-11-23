@@ -1,6 +1,9 @@
+import { randomBytes } from 'node:crypto';
+
 import { createPNG } from '../fixtures/files.js';
 import { getBlobSHA } from '../fixtures/git.js';
 import { expect, GITLAB_CONFIG, test } from '../fixtures/test.js';
+import { getEditor, getEntryRows, openFirstPost } from '../fixtures/ui.js';
 
 /**
  * @import { Locator, Page } from '@playwright/test';
@@ -14,20 +17,6 @@ test.use({ config: GITLAB_CONFIG });
 test.beforeEach(async ({ gitlab }) => {
   gitlab.commit({ [POST_PATH]: FIRST_POST }, { message: 'Add the first post' });
 });
-
-/**
- * Open the first post in the entry editor.
- * @param {Page} page Page.
- * @returns {Promise<Locator>} Editor.
- */
-const openFirstPost = async (page) => {
-  const editor = page.getByRole('group', { name: 'Content Editor' });
-
-  await page.getByRole('row', { name: /First Post/ }).click();
-  await expect(editor.getByRole('textbox', { name: 'Body' })).toHaveValue('Hello, world!');
-
-  return editor;
-};
 
 test('signs in with the stored session and lists the entries', async ({ cms, page }) => {
   await cms.open();
@@ -50,7 +39,7 @@ test('lists the entries of a project with more files than a page of the file lis
   gitlab.treePageSize = 2;
   await cms.open();
 
-  await expect(page.getByRole('group', { name: 'Entry List' }).getByRole('row')).toHaveCount(3);
+  await expect(getEntryRows(page)).toHaveCount(3);
 });
 
 test('refuses a user who can’t push code to the project', async ({ cms, gitlab, page }) => {
@@ -58,7 +47,7 @@ test('refuses a user who can’t push code to the project', async ({ cms, gitlab
 
   await cms.open();
   await expect(page.getByRole('alert')).toContainText(
-    /You don’t have access to the .*e2e-site.* repository/,
+    /You don’t have write access to the .*e2e-site.* repository/,
   );
 });
 
@@ -120,7 +109,7 @@ test('creates an entry, then deletes it', async ({ cms, gitlab, page }) => {
   await cms.open();
   await page.getByRole('button', { name: 'Create New Entry' }).click();
 
-  const editor = page.getByRole('group', { name: 'Content Editor' });
+  const editor = getEditor(page);
 
   await editor.getByRole('textbox', { name: 'Title' }).fill('Second Post');
   await editor.getByRole('textbox', { name: 'Body' }).fill('Hello!');
@@ -158,7 +147,7 @@ test('creates an entry, then deletes it', async ({ cms, gitlab, page }) => {
       },
     ],
   });
-  await expect(page.getByRole('group', { name: 'Entry List' }).getByRole('row')).toHaveCount(1);
+  await expect(getEntryRows(page)).toHaveCount(1);
 });
 
 test('shows an image from the project', async ({ cms, gitlab, page }) => {
@@ -205,6 +194,101 @@ test('uploads an image', async ({ cms, gitlab, page }) => {
       encoding: 'base64',
       content: kite.toString('base64'),
     }),
+  ]);
+});
+
+test('splits an upload over the request size limit of the instance into several commits', async ({
+  cms,
+  gitlab,
+  page,
+}) => {
+  // An image padded with random bytes, which don’t compress, takes 1 MB, or 1.3 MB once encoded
+  const files = ['one.png', 'two.png', 'three.png'].map((name) => ({
+    name,
+    mimeType: 'image/png',
+    buffer: Buffer.concat([createPNG({ color: [0, 0, 255] }), randomBytes(1024 * 1024)]),
+  }));
+
+  let refusals = 0;
+
+  // An instance that takes 2 MB at most, like NGINX with a low `client_max_body_size`, answers a
+  // larger request with 413 Content Too Large, without CORS headers
+  await page.route(`${gitlab.apiRoot}/**`, async (route) => {
+    const request = route.request();
+
+    if (
+      request.method() === 'POST' &&
+      request.url().endsWith('/repository/commits') &&
+      (request.postDataBuffer()?.length ?? 0) > 2 * 1024 * 1024
+    ) {
+      refusals += 1;
+      await route.fulfill({ status: 413, contentType: 'text/html', body: '413' });
+    } else {
+      await route.fallback();
+    }
+  });
+
+  await cms.open();
+  await page.getByRole('radio', { name: 'Assets' }).click();
+  await page.getByRole('button', { name: 'Upload New Assets' }).first().click();
+
+  const [chooser] = await Promise.all([
+    page.waitForEvent('filechooser'),
+    page
+      .getByRole('dialog', { name: 'Upload New Assets' })
+      .getByRole('button', { name: 'Choose Files' })
+      .click(),
+  ]);
+
+  await chooser.setFiles(files);
+  await page
+    .getByRole('alertdialog', { name: 'Upload New Assets' })
+    .getByRole('button', { name: 'Upload' })
+    .click();
+
+  await expect
+    .poll(() => files.map(({ name }) => gitlab.head.tree.get(`static/images/${name}`)))
+    .toEqual(files.map(({ buffer }) => getBlobSHA(buffer)));
+  // The three files are sent again in commits of half the size, one file each
+  expect(refusals).toBe(1);
+  expect(gitlab.received.map(({ actions }) => actions.length)).toEqual([1, 1, 1]);
+});
+
+test('renames an image without sending its content again, which keeps it in Git LFS', async ({
+  cms,
+  gitlab,
+  page,
+}) => {
+  const sunset = createPNG({ color: [255, 128, 0] });
+
+  gitlab.commit({ 'static/images/sunset.png': sunset });
+
+  const loadedHead = gitlab.head.oid;
+
+  await cms.open();
+  await page.getByRole('radio', { name: 'Assets' }).click();
+  await page.getByRole('row', { name: 'sunset.png' }).click();
+  await cms.chooseMenuItem(
+    page.getByRole('button', { name: 'Show Edit Options' }),
+    page.getByRole('menuitem', { name: 'Rename Asset' }),
+  );
+
+  const dialog = page.getByRole('dialog', { name: /Rename/ });
+
+  await dialog.getByRole('textbox').fill('dusk.png');
+  await dialog.getByRole('button', { name: 'Rename' }).click();
+
+  await expect.poll(() => gitlab.head.tree.get('static/images/dusk.png')).toBe(getBlobSHA(sunset));
+  expect(gitlab.head.tree.has('static/images/sunset.png')).toBe(false);
+  // GitLab takes the existing blob for a move without content, which for a file tracked with Git
+  // LFS is the pointer, while a move with content would commit the bytes as a regular blob
+  expect(gitlab.received[0].actions).toEqual([
+    {
+      action: 'move',
+      file_path: 'static/images/dusk.png',
+      previous_path: 'static/images/sunset.png',
+      last_commit_id: loadedHead,
+    },
   ]);
 });
 
@@ -289,33 +373,124 @@ test('saves a change while a colleague changes another file', async ({ cms, gitl
     .poll(() => gitlab.readFile(POST_PATH))
     .toBe('---\ntitle: First Post\n---\n\nHello from Mona!\n');
   expect(gitlab.readFile('content/posts/second-post.md')).toBe('---\ntitle: Second Post\n---\n');
+  // The commit has landed on top of the colleague’s, which is fetched rather than skipped over
+  await expect(page.getByRole('row', { name: /Second Post/ })).toBeVisible();
 });
 
-test('lists the commits of an entry in the History panel', async ({ cms, gitlab, page }) => {
-  gitlab.commit({ [POST_PATH]: FIRST_POST.replace('Hello', 'Hi') }, { author: gitlab.user });
-  // A commit to another file isn’t listed
-  gitlab.commit({ 'content/posts/second-post.md': '---\ntitle: Second Post\n---\n' });
-  await cms.open();
-  await page.getByRole('row', { name: /First Post/ }).click();
-  await page
-    .getByRole('radiogroup', { name: 'Sidebar Panels' })
-    .getByRole('radio', { name: 'History' })
-    .click();
+test.describe('with `prompt_commit_messages` on', () => {
+  test.use({
+    config: {
+      ...GITLAB_CONFIG,
+      backend: { ...GITLAB_CONFIG.backend, prompt_commit_messages: 'prefix' },
+    },
+  });
 
-  const commits = page.getByRole('group', { name: 'History', exact: true }).getByRole('link');
+  test('lists the commits of an entry with their messages in the History panel', async ({
+    cms,
+    gitlab,
+    page,
+  }) => {
+    gitlab.commit(
+      { [POST_PATH]: FIRST_POST.replace('Hello', 'Hi') },
+      { author: gitlab.user, message: 'Say hi\n\nThe greeting was too formal.' },
+    );
+    // A commit to another file isn’t listed
+    gitlab.commit({ 'content/posts/second-post.md': '---\ntitle: Second Post\n---\n' });
+    await cms.open();
+    await page.getByRole('row', { name: /First Post/ }).click();
+    await page
+      .getByRole('radiogroup', { name: 'Sidebar Panels' })
+      .getByRole('radio', { name: 'History' })
+      .click();
 
-  await expect(commits).toHaveCount(2);
-  await expect(commits.first()).toContainText(gitlab.user.name);
-  await expect(commits.last()).toContainText(gitlab.colleague.name);
+    const commits = page.getByRole('group', { name: 'History', exact: true }).getByRole('link');
 
-  // A commit opens on GitLab in a new tab
-  await page
-    .context()
-    .route('https://gitlab.com/sveltia/**', (route) => route.fulfill({ body: '' }));
+    await expect(commits).toHaveCount(2);
+    // Each commit is shown with the headline of its message
+    await expect(commits.first()).toContainText('Say hi');
+    await expect(commits.first()).not.toContainText('too formal');
+    await expect(commits.first()).toContainText(gitlab.user.name);
+    await expect(commits.last()).toContainText('Add the first post');
+    await expect(commits.last()).toContainText(gitlab.colleague.name);
 
-  const [popup] = await Promise.all([page.waitForEvent('popup'), commits.last().click()]);
+    // A commit opens on GitLab in a new tab
+    await page
+      .context()
+      .route('https://gitlab.com/sveltia/**', (route) => route.fulfill({ body: '' }));
 
-  expect(popup.url()).toBe(
-    `https://gitlab.com/sveltia/e2e-site/-/commit/${gitlab.commits.at(-3)?.oid}`,
-  );
+    const [popup] = await Promise.all([page.waitForEvent('popup'), commits.last().click()]);
+
+    expect(popup.url()).toBe(
+      `https://gitlab.com/sveltia/e2e-site/-/commit/${gitlab.commits.at(-3)?.oid}`,
+    );
+  });
+});
+
+test.describe('with a gallery of entry-relative media', () => {
+  test.use({
+    config: {
+      ...GITLAB_CONFIG,
+      collections: [
+        {
+          name: 'galleries',
+          label: 'Galleries',
+          folder: 'content/gallery',
+          path: '{{slug}}/index',
+          media_folder: '.',
+          public_folder: '.',
+          create: true,
+          fields: [{ name: 'title', label: 'Title' }],
+        },
+      ],
+    },
+  });
+
+  test('lists only the folders a colleague’s commit has changed when loading again', async ({
+    cms,
+    gitlab,
+    page,
+  }) => {
+    const png = createPNG();
+
+    gitlab.commit({
+      'content/gallery/spring/index.md': '---\ntitle: Spring\n---\n',
+      'content/gallery/spring/a.png': png,
+      'content/gallery/summer/index.md': '---\ntitle: Summer\n---\n',
+      'content/gallery/summer/b.png': png,
+    });
+
+    /** @type {string[]} */
+    const listed = [];
+
+    page.on('request', (request) => {
+      const url = new URL(request.url());
+
+      if (url.pathname.endsWith('/repository/tree')) {
+        listed.push(url.searchParams.get('path') ?? '');
+      }
+    });
+
+    await cms.open();
+    await expect(page.getByRole('row', { name: 'Summer' })).toBeVisible();
+    expect(listed.sort()).toEqual([
+      'content/gallery',
+      'content/gallery/spring',
+      'content/gallery/summer',
+    ]);
+
+    gitlab.commit({
+      'content/gallery/autumn/index.md': '---\ntitle: Autumn\n---\n',
+      'content/gallery/autumn/c.png': png,
+    });
+    listed.length = 0;
+    await page.reload();
+
+    // The albums that haven’t changed come from the cache
+    await expect(page.getByRole('row', { name: 'Autumn' })).toBeVisible();
+    await expect(page.getByRole('row', { name: 'Spring' })).toBeVisible();
+    expect(listed.sort()).toEqual(['content/gallery', 'content/gallery/autumn']);
+
+    await page.getByRole('radio', { name: 'Assets' }).click();
+    await expect(page.getByRole('row', { name: /^[abc]\.png$/ })).toHaveCount(3);
+  });
 });

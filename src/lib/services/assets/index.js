@@ -1,29 +1,46 @@
-import { decodeFilePath, getPathInfo } from '@sveltia/utils/file';
-import { escapeRegExp, stripSlashes } from '@sveltia/utils/string';
-import { flatten } from 'flat';
+import { getPathInfo } from '@sveltia/utils/file';
+import { stripSlashes } from '@sveltia/utils/string';
 
+import {
+  fillInternalPathTemplate,
+  fillMediaFolderTemplate,
+  findInEntryBaseFolders,
+  findInEntryRelativeFolder,
+} from '$lib/services/assets/entry-relative';
 import {
   allAssetFolders,
   getAssetFolder,
   globalAssetFolder,
   selectedAssetFolder,
 } from '$lib/services/assets/folders';
+import { getAssetPathMap } from '$lib/services/assets/lookup';
 import { allAssets, focusedAsset } from '$lib/services/assets/state';
 import {
   focusedSubfolder,
-  getDirName,
+  getFolderNamesInDir,
+  getNonAssetFileNamesInDir,
   selectedSubfolderPath,
 } from '$lib/services/assets/subfolders';
-import { fillTemplate } from '$lib/services/common/template';
-import { ESCAPED_PLACEHOLDER_REGEX } from '$lib/services/common/template/constants';
 import { hasTemplateTags } from '$lib/services/common/template/tags';
-import { getCollection } from '$lib/services/contents/collection';
-import { isCollectionIndexFile } from '$lib/services/contents/collection/entries/index-file';
-import { getCollectionFilesByEntry } from '$lib/services/contents/collection/files';
-import { getAssociatedCollections } from '$lib/services/contents/entry/collections';
+import { getTemplatePattern } from '$lib/services/common/template/utils';
+import {
+  hasTags,
+  replaceFolderTags,
+  resolveGlobalFolders,
+} from '$lib/services/config/folders/assets';
+import { cmsConfig } from '$lib/services/config/state';
+import { getEntryCollectionContexts } from '$lib/services/contents/entry/contexts';
+import { getEntryLocaleFile } from '$lib/services/contents/entry/paths';
 import { getOrCreate, memoizeOnSource } from '$lib/services/utils/cache';
-import { createPath, resolvePath, stripPathPrefix } from '$lib/services/utils/file';
+import {
+  createPath,
+  foldFileName,
+  getDirName,
+  resolvePath,
+  stripPathPrefix,
+} from '$lib/services/utils/file';
 import { createRootEffect } from '$lib/services/utils/state.svelte';
+import { decodeURIComponentSafely } from '$lib/services/utils/url';
 
 /**
  * @import {
@@ -32,19 +49,11 @@ import { createRootEffect } from '$lib/services/utils/state.svelte';
  * Entry,
  * InternalCollection,
  * InternalCollectionFile,
+ * InternalLocaleCode,
+ * LocalizedEntry,
  * TypedFieldKeyPath,
  * } from '$lib/types/private';
  */
-
-/**
- * Get a Map from asset path to Asset, used for O(1) path lookups. Rebuilt only when `allAssets` is
- * replaced.
- * @type {() => Map<string, Asset>}
- */
-const getAssetPathMap = memoizeOnSource(
-  () => allAssets.current,
-  (_allAssets) => new Map(_allAssets.map((asset) => [asset.path, asset])),
-);
 
 /**
  * Get an asset by its internal repository path.
@@ -65,47 +74,25 @@ export const getAssetByInternalPath = (path) => getAssetPathMap().get(path);
 export const getAssetKey = ({ unsaved, blobURL, path }) => (unsaved && blobURL ? blobURL : path);
 
 /**
- * Resolve template tags in an asset folder’s `internalPath`, such as `/assets/images/{{slug}}`,
- * using the given entry’s content.
- * @param {object} args Arguments.
- * @param {string} args.internalPath Internal path that may contain template tags.
- * @param {string} [args.collectionName] Collection name associated with the asset folder. It’s
- * `undefined` for the global asset folder as well as field-level asset folders in custom editor
- * components.
- * @param {Entry} [args.entry] Associated entry. Can be `undefined` when editing a new draft.
- * @returns {string | undefined} Resolved path, which is the given `internalPath` itself if it has
- * no template tags, or `undefined` if the tags cannot be resolved, typically because the entry has
- * not been saved yet.
+ * Replace the `{{media_folder}}` and `{{public_folder}}` tags in the raw `media_folder` or
+ * `public_folder` option of a collection or collection file, e.g. `{{media_folder}}/blog`, with the
+ * global folders, the same way as the asset folders are normalized. Otherwise the tags would be
+ * taken for entry template tags and filled in with something else.
+ * @param {string | undefined} folder Folder option.
+ * @param {object} [options] Options.
+ * @param {boolean} [options.isPublicFolder] Whether the option is `public_folder`.
+ * @returns {string | undefined} Folder with the tags replaced, or the given folder as is if it has
+ * no such tags or the global `media_folder` option is not configured.
  */
-export const fillInternalPathTemplate = ({ internalPath, collectionName, entry }) => {
-  if (!hasTemplateTags(internalPath)) {
-    return internalPath;
+const replaceGlobalFolderTags = (folder, options) => {
+  // Check for the tags first, so the global folders are only resolved when needed
+  if (folder === undefined || !hasTags(folder)) {
+    return folder;
   }
 
-  const collection = collectionName
-    ? getCollection(collectionName)
-    : entry
-      ? getAssociatedCollections(entry)[0]
-      : undefined;
+  const globalFolders = cmsConfig.current ? resolveGlobalFolders(cmsConfig.current) : undefined;
 
-  if (!entry || !collection) {
-    // Cannot resolve the path
-    return undefined;
-  }
-
-  const { slug, locales } = entry;
-  const { defaultLocale } = collection._i18n;
-  const locale = defaultLocale in locales ? defaultLocale : Object.keys(locales)[0];
-  const { content, path: entryFilePath } = locales[locale];
-
-  return fillTemplate(internalPath, {
-    type: 'media_folder',
-    collection,
-    content: flatten(content),
-    currentSlug: slug,
-    entryFilePath,
-    isIndexFile: isCollectionIndexFile(collection, entry),
-  });
+  return replaceFolderTags(folder, globalFolders, options) ?? folder;
 };
 
 /**
@@ -119,6 +106,8 @@ export const fillInternalPathTemplate = ({ internalPath, collectionName, entry }
  * @param {string} [context.componentName] Custom editor component name for a field-level asset
  * folder.
  * @param {TypedFieldKeyPath} [context.typedKeyPath] Field key path for field-level media folders.
+ * @param {InternalLocaleCode} [context.locale] Locale the path is referenced in, whose entry file
+ * the path is relative to. Default: the default locale.
  * @returns {Asset | undefined} Found asset.
  */
 export const getAssetByRelativePathAndCollection = ({
@@ -128,9 +117,8 @@ export const getAssetByRelativePathAndCollection = ({
   file,
   componentName,
   typedKeyPath,
+  locale,
 }) => {
-  const { locales } = entry;
-
   const {
     _i18n: { defaultLocale },
   } = file ?? collection;
@@ -147,6 +135,10 @@ export const getAssetByRelativePathAndCollection = ({
       })
     : undefined;
 
+  // A collection file without its own `media_folder` inherits the collection’s, along with its
+  // `public_folder`
+  const folderOptions = file?.media_folder !== undefined ? file : collection;
+
   // A field-level folder that isn’t entry-relative is an absolute one, e.g. `/src/assets/authors`,
   // which has to be used along with its own `public_folder` rather than the collection’s
   // `media_folder`
@@ -154,14 +146,20 @@ export const getAssetByRelativePathAndCollection = ({
     ? fieldFolder.entryRelative
       ? (fieldFolder.internalSubPath ?? '')
       : `/${fieldFolder.internalPath}`
-    : /** @type {string | undefined} */ ((file ?? collection).media_folder);
+    : replaceGlobalFolderTags(/** @type {string | undefined} */ (folderOptions.media_folder));
 
-  const publicFolder = fieldFolder?.publicPath
-    ? fieldFolder.publicPath
-    : /** @type {string | undefined} */ ((file ?? collection).public_folder);
+  let publicFolder =
+    fieldFolder?.publicPath !== undefined
+      ? fieldFolder.publicPath
+      : replaceGlobalFolderTags(/** @type {string | undefined} */ (folderOptions.public_folder), {
+          isPublicFolder: true,
+        });
 
-  const locale = defaultLocale in locales ? defaultLocale : Object.keys(locales)[0];
-  const { path: entryFilePath, content: entryContent } = locales[locale];
+  const localeFile = /** @type {LocalizedEntry} */ (
+    getEntryLocaleFile(entry, { locale, defaultLocale })
+  );
+
+  const { path: entryFilePath, content: entryContent } = localeFile;
 
   if (!entryFilePath || !entryContent) {
     return undefined;
@@ -171,18 +169,15 @@ export const getAssetByRelativePathAndCollection = ({
   // (e.g. Hexo’s Post Asset Folder convention) so the asset can be located correctly.
   // @see https://github.com/sveltia/sveltia-cms/issues/853
   if (mediaFolder && hasTemplateTags(mediaFolder)) {
-    mediaFolder = fillTemplate(mediaFolder, {
-      type: 'media_folder',
-      collection,
-      content: entryContent,
-      currentSlug: entry.slug,
-      entryFilePath,
-      isIndexFile: isCollectionIndexFile(collection, entry),
-    });
+    mediaFolder = fillMediaFolderTemplate(mediaFolder, { collection, entry, localeFile });
   }
 
-  // Directory of the entry file, which is an empty string for an entry file at the repository root
-  const entryFolder = getDirName(entryFilePath);
+  // Resolve them in `public_folder` too, so its prefix can be stripped from the stored path below
+  // @see https://github.com/sveltia/sveltia-cms/issues/1104
+  if (publicFolder && hasTemplateTags(publicFolder)) {
+    publicFolder = fillMediaFolderTemplate(publicFolder, { collection, entry, localeFile });
+  }
+
   // Strip the `media_folder` prefix from the stored path before joining with `mediaFolder`, to
   // avoid duplication when the stored value already includes the media folder (e.g.
   // `images/photo.jpg`). Also normalize `./` prefix since `./images/photo.jpg` and
@@ -192,14 +187,14 @@ export const getAssetByRelativePathAndCollection = ({
   const normalizedPath = path.replace(/^\.\//, '');
   const normalizedMediaFolder = mediaFolder?.replace(/^\.\//, '').replace(/\/$/, '');
   let localPath = stripPathPrefix(normalizedPath, normalizedMediaFolder);
-  let resolvedPath;
 
   // When `media_folder` is absolute (starts with `/`) and `public_folder` is entry-relative (e.g.
   // starts with `.` or `..`), we need special handling for the Astro content collections pattern
   // where images are stored in a shared folder but referenced with relative paths from each entry.
   // Strip the `public_folder` prefix from the stored value and resolve directly against the
   // absolute `media_folder`, bypassing `entryFolder` concatenation.
-  if (mediaFolder?.startsWith('/') && publicFolder) {
+  // An empty `public_folder` stores bare file names, which are relative to the `media_folder` too
+  if (mediaFolder?.startsWith('/') && publicFolder !== undefined) {
     // Normalize `public_folder` by removing leading `./`
     const normalizedPublicFolder = publicFolder.replace(/^\.\//, '');
 
@@ -210,13 +205,49 @@ export const getAssetByRelativePathAndCollection = ({
     }
 
     // Resolve against the absolute media_folder (strip leading `/` to make it repo-relative)
-    resolvedPath = resolvePath(createPath([mediaFolder.slice(1), localPath]));
-  } else {
-    // Original logic: concatenate entryFolder + mediaFolder + localPath for entry-relative folders
-    resolvedPath = resolvePath(createPath([entryFolder, mediaFolder, localPath]));
+    return getAssetPathMap().get(resolvePath(createPath([mediaFolder.slice(1), localPath])));
   }
 
-  return getAssetPathMap().get(resolvedPath);
+  // Concatenate the folder holding the entry’s relative assets, `media_folder` and the local path
+  return findInEntryBaseFolders({ collection, localeFile }, [mediaFolder, localPath]);
+};
+
+/**
+ * Get the asset folders that may hold an asset referenced in a field, from the most specific to the
+ * least: the custom editor component’s folder, the field’s, the collection file’s, the
+ * collection’s, then the global one.
+ * @param {object} args Arguments.
+ * @param {string} [args.collectionName] Collection name.
+ * @param {string} [args.fileName] Collection file name. File/singleton collection only.
+ * @param {string} [args.componentName] Custom editor component name for a field-level asset folder.
+ * @param {TypedFieldKeyPath} [args.typedKeyPath] Field key path for field-level media folders.
+ * @param {boolean} [args.requireCollectionName] Whether to leave out the field, collection file
+ * and collection folders when no collection name is given.
+ * @param {boolean} [args.skipTemplateFolders] Whether to leave out the folders whose path has
+ * template tags, which can’t be resolved without an entry.
+ * @returns {AssetFolderInfo[]} Asset folders.
+ */
+const getCandidateAssetFolders = ({
+  collectionName,
+  fileName,
+  componentName,
+  typedKeyPath,
+  requireCollectionName = false,
+  skipTemplateFolders = false,
+}) => {
+  const hasCollection = !requireCollectionName || !!collectionName;
+
+  return /** @type {AssetFolderInfo[]} */ (
+    [
+      componentName ? getAssetFolder({ componentName, typedKeyPath }) : undefined,
+      hasCollection && typedKeyPath
+        ? getAssetFolder({ collectionName, fileName, typedKeyPath })
+        : undefined,
+      hasCollection ? getAssetFolder({ collectionName, fileName }) : undefined,
+      hasCollection ? getAssetFolder({ collectionName }) : undefined,
+      globalAssetFolder.current,
+    ].filter((folder) => !!folder && !(skipTemplateFolders && folder.hasTemplateTags))
+  );
 };
 
 /**
@@ -229,6 +260,8 @@ export const getAssetByRelativePathAndCollection = ({
  * @param {string} [args.fileName] Collection file name. File/singleton collection only.
  * @param {string} [args.componentName] Custom editor component name for a field-level asset folder.
  * @param {TypedFieldKeyPath} [args.typedKeyPath] Field key path for field-level media folders.
+ * @param {InternalLocaleCode} [args.locale] Locale the path is referenced in, which tells which
+ * locale’s entry file an entry-relative path is relative to. Default: the default locale.
  * @returns {Asset | undefined} Corresponding asset.
  */
 export const getAssetByRelativePath = ({
@@ -238,21 +271,19 @@ export const getAssetByRelativePath = ({
   fileName,
   componentName,
   typedKeyPath,
+  locale,
 }) => {
   if (!entry) {
     // Without an entry we use collectionName/fileName to scan configured folders. For
     // entry-relative folders, internalPath + internalSubPath is used as a best-effort path.
-    const scanningFolders = /** @type {AssetFolderInfo[]} */ (
-      [
-        componentName ? getAssetFolder({ componentName, typedKeyPath }) : undefined,
-        collectionName && typedKeyPath
-          ? getAssetFolder({ collectionName, fileName, typedKeyPath })
-          : undefined,
-        collectionName ? getAssetFolder({ collectionName, fileName }) : undefined,
-        collectionName ? getAssetFolder({ collectionName }) : undefined,
-        globalAssetFolder.current,
-      ].filter((folder) => !!folder && !folder.hasTemplateTags)
-    );
+    const scanningFolders = getCandidateAssetFolders({
+      collectionName,
+      fileName,
+      componentName,
+      typedKeyPath,
+      requireCollectionName: true,
+      skipTemplateFolders: true,
+    });
 
     const foundAsset = scanningFolders
       .values()
@@ -271,21 +302,32 @@ export const getAssetByRelativePath = ({
     return foundAsset ?? getAssetPathMap().get(path);
   }
 
-  // Stop at the first collection or collection file that has the asset
-  const foundAsset = getAssociatedCollections(entry)
-    .values()
-    .flatMap((collection) => {
-      const collectionFiles = getCollectionFilesByEntry(collection, entry);
-      const args = { path, entry, collection, componentName, typedKeyPath };
-      /** @type {(InternalCollectionFile | undefined)[]} */
-      const files = collectionFiles.length ? collectionFiles : [undefined];
-
-      return files.values().map((file) => getAssetByRelativePathAndCollection({ ...args, file }));
-    })
-    .find(Boolean);
+  /**
+   * Find the asset relative to the given locale’s entry file, stopping at the first collection or
+   * collection file that has it.
+   * @param {InternalLocaleCode | undefined} _locale Locale.
+   * @returns {Asset | undefined} Asset.
+   */
+  const findAsset = (_locale) =>
+    getEntryCollectionContexts(entry)
+      .map(({ collection, collectionFile: file }) =>
+        getAssetByRelativePathAndCollection({
+          path,
+          entry,
+          collection,
+          file,
+          componentName,
+          typedKeyPath,
+          locale: _locale,
+        }),
+      )
+      .find(Boolean);
 
   return (
-    foundAsset ??
+    findAsset(locale) ??
+    // A file in a duplicated or synced field is stored once, relative to the default locale’s entry
+    // file, which the other locales then share
+    (locale ? findAsset(undefined) : undefined) ??
     // Fall back to exact match at the root folder
     getAssetPathMap().get(path)
   );
@@ -306,10 +348,18 @@ const publicPathRegexCache = new WeakMap();
 const getPublicPathRegex = (folder) =>
   getOrCreate(publicPathRegexCache, folder, () => {
     const publicPath = folder.publicPath ?? '';
-    const normalizedPath = escapeRegExp(publicPath).replace(ESCAPED_PLACEHOLDER_REGEX, '.+?');
+    const normalizedPath = getTemplatePattern(publicPath, '.+?');
 
     return new RegExp(`^${normalizedPath}${publicPath ? '(?=\\/|$)' : '$'}`);
   });
+
+/**
+ * Check if a path is a relative path. A path starting with `@`, like `@assets/images/...` is a
+ * special case, considered as an absolute path.
+ * @param {string} path Path to check.
+ * @returns {boolean} `true` if the path is relative.
+ */
+export const isRelativePath = (path) => !/^[/@]/.test(path);
 
 /**
  * Get an asset by an absolute public path typically stored as an image field value.
@@ -321,6 +371,8 @@ const getPublicPathRegex = (folder) =>
  * @param {string} [args.fileName] Collection file name. File/singleton collection only.
  * @param {string} [args.componentName] Custom editor component name for a field-level asset folder.
  * @param {TypedFieldKeyPath} [args.typedKeyPath] Field key path for field-level media folders.
+ * @param {InternalLocaleCode} [args.locale] Locale the path is referenced in, which tells which
+ * locale’s entry file an entry-relative path is relative to. Default: the default locale.
  * @returns {Asset | undefined} Corresponding asset.
  */
 export const getAssetByAbsolutePath = ({
@@ -330,6 +382,7 @@ export const getAssetByAbsolutePath = ({
   fileName,
   componentName,
   typedKeyPath,
+  locale,
 }) => {
   const exactMatch = getAssetPathMap().get(stripSlashes(path));
 
@@ -348,12 +401,27 @@ export const getAssetByAbsolutePath = ({
     const { publicPath, collectionName: _collectionName } = folder;
     let { internalPath } = folder;
 
+    if (folder.entryRelative && publicPath) {
+      // An absolute public path of an entry-relative folder stands for the folder holding the
+      // entry’s relative assets, not the collection folder
+      if (publicPath.startsWith('/')) {
+        return findInEntryRelativeFolder({ path, folder, entry, locale });
+      }
+
+      // A relative one, like `images` or `./images`, gives a value relative to the entry, which an
+      // absolute path can’t stand for
+      if (isRelativePath(publicPath)) {
+        return undefined;
+      }
+    }
+
     if (internalPath !== undefined) {
       // Deal with template tags like `/assets/images/{{slug}}`
       internalPath = fillInternalPathTemplate({
         internalPath,
         collectionName: _collectionName,
         entry,
+        locale,
       });
 
       if (internalPath === undefined) {
@@ -362,27 +430,32 @@ export const getAssetByAbsolutePath = ({
       }
     }
 
-    // Handle assets stored in a subfolder of the internal path
-    if (publicPath && internalPath && dirName) {
-      if (publicPath === '/') {
-        internalPath = `${internalPath}${dirName}`;
-      } else if (dirName.startsWith(`${publicPath}/`)) {
-        internalPath = dirName.replace(publicPath, internalPath);
+    if (publicPath && dirName) {
+      if (publicPath === '/' || dirName.startsWith(`${publicPath}/`)) {
+        // Handle assets stored in a subfolder of the internal path
+        if (internalPath) {
+          internalPath =
+            publicPath === '/'
+              ? `${internalPath}${dirName}`
+              : dirName.replace(publicPath, internalPath);
+        }
+      } else if (!isRelativePath(publicPath) && !getPublicPathRegex(folder).test(dirName)) {
+        // The directory is neither the public path nor below it, e.g. `/images-old` or `/files`
+        // with the `/images` public path, so the asset cannot be in this folder. A public path with
+        // template tags, like `/images/{{slug}}`, matches any segment in place of the tags
+        return undefined;
       }
     }
 
     return getAssetPathMap().get(createPath([internalPath, baseName]));
   };
 
-  const scanningFolders = /** @type {AssetFolderInfo[]} */ (
-    [
-      componentName ? getAssetFolder({ componentName, typedKeyPath }) : undefined,
-      typedKeyPath ? getAssetFolder({ collectionName, fileName, typedKeyPath }) : undefined,
-      getAssetFolder({ collectionName, fileName }),
-      getAssetFolder({ collectionName }),
-      globalAssetFolder.current,
-    ].filter((folder) => !!folder)
-  );
+  const scanningFolders = getCandidateAssetFolders({
+    collectionName,
+    fileName,
+    componentName,
+    typedKeyPath,
+  });
 
   /** @type {Asset | undefined} */
   let foundAsset = undefined;
@@ -408,14 +481,6 @@ export const getAssetByAbsolutePath = ({
 };
 
 /**
- * Check if a path is a relative path. A path starting with `@`, like `@assets/images/...` is a
- * special case, considered as an absolute path.
- * @param {string} path Path to check.
- * @returns {boolean} `true` if the path is relative.
- */
-export const isRelativePath = (path) => !/^[/@]/.test(path);
-
-/**
  * Get an asset by a public path typically stored as an image field value.
  * @param {object} args Arguments.
  * @param {string} args.value Saved absolute path or relative path.
@@ -425,29 +490,54 @@ export const isRelativePath = (path) => !/^[/@]/.test(path);
  * @param {string} [args.fileName] Collection file name. File/singleton collection only.
  * @param {string} [args.componentName] Custom editor component name for a field-level asset folder.
  * @param {TypedFieldKeyPath} [args.typedKeyPath] Field key path for field-level media folders.
+ * @param {InternalLocaleCode} [args.locale] Locale the path is referenced in, which tells which
+ * locale’s entry file an entry-relative path is relative to. Default: the default locale.
  * @returns {Asset | undefined} Corresponding asset.
  */
 export const getAssetByPath = ({ value, ...rest }) => {
-  // Remove potential fragment before decoding
-  const path = decodeFilePath(value.split('#')[0]);
+  /**
+   * Look up an asset by the given path.
+   * @param {string} encodedPath Path that may contain URL-encoded characters.
+   * @returns {Asset | undefined} Corresponding asset.
+   */
+  const find = (encodedPath) => {
+    // The path is not encoded unless the `encode_file_path` option is enabled, so a file name can
+    // contain a `%` sign, like `50% off.jpg`, which would make `decodeURIComponent()` throw
+    const path = decodeURIComponentSafely(encodedPath);
 
-  // Handle a relative path
-  if (isRelativePath(path)) {
-    return getAssetByRelativePath({ path, ...rest });
-  }
+    return isRelativePath(path)
+      ? getAssetByRelativePath({ path, ...rest })
+      : getAssetByAbsolutePath({ path, ...rest });
+  };
 
-  return getAssetByAbsolutePath({ path, ...rest });
+  // Look up the whole value first, as an unencoded file name can contain a `#` sign, like
+  // `photo #1.jpg`; then remove a potential fragment, like `#section`, and try again
+  const [pathWithoutFragment] = value.split('#');
+
+  return find(value) ?? (pathWithoutFragment !== value ? find(pathWithoutFragment) : undefined);
 };
 
 /**
- * Check if an asset belongs to the given asset folder.
+ * Check if an asset belongs to the given asset folder. An asset is assigned to one folder only, but
+ * a folder with a fixed path also holds the assets assigned to another folder with the same path,
+ * so that the folders sharing a path, like an asset collection and a collection or field-level
+ * folder, all list the same assets. An entry-relative folder has to be the asset’s own, as its path
+ * is that of the collection, which the assets are stored somewhere below.
  * @param {Asset} asset Asset.
  * @param {AssetFolderInfo} folder Folder info.
  * @returns {boolean} Result.
  */
-export const isAssetInFolder = ({ folder: assetFolder }, folder) =>
-  assetFolder === folder ||
-  (assetFolder.collectionName === folder.collectionName &&
+export const isAssetInFolder = ({ folder: assetFolder }, folder) => {
+  if (assetFolder === folder) {
+    return true;
+  }
+
+  if (!folder.entryRelative) {
+    return !assetFolder.entryRelative && assetFolder.internalPath === folder.internalPath;
+  }
+
+  return (
+    assetFolder.collectionName === folder.collectionName &&
     assetFolder.fileName === folder.fileName &&
     assetFolder.typedKeyPath === folder.typedKeyPath &&
     assetFolder.isIndexFile === folder.isIndexFile &&
@@ -455,7 +545,9 @@ export const isAssetInFolder = ({ folder: assetFolder }, folder) =>
     assetFolder.internalSubPath === folder.internalSubPath &&
     assetFolder.publicPath === folder.publicPath &&
     assetFolder.entryRelative === folder.entryRelative &&
-    assetFolder.hasTemplateTags === folder.hasTemplateTags);
+    assetFolder.hasTemplateTags === folder.hasTemplateTags
+  );
+};
 
 /**
  * Get a list of assets stored in the given collection defined folder.
@@ -466,13 +558,98 @@ export const getAssetsByFolder = (folder) =>
   allAssets.current.filter((asset) => isAssetInFolder(asset, folder));
 
 /**
+ * Get a key that two asset folders share exactly when {@link isAssetInFolder} would put the assets
+ * of one in the other: the path alone for a folder with a fixed path, every property it compares
+ * for an entry-relative folder.
+ * @param {AssetFolderInfo} folder Folder info.
+ * @returns {string} Key.
+ */
+const getAssetFolderMatchKey = ({
+  entryRelative,
+  collectionName,
+  fileName,
+  typedKeyPath,
+  isIndexFile,
+  internalPath,
+  internalSubPath,
+  publicPath,
+  hasTemplateTags: _hasTemplateTags,
+}) =>
+  JSON.stringify(
+    entryRelative
+      ? [
+          collectionName,
+          fileName,
+          typedKeyPath,
+          isIndexFile,
+          internalPath,
+          internalSubPath,
+          publicPath,
+          _hasTemplateTags,
+        ]
+      : [internalPath],
+  );
+
+/**
+ * Number of assets in each folder, keyed by {@link getAssetFolderMatchKey}, counted in one pass
+ * over {@link allAssets} and kept until the assets change.
+ */
+const getAssetCountsByFolder = memoizeOnSource(
+  () => allAssets.current,
+  (assets) => {
+    /** @type {Map<string, number>} */
+    const counts = new Map();
+
+    assets.forEach(({ folder }) => {
+      const key = getAssetFolderMatchKey(folder);
+
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    });
+
+    return counts;
+  },
+);
+
+/**
+ * Count the assets stored in the given collection defined folder. This is the length of
+ * {@link getAssetsByFolder}, without going through every asset for each folder, as the folder list
+ * does for every folder whenever an asset is added, removed or renamed.
+ * @param {AssetFolderInfo} folder Folder info.
+ * @returns {number} Number of assets.
+ */
+export const countAssetsInFolder = (folder) =>
+  getAssetCountsByFolder().get(getAssetFolderMatchKey(folder)) ?? 0;
+
+/**
+ * Index of the assets, keyed by the path of the directory they’re in, rebuilt when the assets are
+ * replaced. Saving an entry looks up the directory of every file it adds.
+ * @type {() => Map<string, Asset[]>}
+ */
+const getAssetsByDir = memoizeOnSource(
+  () => allAssets.current,
+  (assets) => Map.groupBy(assets, (asset) => getDirName(asset.path)),
+);
+
+/**
  * Get a list of assets stored in the given internal directory.
  * @param {string} dirname Directory path. An empty string for the repository root.
  * @returns {Asset[]} Assets.
  */
-export const getAssetsByDirName = (dirname) =>
-  // `getPathInfo()` has no directory for a file at the root
-  allAssets.current.filter((a) => (getPathInfo(a.path).dirname ?? '') === dirname);
+export const getAssetsByDirName = (dirname) => [...(getAssetsByDir().get(dirname) ?? [])];
+
+/**
+ * Get the names a new file saved in the given internal directory can’t take: those of the assets,
+ * the entry and Git config files and the subfolders there. A file would overwrite another, and a
+ * Git tree can’t hold a file and a folder under one name.
+ * @param {string} dirname Directory path. An empty string for the repository root.
+ * @returns {string[]} Names, normalized to NFC.
+ */
+export const getTakenNamesInDir = (dirname) =>
+  [
+    ...getAssetsByDirName(dirname).map((a) => a.name),
+    ...getNonAssetFileNamesInDir(dirname),
+    ...getFolderNamesInDir(dirname),
+  ].map((name) => name.normalize());
 
 // Reset the asset selection when a different folder or subfolder is selected
 createRootEffect(() => {
@@ -494,7 +671,7 @@ export const getDuplicateFiles = (files, assets) => {
     return [];
   }
 
-  const existingNames = new Set(assets.map(({ name }) => name.normalize().toLowerCase()));
+  const existingNames = new Set(assets.map(({ name }) => foldFileName(name)));
 
-  return files.filter((file) => existingNames.has(file.name.normalize().toLowerCase()));
+  return files.filter((file) => existingNames.has(foldFileName(file.name)));
 };

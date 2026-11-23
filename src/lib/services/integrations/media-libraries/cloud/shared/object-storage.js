@@ -2,14 +2,18 @@
 
 import { sleep } from '@sveltia/utils/misc';
 
+import { formatFileName } from '$lib/services/assets/file-name';
 import { getAssetKind } from '$lib/services/assets/kinds';
 import { filterAssetsByQuery } from '$lib/services/integrations/media-libraries/cloud/search';
 import {
   getFileKey,
+  getFolderKey,
   getPrefix,
   getRelativeKey,
 } from '$lib/services/integrations/media-libraries/cloud/shared/keys';
-import { fetchPages } from '$lib/services/integrations/media-libraries/paging';
+import { getBaseName, getDirName } from '$lib/services/utils/file';
+import { isSecureURL } from '$lib/services/utils/networking';
+import { fetchPages } from '$lib/services/utils/paging';
 
 /**
  * @import {
@@ -26,6 +30,18 @@ import { fetchPages } from '$lib/services/integrations/media-libraries/paging';
  */
 
 /**
+ * Parameters of the request for a page of objects, made by an {@link ObjectStorageProvider}.
+ * @template {CloudStorageConfig} C Service configuration type.
+ * @typedef {object} ListPageParams
+ * @property {C} config Service configuration.
+ * @property {string} credential Credential, such as a SAS token or a secret access key.
+ * @property {string} prefix Prefix to list the objects under.
+ * @property {string} [cursor] Continuation cursor of the page.
+ * @property {string} [delimiter] Delimiter, such as `/`, to leave out the objects whose key
+ * contains it after the prefix: those in subfolders.
+ */
+
+/**
  * Operations that differ between object storage services, such as Azure Blob Storage and the
  * S3-compatible services, which otherwise list, upload and delete files the same way. Each
  * operation handles the transport, including authorization, of a single request.
@@ -35,59 +51,102 @@ import { fetchPages } from '$lib/services/integrations/media-libraries/paging';
  * @property {(options: MediaLibraryFetchOptions) => string} requireCredential Function to get the
  * credential, such as a SAS token or a secret access key, from the fetch options. It throws when no
  * credential was provided.
- * @property {(params: { config: C, credential: string, prefix: string, cursor?: string }) =>
- * Promise<{ items: T[], cursor?: string }>} listPage Function to fetch a page of objects under the
- * given prefix, starting at the given continuation cursor. The returned cursor is `undefined` on
- * the last page.
+ * @property {(params: ListPageParams<C>) => Promise<{ items: T[], cursor?: string }>} listPage
+ * Function to fetch a page of objects under the given prefix, starting at the given continuation
+ * cursor. The returned cursor is `undefined` on the last page.
  * @property {(item: T) => string} getKey Function to get the key of a listed object.
  * @property {(items: T[], config: C, credential: string) => ExternalAsset[]} parseResults Function
  * to convert objects into the `ExternalAsset` format.
  * @property {(params: { key: string, file: File, config: C, credential: string }) => Promise<T>}
  * putObject Function to upload a file under the given key, overwriting any existing object.
+ * @property {(params: { asset: ExternalAsset, key: string, config: C, credential: string }) =>
+ * Promise<T>} copyObject Function to copy the object of the given asset, whose `id` is the object
+ * key, to the given key on the service, overwriting any existing object. It throws unless the copy
+ * is complete, as the source is deleted next.
+ * @property {(params: { key: string, config: C, credential: string, allowNotFound?: boolean }) =>
+ * Promise<void>} deleteObject Function to delete the object with the given key. With
+ * `allowNotFound`, an object that doesn’t exist counts as deleted.
  * @property {(params: { key: string, config: C, credential: string }) => Promise<void>}
- * deleteObject Function to delete the object with the given key.
+ * putFolderObject Function to put a zero-byte placeholder object at the given folder key, which
+ * ends with a slash.
  */
 
 /**
- * Throw an error with the response body appended to the given message if the request failed.
- * @param {Response} response Response.
- * @param {string} message Error message, such as `Failed to list objects`.
- * @param {object} [options] Options.
- * @param {boolean} [options.allowNotFound] Whether to accept a `404 Not Found` response.
- * @returns {Promise<void>}
- * @throws {Error} When the response status is not OK.
+ * Get the credential from the fetch options for a request to the service. A custom `endpoint`, such
+ * as one for an S3-compatible service or an Azurite emulator, must use HTTPS unless it’s on the
+ * local computer, so that the credential, or a SAS token sent in the query string, isn’t exposed
+ * over an insecure connection.
+ * @template T
+ * @template {CloudStorageConfig} C
+ * @param {ObjectStorageProvider<T, C>} provider Service provider.
+ * @param {C} config Service configuration.
+ * @param {MediaLibraryFetchOptions} options Fetch options (`apiKey` contains the credential).
+ * @returns {string} Credential.
+ * @throws {Error} When the endpoint is insecure, or no credential was provided.
  */
-export const assertResponseOK = async (response, message, { allowNotFound = false } = {}) => {
-  if (!response.ok && !(allowNotFound && response.status === 404)) {
-    const errorText = await response.text();
-
-    throw new Error(`${message}: ${errorText}`);
+const getCredential = (provider, config, options) => {
+  if (config.endpoint && !isSecureURL(config.endpoint)) {
+    throw new Error('Refusing to send credentials over an insecure connection');
   }
+
+  return provider.requireCredential(options);
 };
 
 /**
- * Fetch the objects under the configured prefix, page by page.
+ * Get the key prefix to list a folder with.
+ * @param {CloudStorageConfig} config Service configuration.
+ * @param {string} [dirPath] Folder path relative to the configured prefix. Default: the configured
+ * prefix itself.
+ * @returns {string} Key prefix.
+ */
+const getListPrefix = (config, dirPath) =>
+  dirPath ? getFolderKey(config, dirPath) : getPrefix(config);
+
+/**
+ * Fetch the objects under the configured prefix, or under a folder below it, page by page.
  * @template T
  * @template {CloudStorageConfig} C
  * @param {ObjectStorageProvider<T, C>} provider Service provider.
  * @param {C} config Service configuration.
  * @param {MediaLibraryFetchOptions} options Fetch options (`apiKey` contains the credential).
  * @param {object} [params] Additional parameters.
- * @param {number} [params.maxPages] Maximum number of pages to fetch. Default: 10.
- * @returns {Promise<{ files: T[], folders: string[] }>} Objects, split into the files and the
- * folder placeholders, the latter given as folder paths relative to the prefix.
+ * @param {number} [params.maxPages] Maximum number of pages to fetch. Default: 10. `Infinity` to
+ * fetch every page.
+ * @param {string} [params.dirPath] Path of the folder to list, at any depth, relative to the
+ * configured prefix. Default: the configured prefix itself.
+ * @param {string} [params.delimiter] Delimiter to list the folder with, such as `/` to leave out
+ * the objects in its subfolders. Default: none, listing the folder at any depth.
+ * @returns {Promise<{ files: T[], folders: string[], truncated: boolean }>} Objects, split into the
+ * files and the folder placeholders, the latter given as folder paths relative to the prefix, and
+ * whether the listing was cut short by the page limit, leaving some objects out.
  */
-export const fetchListing = async (provider, config, options, { maxPages = 10 } = {}) => {
-  const credential = provider.requireCredential(options);
-  const prefix = getPrefix(config);
+export const fetchListing = async (
+  provider,
+  config,
+  options,
+  { maxPages = 10, dirPath, delimiter } = {},
+) => {
+  const credential = getCredential(provider, config, options);
+  const prefix = getListPrefix(config, dirPath);
   /** @type {T[]} */
   const files = [];
   /** @type {string[]} */
   const folders = [];
+  let truncated = false;
 
   const items = await fetchPages(
     async (/** @type {string | undefined} */ cursor) => {
-      const result = await provider.listPage({ config, credential, prefix, cursor });
+      const result = await provider.listPage({
+        config,
+        credential,
+        prefix,
+        cursor,
+        ...(delimiter && { delimiter }),
+      });
+
+      // The paging stops at the last page, which has no cursor, or at the page limit, in which
+      // case the cursor of the last page fetched points to the objects left out
+      truncated = !!result.cursor;
 
       return { results: result.items, next: result.cursor };
     },
@@ -100,18 +159,18 @@ export const fetchListing = async (provider, config, options, { maxPages = 10 } 
     // A key ending with a slash is a folder placeholder — one the CMS created for an empty folder,
     // or one a hierarchical namespace account returns — rather than a file
     if (key.endsWith('/')) {
-      const dirPath = getRelativeKey(config, key).replace(/\/$/, '');
+      const folderPath = getRelativeKey(config, key).replace(/\/$/, '');
 
       // The placeholder of the prefix itself isn’t a folder below it
-      if (dirPath) {
-        folders.push(dirPath);
+      if (folderPath) {
+        folders.push(folderPath);
       }
     } else {
       files.push(item);
     }
   });
 
-  return { files, folders };
+  return { files, folders, truncated };
 };
 
 /**
@@ -153,12 +212,35 @@ export const listObjects = async (provider, config, options, params = {}) => {
  * @returns {Promise<ExternalFolderListing>} Files and folders.
  */
 export const browseObjects = async (provider, config, options) => {
-  const { files, folders } = await fetchListing(provider, config, options);
+  const { files, folders, truncated } = await fetchListing(provider, config, options);
 
   return {
     assets: provider.parseResults(filterByKind(provider, files, options), config, options.apiKey),
     folders,
+    truncated,
   };
+};
+
+/**
+ * List every file and empty folder below the given folder, at any depth, following the listing to
+ * the end rather than stopping at the page limit, so that a folder operation like a rename or a
+ * deletion leaves nothing behind, however large the bucket. The asset kind filter is ignored.
+ * @template T
+ * @template {CloudStorageConfig} C
+ * @param {ObjectStorageProvider<T, C>} provider Service provider.
+ * @param {string} dirPath Folder path relative to the configured prefix.
+ * @param {C} config Service configuration.
+ * @param {MediaLibraryFetchOptions} options Fetch options (`apiKey` contains the credential).
+ * @returns {Promise<ExternalFolderListing>} Files and folders, including the folder itself if it
+ * has a placeholder.
+ */
+export const listFolderObjects = async (provider, dirPath, config, options) => {
+  const { files, folders } = await fetchListing(provider, config, options, {
+    maxPages: Infinity,
+    dirPath,
+  });
+
+  return { assets: provider.parseResults(files, config, options.apiKey), folders };
 };
 
 /**
@@ -179,7 +261,40 @@ export const searchObjects = async (provider, query, config, options) => {
 };
 
 /**
- * Upload files one by one to the folder given in the fetch options.
+ * Get the names of the files directly in the given folder, so that an upload can avoid them. The
+ * folder is listed with a delimiter, as the services then sum up each subfolder in a single entry,
+ * so even the root of a large bucket only takes a request per 1,000 files right in it. The listing
+ * is followed to the end, as a name left out would let an upload overwrite that file.
+ * @template T
+ * @template {CloudStorageConfig} C
+ * @param {ObjectStorageProvider<T, C>} provider Service provider.
+ * @param {C} config Service configuration.
+ * @param {MediaLibraryFetchOptions} options Fetch options (`apiKey` contains the credential).
+ * @param {string} dirPath Folder path relative to the configured prefix, or an empty string for the
+ * prefix itself.
+ * @returns {Promise<string[]>} File names, normalized to NFC.
+ */
+const getFileNamesInFolder = async (provider, config, options, dirPath) => {
+  const folderKey = getListPrefix(config, dirPath);
+
+  const { files } = await fetchListing(provider, config, options, {
+    maxPages: Infinity,
+    dirPath,
+    delimiter: '/',
+  });
+
+  return (
+    files
+      .map((item) => provider.getKey(item).slice(folderKey.length).normalize())
+      // A service that ignores the delimiter lists the files in the subfolders as well
+      .filter((name) => !name.includes('/'))
+  );
+};
+
+/**
+ * Upload files one by one to the folder given in the fetch options. A file whose name is taken in
+ * the folder, by an existing file or by one uploaded before it, is renamed with a number suffix,
+ * like `photo-1.jpg`, rather than overwriting it, the way an upload to the repository is.
  * @template T
  * @template {CloudStorageConfig} C
  * @param {ObjectStorageProvider<T, C>} provider Service provider.
@@ -187,24 +302,41 @@ export const searchObjects = async (provider, query, config, options) => {
  * @param {C} config Service configuration.
  * @param {MediaLibraryFetchOptions} options Fetch options (`apiKey` contains the credential).
  * @returns {Promise<ExternalAsset[]>} Uploaded assets.
+ * @throws {Error} When a file name has nothing left once sanitized, such as `..`.
  */
 export const uploadObjects = async (provider, files, config, options) => {
   if (files.length === 0) {
     return [];
   }
 
-  const credential = provider.requireCredential(options);
+  const credential = getCredential(provider, config, options);
   const { dirPath = '' } = options;
+  const takenNames = await getFileNamesInFolder(provider, config, options, dirPath);
+
+  // Name every file before uploading any, so that an invalid name stops the batch before it starts.
+  // Two files can end up with one name, e.g. `photo.jpg` and `photo.png` both converted to WebP, or
+  // `a/photo.jpg` and `b/photo.jpg` from a dropped folder, so each name is taken in turn
+  const keys = files.map((file) => {
+    // Extract only the filename to prevent path traversal via crafted File objects
+    const baseName = file.name.split(/[/\\]/).filter(Boolean).at(-1) ?? '';
+    const fileName = formatFileName(baseName, { assetNamesInSameFolder: takenNames });
+
+    // Sanitizing drops a name like `..`, which would otherwise point the key outside the folder
+    if (!fileName) {
+      throw new Error(`Invalid file name: ${file.name}`);
+    }
+
+    takenNames.push(fileName);
+
+    return getFileKey(config, dirPath ? `${dirPath}/${fileName}` : fileName);
+  });
+
   /** @type {T[]} */
   const uploadedObjects = [];
 
   // eslint-disable-next-line no-restricted-syntax
-  for (const file of files) {
-    // Extract only the filename to prevent path traversal via crafted File objects
-    const sanitizedName = file.name.split(/[/\\]/).filter(Boolean).at(-1) ?? file.name;
-    const key = getFileKey(config, dirPath ? `${dirPath}/${sanitizedName}` : sanitizedName);
-
-    uploadedObjects.push(await provider.putObject({ key, file, config, credential }));
+  for (const [index, file] of files.entries()) {
+    uploadedObjects.push(await provider.putObject({ key: keys[index], file, config, credential }));
 
     // Wait a bit between uploads
     if (files.length > 1) {
@@ -226,7 +358,7 @@ export const uploadObjects = async (provider, files, config, options) => {
  * @returns {Promise<void>}
  */
 export const deleteObjects = async (provider, assets, config, options) => {
-  const credential = provider.requireCredential(options);
+  const credential = getCredential(provider, config, options);
 
   // eslint-disable-next-line no-restricted-syntax
   for (const { id: key } of assets) {
@@ -253,10 +385,71 @@ export const deleteObjects = async (provider, assets, config, options) => {
  * @returns {Promise<ExternalAsset>} Replaced asset.
  */
 export const replaceObject = async (provider, asset, file, config, options) => {
-  const credential = provider.requireCredential(options);
+  const credential = getCredential(provider, config, options);
   const object = await provider.putObject({ key: asset.id, file, config, credential });
 
   return provider.parseResults([object], config, credential)[0];
+};
+
+/**
+ * Move an object to another path. Object storage has no move operation, so the object is copied to
+ * the new key and then the original is deleted.
+ * @template T
+ * @template {CloudStorageConfig} C
+ * @param {ObjectStorageProvider<T, C>} provider Service provider.
+ * @param {ExternalAsset} asset Asset to move. Its `id` is the object key.
+ * @param {string} newPath New path relative to the configured prefix.
+ * @param {C} config Service configuration.
+ * @param {MediaLibraryFetchOptions} options Fetch options (`apiKey` contains the credential).
+ * @returns {Promise<ExternalAsset>} Moved asset.
+ */
+export const moveObject = async (provider, asset, newPath, config, options) => {
+  const credential = getCredential(provider, config, options);
+  const key = getFileKey(config, newPath);
+  const object = await provider.copyObject({ asset, key, config, credential });
+
+  await provider.deleteObject({ key: asset.id, config, credential });
+
+  return provider.parseResults([object], config, credential)[0];
+};
+
+/**
+ * Create an empty folder by putting a zero-byte placeholder object at the folder key, the way the
+ * services’ own consoles do.
+ * @template T
+ * @template {CloudStorageConfig} C
+ * @param {ObjectStorageProvider<T, C>} provider Service provider.
+ * @param {string} dirPath Folder path relative to the configured prefix.
+ * @param {C} config Service configuration.
+ * @param {MediaLibraryFetchOptions} options Fetch options (`apiKey` contains the credential).
+ * @returns {Promise<void>}
+ */
+export const createFolderObject = async (provider, dirPath, config, options) => {
+  const credential = getCredential(provider, config, options);
+
+  await provider.putFolderObject({ key: getFolderKey(config, dirPath), config, credential });
+};
+
+/**
+ * Remove the placeholder object of a folder. A folder that has no placeholder, because it only
+ * ever held files, is as good as removed.
+ * @template T
+ * @template {CloudStorageConfig} C
+ * @param {ObjectStorageProvider<T, C>} provider Service provider.
+ * @param {string} dirPath Folder path relative to the configured prefix.
+ * @param {C} config Service configuration.
+ * @param {MediaLibraryFetchOptions} options Fetch options (`apiKey` contains the credential).
+ * @returns {Promise<void>}
+ */
+export const deleteFolderObject = async (provider, dirPath, config, options) => {
+  const credential = getCredential(provider, config, options);
+
+  await provider.deleteObject({
+    key: getFolderKey(config, dirPath),
+    config,
+    credential,
+    allowNotFound: true,
+  });
 };
 
 /**
@@ -267,81 +460,65 @@ export const replaceObject = async (provider, asset, file, config, options) => {
  * @returns {string} New path relative to the configured prefix.
  */
 export const getRenamedPath = (config, asset, newName) => {
-  const dirName = getRelativeKey(config, asset.id).split('/').slice(0, -1).join('/');
+  const dirName = getDirName(getRelativeKey(config, asset.id));
 
   return dirName ? `${dirName}/${newName}` : newName;
 };
 
 /**
- * Create the operations of an object storage service, binding the given provider to the shared
- * list, browse, search, upload, delete and replace operations. A file is renamed by moving it
- * within its folder.
+ * Rename an object, keeping it in its folder. The folder is listed to the end first, as the listing
+ * the user picked the name against can be cut short in a large bucket, and copying the object onto
+ * a file with the new name would overwrite that file.
  * @template T
  * @template {CloudStorageConfig} C
  * @param {ObjectStorageProvider<T, C>} provider Service provider.
- * @param {Pick<ObjectStorageOperations<C>, 'move' | 'createFolder' | 'deleteFolder'>} operations
- * Service-specific operations.
+ * @param {ExternalAsset} asset Asset to rename. Its `id` is the object key.
+ * @param {string} newName New file name, without a directory.
+ * @param {C} config Service configuration.
+ * @param {MediaLibraryFetchOptions} options Fetch options (`apiKey` contains the credential).
+ * @returns {Promise<ExternalAsset>} Renamed asset.
+ * @throws {Error} When another file in the folder has the new name.
+ */
+export const renameObject = async (provider, asset, newName, config, options) => {
+  const newPath = getRenamedPath(config, asset, newName);
+  const dirPath = getDirName(newPath);
+  const ownName = getBaseName(getRelativeKey(config, asset.id)).normalize();
+  const takenNames = await getFileNamesInFolder(provider, config, options, dirPath);
+  const normalizedName = newName.normalize();
+
+  if (takenNames.some((name) => name !== ownName && name === normalizedName)) {
+    throw new Error(`A file named “${newName}” already exists in the folder.`);
+  }
+
+  return moveObject(provider, asset, newPath, config, options);
+};
+
+/**
+ * Create the operations of an object storage service, binding the given provider to the shared
+ * operations, which all take it as their first argument. A file is renamed by moving it within its
+ * folder.
+ * @template T
+ * @template {CloudStorageConfig} C
+ * @param {ObjectStorageProvider<T, C>} provider Service provider.
  * @returns {ObjectStorageOperations<C>} Operations.
  */
-export const createObjectStorageOperations = (provider, { move, createFolder, deleteFolder }) => ({
-  /**
-   * List the files under the configured prefix.
-   * @param {C} config Service configuration.
-   * @param {MediaLibraryFetchOptions} options Fetch options.
-   * @returns {Promise<ExternalAsset[]>} Assets.
-   */
-  list: (config, options) => listObjects(provider, config, options),
-  /**
-   * List the files and the empty folders under the configured prefix.
-   * @param {C} config Service configuration.
-   * @param {MediaLibraryFetchOptions} options Fetch options.
-   * @returns {Promise<ExternalFolderListing>} Files and folders.
-   */
-  browse: (config, options) => browseObjects(provider, config, options),
-  /**
-   * Search the files under the configured prefix.
-   * @param {string} query Search query.
-   * @param {C} config Service configuration.
-   * @param {MediaLibraryFetchOptions} options Fetch options.
-   * @returns {Promise<ExternalAsset[]>} Assets.
-   */
-  search: (query, config, options) => searchObjects(provider, query, config, options),
-  /**
-   * Upload files to the folder given in the fetch options.
-   * @param {File[]} files Files to upload.
-   * @param {C} config Service configuration.
-   * @param {MediaLibraryFetchOptions} options Fetch options.
-   * @returns {Promise<ExternalAsset[]>} Uploaded assets.
-   */
-  upload: (files, config, options) => uploadObjects(provider, files, config, options),
-  /**
-   * Delete files.
-   * @param {ExternalAsset[]} assets Assets to delete.
-   * @param {C} config Service configuration.
-   * @param {MediaLibraryFetchOptions} options Fetch options.
-   * @returns {Promise<void>}
-   */
-  delete: (assets, config, options) => deleteObjects(provider, assets, config, options),
-  /**
-   * Rename a file, keeping it in its folder.
-   * @param {ExternalAsset} asset Asset to rename.
-   * @param {string} newName New file name, without a directory.
-   * @param {C} config Service configuration.
-   * @param {MediaLibraryFetchOptions} options Fetch options.
-   * @returns {Promise<ExternalAsset>} Renamed asset.
-   */
-  rename: (asset, newName, config, options) =>
-    move(asset, getRenamedPath(config, asset, newName), config, options),
-  /**
-   * Replace a file, keeping the object key so that the URL stays the same.
-   * @param {ExternalAsset} asset Asset to replace.
-   * @param {File} file New file.
-   * @param {C} config Service configuration.
-   * @param {MediaLibraryFetchOptions} options Fetch options.
-   * @returns {Promise<ExternalAsset>} Replaced asset.
-   */
-  replace: (asset, file, config, options) => replaceObject(provider, asset, file, config, options),
-  move,
-  createFolder,
-  deleteFolder,
-});
+export const createObjectStorageOperations = (provider) =>
+  /** @type {ObjectStorageOperations<C>} */ (
+    Object.fromEntries(
+      Object.entries(
+        /** @type {Record<string, (...args: any[]) => Promise<any>>} */ ({
+          list: listObjects,
+          browse: browseObjects,
+          listFolder: listFolderObjects,
+          search: searchObjects,
+          upload: uploadObjects,
+          delete: deleteObjects,
+          rename: renameObject,
+          replace: replaceObject,
+          move: moveObject,
+          createFolder: createFolderObject,
+          deleteFolder: deleteFolderObject,
+        }),
+      ).map(([name, operation]) => [name, operation.bind(null, provider)]),
+    )
+  );

@@ -4,7 +4,8 @@ import { page, userEvent } from 'vitest/browser';
 
 import { createProxy } from '$lib/services/contents/draft/create/proxy.svelte';
 import { initTestConfig } from '$lib/test/config';
-import { createMockDraft, renderWithDraft } from '$lib/test/draft';
+import { createMockDraft } from '$lib/test/draft';
+import { renderFieldEditor } from '$lib/test/field.svelte';
 
 import KeyValueEditor from './key-value-editor.svelte';
 
@@ -62,18 +63,12 @@ const renderEditor = async (pairs, { config = {}, readonly = false, locale = '_d
     draft.currentValues._default = createProxy({ draft, locale: '_default', target: values });
   }
 
-  await renderWithDraft(KeyValueEditor, {
+  await renderFieldEditor(KeyValueEditor, {
+    fieldConfig,
+    fieldLabel: 'Meta',
+    locale,
+    props: { readonly },
     draft,
-    props: {
-      locale,
-      keyPath: 'meta',
-      typedKeyPath: 'meta',
-      fieldId: 'meta',
-      fieldLabel: 'Meta',
-      fieldConfig,
-      currentValue: undefined,
-      readonly,
-    },
   });
 
   return { draft };
@@ -182,6 +177,36 @@ describe('KeyValueEditor', () => {
 
     await expect.poll(getRows).toEqual([['size', 'L']]);
     await expect.poll(() => getStoredPairs(draft)).toEqual({ size: 'L' });
+  });
+
+  test('keeps the focus in the table as pairs are removed', async () => {
+    await renderEditor({ color: 'red', size: 'L', shape: 'round' });
+
+    const removeButtons = page.getByRole('button', { name: 'Remove' });
+
+    /**
+     * Get the key in the row that has the focus.
+     * @returns {string | undefined} Key.
+     */
+    const getFocusedRowKey = () =>
+      /** @type {HTMLInputElement | null | undefined} */ (
+        document.activeElement?.closest('tr')?.querySelector('td.key input')
+      )?.value;
+
+    // The Remove button of the next row takes the place of the removed one
+    await removeButtons.nth(1).click();
+    await expect.poll(getFocusedRowKey).toBe('shape');
+    expect(document.activeElement).toBe(removeButtons.nth(1).element());
+
+    // The previous row’s, once the last row is removed
+    await removeButtons.nth(1).click();
+    await expect.poll(getFocusedRowKey).toBe('color');
+    expect(document.activeElement).toBe(removeButtons.nth(0).element());
+
+    // The key of the blank row left once the last pair is removed, as it can’t be removed
+    await removeButtons.nth(0).click();
+    await expect.element(page.getByRole('textbox', { name: 'Key' })).toHaveFocus();
+    await expect.poll(getRows).toEqual([['', '']]);
   });
 
   test('offers a blank row for an empty field, storing a placeholder so it can be validated', async () => {
@@ -308,7 +333,7 @@ describe('KeyValueEditor', () => {
 
     first.dispatchEvent(new DragEvent('dragstart', { bubbles: true, dataTransfer }));
     expect(dataTransfer.getData('text/plain')).toBe('color');
-    await expect.poll(() => first.classList.contains('dragging')).toBe(true);
+    await expect.poll(() => first.classList.contains('drag-placeholder')).toBe(true);
 
     const { bottom } = second.getBoundingClientRect();
 

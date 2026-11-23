@@ -8,12 +8,14 @@ import { stripSlashes } from '@sveltia/utils/string';
 
 import { TEMP_FILE_PREFIX } from '$lib/services/backends/fs/shared/constants';
 import {
+  findEntryName,
   getDirectoryHandle,
   getFileHandle,
   getHandleByPath,
+  isNotFoundError,
 } from '$lib/services/backends/fs/shared/handles';
 import { env } from '$lib/services/user/env.svelte';
-import { getBlob, getGitHash } from '$lib/services/utils/file';
+import { foldPath, getBlob, getDirName, getGitHash } from '$lib/services/utils/file';
 
 /**
  * @import {
@@ -46,26 +48,51 @@ export const canMoveFile = () => 'move' in FileSystemFileHandle.prototype && !en
  * handles the case where the `createWritable` method is not supported by older versions of Safari.
  * @param {FileSystemFileHandle} fileHandle File handle to write to.
  * @param {FileSystemWriteChunkType} data Data to write to the file.
+ * @throws {Error} If the data couldn’t be written or the file couldn’t be closed.
  */
 export const writeFile = async (fileHandle, data) => {
   // The `createWritable` method is not supported by older versions of Safari
   const writer = await fileHandle.createWritable?.();
 
+  if (!writer) {
+    return;
+  }
+
   try {
     // Can throw if the file has just been moved/renamed without any change, and then the `data` is
     // no longer available
-    await writer?.write(data);
-  } finally {
+    await writer.write(data);
+  } catch (ex) {
+    // Release the file; closing a stream that has failed fails too, but the write error is the one
+    // that tells what went wrong
     try {
-      await writer?.close();
+      await writer.close();
     } catch {
       //
     }
+
+    throw ex;
   }
+
+  // The data is only committed to the file when the stream is closed: Chrome writes to a swap file
+  // and moves it into place then. If that fails, e.g. because another program has locked the file,
+  // the file hasn’t been written, which the caller has to know rather than treat it as saved
+  await writer.close();
 };
 
 /**
- * Move a file from a previous path to a new path within the file system.
+ * Create a temporary file with a unique name in the given directory. Its name starts with
+ * `TEMP_FILE_PREFIX`, so it’s hidden, and a stale one is deleted when the files are scanned.
+ * @param {FileSystemDirectoryHandle} dirHandle Directory handle.
+ * @returns {Promise<FileSystemFileHandle>} Handle of the new, empty file.
+ */
+const createTempFile = (dirHandle) =>
+  dirHandle.getFileHandle(`${TEMP_FILE_PREFIX}${crypto.randomUUID()}`, { create: true });
+
+/**
+ * Move a file from a previous path to a new path within the file system. A file or folder whose
+ * name is spelled in another Unicode normalization form than the path’s is moved or moved to as it
+ * is, rather than missed, on a file system that compares names byte for byte.
  * @param {object} args Arguments.
  * @param {FileSystemDirectoryHandle} args.rootDirHandle Root directory handle.
  * @param {string} args.previousPath The current path of the file to move.
@@ -74,23 +101,47 @@ export const writeFile = async (fileHandle, data) => {
  */
 export const moveFile = async ({ rootDirHandle, previousPath, path }) => {
   const { dirname: newDirname, basename: newBasename } = getPathInfo(path);
-  const { dirname: oldDirname, basename: oldBasename } = getPathInfo(previousPath);
+  const { dirname: oldDirname } = getPathInfo(previousPath);
   const fileHandle = await getFileHandle(rootDirHandle, previousPath);
 
   // Use the native `move` method if supported, as it’s more efficient and preserves file metadata.
   // If not, fall back to copying the file to the new location and deleting the old file.
   if (canMoveFile()) {
+    const newDirHandle = await getDirectoryHandle(rootDirHandle, newDirname);
+
     // @ts-ignore
-    await fileHandle.move(await getDirectoryHandle(rootDirHandle, newDirname), newBasename);
+    await fileHandle.move(newDirHandle, await findEntryName(newDirHandle, newBasename));
 
     return fileHandle;
   }
 
-  const newFileHandle = await getFileHandle(rootDirHandle, path);
   const oldDirHandle = await getDirectoryHandle(rootDirHandle, oldDirname);
+  const newDirHandle = await getDirectoryHandle(rootDirHandle, newDirname);
+  let newFileHandle = await getFileHandle(rootDirHandle, path);
 
-  await writeFile(newFileHandle, await fileHandle.getFile());
-  await oldDirHandle.removeEntry(oldBasename);
+  // On a case-insensitive file system, a file renamed only in case, e.g. `Photo.jpg` to
+  // `photo.jpg`, is still the same file under the new name, as is one renamed only in its Unicode
+  // normalization form where the file system or the name lookup ignores it. The browser doesn’t
+  // always tell, as it may compare the paths it has, so the paths are compared here too. Copying
+  // the file onto itself and deleting the old name would delete the file, so it’s copied to a
+  // temporary file first, which also gives it the new spelling
+  if (!(await newFileHandle.isSameEntry(fileHandle)) && foldPath(previousPath) !== foldPath(path)) {
+    await writeFile(newFileHandle, await fileHandle.getFile());
+    // The name the file has on the disk
+    await oldDirHandle.removeEntry(fileHandle.name);
+
+    return newFileHandle;
+  }
+
+  const tempFileHandle = await createTempFile(newDirHandle);
+
+  await writeFile(tempFileHandle, await fileHandle.getFile());
+  await oldDirHandle.removeEntry(fileHandle.name);
+  newFileHandle = await getFileHandle(rootDirHandle, path);
+  // The temporary file is only removed once the file has been written under the new name, so the
+  // content isn’t lost if that fails
+  await writeFile(newFileHandle, await tempFileHandle.getFile());
+  await newDirHandle.removeEntry(tempFileHandle.name);
 
   return newFileHandle;
 };
@@ -120,7 +171,9 @@ const renameFile = async (fileHandle, dirHandle, name) => {
 };
 
 /**
- * Save data to a file at the specified path.
+ * Save data to a file at the specified path. An existing file whose name, or the name of a folder
+ * on the path, is spelled in another Unicode normalization form is written to, rather than joined
+ * by a new one that looks the same on a file system that compares names byte for byte.
  * @param {object} args Arguments.
  * @param {FileSystemDirectoryHandle} args.rootDirHandle Root directory handle.
  * @param {FileSystemFileHandle} [args.fileHandle] File handle to write to. Provided if the file has
@@ -134,7 +187,7 @@ export const saveFile = async ({ rootDirHandle, fileHandle, path, data }) => {
   // final path. This avoids race conditions with file watchers (e.g., Astro dev server) that may
   // read the new file before its content is fully written.
   // @see https://github.com/sveltia/sveltia-cms/issues/675
-  /** @type {{ dirname: string | undefined, basename: string } | undefined} */
+  /** @type {{ dirHandle: FileSystemDirectoryHandle, basename: string } | undefined} */
   let pendingRename;
 
   if (!fileHandle) {
@@ -143,10 +196,10 @@ export const saveFile = async ({ rootDirHandle, fileHandle, path, data }) => {
     // supported. If the `move` method is supported, we have to write directly to the final path.
     if (canMoveFile()) {
       const { dirname, basename } = getPathInfo(stripSlashes(path));
-      const tempPath = `${dirname ? `${dirname}/` : ''}${TEMP_FILE_PREFIX}${crypto.randomUUID()}`;
+      const dirHandle = await getDirectoryHandle(rootDirHandle, dirname);
 
-      fileHandle = await getFileHandle(rootDirHandle, tempPath);
-      pendingRename = { dirname, basename };
+      fileHandle = await createTempFile(dirHandle);
+      pendingRename = { dirHandle, basename };
     } else {
       fileHandle = await getFileHandle(rootDirHandle, path);
     }
@@ -158,12 +211,13 @@ export const saveFile = async ({ rootDirHandle, fileHandle, path, data }) => {
     return fileHandle.getFile();
   }
 
-  const { dirname, basename } = pendingRename;
-  const dirHandle = await getDirectoryHandle(rootDirHandle, dirname);
+  const { dirHandle, basename } = pendingRename;
 
   try {
     await writeFile(fileHandle, data);
-    await renameFile(fileHandle, dirHandle, basename);
+    // Replace the file with the name spelled in another normalization form, if any, rather than
+    // adding another one next to it
+    await renameFile(fileHandle, dirHandle, await findEntryName(dirHandle, basename));
   } catch (ex) {
     // Don’t leave the temporary file behind; the error is reported to the user, who can retry
     try {
@@ -177,13 +231,6 @@ export const saveFile = async ({ rootDirHandle, fileHandle, path, data }) => {
 
   return fileHandle.getFile();
 };
-
-/**
- * Check if the given error says a file or directory doesn’t exist.
- * @param {unknown} ex Error.
- * @returns {boolean} `true` for a `NotFoundError`.
- */
-const isNotFoundError = (ex) => /** @type {DOMException} */ (ex)?.name === 'NotFoundError';
 
 /**
  * Recursively delete empty parent directories.
@@ -202,7 +249,8 @@ export const deleteEmptyParentDirs = async (rootDirHandle, pathSegments) => {
         await getHandleByPath(rootDirHandle, parentPath, 'directory', { create: false })
       );
 
-      const dirHandle = await parentHandle.getDirectoryHandle(dirName);
+      const name = await findEntryName(parentHandle, dirName);
+      const dirHandle = await parentHandle.getDirectoryHandle(name);
 
       // Use for...of to check if directory is empty with early exit on first entry found
       // eslint-disable-next-line no-unreachable-loop
@@ -212,7 +260,7 @@ export const deleteEmptyParentDirs = async (rootDirHandle, pathSegments) => {
       }
 
       // Directory is empty, remove it
-      await parentHandle.removeEntry(dirName);
+      await parentHandle.removeEntry(name);
     } catch (ex) {
       // A directory that is already gone, e.g. removed outside the CMS, is as good as removed
       if (!isNotFoundError(ex)) {
@@ -226,7 +274,8 @@ export const deleteEmptyParentDirs = async (rootDirHandle, pathSegments) => {
  * Delete a file at the specified path within the file system. The directory the file was in is left
  * alone even if it’s now empty; {@link deleteEmptyDirs} cleans up once a whole batch of changes has
  * been saved, because the files in a batch are removed all at once, and a directory can’t be
- * removed while another file is being removed from it.
+ * removed while another file is being removed from it. The file is found by its name in Unicode
+ * normalization form C or by another spelling of it.
  * @param {object} args Arguments.
  * @param {FileSystemDirectoryHandle} args.rootDirHandle Root directory handle.
  * @param {string} args.path The path to the file to be deleted.
@@ -236,7 +285,7 @@ export const deleteFile = async ({ rootDirHandle, path }) => {
   const dirHandle = await getDirectoryHandle(rootDirHandle, dirPath);
 
   try {
-    await dirHandle.removeEntry(fileName);
+    await dirHandle.removeEntry(await findEntryName(dirHandle, fileName));
   } catch (ex) {
     // The file may have been removed outside the CMS, e.g. in a file manager or by a Git branch
     // switch; the point is that it’s gone, so that’s not a failure
@@ -375,7 +424,7 @@ export const saveChanges = async (rootDirHandle, changes) => {
           return undefined;
         })
         .filter((path) => path !== undefined)
-        .map((path) => getPathInfo(stripSlashes(path)).dirname ?? ''),
+        .map((path) => getDirName(stripSlashes(path))),
     );
   }
 

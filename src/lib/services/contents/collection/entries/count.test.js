@@ -12,11 +12,20 @@ vi.mock('$lib/services/contents/collection/entries', () => ({
   countCollectionEntries: vi.fn((_collectionName, entries) => entries.length),
 }));
 
-// Only the store is mocked; `mergeUnpublishedEntries` is a pure helper and is used as is
-vi.mock('$lib/services/workflow', async (importOriginal) => ({
-  .../** @type {object} */ (await importOriginal()),
-  unpublishedEntries: { current: [] },
-}));
+// Only the store is mocked; `mergeUnpublishedEntries` is a pure helper and is used as is, and so
+// is `getCompanionEntries`, pointed at the store mocked here
+vi.mock('$lib/services/workflow', async (importOriginal) => {
+  const original = /** @type {any} */ (await importOriginal());
+  const store = { current: [] };
+
+  return {
+    ...original,
+    getCompanionEntries: vi.fn((collectionName) =>
+      original.getCompanionEntries(collectionName, store.current),
+    ),
+    unpublishedEntries: store,
+  };
+});
 
 /**
  * Create an entry.
@@ -34,7 +43,7 @@ const createEntry = (subPath, collectionName) => ({
 
 describe('countQuotaEntries()', () => {
   beforeEach(() => {
-    unpublishedEntries.current = [];
+    /** @type {{ current: any[] }} */ (unpublishedEntries).current = [];
   });
 
   test('counts the published entries', () => {
@@ -46,13 +55,31 @@ describe('countQuotaEntries()', () => {
 
   test('counts a never-published draft, but an updated entry only once', () => {
     vi.mocked(getEntriesByCollection).mockReturnValue([createEntry('a'), createEntry('b')]);
-    unpublishedEntries.current = /** @type {any[]} */ ([
+    /** @type {{ current: any[] }} */ (unpublishedEntries).current = /** @type {any[]} */ ([
       createEntry('a', 'posts'),
       createEntry('new', 'posts'),
       createEntry('other', 'pages'),
     ]);
 
     expect(countQuotaEntries('posts')).toBe(3);
+  });
+
+  test('counts a new entry riding along in the pull request of another collection’s entry', () => {
+    vi.mocked(getEntriesByCollection).mockReturnValue([createEntry('a')]);
+    /** @type {{ current: any[] }} */ (unpublishedEntries).current = /** @type {any[]} */ ([
+      {
+        ...createEntry('hello', 'pages'),
+        workflow: {
+          collectionName: 'pages',
+          companions: [
+            { collectionName: 'posts', entry: createEntry('new') },
+            { collectionName: 'tags', entry: createEntry('news') },
+          ],
+        },
+      },
+    ]);
+
+    expect(countQuotaEntries('posts')).toBe(2);
   });
 
   test('leaves the counting to countCollectionEntries()', () => {

@@ -7,6 +7,7 @@ import {
   fetchForkFromNetwork,
   fetchProjectDetails,
   fetchRepositoryAccess,
+  getBranchRepository,
   getWorkflowRepository,
   initOpenAuthoring,
   isOpenAuthoringConfigured,
@@ -115,6 +116,21 @@ describe('GitLab Open Authoring service', () => {
     });
   });
 
+  describe('getBranchRepository', () => {
+    test('is the project a branch lives in', () => {
+      expect(getBranchRepository('cms/posts/hello')).toEqual({
+        owner: 'group/sub',
+        repo: 'project',
+        branch: 'cms/posts/hello',
+      });
+      expect(getBranchRepository('alice/website:cms/alice/website/posts/hello')).toEqual({
+        owner: 'alice',
+        repo: 'website',
+        branch: 'cms/alice/website/posts/hello',
+      });
+    });
+  });
+
   describe('getWorkflowRepository', () => {
     test('is the configured project without a fork', () => {
       expect(getWorkflowRepository()).toEqual({ owner: 'group/sub', repo: 'project' });
@@ -146,14 +162,14 @@ describe('GitLab Open Authoring service', () => {
       await expect(fetchRepositoryAccess()).rejects.toThrow('Not a collaborator of the repository');
     });
 
-    test('leaves an unanswered question visible rather than assuming no write access', async () => {
-      vi.mocked(fetchProjectPermissions).mockRejectedValue(
-        new Error('Too Many Requests', { cause: { status: 429 } }),
-      );
+    test('passes on the error the permission query was answered with', async () => {
+      // `fetchProjectPermissions` tells no access from a failed check the same way for both
+      // sign-in paths, e.g. an expired token is no access, so the cached credentials are dropped
+      const error = new Error('Not a collaborator of the repository');
 
-      await expect(fetchRepositoryAccess()).rejects.toThrow(
-        'Failed to check the repository permission.',
-      );
+      vi.mocked(fetchProjectPermissions).mockRejectedValue(error);
+
+      await expect(fetchRepositoryAccess()).rejects.toBe(error);
     });
   });
 
@@ -222,6 +238,15 @@ describe('GitLab Open Authoring service', () => {
 
       await expect(fetchForkByName()).resolves.toBeUndefined();
     });
+
+    test('passes on a failure other than a missing project', async () => {
+      // A rate limit or an outage says nothing about whether the fork is there, and reading it as
+      // missing would have the contributor asked to create another one
+      const error = new Error('Service Unavailable', { cause: { status: 503 } });
+
+      vi.mocked(fetchAPI).mockRejectedValue(error);
+      await expect(fetchForkByName()).rejects.toBe(error);
+    });
   });
 
   describe('fetchForkFromNetwork', () => {
@@ -257,16 +282,20 @@ describe('GitLab Open Authoring service', () => {
       await expect(fetchForkFromNetwork()).resolves.toBeUndefined();
     });
 
-    test('gives up when the list can’t be read', async () => {
-      vi.mocked(fetchAPI).mockRejectedValue(new Error('Forbidden'));
-      await expect(fetchForkFromNetwork()).resolves.toBeUndefined();
+    test('passes on a failure to read the list', async () => {
+      // A rate limit or an outage says nothing about whether a renamed fork is there, and reading
+      // it as missing would have the contributor asked to create another one
+      const error = new Error('Service Unavailable', { cause: { status: 503 } });
+
+      vi.mocked(fetchAPI).mockRejectedValue(error);
+      await expect(fetchForkFromNetwork()).rejects.toBe(error);
     });
   });
 
   describe('fetchFork', () => {
     test('falls back to the fork list when the default path is empty', async () => {
       vi.mocked(fetchAPI)
-        .mockRejectedValueOnce(new Error('Not Found'))
+        .mockRejectedValueOnce(new Error('Not Found', { cause: { status: 404 } }))
         .mockResolvedValueOnce([
           {
             id: 77,
@@ -347,6 +376,82 @@ describe('GitLab Open Authoring service', () => {
       await expect(createFork()).rejects.toThrow('Failed to fork the repository.');
       expect(error).toHaveBeenCalled();
       error.mockRestore();
+    });
+
+    describe('when the contributor has an unrelated project at the default path', () => {
+      /**
+       * Create GitLab’s response to a fork whose name and path are taken in the namespace.
+       * @param {number} [status] HTTP status.
+       * @returns {Error} Error.
+       */
+      const nameTaken = (status = 409) =>
+        new Error('Server responded with an error', { cause: { status, message: '' } });
+
+      test.each([409, 400])('retries under another name after a %s', async (status) => {
+        vi.mocked(fetchAPI)
+          .mockRejectedValueOnce(nameTaken(status))
+          // The unrelated project at the default path
+          .mockResolvedValueOnce({ id: 5, path_with_namespace: 'contributor/project' })
+          .mockResolvedValueOnce({ id: 77, path_with_namespace: 'contributor/group-sub-project' })
+          .mockResolvedValueOnce({ import_status: 'finished' });
+
+        await expect(createFork()).resolves.toEqual({
+          owner: 'contributor',
+          repo: 'group-sub-project',
+        });
+        expect(projectIds.fork).toBe(77);
+
+        expect(fetchAPI).toHaveBeenNthCalledWith(2, `/projects/${FORK_ID}`);
+        // A path can’t hold the slash of the subgroup
+        expect(fetchAPI).toHaveBeenNthCalledWith(3, `/projects/${PROJECT_ID}/fork`, {
+          method: 'POST',
+          body: { name: 'group-sub-project', path: 'group-sub-project' },
+        });
+        expect(fetchAPI).toHaveBeenNthCalledWith(
+          4,
+          `/projects/${encodeURIComponent('contributor/group-sub-project')}`,
+        );
+      });
+
+      test('finds the renamed fork in a later session', async () => {
+        vi.mocked(fetchAPI)
+          // The unrelated project at the default path isn’t a fork
+          .mockResolvedValueOnce(createForkProject({ forked_from_project: undefined }))
+          .mockResolvedValueOnce([
+            createForkProject({ id: 77, path_with_namespace: 'contributor/group-sub-project' }),
+          ]);
+
+        await expect(fetchFork()).resolves.toEqual({
+          owner: 'contributor',
+          repo: 'group-sub-project',
+        });
+        expect(projectIds.fork).toBe(77);
+      });
+
+      test('reports a refusal when the default path is free', async () => {
+        const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+        vi.mocked(fetchAPI)
+          .mockRejectedValueOnce(nameTaken())
+          .mockRejectedValueOnce(new Error('Not Found', { cause: { status: 404 } }));
+
+        await expect(createFork()).rejects.toThrow('Failed to fork the repository.');
+        expect(fetchAPI).toHaveBeenCalledTimes(2);
+        error.mockRestore();
+      });
+
+      test('reports a retry that fails as well', async () => {
+        const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+        vi.mocked(fetchAPI)
+          .mockRejectedValueOnce(nameTaken())
+          .mockResolvedValueOnce({ id: 5, path_with_namespace: 'contributor/project' })
+          .mockRejectedValueOnce(nameTaken());
+
+        await expect(createFork()).rejects.toThrow('Failed to fork the repository.');
+        expect(fetchAPI).toHaveBeenCalledTimes(3);
+        error.mockRestore();
+      });
     });
   });
 
@@ -429,6 +534,11 @@ describe('GitLab Open Authoring service', () => {
 
         if (path === `/projects/${PROJECT_ID}`) {
           return { id: 42 };
+        }
+
+        // The contributor has no fork under another name either
+        if (path.startsWith(`/projects/${PROJECT_ID}/forks?`)) {
+          return [];
         }
 
         // The fork’s own path: not found before the fork is made, ready right after

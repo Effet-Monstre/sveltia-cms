@@ -3,19 +3,13 @@ import { stringify } from 'yaml';
 import { MONOLINGUAL_CONFIG, MONOLINGUAL_FILES } from '../../fixtures/configs/monolingual.js';
 import { createPNG } from '../../fixtures/files.js';
 import { expect, GITHUB_CONFIG, test } from '../../fixtures/test.js';
+import { getEntryGroups, getEntryRows } from '../../fixtures/ui.js';
 
 /**
  * @import { Locator, Page } from '@playwright/test';
  */
 
 test.use({ config: MONOLINGUAL_CONFIG });
-
-/**
- * Get the rows of the entry list.
- * @param {Page} page Page.
- * @returns {Locator} Rows.
- */
-const getRows = (page) => page.getByRole('grid', { name: 'Entries' }).getByRole('row');
 
 /**
  * Get the button that deletes the selected entries, whose name changes with the selection count.
@@ -67,7 +61,7 @@ test.describe('with the magazine’s files', () => {
   });
 
   test('selects entries one by one and deletes them at once', async ({ cms, page }) => {
-    const rows = getRows(page);
+    const rows = getEntryRows(page);
     const selectAll = page.getByRole('checkbox', { name: 'Select All' });
 
     await expect(rows).toHaveCount(3);
@@ -95,6 +89,8 @@ test.describe('with the magazine’s files', () => {
     await expect(page.getByText(/selected$/)).toBeHidden();
     await expect(selectAll).not.toBeChecked();
     await expect(getDeleteButton(page)).toBeDisabled();
+    // The disabled button can’t keep the focus, so the entry list takes it
+    await expect(rows.first()).toBeFocused();
   });
 
   test('selects and clears all the entries with the Select All checkbox', async ({ page }) => {
@@ -133,6 +129,8 @@ test.describe('with the magazine’s files', () => {
         .getByRole('group', { name: 'Entry List' })
         .getByRole('button', { name: 'Create New Entry' }),
     ).toBeVisible();
+    // The disabled Delete button can’t keep the focus, and the list is gone, so the page takes it
+    await expect(page.locator('#page-container')).toBeFocused();
     await expect
       .poll(async () => Object.keys(await cms.readRepo()).filter((path) => path.includes('posts/')))
       .toEqual([]);
@@ -148,7 +146,7 @@ test.describe('with the magazine’s files', () => {
     await dialog.getByRole('button', { name: 'Cancel' }).click();
     await expect(dialog).toBeHidden();
 
-    await expect(getRows(page)).toHaveCount(3);
+    await expect(getEntryRows(page)).toHaveCount(3);
     // The selection is kept, so the user can change it and try again
     await expect(page.getByText('1 of 3 selected')).toBeVisible();
     expect(Object.keys(await cms.readRepo())).toContain('content/posts/2026-01-first-light.md');
@@ -180,21 +178,24 @@ test.describe('with the magazine’s files', () => {
     const listView = page.getByRole('radio', { name: 'List View' });
     const gridView = page.getByRole('radio', { name: 'Grid View' });
 
+    // The list is the default, and the table isn’t offered without its columns configured
     await expect(listView).toBeChecked();
+    await expect(page.getByRole('radio', { name: 'Table View' })).toBeHidden();
     await gridView.click();
     await expect(gridView).toBeChecked();
-    await expect(getRows(page)).toHaveCount(3);
+    await expect(getEntryRows(page)).toHaveCount(3);
 
-    // The authors have no image field to show as a thumbnail, hence no grid view, and the posts
-    // keep theirs on the way back
+    // The authors have no image field to show as a thumbnail, hence no view to switch to, and the
+    // posts keep theirs on the way back
     await page.getByRole('treeitem', { name: 'Authors' }).click();
-    await expect(getRows(page)).toHaveText([/Jane Doe/, /John Smith/]);
-    await expect(gridView).toBeHidden();
+    await expect(getEntryRows(page)).toHaveText([/Jane Doe/, /John Smith/]);
+    await expect(page.getByRole('radiogroup', { name: 'Switch View' })).toBeHidden();
     await page.getByRole('treeitem', { name: 'Posts' }).click();
     await expect(gridView).toBeChecked();
 
     await listView.click();
     await expect(listView).toBeChecked();
+    await expect(getEntryRows(page)).toHaveCount(3);
   });
 
   test('keeps the sort order of each collection', async ({ cms, page }) => {
@@ -204,29 +205,41 @@ test.describe('with the magazine’s files', () => {
       sortButton,
       page.getByRole('menuitemradio', { name: /Date.*new to old/ }),
     );
-    await expect(getRows(page)).toHaveText([/Talking to Jane/, /A Quiet Review/, /First Light/]);
+    await expect(getEntryRows(page)).toHaveText([
+      /Talking to Jane/,
+      /A Quiet Review/,
+      /First Light/,
+    ]);
 
     await page.getByRole('treeitem', { name: 'Authors' }).click();
-    await expect(getRows(page)).toHaveText([/Jane Doe/, /John Smith/]);
+    await expect(getEntryRows(page)).toHaveText([/Jane Doe/, /John Smith/]);
     await cms.chooseMenuItem(sortButton, page.getByRole('menuitemradio', { name: /Z to A/ }));
-    await expect(getRows(page)).toHaveText([/John Smith/, /Jane Doe/]);
+    await expect(getEntryRows(page)).toHaveText([/John Smith/, /Jane Doe/]);
 
     await page.getByRole('treeitem', { name: 'Posts' }).click();
-    await expect(getRows(page)).toHaveText([/Talking to Jane/, /A Quiet Review/, /First Light/]);
+    await expect(getEntryRows(page)).toHaveText([
+      /Talking to Jane/,
+      /A Quiet Review/,
+      /First Light/,
+    ]);
 
     // Choosing the other direction of the same field reverses the list
     await cms.chooseMenuItem(
       sortButton,
       page.getByRole('menuitemradio', { name: /Date.*old to new/ }),
     );
-    await expect(getRows(page)).toHaveText([/First Light/, /A Quiet Review/, /Talking to Jane/]);
+    await expect(getEntryRows(page)).toHaveText([
+      /First Light/,
+      /A Quiet Review/,
+      /Talking to Jane/,
+    ]);
 
     await page.getByRole('treeitem', { name: 'Authors' }).click();
-    await expect(getRows(page)).toHaveText([/John Smith/, /Jane Doe/]);
+    await expect(getEntryRows(page)).toHaveText([/John Smith/, /Jane Doe/]);
   });
 
   test('clears a view filter and a view group', async ({ cms, page }) => {
-    const rows = getRows(page);
+    const rows = getEntryRows(page);
     const filterButton = page.getByRole('button', { name: 'Filter', exact: true });
     const groupButton = page.getByRole('button', { name: 'Group', exact: true });
     const grid = page.getByRole('grid', { name: 'Entries' });
@@ -248,7 +261,7 @@ test.describe('with the magazine’s files', () => {
     const grid = page.getByRole('grid', { name: 'Entries' });
 
     await cms.chooseMenuItem(groupButton, page.getByRole('menuitemradio', { name: 'Category' }));
-    await expect(grid.getByRole('rowgroup')).toHaveCount(3);
+    await expect(getEntryGroups(page)).toHaveCount(3);
     await expect(grid.getByRole('row', { name: /First Light/ })).toBeVisible();
 
     await cms.chooseMenuItem(groupButton, page.getByRole('menuitem', { name: 'Collapse All' }));
@@ -256,7 +269,7 @@ test.describe('with the magazine’s files', () => {
     await expect(grid.getByRole('row', { name: /Talking to Jane/ })).toBeHidden();
 
     // The group captions stay, so a group can be expanded again
-    await expect(grid.getByRole('rowgroup')).toHaveCount(3);
+    await expect(getEntryGroups(page)).toHaveCount(3);
 
     await cms.chooseMenuItem(groupButton, page.getByRole('menuitem', { name: 'Expand All' }));
     await expect(grid.getByRole('row', { name: /First Light/ })).toBeVisible();
@@ -279,7 +292,7 @@ test.describe('on GitHub', () => {
     const groupButton = page.getByRole('button', { name: 'Group', exact: true });
 
     await cms.open();
-    await expect(getRows(page)).toHaveCount(3);
+    await expect(getEntryRows(page)).toHaveCount(3);
 
     await gridView.click();
     await expect(gridView).toBeChecked();
@@ -288,7 +301,7 @@ test.describe('on GitHub', () => {
       page.getByRole('menuitemradio', { name: /Date.*new to old/ }),
     );
     await cms.chooseMenuItem(groupButton, page.getByRole('menuitemradio', { name: 'Category' }));
-    await expect(grid.getByRole('rowgroup')).toHaveCount(3);
+    await expect(getEntryGroups(page)).toHaveCount(3);
     await grid
       .getByRole('rowgroup', { name: /^news$/i })
       .getByRole('button')
@@ -300,7 +313,7 @@ test.describe('on GitHub', () => {
       page.getByRole('button', { name: 'Sort', exact: true }),
       page.getByRole('menuitemradio', { name: /Name.*Z to A/ }),
     );
-    await expect(getRows(page)).toHaveText([/John Smith/, /Jane Doe/]);
+    await expect(getEntryRows(page)).toHaveText([/John Smith/, /Jane Doe/]);
 
     // The view settings are written to IndexedDB in the background, and a reload a moment after
     // a change would cancel the write, which a user can’t do as fast
@@ -308,11 +321,11 @@ test.describe('on GitHub', () => {
       .poll(async () => (await readViewSettings(page))?.authors?.sort)
       .toEqual({ key: 'name', order: 'descending' });
     await page.reload();
-    await expect(getRows(page)).toHaveText([/John Smith/, /Jane Doe/]);
+    await expect(getEntryRows(page)).toHaveText([/John Smith/, /Jane Doe/]);
 
     await page.getByRole('treeitem', { name: 'Posts' }).click();
     await expect(gridView).toBeChecked();
-    await expect(grid.getByRole('rowgroup')).toHaveCount(3);
+    await expect(getEntryGroups(page)).toHaveCount(3);
     // The collapsed group stays collapsed
     await expect(
       grid.getByRole('rowgroup', { name: /^news$/i }).getByRole('button'),
@@ -325,12 +338,12 @@ test.describe('on GitHub', () => {
     const grid = page.getByRole('grid', { name: 'Entries' });
 
     await cms.open();
-    await expect(getRows(page)).toHaveCount(3);
+    await expect(getEntryRows(page)).toHaveCount(3);
     await cms.chooseMenuItem(
       page.getByRole('button', { name: 'Group', exact: true }),
       page.getByRole('menuitemradio', { name: 'Category' }),
     );
-    await expect(grid.getByRole('rowgroup')).toHaveCount(3);
+    await expect(getEntryGroups(page)).toHaveCount(3);
     await expect
       .poll(async () => (await readViewSettings(page))?.posts?.group)
       .toEqual({ field: 'category' });
@@ -351,8 +364,8 @@ test.describe('on GitHub', () => {
     );
     await page.reload();
 
-    await expect(getRows(page)).toHaveCount(3);
-    await expect(grid.getByRole('rowgroup')).toHaveCount(1);
+    await expect(getEntryRows(page)).toHaveCount(3);
+    await expect(getEntryGroups(page)).toHaveCount(1);
     await expect(grid.getByRole('rowgroup', { name: /^news$/i })).toHaveCount(0);
   });
 });
@@ -417,7 +430,7 @@ test.describe('with an optional relation field', () => {
     );
     await dialog.getByRole('button', { name: 'Delete' }).click();
 
-    await expect(getRows(page)).toHaveText([/John Smith/]);
+    await expect(getEntryRows(page)).toHaveText([/John Smith/]);
 
     await expect
       .poll(async () => Object.keys(await cms.readRepo()))
@@ -445,5 +458,41 @@ test.describe('with an optional relation field', () => {
     expect(files['content/posts/2026-02-a-quiet-review.md']).toBe(
       MONOLINGUAL_FILES['content/posts/2026-02-a-quiet-review.md'],
     );
+  });
+});
+
+test.describe('with the table columns configured', () => {
+  test.use({
+    config: {
+      ...MONOLINGUAL_CONFIG,
+      collections: MONOLINGUAL_CONFIG.collections.map((collection) =>
+        collection.name === 'posts'
+          ? { ...collection, table_columns: ['title', 'date'] }
+          : collection,
+      ),
+    },
+  });
+
+  test.beforeEach(async ({ cms }) => {
+    await cms.open();
+    await cms.seed(MONOLINGUAL_FILES);
+    await cms.signIn();
+  });
+
+  test('shows the entries in the table view by default', async ({ page }) => {
+    const tableView = page.getByRole('radio', { name: 'Table View' });
+    const listView = page.getByRole('radio', { name: 'List View' });
+    const headers = page.getByRole('grid', { name: 'Entries' }).getByRole('columnheader');
+
+    await expect(tableView).toBeChecked();
+    await expect(headers).not.toHaveCount(0);
+    await expect(getEntryRows(page)).toHaveCount(3);
+
+    await listView.click();
+    await expect(listView).toBeChecked();
+    await expect(headers).toHaveCount(0);
+    await tableView.click();
+    await expect(tableView).toBeChecked();
+    await expect(headers).not.toHaveCount(0);
   });
 });

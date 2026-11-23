@@ -146,6 +146,43 @@ export const createStableDerivedState = (getter) => {
 };
 
 /**
+ * Put a request the UI answers, e.g. with a confirmation dialog, in the given box, and wait for the
+ * answer. The request gets a `respond` method that answers it and takes it down. An earlier request
+ * still in the box is answered with the fallback first, as leaving it unresolved would hang
+ * whatever awaits it.
+ * @template {{ respond: (answer: A) => void }} R
+ * @template A
+ * @param {{ current: R | undefined }} state Box holding the pending request.
+ * @param {Omit<R, 'respond'>} props Properties of the request other than `respond`.
+ * @param {A} fallback Answer given to an earlier request.
+ * @returns {Promise<A>} Answer.
+ */
+export const requestAnswer = (state, props, fallback) => {
+  state.current?.respond(fallback);
+
+  return new Promise((resolve) => {
+    const request = /** @type {R} */ ({
+      ...props,
+      /**
+       * Answer the request.
+       * @param {A} answer Answer.
+       */
+      respond: (answer) => {
+        // Only take down the dialog that belongs to this request, so answering a stale one can’t
+        // dismiss a newer one. Resolving an already settled promise does nothing
+        if (state.current === request) {
+          state.current = undefined;
+        }
+
+        resolve(answer);
+      },
+    });
+
+    state.current = request;
+  });
+};
+
+/**
  * Run the given function whenever the reactive state it reads has changed, like `$effect` in a
  * component, but for a service module that lives as long as the app. The function is first run
  * asynchronously, after the current task, and never synchronously on state changes, so a service
@@ -186,8 +223,11 @@ export const watch = (getDependencies, fn) => {
  * @param {() => Promise<T> | undefined} fn Function to run. It can return `undefined` instead of a
  * `Promise` to skip the run, e.g. while a required value is missing.
  * @param {(result: T) => void} onResult Function receiving the result of the latest run.
+ * @param {(error: unknown) => void} [onError] Function receiving the error the latest run has been
+ * rejected with. An error of a run that has been superseded is ignored. Without this, the error is
+ * left unhandled.
  */
-export const watchAsync = (fn, onResult) => {
+export const watchAsync = (fn, onResult, onError) => {
   $effect(() => {
     const promise = fn();
 
@@ -197,11 +237,19 @@ export const watchAsync = (fn, onResult) => {
 
     let stale = false;
 
-    promise.then((result) => {
-      if (!stale) {
-        onResult(result);
-      }
-    });
+    promise.then(
+      (result) => {
+        if (!stale) {
+          onResult(result);
+        }
+      },
+      onError &&
+        ((error) => {
+          if (!stale) {
+            onError(error);
+          }
+        }),
+    );
 
     return () => {
       stale = true;
@@ -217,6 +265,12 @@ export const watchAsync = (fn, onResult) => {
  * read other state, e.g. the field configuration, without being rerun on changes to it. The
  * arguments are positional because an arrow function in an object literal would need a JSDoc
  * comment of its own at every call site.
+ *
+ * The field value is only written once the user has edited the input, so that it differs from what
+ * the field value was last converted to. A value the input can’t represent, like a decimal number
+ * in an integer field, converts to an input that doesn’t convert back to the same value, so writing
+ * it back right away would replace the stored value as soon as the editor is opened, without any
+ * user action, and the next save would lose it.
  * @template V, I
  * @param {() => V} getValue Function returning the field value.
  * @param {(value: V) => void} setValue Function updating the field value.
@@ -238,6 +292,12 @@ export const syncValues = (
   toValue = (input) => /** @type {V} */ (/** @type {unknown} */ (input)),
 ) => {
   /**
+   * Input value converted from the field value the last time the input was synced with it.
+   * @type {I | undefined}
+   */
+  let syncedInput;
+
+  /**
    * Update the input value based on the field value.
    */
   const updateInput = () => {
@@ -246,6 +306,8 @@ export const syncValues = (
     if (getInput() !== input) {
       setInput(input);
     }
+
+    syncedInput = input;
   };
 
   /**
@@ -260,7 +322,12 @@ export const syncValues = (
   };
 
   watch(getValue, updateInput);
-  watch(getInput, updateValue);
+  watch(getInput, () => {
+    // Skip the input that merely reflects the field value, including the one set on the first run
+    if (getInput() !== syncedInput) {
+      updateValue();
+    }
+  });
 
   return { updateInput, updateValue };
 };

@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'vitest';
 
-import { sortEntriesByOrderField } from './sort';
+import { getOrderValueGetter, sortEntriesByOrderField } from './sort';
 
 /**
  * Build a minimal entry collection mock for tests.
@@ -84,6 +84,18 @@ describe('sortEntriesByOrderField()', () => {
     ).toEqual([first, second, unorderedA, unorderedB]);
   });
 
+  test('places an entry with an empty order value at the end rather than as 0', () => {
+    const nullOrder = makeEntry('n', { title: 'N', order: null });
+    const emptyOrder = makeEntry('e', { title: 'E', order: '' });
+    const blankOrder = makeEntry('w', { title: 'W', order: '  ' });
+    const zero = makeEntry('z', { title: 'Z', order: 0 });
+    const one = makeEntry('o', { title: 'O', order: '1' });
+
+    expect(
+      sortEntriesByOrderField([nullOrder, one, emptyOrder, blankOrder, zero], makeCollection()),
+    ).toEqual([zero, one, nullOrder, emptyOrder, blankOrder]);
+  });
+
   test('sorts the entries of an array file collection by their position', () => {
     const second = makeArrayEntry('b', 2);
     const unknownA = makeArrayEntry('x', undefined);
@@ -107,5 +119,55 @@ describe('sortEntriesByOrderField()', () => {
       five,
       unordered,
     ]);
+  });
+});
+
+describe('getOrderValueGetter', () => {
+  test('returns the numeric value of the order field', () => {
+    const getOrderValue = getOrderValueGetter(makeCollection());
+
+    expect(getOrderValue(makeEntry('a', { order: 3 }))).toBe(3);
+    expect(getOrderValue(makeEntry('b', { order: ' 2 ' }))).toBe(2);
+  });
+
+  test('returns `undefined` for a missing or invalid value', () => {
+    const getOrderValue = getOrderValueGetter(makeCollection());
+
+    expect(getOrderValue(makeEntry('a', {}))).toBeUndefined();
+    expect(getOrderValue(makeEntry('b', { order: null }))).toBeUndefined();
+    expect(getOrderValue(makeEntry('c', { order: ' ' }))).toBeUndefined();
+    expect(getOrderValue(makeEntry('d', { order: 'abc' }))).toBeUndefined();
+    expect(getOrderValue(makeEntry('e', { order: Infinity }))).toBeUndefined();
+  });
+
+  test('reads the value from another locale when the entry lacks the default one', () => {
+    const getOrderValue = getOrderValueGetter(
+      makeCollection({
+        _i18n: { allLocales: ['en', 'fr'], defaultLocale: 'en', structureMap: {} },
+      }),
+    );
+
+    // A multi-file i18n entry with only `a.fr.md`
+    const entry = {
+      id: 'a',
+      slug: 'a',
+      subPath: 'a',
+      locales: { fr: { slug: 'a', path: 'content/a.fr.md', content: { order: 4 } } },
+    };
+
+    expect(getOrderValue(entry)).toBe(4);
+  });
+
+  test('returns `undefined` for every entry if the collection can’t be reordered', () => {
+    const getOrderValue = getOrderValueGetter(makeCollection({ reorder: undefined }));
+
+    expect(getOrderValue(makeEntry('a', { order: 3 }))).toBeUndefined();
+  });
+
+  test('returns the position in the array for a collection stored in one file', () => {
+    const getOrderValue = getOrderValueGetter(makeArrayFileCollection());
+
+    expect(getOrderValue(makeArrayEntry('a', 5))).toBe(5);
+    expect(getOrderValue(makeArrayEntry('b', undefined))).toBe(0);
   });
 });

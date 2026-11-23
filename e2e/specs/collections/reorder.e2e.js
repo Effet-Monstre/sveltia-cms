@@ -3,8 +3,7 @@ import {
   COLLECTION_OPTIONS_FILES,
 } from '../../fixtures/configs/collection-options.js';
 import { expect, test } from '../../fixtures/test.js';
-
-import { getEntryList, openCollection } from './helpers.js';
+import { getEditor, getEntryList, getEntryRows, openCollection } from '../../fixtures/ui.js';
 
 /**
  * @import { CMS } from '../../fixtures/test.js';
@@ -139,7 +138,7 @@ test('cancels reordering, leaving the order and the files as they were', async (
 test('puts a new entry at the end', async ({ cms, page }) => {
   await page.getByRole('button', { name: 'Create New Entry' }).click();
 
-  const editor = page.getByRole('group', { name: 'Content Editor' });
+  const editor = getEditor(page);
 
   await editor.getByRole('textbox', { name: 'Question' }).fill('Is there parking?');
   await editor.getByRole('textbox', { name: 'Answer' }).fill('On the street.');
@@ -148,9 +147,7 @@ test('puts a new entry at the end', async ({ cms, page }) => {
   await expect
     .poll(async () => (await cms.readRepo())['content/faqs/is-there-parking.md'])
     .toBe('---\norder: 4\nquestion: Is there parking?\nanswer: On the street.\n---\n');
-  await expect(getEntryList(page).getByRole('row').last()).toHaveAccessibleName(
-    /Is there parking\?/,
-  );
+  await expect(getEntryRows(page).last()).toHaveAccessibleName(/Is there parking\?/);
 });
 
 test('renumbers the other entries when one is deleted', async ({ cms, page }) => {

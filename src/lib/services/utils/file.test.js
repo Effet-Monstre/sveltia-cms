@@ -1,18 +1,26 @@
 import { describe, expect, test, vi } from 'vitest';
 
-import { ESCAPED_PLACEHOLDER_REGEX } from '$lib/services/common/template/constants';
+import { getTemplatePattern } from '$lib/services/common/template/utils';
 import {
   createPath,
   createPathRegEx,
   encodeFilePath,
+  foldFileName,
+  foldPath,
+  getBaseName,
   getBlob,
   getByteSize,
+  getDirName,
   getGitHash,
   isEquivalentFileExtension,
+  normalizeFolderPath,
+  readBlobAsFile,
   renameIfNeeded,
+  renameReservedFileName,
   resolvePath,
   sanitizeFileName,
   sanitizePath,
+  stripLeadingDotSlash,
   stripPathPrefix,
 } from '$lib/services/utils/file';
 
@@ -40,12 +48,128 @@ describe('Test sanitizeFileName()', () => {
     expect(sanitizeFileName('a\u00A0b\t\n  c.jpg')).toEqual('a b c.jpg');
     expect(sanitizeFileName('a/b\\c:d?.jpg')).toEqual('abcd.jpg');
   });
+
+  test('should rename a name Windows reserves instead of dropping it', () => {
+    expect(sanitizeFileName('aux.png')).toEqual('aux-1.png');
+    expect(sanitizeFileName('CON')).toEqual('CON-1');
+    expect(sanitizeFileName('nul.tar.gz')).toEqual('nul-1.tar.gz');
+    expect(sanitizeFileName('LPT¹.txt')).toEqual('LPT¹-1.txt');
+    // An unsafe character can be what makes the name reserved
+    expect(sanitizeFileName('aux?.png')).toEqual('aux-1.png');
+    expect(sanitizeFileName('com1 ')).toEqual('com1-1');
+    // The length limit still applies
+    expect(sanitizeFileName(`aux.${'a'.repeat(300)}`)).toEqual(`aux-1.${'a'.repeat(249)}`);
+    // A name with nothing usable is still dropped
+    expect(sanitizeFileName('?:*')).toEqual('');
+    expect(sanitizeFileName('..')).toEqual('');
+    // Names that only start like a reserved one are kept
+    expect(sanitizeFileName('auxiliary.png')).toEqual('auxiliary.png');
+    expect(sanitizeFileName('con-tent')).toEqual('con-tent');
+  });
+});
+
+describe('Test renameReservedFileName()', () => {
+  test('should number a name Windows reserves, before the first dot', () => {
+    expect(renameReservedFileName('aux.png')).toEqual('aux-1.png');
+    expect(renameReservedFileName('Prn')).toEqual('Prn-1');
+    expect(renameReservedFileName('com9.tar.gz')).toEqual('com9-1.tar.gz');
+  });
+
+  test('should leave any other name alone', () => {
+    expect(renameReservedFileName('photo.png')).toEqual('photo.png');
+    expect(renameReservedFileName('console.log')).toEqual('console.log');
+    expect(renameReservedFileName('my-aux.png')).toEqual('my-aux.png');
+  });
+});
+
+describe('Test foldFileName()', () => {
+  test('should fold case and the Unicode normalization form', () => {
+    expect(foldFileName('Photo.JPG')).toEqual('photo.jpg');
+    expect(foldFileName('Cafe\u0301.png')).toEqual('caf\u00e9.png');
+    expect(foldFileName('CAF\u00c9.png')).toEqual(foldFileName('cafe\u0301.png'));
+  });
+});
+
+describe('Test foldPath()', () => {
+  test('should strip the slashes and fold the path', () => {
+    expect(foldPath('/Static/Cafe\u0301/')).toEqual('static/caf\u00e9');
+    expect(foldPath('static/Admin/config.yml')).toEqual('static/admin/config.yml');
+    expect(foldPath('')).toEqual('');
+  });
+});
+
+describe('Test stripLeadingDotSlash()', () => {
+  test('should remove a leading `./` or a lone `.`', () => {
+    expect(stripLeadingDotSlash('./images')).toEqual('images');
+    expect(stripLeadingDotSlash('./')).toEqual('');
+    expect(stripLeadingDotSlash('.')).toEqual('');
+    // Slashes are kept otherwise
+    expect(stripLeadingDotSlash('./images/')).toEqual('images/');
+    expect(stripLeadingDotSlash('/images')).toEqual('/images');
+  });
+
+  test('should leave a parent folder or a dot file alone', () => {
+    expect(stripLeadingDotSlash('../images')).toEqual('../images');
+    expect(stripLeadingDotSlash('.images')).toEqual('.images');
+    expect(stripLeadingDotSlash('..')).toEqual('..');
+    expect(stripLeadingDotSlash('')).toEqual('');
+  });
+});
+
+describe('Test normalizeFolderPath()', () => {
+  test('should strip the slashes, then a leading `./`', () => {
+    expect(normalizeFolderPath('')).toEqual('');
+    expect(normalizeFolderPath('/')).toEqual('');
+    expect(normalizeFolderPath('.')).toEqual('');
+    expect(normalizeFolderPath('./')).toEqual('');
+    expect(normalizeFolderPath('./static/images/')).toEqual('static/images');
+    expect(normalizeFolderPath('/static/images')).toEqual('static/images');
+    expect(normalizeFolderPath('../images')).toEqual('../images');
+  });
 });
 
 describe('Test renameIfNeeded()', () => {
+  test('uses the folded names given instead of folding the other names', () => {
+    const otherNames = ['Photo.png', 'photo-1.png'];
+    const foldedNames = new Set(otherNames.map((name) => name.toLowerCase()));
+
+    expect(renameIfNeeded('photo.png', otherNames, { foldedNames })).toEqual('photo-2.png');
+    expect(renameIfNeeded('new.png', otherNames, { foldedNames })).toEqual('new.png');
+    // Only the set tells whether the name is taken
+    expect(renameIfNeeded('photo.png', otherNames, { foldedNames: new Set() })).toEqual(
+      'photo.png',
+    );
+  });
+
   test('should take the highest number already used, whatever order the names come in', () => {
-    expect(renameIfNeeded('photo.png', ['photo-1.png', 'photo-0.png'])).toEqual('photo-2.png');
-    expect(renameIfNeeded('photo.png', ['photo-10.png', 'photo-9.png'])).toEqual('photo-11.png');
+    expect(renameIfNeeded('photo.png', ['photo-1.png', 'photo.png', 'photo-0.png'])).toEqual(
+      'photo-2.png',
+    );
+    expect(renameIfNeeded('photo.png', ['photo-10.png', 'photo-9.png', 'photo.png'])).toEqual(
+      'photo-11.png',
+    );
+    expect(renameIfNeeded('photo.png', ['photo.png', 'photo-0.png'])).toEqual('photo-1.png');
+    // A slug has no extension
+    expect(renameIfNeeded('my-post', ['my-post-1', 'my-post'])).toEqual('my-post-2');
+  });
+
+  test('should number a name without an extension at the end', () => {
+    expect(
+      renameIfNeeded('release-2.0', ['release-2.0', 'release-2.0-1'], { hasExtension: false }),
+    ).toEqual('release-2.0-2');
+    expect(renameIfNeeded('example.com', ['Example.com'], { hasExtension: false })).toEqual(
+      'example.com-1',
+    );
+    // A file name keeps its extension by default
+    expect(renameIfNeeded('example.com', ['example.com'])).toEqual('example-1.com');
+  });
+
+  test('should keep a name that isn’t taken, even if numbered variants of it are', () => {
+    expect(renameIfNeeded('summer.jpg', ['summer-2023.jpg'])).toEqual('summer.jpg');
+    expect(renameIfNeeded('photo.jpg', ['photo-1.jpg', 'photo-2.jpg'])).toEqual('photo.jpg');
+    expect(renameIfNeeded('my-post', ['my-post-1', 'other'])).toEqual('my-post');
+    // A different extension doesn’t clash
+    expect(renameIfNeeded('photo.jpg', ['photo.png', 'photo-1.png'])).toEqual('photo.jpg');
   });
 
   test('should treat names that only differ in case as taken', () => {
@@ -54,13 +178,25 @@ describe('Test renameIfNeeded()', () => {
     expect(renameIfNeeded('photo.jpg', ['PHOTO.JPG', 'Photo-1.jpg'])).toEqual('photo-2.jpg');
   });
 
+  test('should treat names that only differ in Unicode normalization form as taken', () => {
+    // A name read from a macOS disk is in NFD, while one typed in the browser is in NFC
+    expect(renameIfNeeded('caf\u00e9.jpg', ['cafe\u0301.jpg'])).toEqual('caf\u00e9-1.jpg');
+    expect(renameIfNeeded('cafe\u0301.jpg', ['Caf\u00c9.jpg'])).toEqual('cafe\u0301-1.jpg');
+    // The numbered variants count in either form too
+    expect(
+      renameIfNeeded('caf\u00e9.jpg', ['cafe\u0301.jpg', 'cafe\u0301-1.jpg', 'CAFE\u0301-2.JPG']),
+    ).toEqual('caf\u00e9-3.jpg');
+  });
+
   test('should not be fooled by a dot in the base name', () => {
     // The base name is everything before the last dot, so these candidates all share the `x.y.z`
     // prefix. Picking anything but the highest number would hand back a name that is already taken
-    expect(renameIfNeeded('x.y.z.png', ['x.y.z-1.png', 'x.y.z-0.png'])).toEqual('x.y.z-2.png');
-    expect(renameIfNeeded('my.photo.jpg', ['my.photo-8.jpg', 'my.photo-3.jpg'])).toEqual(
-      'my.photo-9.jpg',
+    expect(renameIfNeeded('x.y.z.png', ['x.y.z.png', 'x.y.z-1.png', 'x.y.z-0.png'])).toEqual(
+      'x.y.z-2.png',
     );
+    expect(
+      renameIfNeeded('my.photo.jpg', ['my.photo-8.jpg', 'my.photo.jpg', 'my.photo-3.jpg']),
+    ).toEqual('my.photo-9.jpg');
   });
 
   test('should leave the given list of other names alone', () => {
@@ -371,11 +507,14 @@ describe('Test resolvePath()', () => {
     expect(resolvePath('//folder/file.txt')).toBe('folder/file.txt'); // Leading empty segments are filtered
   });
 
-  test('should handle dots after all segments are removed', () => {
-    // When .. is encountered but no named segment exists before it (after first segment)
-    // This tests the case where lastIndex === -1 inside the .. handling
-    expect(resolvePath('file.txt/../..')).toBe(''); // .. after removing file.txt finds no segment
-    expect(resolvePath('a/file.txt/../../..')).toBe(''); // Going back 3 times removes all segments
+  test('should keep a `..` that goes up past the named segments', () => {
+    // The path points outside the starting folder, so the excess `..` can’t be dropped
+    expect(resolvePath('file.txt/../..')).toBe('..');
+    expect(resolvePath('a/file.txt/../../..')).toBe('..');
+    expect(resolvePath('a/../../b')).toBe('../b');
+    // A leading `..` isn’t cancelled out by a later one
+    expect(resolvePath('../a/../../b')).toBe('../../b');
+    expect(resolvePath('./a/../../b')).toBe('./../b');
     expect(resolvePath('a/b/file.txt/../..')).toBe('a'); // Going back twice: removes file.txt then b, a remains
     // Case where segment exists after going back
     expect(resolvePath('a/b/c/../../file.txt')).toBe('a/file.txt'); // Go back twice, then file.txt at same level
@@ -471,6 +610,32 @@ describe('Test createPath()', () => {
 
   test('should handle array with only falsy values', () => {
     expect(createPath([null, undefined, ''])).toBe('');
+  });
+});
+
+describe('Test getDirName()', () => {
+  test('should return the directory of a file path', () => {
+    expect(getDirName('static/images/photo.jpg')).toBe('static/images');
+    expect(getDirName('static/photo.jpg')).toBe('static');
+  });
+
+  test('should return an empty string for a file at the root', () => {
+    expect(getDirName('photo.jpg')).toBe('');
+  });
+});
+
+describe('Test getBaseName()', () => {
+  test('should return the last segment of a path', () => {
+    expect(getBaseName('static/images/photo.jpg')).toBe('photo.jpg');
+    expect(getBaseName('https://example.com/a/b_150.jpg')).toBe('b_150.jpg');
+  });
+
+  test('should return the path itself if it has no slash', () => {
+    expect(getBaseName('photo.jpg')).toBe('photo.jpg');
+  });
+
+  test('should return an empty string for a path ending with a slash', () => {
+    expect(getBaseName('static/images/')).toBe('');
   });
 });
 
@@ -610,14 +775,9 @@ describe('Test createPathRegEx()', () => {
   });
 
   test('should handle brackets with template tags', () => {
-    const regex = createPathRegEx('app/(pages)/{{slug}}.md', (segment) => {
-      // First escape special regex chars including parentheses
-      let escaped = segment.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-
-      // Then replace escaped template placeholders with wildcard
-      escaped = escaped.replace(ESCAPED_PLACEHOLDER_REGEX, '.+?');
-      return escaped;
-    });
+    const regex = createPathRegEx('app/(pages)/{{slug}}.md', (segment) =>
+      getTemplatePattern(segment, '.+?'),
+    );
 
     expect(regex.test('app/(pages)/my-post.md')).toBe(true);
     expect(regex.test('app/(pages)/another.md')).toBe(true);
@@ -637,5 +797,16 @@ describe('Test createPathRegEx()', () => {
     const result = 'src/assets/images/666-test/photo.jpg'.replace(regex, '/@assets/images/$<slug>');
 
     expect(result).toBe('/@assets/images/666-test/photo.jpg');
+  });
+});
+
+describe('readBlobAsFile()', () => {
+  test('copies the bytes and type of a blob into a named file', async () => {
+    const file = await readBlobAsFile(new Blob(['png'], { type: 'image/png' }), 'a.png');
+
+    expect(file).toBeInstanceOf(File);
+    expect(file.name).toBe('a.png');
+    expect(file.type).toBe('image/png');
+    expect(await file.text()).toBe('png');
   });
 });

@@ -4,17 +4,25 @@
 
   import AssetsPanel from '$lib/components/assets/browser/assets-panel.svelte';
   import DropZone from '$lib/components/assets/shared/drop-zone.svelte';
-  import { encodeRoutePath, goto } from '$lib/services/app/navigation';
+  import { goto } from '$lib/services/app/navigation';
   import { isAssetInFolder } from '$lib/services/assets';
   import { assetsLocked, canCreateAsset, getAssetFolder } from '$lib/services/assets/folders';
   import { allAssets, uploadingAssets } from '$lib/services/assets/state';
   import { selectedCollection } from '$lib/services/contents/collection';
   import { currentView } from '$lib/services/contents/collection/view/settings';
   import { env } from '$lib/services/user/env.svelte';
+  import { encodePathSegments } from '$lib/services/utils/url';
+
+  /**
+   * @import { AssetFolderInfo } from '$lib/types/private';
+   */
 
   const folder = $derived(getAssetFolder({ collectionName: selectedCollection.current?.name }));
+  // Only read while the folder is shown below, so the folder is always there
   const assets = $derived(
-    folder ? allAssets.current.filter((asset) => isAssetInFolder(asset, folder)) : [],
+    allAssets.current.filter((asset) =>
+      isAssetInFolder(asset, /** @type {AssetFolderInfo} */ (folder)),
+    ),
   );
   const internalPath = $derived(folder?.internalPath);
   // Can’t upload assets if collection assets are saved at entry-relative paths, or the folder is
@@ -36,7 +44,7 @@
       <AssetsPanel
         {assets}
         onSelect={({ asset }) => {
-          goto(encodeRoutePath(`/assets/${asset.path}`), { transitionType: 'forwards' });
+          goto(encodePathSegments(`/assets/${asset.path}`), { transitionType: 'forwards' });
         }}
       />
     </DropZone>

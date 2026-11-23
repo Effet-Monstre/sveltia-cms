@@ -6,10 +6,12 @@
 -->
 <script>
   import { TextInput } from '@sveltia/ui';
-  import { onMount } from 'svelte';
 
-  import { warnDeprecation } from '$lib/services/config/deprecations';
   import { getEntryDraftContext } from '$lib/services/contents/draft/state.svelte';
+  import {
+    getFieldEditorContext,
+    isInEditorComponent,
+  } from '$lib/services/contents/editor/field-context';
   import { getInitialValue } from '$lib/services/contents/fields/uuid/helpers';
   import { isFieldTranslatable } from '$lib/services/contents/i18n/fields';
   import { watch } from '$lib/services/utils/state.svelte';
@@ -27,9 +29,13 @@
 
   const entryDraft = getEntryDraftContext();
 
+  const { valueStoreKey = 'currentValues' } = getFieldEditorContext();
+  // A rich text editor component’s values live in the document of the locale they’re edited in,
+  // so its UUID is filled in whatever the locale
+  const inEditorComponent = isInEditorComponent(valueStoreKey);
+
   /** @type {FieldEditorProps & Props} */
   let {
-    /* eslint-disable prefer-const */
     locale,
     fieldId,
     fieldConfig,
@@ -37,7 +43,6 @@
     required = true,
     readonly = true,
     invalid = false,
-    /* eslint-enable prefer-const */
   } = $props();
 
   const defaultLocale = $derived(entryDraft.current?.defaultLocale);
@@ -49,25 +54,21 @@
   watch(
     () => locale,
     () => {
-      if (!currentValue && (locale === defaultLocale || isFieldTranslatable(fieldConfig?.i18n))) {
+      if (
+        !currentValue &&
+        (locale === defaultLocale || inEditorComponent || isFieldTranslatable(fieldConfig?.i18n))
+      ) {
         currentValue = getInitialValue(fieldConfig);
       }
     },
   );
-
-  onMount(() => {
-    // @todo Remove the option prior to the 1.0 release.
-    if ('read_only' in fieldConfig) {
-      warnDeprecation('uuid_read_only');
-    }
-  });
 </script>
 
 <TextInput
   dir="ltr"
   bind:value={currentValue}
   flex
-  readonly={readonly && fieldConfig.read_only !== false}
+  {readonly}
   {required}
   {invalid}
   aria-labelledby="{fieldId}-label"

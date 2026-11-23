@@ -13,6 +13,7 @@ import { formatEntryFile } from '$lib/services/contents/file/format';
  * InternalCollection,
  * InternalCollectionFile,
  * InternalLocaleCode,
+ * FileState,
  * } from '$lib/types/private';
  */
 
@@ -29,19 +30,30 @@ import { formatEntryFile } from '$lib/services/contents/file/format';
  * @param {InternalLocaleCode} [args.locale] Locale of the file, when the collection uses a
  * file-per-locale i18n structure. Omit it for an entry stored in a single file, which then holds
  * every locale.
+ * @param {FileState} [args.state] What is remembered about the file being overwritten. See
+ * {@link formatEntryFile}.
  * @returns {Promise<string>} Formatted file data.
  */
-export const formatEntryData = ({ draft, config, _file, entry, locale }) =>
+export const formatEntryData = ({ draft, config, _file, entry, locale, state }) =>
   formatEntryFile(
+    // The format of `_file` is the one the file is actually saved in, e.g. the front matter format
+    // detected in an existing file of a collection in the `frontmatter` format
     locale === undefined
       ? {
-          content: buildSingleFileContent({ config, entry, draft }),
+          content: buildSingleFileContent({ config, entry, draft, format: _file.format }),
           _file,
           comments: getSingleFileComments({ config, fields: draft.fields }),
+          state,
         }
       : {
-          content: serializeContent({ draft, locale, valueMap: entry.locales[locale].content }),
+          content: serializeContent({
+            draft,
+            locale,
+            valueMap: entry.locales[locale].content,
+            format: _file.format,
+          }),
           _file,
           comments: getFieldComments(draft.fields),
+          state,
         },
   );

@@ -28,6 +28,7 @@ import {
 const {
   _publishedAssets,
   _selectedAssets,
+  _focusedAsset,
   _uploadingAssets,
   _selectedAssetFolder,
   _browsedDirPath,
@@ -45,6 +46,8 @@ const {
     _publishedAssets: createRawState([]),
     /** @type {{ current: any[] }} */
     _selectedAssets: createRawState([]),
+    /** @type {{ current: any }} */
+    _focusedAsset: createRawState(undefined),
     /** @type {{ current: any }} */
     _uploadingAssets: createRawState({ folder: undefined, files: [] }),
     /** @type {{ current: any }} */
@@ -91,6 +94,7 @@ vi.mock('$lib/services/contents/collection/files', () => ({
 vi.mock('$lib/services/assets/state', () => ({
   publishedAssets: _publishedAssets,
   selectedAssets: _selectedAssets,
+  focusedAsset: _focusedAsset,
   uploadingAssets: _uploadingAssets,
 }));
 
@@ -178,6 +182,7 @@ describe('assets/view/index', () => {
     _prefs.devModeEnabled = false;
     _publishedAssets.current = [];
     _selectedAssets.current = [];
+    _focusedAsset.current = undefined;
     _uploadingAssets.current = { folder: undefined, files: [] };
     _selectedAssetFolder.current = undefined;
     _browsedDirPath.current = undefined;
@@ -503,6 +508,83 @@ describe('assets/view/index', () => {
       expect(_selectedAssets.current).toEqual([]);
     });
 
+    it('should reset the selected assets when the filter changes', async () => {
+      const selection = [createAsset('images/photo1.jpg', globalFolder)];
+
+      await wait();
+      _selectedAssets.current = selection;
+      // Switching between grid and list doesn’t change the filter, so the selection is kept
+      currentView.current = { type: 'list', showInfo: true };
+      await wait();
+
+      expect(_selectedAssets.current).toEqual(selection);
+
+      currentView.current = {
+        type: 'list',
+        showInfo: true,
+        filter: { field: 'kind', pattern: 'video' },
+      };
+      await wait();
+
+      expect(_selectedAssets.current).toEqual([]);
+    });
+
+    it('should drop the focus from an asset the filter hides', async () => {
+      await wait();
+
+      const [photo1] = _publishedAssets.current;
+
+      _focusedAsset.current = photo1;
+      // A filter the focused asset matches keeps the focus
+      vi.mocked(filterAssets).mockImplementation((assets, filter) =>
+        filter?.pattern
+          ? assets.filter(({ name }) => name.includes(String(filter.pattern)))
+          : assets,
+      );
+      currentView.current = {
+        type: 'grid',
+        showInfo: true,
+        filter: { field: 'name', pattern: '1' },
+      };
+      await wait();
+
+      expect(_focusedAsset.current).toBe(photo1);
+
+      // The focused asset is filtered out, so the toolbar actions must no longer apply to it
+      currentView.current = {
+        type: 'grid',
+        showInfo: true,
+        filter: { field: 'name', pattern: '2' },
+      };
+      await wait();
+
+      expect(_focusedAsset.current).toBeUndefined();
+
+      vi.mocked(filterAssets).mockImplementation((assets) => assets);
+    });
+
+    it('should drop the focus from an asset no longer listed', async () => {
+      _focusedAsset.current = createAsset('images/photo1.jpg', globalFolder);
+      _selectedAssetFolder.current = blogFolder;
+      await wait();
+
+      expect(_focusedAsset.current).toBeUndefined();
+    });
+
+    it('should keep the focus on an asset replaced with an updated copy', async () => {
+      await wait();
+
+      [_focusedAsset.current] = _publishedAssets.current;
+      // An upload replaces the asset objects, e.g. with a new SHA
+      _publishedAssets.current = _publishedAssets.current.map((/** @type {any} */ a) => ({
+        ...a,
+        sha: `${a.sha}-new`,
+      }));
+      await wait();
+
+      expect(_focusedAsset.current?.path).toBe('images/photo1.jpg');
+    });
+
     it('should not log the assets to the console when dev mode is disabled', async () => {
       const consoleSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
 
@@ -756,30 +838,59 @@ describe('assets/view/index', () => {
       createAsset('images/c.jpg'),
     ];
 
+    const groups = { '*': assets };
+    /**
+     * Allow any asset to be previewed.
+     * @returns {boolean} Result.
+     */
+    const canPreview = () => true;
+
     it('should return the neighbours of an asset in the middle', () => {
-      expect(getAdjacentAssets(assets, ({ path }) => path === 'images/b.jpg')).toEqual({
+      expect(getAdjacentAssets(groups, ({ path }) => path === 'images/b.jpg', canPreview)).toEqual({
         previous: assets[0],
         next: assets[2],
       });
     });
 
     it('should omit the previous asset for the first one', () => {
-      expect(getAdjacentAssets(assets, ({ path }) => path === 'images/a.jpg')).toEqual({
+      expect(getAdjacentAssets(groups, ({ path }) => path === 'images/a.jpg', canPreview)).toEqual({
         previous: undefined,
         next: assets[1],
       });
     });
 
     it('should omit the next asset for the last one', () => {
-      expect(getAdjacentAssets(assets, ({ path }) => path === 'images/c.jpg')).toEqual({
+      expect(getAdjacentAssets(groups, ({ path }) => path === 'images/c.jpg', canPreview)).toEqual({
         previous: assets[1],
         next: undefined,
       });
     });
 
     it('should return nothing when the asset is not listed', () => {
-      expect(getAdjacentAssets(assets, ({ path }) => path === 'images/d.jpg')).toEqual({});
-      expect(getAdjacentAssets([], () => true)).toEqual({});
+      expect(getAdjacentAssets(groups, ({ path }) => path === 'images/d.jpg', canPreview)).toEqual(
+        {},
+      );
+      expect(getAdjacentAssets({}, () => true, canPreview)).toEqual({});
+    });
+
+    it('should move across the groups in the order they are listed', () => {
+      expect(
+        getAdjacentAssets(
+          { A: [assets[0]], B: [assets[1], assets[2]] },
+          ({ path }) => path === 'images/a.jpg',
+          canPreview,
+        ),
+      ).toEqual({ previous: undefined, next: assets[1] });
+    });
+
+    it('should skip the assets that can’t be previewed, but not the current one', () => {
+      expect(
+        getAdjacentAssets(
+          groups,
+          ({ path }) => path === 'images/b.jpg',
+          ({ path }) => path === 'images/c.jpg',
+        ),
+      ).toEqual({ previous: undefined, next: assets[2] });
     });
   });
 

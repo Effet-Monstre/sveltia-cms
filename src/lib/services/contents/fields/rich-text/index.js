@@ -1,7 +1,7 @@
 import { cmsConfig } from '$lib/services/config';
 
 /**
- * @import { TextEditorBlockType, TextEditorInlineType, TextEditorMode } from '@sveltia/ui';
+ * @import { TextEditorMode, TextEditorNodeType } from '@sveltia/ui';
  * @import {
  * MarkdownField,
  * RichTextEditorButtonName,
@@ -13,10 +13,20 @@ import { cmsConfig } from '$lib/services/config';
  */
 
 /**
- * Regular expression to match the component name prefix in the key path, e.g. `body:c12:image:`.
+ * Regular expression to match the component name prefix in the key path, e.g. `body:c12:`.
  * @type {RegExp}
  */
 export const COMPONENT_NAME_PREFIX_REGEX = /^.+?:\w+:/;
+
+/**
+ * Remove the component name prefix from a key path, e.g. `body:c12:src` → `src`, to look up
+ * a rich text editor component’s field in the component definition. A key path without the prefix
+ * is returned as is.
+ * @param {string} keyPath Key path.
+ * @returns {string} Key path without the prefix.
+ */
+export const stripComponentNamePrefix = (keyPath) =>
+  keyPath.replace(COMPONENT_NAME_PREFIX_REGEX, '');
 
 /**
  * The default `modes` property options.
@@ -34,15 +44,17 @@ export const NODE_NAME_MAP = {
 };
 
 /**
- * The default `buttons` property options.
+ * Buttons that format text within a paragraph, the only ones a field with `multiline: false` can
+ * use. The other buttons format a whole block.
  * @type {RichTextEditorButtonName[]}
  */
-export const DEFAULT_BUTTONS = [
-  'bold',
-  'italic',
-  'strikethrough',
-  'code',
-  'link',
+export const INLINE_BUTTONS = ['bold', 'italic', 'underline', 'strikethrough', 'code', 'link'];
+
+/**
+ * Buttons that format a whole block, which a field with `multiline: false` can’t use.
+ * @type {RichTextEditorButtonName[]}
+ */
+export const BLOCK_BUTTONS = [
   'heading-one',
   'heading-two',
   'heading-three',
@@ -51,17 +63,42 @@ export const DEFAULT_BUTTONS = [
   'heading-six',
   'bulleted-list',
   'numbered-list',
+  'task-list',
   'quote',
+  'align',
 ];
 
 /**
- * Key is a name used in Netlify/Decap CMS, value is a name used in Sveltia UI.
- * @type {Record<RichTextEditorButtonName | 'code-block', TextEditorInlineType |
- * TextEditorBlockType>}
+ * Buttons only available with the `html` format, as Markdown has no syntax for them. They’re not
+ * enabled by default: they have to be listed in the `buttons` option.
+ * @type {RichTextEditorButtonName[]}
+ */
+export const HTML_ONLY_BUTTONS = ['underline', 'align'];
+
+/**
+ * Buttons not enabled by default: the HTML-only ones, and `task-list`, as task lists are a GitHub
+ * Flavored Markdown extension that not every Markdown renderer supports.
+ * @type {RichTextEditorButtonName[]}
+ */
+export const OPTIONAL_BUTTONS = [...HTML_ONLY_BUTTONS, 'task-list'];
+
+/**
+ * The default `buttons` property options: all the buttons but the optional ones.
+ * @type {RichTextEditorButtonName[]}
+ */
+export const DEFAULT_BUTTONS = [...INLINE_BUTTONS, ...BLOCK_BUTTONS].filter(
+  (name) => !OPTIONAL_BUTTONS.includes(name),
+);
+
+/**
+ * Key is a name used in Netlify/Decap CMS, value is a name used in Sveltia UI. The built-in
+ * `code-block`, `table` and `hr` components are implemented as buttons in Sveltia UI.
+ * @type {Record<RichTextEditorButtonName | 'code-block' | 'table' | 'hr', TextEditorNodeType>}
  */
 export const BUTTON_NAME_MAP = {
   bold: 'bold',
   italic: 'italic',
+  underline: 'underline',
   strikethrough: 'strikethrough',
   code: 'code',
   link: 'link',
@@ -73,13 +110,26 @@ export const BUTTON_NAME_MAP = {
   'heading-six': 'heading-6',
   'bulleted-list': 'bulleted-list',
   'numbered-list': 'numbered-list',
+  'task-list': 'task-list',
   quote: 'blockquote',
+  align: 'align',
   'code-block': 'code-block',
+  table: 'table',
+  hr: 'horizontal-rule',
 };
 
 /**
- * Built-in editor component names. `code-block` is a button in Sveltia CMS, but it’s included here
- * for consistency with the Netlify/Decap CMS API.
+ * Built-in editor components implemented as buttons in Sveltia UI rather than as editor components.
+ * They’re all blocks.
+ * @type {('code-block' | 'table' | 'hr')[]}
+ */
+export const BUTTON_COMPONENTS = ['code-block', 'table', 'hr'];
+
+/**
+ * Built-in editor component names enabled by default. `code-block` is a button in Sveltia CMS, but
+ * it’s included here for consistency with the Netlify/Decap CMS API. The `hr` component, also a
+ * button, is left out: it has to be enabled with the `editor_components` option. Upstream leaves
+ * the `table` button out as well, but the fork enables it by default; see `docs/fork.md`.
  * @type {RichTextEditorComponentName[]}
  */
 export const BUILTIN_COMPONENTS = ['code-block', 'image', 'table'];

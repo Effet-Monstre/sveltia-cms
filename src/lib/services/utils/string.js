@@ -1,3 +1,4 @@
+import { isURL } from '@sveltia/utils/string';
 import { sanitize } from 'isomorphic-dompurify';
 import { parseInline } from 'marked';
 
@@ -7,6 +8,16 @@ import { parseInline } from 'marked';
  * @returns {value is string} Whether the value is a non-empty string.
  */
 export const isNonEmptyString = (value) => typeof value === 'string' && !!value.trim();
+
+/**
+ * Check if a value is an absolute URL starting with `https://` or `http://`, ignoring surrounding
+ * whitespace. `isURL()` alone accepts any scheme, so `localhost:8080/api` would pass as a URL with
+ * the `localhost:` scheme.
+ * @param {any} value Value to check.
+ * @returns {boolean} Result.
+ */
+export const isHttpURL = (value) =>
+  typeof value === 'string' && /^https?:\/\//i.test(value.trim()) && isURL(value.trim());
 
 /**
  * Escape a string for safe use as an HTML attribute value inside double quotes. Bare `&` characters
@@ -68,4 +79,15 @@ export const sanitizeInlineMarkdown = (
   sanitize(/** @type {string} */ (parseInline(str)), {
     ALLOWED_TAGS: allowedTags,
     ALLOWED_ATTR: allowedAttr,
+  });
+
+/**
+ * Parse the given help text from the configuration, such as a field’s `hint`, as inline Markdown
+ * and sanitize the result to only allow certain tags. A literal `\n` is turned into a line break.
+ * @param {string} str Original string.
+ * @returns {string} Sanitized HTML string.
+ */
+export const sanitizeHelpText = (str) =>
+  sanitizeInlineMarkdown(str.replaceAll('\\n', '<br>'), {
+    allowedTags: ['strong', 'em', 'del', 'code', 'a', 'br'],
   });

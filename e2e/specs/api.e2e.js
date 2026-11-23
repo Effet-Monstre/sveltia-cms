@@ -1,6 +1,7 @@
 import { openEntryPullRequest, post, WORKFLOW_CONFIG } from '../fixtures/configs/workflow.js';
 import { createPNG } from '../fixtures/files.js';
-import { BASE_CONFIG, expect, test } from '../fixtures/test.js';
+import { addScripts, BASE_CONFIG, expect, test } from '../fixtures/test.js';
+import { getCard, getEditor, getEntryRows, openBoard } from '../fixtures/ui.js';
 
 /**
  * @import { Locator, Page } from '@playwright/test';
@@ -23,32 +24,6 @@ const CONFIG = {
 };
 
 /**
- * Add scripts to the admin page, the way a site extends the CMS: after the CMS `<script>`, and
- * optionally before it. A single route has to add both, as a later route would fetch the original
- * page again.
- * @param {Page} page Page.
- * @param {object} scripts Scripts.
- * @param {string} [scripts.before] Script to run before the CMS is loaded.
- * @param {string} [scripts.after] Script to run after the CMS is loaded.
- */
-const addScripts = async (page, { before, after }) => {
-  await page.route('**/admin/', async (route) => {
-    const response = await route.fetch();
-    let html = await response.text();
-
-    if (before) {
-      html = html.replace('<script src=', `<script>${before}</script><script src=`);
-    }
-
-    if (after) {
-      html = html.replace('</body>', `<script>${after}</script></body>`);
-    }
-
-    await route.fulfill({ response, body: html });
-  });
-};
-
-/**
  * Start a new post and fill in its title.
  * @param {Page} page Page.
  * @param {string} title Title.
@@ -57,7 +32,7 @@ const addScripts = async (page, { before, after }) => {
 const createPost = async (page, title) => {
   await page.getByRole('button', { name: 'Create New Entry' }).first().click();
 
-  const editor = page.getByRole('group', { name: 'Content Editor' });
+  const editor = getEditor(page);
 
   await editor.getByRole('textbox', { name: 'Title' }).fill(title);
 
@@ -65,9 +40,6 @@ const createPost = async (page, title) => {
 };
 
 test.describe('CMS.init()', () => {
-  // The admin page of the dev server starts the CMS on its own
-  test.skip(process.env.E2E_TARGET === 'dev', 'The dev server’s admin page can’t be changed');
-
   test.use({ config: CONFIG });
 
   test('merges the config it’s given with the config file', async ({ cms, page }) => {
@@ -173,7 +145,8 @@ test.describe('CMS.registerEditorComponent()', () => {
     const field = editor.getByRole('group', { name: /Body.*Field/ });
 
     await cms.chooseMenuItem(
-      field.getByRole('button', { name: 'Insert' }),
+      // Exactly, as the fork also offers the Insert Table button by default; see `docs/fork.md`
+      field.getByRole('button', { name: 'Insert', exact: true }),
       page.getByRole('menuitem', { name: 'YouTube' }),
     );
     await field
@@ -198,9 +171,7 @@ test.describe('CMS.registerEditorComponent()', () => {
     await cms.signIn();
     await page.getByRole('row', { name: /Launch Day/ }).click();
 
-    const field = page
-      .getByRole('group', { name: 'Content Editor' })
-      .getByRole('group', { name: /Body.*Field/ });
+    const field = getEditor(page).getByRole('group', { name: /Body.*Field/ });
 
     await expect(
       field
@@ -248,6 +219,111 @@ test.describe('CMS.registerEditorComponent()', () => {
 
     await expect(preview).toContainText('{{< youtube dQw4w9WgXcQ >}}');
     await expect(preview.locator('.video')).toHaveCount(0);
+  });
+});
+
+test.describe('an editor component in the inline mode', () => {
+  test.use({ config: CONFIG });
+
+  /**
+   * Register a status component, rendered as a select box within the text.
+   * @param {Page} page Page.
+   * @param {string} [fields] Fields option, as a script.
+   */
+  const registerStatus = async (page, fields) => {
+    await addScripts(page, {
+      after: `
+        CMS.registerEditorComponent({
+          id: 'status',
+          label: 'Status',
+          mode: 'inline',
+          fields: ${fields ?? "[{ name: 'value', label: 'Value', widget: 'select', options: ['draft', 'done'] }]"},
+          pattern: /\\[status:(\\w+)\\]/,
+          fromBlock: (match) => ({ value: match[1] }),
+          toBlock: ({ value }) => '[status:' + value + ']',
+          toPreview: ({ value }) => '<span>' + value + '</span>',
+        });
+      `,
+    });
+  };
+
+  test('renders the control within the text, which updates the component', async ({
+    cms,
+    page,
+  }) => {
+    await registerStatus(page);
+    await cms.open();
+    await cms.seed({
+      'content/posts/launch-day.md':
+        '---\ntitle: Launch Day\n---\n\nThe post is [status:draft] now.\n',
+    });
+    await cms.signIn();
+    await page.getByRole('row', { name: /Launch Day/ }).click();
+
+    const editor = getEditor(page);
+    const body = editor.getByRole('textbox', { name: 'Body' });
+    const component = body.getByRole('group', { name: 'Status', exact: true });
+
+    // The control sits within the paragraph, without a label or a dialog
+    await expect(body.locator('p').getByRole('group', { name: 'Status' })).toBeVisible();
+    await expect(component.getByRole('combobox', { name: 'Value' })).toHaveText(/draft/);
+    await expect(component.getByRole('heading')).toHaveCount(0);
+
+    await cms.chooseMenuItem(
+      component.getByRole('combobox', { name: 'Value' }),
+      page.getByRole('option', { name: 'done' }),
+    );
+    await editor.getByRole('button', { name: 'Save' }).click();
+    await expect
+      .poll(async () => (await cms.readRepo())['content/posts/launch-day.md'])
+      .toBe('---\ntitle: Launch Day\n---\n\nThe post is [status:done] now.\n');
+  });
+
+  test('removes the component with the Backspace key', async ({ cms, page }) => {
+    await registerStatus(page);
+    await cms.open();
+    await cms.seed({
+      'content/posts/launch-day.md':
+        '---\ntitle: Launch Day\n---\n\nThe post is [status:draft] now\n',
+    });
+    await cms.signIn();
+    await page.getByRole('row', { name: /Launch Day/ }).click();
+
+    const editor = getEditor(page);
+    const body = editor.getByRole('textbox', { name: 'Body' });
+
+    await expect(body.getByRole('group', { name: 'Status' })).toBeVisible();
+    // Place the caret right after the component, at the start of the text following it
+    await body.getByText('now').click();
+    await body.evaluate((element) => {
+      const text = [...element.querySelectorAll('[data-lexical-text]')].find((span) =>
+        span.textContent?.includes('now'),
+      )?.firstChild;
+
+      const range = document.createRange();
+
+      range.setStart(/** @type {Node} */ (text), 0);
+      window.getSelection()?.removeAllRanges();
+      window.getSelection()?.addRange(range);
+    });
+    await page.keyboard.press('Backspace');
+    await expect(body.getByRole('group', { name: 'Status' })).toHaveCount(0);
+    await expect(body.locator('p')).toHaveText('The post is  now');
+
+    await editor.getByRole('button', { name: 'Save' }).click();
+    await expect
+      .poll(async () => (await cms.readRepo())['content/posts/launch-day.md'])
+      .toBe('---\ntitle: Launch Day\n---\n\nThe post is  now\n');
+  });
+
+  test('reports a config error for a field the mode can’t have', async ({ cms, page }) => {
+    await registerStatus(page, "[{ name: 'value', label: 'Value', widget: 'text' }]");
+    await cms.open();
+    await expect(
+      // The component name is wrapped in bidi isolates
+      page.getByText(/component: The inline mode requires a single Boolean/),
+    ).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Work with Test Repository' })).toBeHidden();
   });
 });
 
@@ -318,7 +394,8 @@ test.describe('toPreview() arguments', () => {
     const field = editor.getByRole('group', { name: /Body.*Field/ });
 
     await cms.chooseMenuItem(
-      field.getByRole('button', { name: 'Insert' }),
+      // Exactly, as the fork also offers the Insert Table button by default; see `docs/fork.md`
+      field.getByRole('button', { name: 'Insert', exact: true }),
       page.getByRole('menuitem', { name: 'Figure' }),
     );
     await field
@@ -353,6 +430,91 @@ test.describe('toPreview() arguments', () => {
       'https://example.com/photo.png',
     );
     await expect(getFigure(page, '/images/missing.png')).toHaveAttribute('data-url', '');
+  });
+});
+
+test.describe('a relative media_folder in a component', () => {
+  // Each post is a folder with its images in `medias` next to it, like a Hugo page bundle. The
+  // cover field puts its images there as well
+  test.use({
+    config: {
+      ...BASE_CONFIG,
+      collections: [
+        {
+          ...BASE_CONFIG.collections[0],
+          path: '{{slug}}/index',
+          fields: [
+            { name: 'title', label: 'Title' },
+            {
+              name: 'cover',
+              label: 'Cover',
+              widget: 'image',
+              media_folder: 'medias',
+              required: false,
+            },
+            { name: 'body', label: 'Body', widget: 'markdown' },
+          ],
+        },
+      ],
+    },
+  });
+
+  test.beforeEach(async ({ cms, page }) => {
+    await addScripts(page, {
+      after: `
+        CMS.registerEditorComponent({
+          id: 'figure',
+          label: 'Figure',
+          fields: [{ name: 'src', label: 'Image', widget: 'image', media_folder: 'medias' }],
+          pattern: /^{{< figure src="(?<src>.*?)" >}}$/m,
+          toBlock: ({ src = '' }) => '{{< figure src="' + src + '" >}}',
+          toPreview: ({ src = '' }) => src,
+        });
+      `,
+    });
+    await cms.open();
+    await cms.seed({
+      'content/posts/lake/index.md':
+        '---\ntitle: Lake\ncover: medias/lake.png\n---\n\nCalm water.\n',
+      'content/posts/lake/medias/lake.png': createPNG({ color: [40, 120, 200] }),
+      'content/posts/dome/index.md': '---\ntitle: Dome\n---\n',
+      'content/posts/dome/medias/dome.png': createPNG({ color: [200, 180, 40] }),
+    });
+    await cms.signIn();
+  });
+
+  test('lists the images next to the entry, and picks one', async ({ cms, page }) => {
+    await page.getByRole('row', { name: /Lake/ }).click();
+
+    const editor = getEditor(page);
+    const field = editor.getByRole('group', { name: /Body.*Field/ });
+    const dialog = page.getByRole('dialog', { name: 'Select Image' });
+
+    await cms.chooseMenuItem(
+      // Exactly, as the fork also offers the Insert Table button by default; see `docs/fork.md`
+      field.getByRole('button', { name: 'Insert', exact: true }),
+      page.getByRole('menuitem', { name: 'Figure' }),
+    );
+    await field
+      .getByRole('group', { name: 'Figure', exact: true })
+      .getByRole('button', { name: 'Browse' })
+      .click();
+
+    // Only the images of this post, not those of another post or the global media folder
+    await expect(
+      dialog.getByRole('listbox', { name: 'Available Images' }).getByRole('option'),
+    ).toHaveText([/lake\.png/]);
+    await dialog.getByRole('option', { name: 'lake.png' }).click();
+    await dialog.getByRole('button', { name: 'Insert' }).click();
+    await expect(dialog).toBeHidden();
+    await editor.getByRole('button', { name: 'Save' }).click();
+
+    await expect
+      .poll(async () => (await cms.readRepo())['content/posts/lake/index.md'])
+      .toBe(
+        '---\ntitle: Lake\ncover: medias/lake.png\n---\n\nCalm water.\n\n' +
+          '{{< figure src="medias/lake.png" >}}\n',
+      );
   });
 });
 
@@ -564,6 +726,119 @@ test.describe('CMS.registerPreviewStyle()', () => {
   });
 });
 
+test.describe('CMS.registerPreviewStyle() with a collection or file', () => {
+  test.use({
+    config: {
+      ...CONFIG,
+      singletons: [
+        {
+          name: 'about',
+          label: 'About',
+          file: 'content/about.md',
+          fields: [
+            { name: 'title', label: 'Title' },
+            { name: 'body', label: 'Body', widget: 'markdown' },
+          ],
+        },
+      ],
+    },
+  });
+
+  test('styles the preview of the given collection or singleton only', async ({ cms, page }) => {
+    await addScripts(page, {
+      after: `
+        CMS.registerPreviewStyle('h1 { color: rgb(200, 0, 0); }', {
+          raw: true,
+          collection: 'posts',
+        });
+        CMS.registerPreviewStyle('h1 { color: rgb(0, 0, 200); }', {
+          raw: true,
+          collection: '_singletons',
+          file: 'about',
+        });
+      `,
+    });
+    await cms.open();
+    await cms.seed({
+      'content/posts/styled.md': '---\ntitle: Styled\n---\n\n# Big News\n',
+      'content/about.md': '---\ntitle: About\n---\n\n# About Us\n',
+    });
+    await cms.signIn();
+    await page.getByRole('row', { name: /Styled/ }).click();
+
+    const frame = page.getByRole('group', { name: 'Preview Content' }).frameLocator('iframe');
+
+    await expect(frame.locator('h1', { hasText: 'Big News' })).toHaveCSS('color', 'rgb(200, 0, 0)');
+
+    await page.evaluate(() => {
+      window.location.hash = '#/collections/_singletons/entries/about';
+    });
+
+    await expect(frame.locator('h1', { hasText: 'About Us' })).toHaveCSS('color', 'rgb(0, 0, 200)');
+  });
+});
+
+test.describe('CMS.registerStringTransformation()', () => {
+  test.use({
+    config: {
+      ...BASE_CONFIG,
+      collections: [
+        {
+          ...BASE_CONFIG.collections[0],
+          summary: "{{title | wrap('[', ' {{fields.body}}]') | upper}}",
+          fields: [
+            { name: 'title', label: 'Title' },
+            { name: 'body', label: 'Body', widget: 'text' },
+            {
+              name: 'initials',
+              label: 'Initials',
+              widget: 'compute',
+              value: '{{fields.title | initials}}',
+            },
+          ],
+        },
+      ],
+    },
+  });
+
+  test('applies a custom transformation to a summary and a Compute field', async ({
+    cms,
+    page,
+  }) => {
+    await addScripts(page, {
+      after: `
+        CMS.registerStringTransformation('wrap', (value, { args: [before, after] }) =>
+          before + value + after,
+        );
+        CMS.registerStringTransformation('initials', (value) =>
+          String(value).split(' ').map((word) => word[0]).join(''),
+        );
+      `,
+    });
+    await cms.open();
+    await cms.seed({ 'content/posts/hello.md': '---\ntitle: Hello\n---\n\nWorld\n' });
+    await cms.signIn();
+
+    // The nested template in the argument is resolved before the transformation runs, and the
+    // output is chained to the built-in `upper`
+    await expect(getEntryRows(page)).toHaveText([/\[HELLO WORLD\]/]);
+
+    const editor = await createPost(page, 'Launch Day Party');
+
+    await editor.getByRole('textbox', { name: 'Body' }).fill('Join us!');
+
+    // A Compute field has no control of its own, but its value shows in the preview
+    await expect(
+      editor.getByRole('document', { name: 'Content Preview' }).getByText('LDP'),
+    ).toBeVisible();
+    await editor.getByRole('button', { name: 'Save' }).click();
+
+    await expect
+      .poll(async () => (await cms.readRepo())['content/posts/launch-day-party.md'])
+      .toBe('---\ntitle: Launch Day Party\ninitials: LDP\n---\n\nJoin us!\n');
+  });
+});
+
 test.describe('CMS.registerEventListener()', () => {
   test.use({ config: CONFIG });
 
@@ -641,5 +916,116 @@ test.describe('CMS.registerEventListener()', () => {
         .poll(() => page.evaluate(() => /** @type {any} */ (window).events))
         .toEqual(['prePublish second-post', 'postPublish second-post']);
     });
+
+    test('reports carrying out a deletion as unpublishing, not publishing', async ({
+      cms,
+      github,
+      page,
+    }) => {
+      github.commit({ 'content/posts/second-post.md': post('Second Post', 'Going away.') });
+      openEntryPullRequest(github, {
+        slug: 'second-post',
+        files: { 'content/posts/second-post.md': null },
+        status: 'pending_deletion',
+      });
+      // Tells the handlers whether the entry is still published at the time they run
+      await page.exposeFunction('isPublished', () =>
+        github.readFile('content/posts/second-post.md') !== undefined ? 'published' : 'deleted',
+      );
+      await addScripts(page, {
+        after: `
+          window.events = [];
+          ['prePublish', 'postPublish', 'preUnpublish', 'postUnpublish'].forEach((name) => {
+            CMS.registerEventListener({
+              name,
+              handler: async ({ entry }) => {
+                const state = await window.isPublished();
+
+                window.events.push(name + ' ' + entry.get('slug') + ' ' + state);
+              },
+            });
+          });
+        `,
+      });
+      await cms.open();
+      await getCard(await openBoard(page), 'Second Post')
+        .getByRole('button', { name: 'Delete Entry' })
+        .click();
+      await page.getByRole('alertdialog').getByRole('button', { name: 'Delete' }).click();
+
+      await expect.poll(() => github.pullRequests[0].state).toBe('merged');
+      await expect
+        .poll(() => page.evaluate(() => /** @type {any} */ (window).events))
+        // Before the merge takes the entry off the branch, and after
+        .toEqual(['preUnpublish second-post published', 'postUnpublish second-post deleted']);
+    });
+  });
+});
+
+test.describe('CMS.registerCustomPage()', () => {
+  test.use({ config: CONFIG });
+
+  test('adds a React page, an embedded page and a link to the toolbar', async ({
+    cms,
+    context,
+    page,
+  }) => {
+    await page.route('**/stats.html', (route) =>
+      route.fulfill({ contentType: 'text/html', body: '<h1>Visitor Stats</h1>' }),
+    );
+    await context.route('https://example.com/**', (route) =>
+      route.fulfill({ contentType: 'text/html', body: '<h1>Docs</h1>' }),
+    );
+    await addScripts(page, {
+      after: `
+        const Counter = () => {
+          const [count, setCount] = CMS.React.useState(0);
+
+          return h('button', { onClick: () => setCount(count + 1) }, 'Clicked ' + count);
+        };
+
+        CMS.registerCustomPage({ id: 'counter', label: 'Counter', component: Counter });
+        CMS.registerCustomPage({ id: 'stats', label: 'Stats', url: 'stats.html' });
+        CMS.registerCustomPage({
+          id: 'docs',
+          label: 'Docs',
+          icon: 'help',
+          url: 'https://example.com/docs',
+          newTab: true,
+        });
+      `,
+    });
+    await cms.open();
+    await cms.signIn();
+
+    const pages = page.getByRole('radiogroup', { name: 'Switch Page' });
+
+    await pages.getByRole('radio', { name: 'Counter' }).click();
+    await expect(page).toHaveURL(/#\/pages\/counter$/);
+    await expect(pages.getByRole('radio', { name: 'Counter' })).toBeChecked();
+    await expect(page).toHaveTitle(/^Counter – /);
+
+    // The component is a live React component, with working hooks
+    await page.getByRole('button', { name: 'Clicked 0' }).click();
+    await expect(page.getByRole('button', { name: 'Clicked 1' })).toBeVisible();
+
+    await pages.getByRole('radio', { name: 'Stats' }).click();
+    await expect(page).toHaveURL(/#\/pages\/stats$/);
+    await expect(
+      page.frameLocator('iframe[title="Stats"]').getByRole('heading', { name: 'Visitor Stats' }),
+    ).toBeVisible();
+
+    // A link opens in a new tab and leaves the CMS where it was
+    const popupPromise = context.waitForEvent('page');
+
+    await page.getByRole('button', { name: 'Docs' }).click();
+    await expect(await popupPromise).toHaveURL('https://example.com/docs');
+    await expect(page).toHaveURL(/#\/pages\/stats$/);
+
+    // The pages can be opened directly, and back to the content library
+    await page.goto(page.url().replace(/#.*/, '#/pages/counter'));
+    await expect(page.getByRole('button', { name: 'Clicked 0' })).toBeVisible();
+    await pages.getByRole('radio', { name: 'Contents' }).click();
+    await expect(page.getByRole('button', { name: 'Clicked 0' })).toBeHidden();
   });
 });

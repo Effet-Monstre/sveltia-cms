@@ -1,3 +1,4 @@
+import { isValidFileType } from '@sveltia/utils/file';
 import { isObject } from '@sveltia/utils/object';
 
 import { getMediaLibraryOptions } from '$lib/services/integrations/media-libraries';
@@ -7,8 +8,10 @@ import {
   SUPPORTED_IMAGE_TYPES,
   SUPPORTED_IMAGE_TYPES_WITH_HEIC,
 } from '$lib/services/utils/media/image';
+import { isAnimatedImage } from '$lib/services/utils/media/image/animation';
 import { sniffRasterImageFormat } from '$lib/services/utils/media/image/sniff';
 import { optimizeSVG, transformImage } from '$lib/services/utils/media/image/transform';
+import mime from '$lib/services/utils/mime';
 
 /**
  * @import {
@@ -123,6 +126,74 @@ export const getAcceptedFileTypes = ({ accept, image, transformations }) =>
   accept ?? (image ? getAcceptedImageTypes(transformations).join(',') : undefined);
 
 /**
+ * Check whether a file or an asset is one of the given file types, matched by extension or MIME
+ * type the same way the browser matches the `accept` attribute of a file input.
+ * @param {{ name: string, type?: string }} file File or asset. An asset has no type, and a file may
+ * come with an empty one, so the MIME type of the file extension is used then.
+ * @param {string | undefined} accept Comma-separated file types, as given by
+ * {@link getAcceptedFileTypes}. Any file is accepted if it’s `undefined` or blank.
+ * @returns {boolean} Result.
+ */
+export const isAcceptedFile = ({ name, type }, accept) =>
+  isValidFileType(
+    /** @type {File} */ ({ name, type: type || mime.getType(name) || '' }),
+    (accept ?? '')
+      .split(',')
+      .map((specifier) => specifier.trim())
+      .filter(Boolean),
+  );
+
+/**
+ * Get the transformation that applies to a raster image file.
+ * @param {File} file File.
+ * @param {FileTransformations} transformations File transformation options.
+ * @returns {Promise<{ sourceFormat?: RasterImageFormat, transformation?:
+ * RasterImageTransformationOptions }>} The format the file’s content says, `undefined` if the file
+ * isn’t a supported raster image, and the transformation for it, if any.
+ */
+const getRasterImageTransformation = async (file, transformations) => {
+  const { sourceFormat, declaredFormat } = await getRasterImageFormats(file);
+
+  if (!sourceFormat) {
+    return {};
+  }
+
+  const formatTransformations =
+    /** @type {Record<string, RasterImageTransformationOptions | undefined>} */ (transformations);
+
+  // A format-specific transformation for the actual format first, then one for the declared
+  // format, so a JPEG image saved with a `.png` extension is still converted with `png` options
+  return {
+    sourceFormat,
+    transformation:
+      formatTransformations[sourceFormat] ??
+      (declaredFormat ? formatTransformations[declaredFormat] : undefined) ??
+      transformations.raster_image,
+  };
+};
+
+/**
+ * Check whether the given file keeps its format through the transformations: an SVG image, a file
+ * other than a raster image, a raster image without a transformation for it, or one encoded again
+ * in its own format, e.g. a WebP image with a `raster_image` transformation to WebP.
+ * @param {File} file File.
+ * @param {FileTransformations | undefined} transformations File transformation options.
+ * @returns {Promise<boolean>} Result.
+ */
+export const keepsFileFormat = async (file, transformations) => {
+  if (!transformations) {
+    return true;
+  }
+
+  const { sourceFormat, transformation } = await getRasterImageTransformation(
+    file,
+    transformations,
+  );
+
+  return !sourceFormat || !transformation || (transformation.format ?? 'webp') === sourceFormat;
+};
+
+/**
  * Process the given file by applying a transformation if available.
  * @param {File} file Original file.
  * @param {FileTransformations} transformations File transformation options. The options are
@@ -145,24 +216,18 @@ export const transformFile = async (file, transformations) => {
   }
 
   // Process raster image
-  const { sourceFormat, declaredFormat } = await getRasterImageFormats(file);
+  const { sourceFormat, transformation } = await getRasterImageTransformation(
+    file,
+    transformations,
+  );
 
   if (!sourceFormat) {
     return file;
   }
 
-  const formatTransformations =
-    /** @type {Record<string, RasterImageTransformationOptions | undefined>} */ (transformations);
-
-  // A format-specific transformation for the actual format first, then one for the declared
-  // format, so a JPEG image saved with a `.png` extension is still converted with `png` options
-  /** @type {RasterImageTransformationOptions | undefined} */
-  const transformation =
-    formatTransformations[sourceFormat] ??
-    (declaredFormat ? formatTransformations[declaredFormat] : undefined) ??
-    transformations.raster_image;
-
-  if (!transformation) {
+  // An animated GIF, WebP or PNG would be flattened to its first frame, as the browser decodes no
+  // more, so it’s uploaded as is
+  if (!transformation || (await isAnimatedImage(file, sourceFormat))) {
     return file;
   }
 
@@ -187,7 +252,7 @@ export const transformFile = async (file, transformations) => {
   const [, newFormat] = blob.type.split('/');
 
   const newFileName = RASTER_IMAGE_EXTENSION_REGEX.test(file.name)
-    ? file.name.replace(RASTER_IMAGE_EXTENSION_REGEX, newFormat)
+    ? file.name.replace(RASTER_IMAGE_EXTENSION_REGEX, `.${newFormat}`)
     : `${file.name}.${newFormat}`;
 
   return new File([blob], newFileName, { type: blob.type });

@@ -12,23 +12,27 @@
 -->
 <script>
   import { _ } from '@sveltia/i18n';
-  import { Button, Icon, TextInput } from '@sveltia/ui';
+  import { TextInput } from '@sveltia/ui';
   import equal from 'fast-deep-equal';
-  import { getContext, tick } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import { flip } from 'svelte/animate';
 
+  import RemoveButton from '$lib/components/common/remove-button.svelte';
   import ReorderControls from '$lib/components/common/reorder-controls.svelte';
   import AddItemButton from '$lib/components/contents/details/fields/object/add-item-button.svelte';
   import { getEntryDraftContext } from '$lib/services/contents/draft/state.svelte';
   import { updateNonPrimitiveValue } from '$lib/services/contents/draft/update';
+  import { deferDraftWrite } from '$lib/services/contents/draft/update/deferred';
+  import { getFieldEditorContext } from '$lib/services/contents/editor/field-context';
   import { isSingleItemList } from '$lib/services/contents/fields/list/helpers';
   import { getDirection } from '$lib/services/contents/i18n';
+  import { focusAfterRemoval } from '$lib/services/utils/drag-sorting';
   import { createDragSorter } from '$lib/services/utils/drag-sorting.svelte';
   import { createKeyedRows } from '$lib/services/utils/keyed-rows.svelte';
   import { watch } from '$lib/services/utils/state.svelte';
 
   /**
-   * @import { FieldEditorContext, FieldEditorProps } from '$lib/types/private';
+   * @import { FieldEditorProps } from '$lib/types/private';
    * @import { SimpleListField } from '$lib/types/public';
    */
 
@@ -38,13 +42,11 @@
    * @property {string[]} currentValue Field value.
    */
 
-  /** @type {FieldEditorContext} */
-  const { valueStoreKey = 'currentValues' } = getContext('field-editor') ?? {};
+  const { valueStoreKey = 'currentValues' } = getFieldEditorContext();
   const entryDraft = getEntryDraftContext();
 
   /** @type {FieldEditorProps & Props} */
   let {
-    /* eslint-disable prefer-const */
     locale,
     keyPath,
     fieldId,
@@ -53,7 +55,6 @@
     required = true,
     readonly = false,
     invalid = false,
-    /* eslint-enable prefer-const */
   } = $props();
 
   /**
@@ -65,6 +66,12 @@
    * @type {HTMLElement | undefined}
    */
   let itemList = $state();
+  /**
+   * Whether the editor has been unmounted, e.g. along with a removed list item, after which a
+   * deferred write must not put its value back into the draft. A plain variable, as it’s read
+   * outside of any reactive context.
+   */
+  let unmounted = false;
 
   const { i18n, max = Infinity } = $derived(fieldConfig);
   const canEdit = $derived(!readonly);
@@ -101,6 +108,9 @@
    * Write the rows to the draft, unless they already hold the stored value. Rewriting an unchanged
    * value isn’t harmless: it adds the placeholder of a non-empty list, which the loaded content
    * doesn’t have, so merely opening an entry would count as a change.
+   *
+   * This runs from an effect, so the write to the draft is deferred. The value and its location are
+   * worked out now, from the rows as they are.
    */
   const updateValue = () => {
     const draft = entryDraft.current;
@@ -111,9 +121,17 @@
       return;
     }
 
-    if (!equal(value, currentValue ?? [])) {
-      updateNonPrimitiveValue({ draft, valueStoreKey, locale, keyPath, i18n, value });
+    if (equal(value, currentValue ?? [])) {
+      return;
     }
+
+    const args = { draft, valueStoreKey, locale, keyPath, i18n, value };
+
+    deferDraftWrite(() => {
+      if (!unmounted) {
+        updateNonPrimitiveValue(args);
+      }
+    });
   };
 
   /**
@@ -142,7 +160,7 @@
     rows.remove(index);
 
     await tick();
-    getInput(Math.min(index, rows.values.length - 1))?.focus();
+    focusAfterRemoval({ index, getTarget: getInput });
   };
 
   /**
@@ -166,6 +184,16 @@
      */
     getListElement: () => itemList,
     onMove: moveItem,
+    /**
+     * Get the value of a row, to be attached to its drag.
+     * @param {number} index Row index.
+     * @returns {string} Value.
+     */
+    getItemData: (index) => rows.values[index],
+  });
+
+  onMount(() => () => {
+    unmounted = true;
   });
 
   watch(
@@ -183,21 +211,13 @@
   );
 </script>
 
-<div
-  role="none"
-  class="item-list"
-  bind:this={itemList}
-  ondragovercapture={sorter.onDragOver}
-  ondropcapture={sorter.onDrop}
->
+<div role="none" class="item-list" bind:this={itemList} {...sorter.listProps}>
   {#each sorter.displayOrder as index (rows.ids[index])}
     <div
       role="none"
       class="item"
-      class:dragging={sorter.dragIndex === index}
-      draggable={sorter.grabbedIndex === index}
-      ondragstart={(event) => sorter.onDragStart(index, event, rows.values[index])}
-      ondragend={sorter.onDragEnd}
+      class:drag-placeholder={sorter.dragIndex === index}
+      {...sorter.itemProps(index)}
       animate:flip={{ duration: 200 }}
     >
       {#if canEdit && !singleItem}
@@ -205,9 +225,7 @@
           {index}
           itemCount={rows.values.length}
           disabled={!hasMultipleItems}
-          onGrab={() => sorter.grab(index)}
-          onRelease={sorter.release}
-          onMove={(to, action) => sorter.move(index, to, action)}
+          {...sorter.reorderControlProps(index)}
         />
       {/if}
       <TextInput
@@ -230,27 +248,25 @@
         }}
       />
       {#if canEdit && !singleItem}
-        <Button
+        <RemoveButton
           variant="ghost"
-          size="small"
-          iconic
           disabled={!hasMultipleItems}
-          aria-label={_('remove')}
           onclick={() => {
             removeItem(index);
           }}
-        >
-          {#snippet startIcon()}
-            <Icon name="close" />
-          {/snippet}
-        </Button>
+        />
       {/if}
     </div>
   {/each}
 </div>
 {#if canEdit && rows.values.length < max}
   <div role="none" class="toolbar">
-    <AddItemButton {fieldConfig} items={rows.values} addItem={() => addItem(rows.values.length)} />
+    <AddItemButton
+      {fieldConfig}
+      {locale}
+      items={rows.values}
+      addItem={() => addItem(rows.values.length)}
+    />
   </div>
 {/if}
 
@@ -271,13 +287,5 @@
     display: flex;
     align-items: center;
     gap: 4px;
-
-    /* The dragged row is left as a faint placeholder marking the gap it would drop into. The
-      pointer already carries the browser’s own drag image of it, so showing it twice at full
-      strength would just be confusing. */
-
-    &.dragging {
-      opacity: 0.25;
-    }
   }
 </style>

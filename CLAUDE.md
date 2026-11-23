@@ -26,6 +26,8 @@ pnpm check:stylelint
 pnpm check:svelte
 pnpm check:oxlint
 pnpm check:cspell
+pnpm check:duplicates # copy-paste detection with jscpd, configured in `.jscpd.json`
+pnpm find:similar     # report functions that look alike, which jscpd misses once they have drifted
 pnpm check:imports    # custom script, more accurate than standard unused-import tools
 pnpm check:audit
 
@@ -68,13 +70,16 @@ Build output: `package/dist/sveltia-cms.js` (IIFE), `package/dist/sveltia-cms.mj
 
 ## CI
 
-`.github/workflows/tests.yml` runs on every push: Check, Test (three shards each of the unit and component tests and six of the end-to-end tests, the latter two with Chromium), Build in parallel, using `.nvmrc` Node version and pnpm. A PR must pass ESLint, Prettier, all tests, Svelte compiler checks, the production build, and the unused-imports check.
+`.github/workflows/tests.yml` runs on every push, using the `.nvmrc` Node version and pnpm: Check, Test (three shards each of the unit and component tests and six of the end-to-end tests, the latter two with Chromium) and Build in parallel, except the end-to-end tests, which wait for Build and run against the bundle it uploads. A PR must pass ESLint, Prettier, all tests, Svelte compiler checks, the production build, and the unused-imports check.
 
 ## Workflow
 
 - Fix a bug a test turns up, and cover it with a test that fails without the fix; don’t work around it in the test. When the fix needs a product decision, pin the current behaviour with a “(known issue)” test (see `e2e/README.md`) and raise it instead.
-- Before committing a change, review it with `/code-review --fix` and repeat until it reports no findings.
+- Before running tests, review the change with `/code-review --fix` repeatedly until it reports no findings.
+- Also run `/security-review` to check for security issues if the change touches a backend, API client, integration, or any code that handles user input or content.
 - Run the end-to-end tests on a port of your own, e.g. `E2E_PORT=4181 pnpm test:e2e`, when another worktree may be running them: the run fails rather than share a busy port.
+- Do not add a `Co-Authored-By` trailer to commit messages.
+- When an issue ID is given, add `Fix #(ISSUE_ID)` to the commit description.
 
 ## Localization PRs
 
@@ -86,6 +91,15 @@ When reviewing or preparing a PR that adds or updates a translation:
 - `en-US.yaml` is the source of truth for keys and meaning. A missing key falls back to English, so it isn’t an error, but there should be no keys that `en-US.yaml` lacks.
 - The Sveltia UI strings are translated in a separate PR to `sveltia/sveltia-ui`; a new language needs both.
 - Translation quality can’t be judged here: limit the review to structure, syntax, placeholders, plurals and the rules above, and spot-check plural forms against the [CLDR plural rules](https://www.unicode.org/cldr/charts/48/supplemental/language_plural_rules.html).
+
+## Syncing Locales
+
+When asked to sync the latest English strings to the other locales, translating them:
+
+- Run `pnpm sync:l10n todo --out <temporary folder>`. It finds the last sync by its commit message, “Sync and translate…”, or takes `--since <commit>`, and lists for each locale the keys it lacks and the keys whose English changed since the translation was last touched, even under the same key, as `todo/<locale>.todo.json`. It also writes `BRIEF.md`, the translators’ instructions from `scripts/sync-locales.md`.
+- Translate each locale with an agent of its own, pointed at `BRIEF.md` with its locale code, all in parallel; at most 20 run at once, so start the rest as they finish. A locale with nothing to do needs no agent. `en-CA`, `en-GB` and `en-ZA` only adapt the spelling the file already uses, and `ja` is maintained along with `en-US`.
+- Each agent writes JSON files and runs `pnpm sync:l10n apply <locale> <json…>`, which rebuilds the locale file in the order and under the comments of `en-US.yaml`, keeping the locale’s own header comment, then checks it with `pnpm check:l10n` and Prettier.
+- Finish with `pnpm check:l10n` and `pnpm check:prettier`, pass on the agents’ notes for the native reviewers, and commit as “Sync and translate the latest strings in all locales” so the next sync starts from there. The next sync takes every locale to be up to date as of that commit, so a locale left out of it has to be synced on its own next time, with `--since` set to an earlier commit.
 
 ## Conventions
 

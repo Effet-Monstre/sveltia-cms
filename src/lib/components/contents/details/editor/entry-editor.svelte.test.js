@@ -52,7 +52,7 @@ describe('EntryEditor', () => {
     expect(page.getByRole('textbox', { name: 'Slug' }).elements()).toHaveLength(0);
   });
 
-  test('adds the path editor for a nested collection', async () => {
+  test('adds the path editor for a collection with nested entries', async () => {
     await initTestConfig({
       collections: [
         {
@@ -60,7 +60,7 @@ describe('EntryEditor', () => {
           label: 'Pages',
           folder: 'content/pages',
           nested: { depth: 3 },
-          meta: { path: { widget: 'string', index_file: 'index' } },
+          meta: { path: { index_file: 'index' } },
           fields,
         },
       ],

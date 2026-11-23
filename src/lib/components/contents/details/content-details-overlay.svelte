@@ -18,17 +18,23 @@
 
   import PaneBody from '$lib/components/contents/details/pane-body.svelte';
   import PaneHeader from '$lib/components/contents/details/pane-header.svelte';
+  import PendingEditInfobar from '$lib/components/contents/details/pending-edit-infobar.svelte';
   import RemoteChangeInfobar from '$lib/components/contents/details/remote-change-infobar.svelte';
   import SidebarSheet from '$lib/components/contents/details/sidebar/sidebar-sheet.svelte';
   import Sidebar from '$lib/components/contents/details/sidebar/sidebar.svelte';
   import Toolbar from '$lib/components/contents/details/toolbar.svelte';
+  import { getAdditions, requireAdditions } from '$lib/services/app/additions';
   import { focusOverlay, rememberFocus } from '$lib/services/app/focus';
   import { goto } from '$lib/services/app/navigation';
-  import { getReadonlyMessage, isDraftReadonly } from '$lib/services/config/readonly';
+  import {
+    getReadonlyMessage,
+    isDraftConfigReadonly,
+    isDraftLockedByOthers,
+  } from '$lib/services/config/readonly';
   import { selectedCollection } from '$lib/services/contents/collection';
   import { collectionState } from '$lib/services/contents/collection/view';
   import { resetBackupToastState, scheduleBackup } from '$lib/services/contents/draft/backup';
-  import { getValueMapVersion } from '$lib/services/contents/draft/create/proxy.svelte';
+  import { getValueMapVersion } from '$lib/services/contents/draft/create/versioned-map.svelte';
   import { initEntryDraftEditor } from '$lib/services/contents/draft/editor.svelte';
   import { setEntryDraftContext } from '$lib/services/contents/draft/state.svelte';
   import {
@@ -55,7 +61,10 @@
   import { getDraftI18nConfig } from '$lib/services/contents/i18n/config';
   import { env } from '$lib/services/user/env.svelte';
   import { prefs } from '$lib/services/user/prefs.svelte';
+  import { createLatestGuard } from '$lib/services/utils/scheduling';
   import { watch } from '$lib/services/utils/state.svelte';
+  import { isOrphanedForkDraft } from '$lib/services/workflow';
+  import { getForkEntryNotice, isLockedForkEntry } from '$lib/services/workflow/forks';
 
   /**
    * @import { EntryDraftState } from '$lib/services/contents/draft/state.svelte';
@@ -73,13 +82,7 @@
    */
 
   /** @type {Props} */
-  let {
-    /* eslint-disable prefer-const */
-    entryDraft,
-    editorLocale = undefined,
-    loading = false,
-    /* eslint-enable prefer-const */
-  } = $props();
+  let { entryDraft, editorLocale = undefined, loading = false } = $props();
 
   // svelte-ignore state_referenced_locally
   setEntryDraftContext(entryDraft);
@@ -87,10 +90,10 @@
   let restoring = false;
   let switching = false;
   /**
-   * Number of field highlight requests so far, so a request still looking for its field can tell
-   * whether a newer one has come in.
+   * Guard for field highlight requests, so a request still looking for its field can tell whether a
+   * newer one has come in.
    */
-  let highlightRequestCount = 0;
+  const highlightRequestGuard = createLatestGuard();
   /**
    * Width of the first pane in pixels, used to place the pane swap button over the gutter between
    * the panes. The button sits next to the resize handle rather than inside it: the handle is a
@@ -111,13 +114,18 @@
   const {
     isNew = true,
     canPreview = true,
+    canShowSecondPane = true,
     collection,
     collectionName,
     collectionFile,
     fileName,
     isIndexFile,
   } = $derived(/** @type {EntryDraft} */ (entryDraft.current ?? {}));
-  const { showPreview, showSecondPane = true } = $derived(entryEditorSettings.current ?? {});
+  const { showPreview, showSecondPane: secondPaneShown = true } = $derived(
+    entryEditorSettings.current ?? {},
+  );
+  // The user’s choice only applies where the `editor.second_pane` option allows the second pane
+  const showSecondPane = $derived(canShowSecondPane && secondPaneShown);
   const { i18nEnabled, allLocales, defaultLocale } = $derived(
     getDraftI18nConfig(entryDraft.current),
   );
@@ -128,8 +136,32 @@
     quota,
     creationDisabled,
   } = $derived(collectionState.current);
-  // The entry can be viewed but not changed, which the editor says up front
-  const readonly = $derived(isDraftReadonly(entryDraft.current));
+  // The entry can be viewed but not changed, which the editor says up front. It’s also read-only
+  // while the user is asked whether to restore a backup, which the dialog says itself
+  const readonly = $derived(isDraftConfigReadonly(entryDraft.current));
+  // An entry from a contributor’s pull request is edited in their branch, or only viewed if they
+  // don’t let maintainers push to it, which the editor says up front as well. Once the pull request
+  // is no longer open, there’s nowhere left to save it, which the editor says instead
+  const forkNotice = $derived(
+    isOrphanedForkDraft(entryDraft.current)
+      ? _('workflow.fork_entry_gone')
+      : getForkEntryNotice(entryDraft.current?.originalEntry),
+  );
+  // Sveltia CMS Additions, whose chunk is loaded along with the backend if it’s enabled
+  const additions = $derived(getAdditions());
+  // Sveltia CMS Additions entry lock, which tells others the entry is being edited
+  const lockKey = $derived(additions?.getDraftLockKey(entryDraft.current));
+  // A new entry that can’t be created gets the message in place of the editor instead, and someone
+  // else editing the entry is what the lock infobar says
+  const showReadonlyInfobar = $derived(
+    readonly &&
+      !loading &&
+      !(isNew && creationDisabled) &&
+      !isDraftLockedByOthers(entryDraft.current),
+  );
+  // Only someone who can edit the entry takes its lock, or they would keep those who can from
+  // editing it. A viewer, or anyone else who can’t, only sees whether someone else is editing it
+  const holdsLock = $derived(!readonly && !isLockedForkEntry(entryDraft.current?.originalEntry));
   const [firstPaneSize, secondPaneSize, minPaneSize] = $derived(
     getPaneSizes({ firstPane: editorFirstPane.current, secondPane: editorSecondPane.current }),
   );
@@ -187,6 +219,7 @@
 
     if (!(await restorePanes())) {
       [editorFirstPane.current, editorSecondPane.current] = getDefaultPanes({
+        editorLocale,
         currentLocale: editorFirstPane.current?.locale,
         defaultLocale,
         allLocales,
@@ -268,9 +301,7 @@
    * @param {FieldKeyPath} args.keyPath Key path of the field.
    */
   const revealRequestedField = async ({ locale, keyPath }) => {
-    highlightRequestCount += 1;
-
-    const request = highlightRequestCount;
+    const isLatest = highlightRequestGuard.next();
 
     await ensureEditPaneVisible(locale);
 
@@ -286,7 +317,7 @@
      * Check whether a newer request has come in.
      * @returns {boolean} Result.
      */
-    const isOutdated = () => request !== highlightRequestCount;
+    const isOutdated = () => !isLatest();
 
     await revealEditorField({ draft, locale, keyPath, isOutdated });
   };
@@ -364,12 +395,29 @@
       void $state.snapshot(draft.currentSlugs);
       // The files map holds `File` objects, which can’t be snapshotted; a file can be replaced
       Object.values(draft.files).forEach(({ file }) => void file);
-      void draft.pendingEntries.length;
+      // A pending entry opened again and changed takes the place of its earlier version
+      draft.pendingEntries.forEach((pendingEntry) => void pendingEntry);
       void draft.interacted;
     }
 
     // Back up the draft automatically whenever it changes, or drop a pending backup once it’s gone
     untrack(() => scheduleBackup(draft));
+  });
+
+  // Tell others the entry is open, read-only or not, so they can see who else is looking at it, and
+  // hold its lock while it’s open, if the user can edit it
+  $effect(() => {
+    const key = lockKey;
+    const hold = holdsLock;
+
+    if (!key) {
+      return undefined;
+    }
+
+    // There’s only a key with Sveltia CMS Additions
+    const { watchEntry } = requireAdditions();
+
+    return untrack(() => watchEntry(key, { hold }));
   });
 
   $effect(() => {
@@ -380,8 +428,11 @@
     }
   });
 
+  // The pane state key also changes between the files of a file/singleton collection, which share
+  // the collection
   watch(
     () => [
+      paneStateKey,
       collection,
       showSecondPane,
       showPreview,
@@ -460,14 +511,24 @@
   bind:this={wrapper}
 >
   {#key entryDraft.current?.id}
-    <!-- A new entry that can’t be created gets the message in place of the editor instead -->
-    {#if readonly && !loading && !(isNew && creationDisabled)}
+    {#if additions}
+      <additions.EntryLockInfobar {lockKey} />
+    {/if}
+    {#if showReadonlyInfobar}
       <Infobar
         dismissible={false}
         --sui-infobar-border-width="0 0 1px"
         --sui-infobar-message-justify-content="center"
       >
         {getReadonlyMessage('entry', { collection, collectionFile })}
+      </Infobar>
+    {:else if forkNotice && !loading}
+      <Infobar
+        dismissible={false}
+        --sui-infobar-border-width="0 0 1px"
+        --sui-infobar-message-justify-content="center"
+      >
+        {forkNotice}
       </Infobar>
     {/if}
     <Toolbar disabled={loading || (isNew && creationDisabled)} />
@@ -510,6 +571,7 @@
       </EmptyState>
     {:else}
       <RemoteChangeInfobar />
+      <PendingEditInfobar />
       <div role="none" class="body" onpointerdown={markInteracted} onkeydown={markInteracted}>
         {#key `${collectionName}|${fileName}|${isIndexFile}`}
           <div role="none" class="content-area">
@@ -544,6 +606,7 @@
                 iconic
                 size="small"
                 variant="tertiary"
+                tooltip={_('swap_panes')}
                 aria-label={_('swap_panes')}
                 style="--gutter-position: {firstPaneWidth}px"
                 onclick={swapPanes}
@@ -636,6 +699,8 @@
         border-radius: 50%;
         opacity: 0.5;
         translate: -50%;
+        /* Not `all`: the position would animate from the unmeasured width and lag behind a drag */
+        transition-property: opacity, color, background-color;
 
         &:dir(rtl) {
           translate: 50%;

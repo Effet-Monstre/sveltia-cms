@@ -17,6 +17,7 @@ import { isNumeric } from '$lib/services/utils/number';
 
 /**
  * @import {
+ * EntryDraft,
  * FlattenedEntryContent,
  * GetFieldArgs,
  * InternalEntryCollection,
@@ -36,12 +37,6 @@ import { isNumeric } from '$lib/services/utils/number';
  */
 
 const TYPE_MATCH_REGEX = /^(.*?)<([^>]+)>(.*)$/;
-
-/**
- * Regular expression to match the list key path, e.g. `field.0`, `field.1`, etc.
- * @type {RegExp}
- */
-export const LIST_KEY_PATH_REGEX = /\.\d+$/;
 
 /**
  * @type {Map<string, Field | undefined>}
@@ -203,6 +198,20 @@ const resolveNextSegment = ({
   // we’re trying to access a nested path, so return undefined
   return { field: undefined, explicitType };
 };
+
+/**
+ * Get the {@link getField} arguments for a field of an entry draft: the draft’s collection, file
+ * and index file flag, along with the other arguments given.
+ * @template {Partial<Pick<GetFieldArgs, 'keyPath' | 'valueMap' | 'componentName'>>} T
+ * @param {Pick<EntryDraft, 'collectionName' | 'fileName' | 'isIndexFile'>} draft Entry draft.
+ * @param {T} [args] Other arguments. The key path can be left out, to be added later by the
+ * caller.
+ * @returns {Pick<GetFieldArgs, 'collectionName' | 'fileName' | 'isIndexFile'> & T} Arguments.
+ */
+export const getDraftFieldArgs = (
+  { collectionName, fileName, isIndexFile },
+  args = /** @type {T} */ ({}),
+) => ({ collectionName, fileName, isIndexFile, ...args });
 
 /**
  * Get a field’s config object that matches the given field name (key path).

@@ -1,4 +1,5 @@
 import { expect, GITHUB_CONFIG, test } from '../../fixtures/test.js';
+import { getEditor } from '../../fixtures/ui.js';
 
 /**
  * @import { Locator, Page } from '@playwright/test';
@@ -49,7 +50,7 @@ const config = (fields) => ({
 const createNote = async (page, title) => {
   await page.getByRole('button', { name: 'Create New Entry' }).first().click();
 
-  const editor = page.getByRole('group', { name: 'Content Editor' });
+  const editor = getEditor(page);
 
   await editor.getByRole('textbox', { name: 'Title' }).fill(title);
 
@@ -65,7 +66,7 @@ const createNote = async (page, title) => {
 const openNote = async (page, title) => {
   await page.getByRole('row', { name: new RegExp(title) }).click();
 
-  const editor = page.getByRole('group', { name: 'Content Editor' });
+  const editor = getEditor(page);
 
   await expect(editor.getByRole('textbox', { name: 'Title' })).toHaveValue(title);
 
@@ -280,7 +281,9 @@ test.describe('Hidden field', () => {
   });
 
   test.beforeEach(async ({ cms, github, page }) => {
-    await page.clock.install({ time: new Date('2026-09-28T12:34:56.789Z') });
+    // Pin the time rather than install a clock that keeps running: signing in takes long enough to
+    // pass the minute, which `{{datetime}}` would then show
+    await page.clock.setFixedTime(new Date('2026-09-28T12:34:56.789Z'));
     github.commit({
       [SAVED]: [
         'title: Saved',
@@ -358,7 +361,7 @@ test.describe('Hidden field', () => {
   test('fills in the defaults again for a duplicate', async ({ cms, github, page }) => {
     const editor = await openNote(page, 'Saved');
 
-    await page.clock.setSystemTime(new Date('2026-10-01T08:00:00Z'));
+    await page.clock.setFixedTime(new Date('2026-10-01T08:00:00Z'));
     await duplicate(cms, page);
     await editor.getByRole('textbox', { name: 'Title' }).fill('Copy');
     await editor.getByRole('button', { name: 'Save' }).click();
@@ -560,6 +563,81 @@ test.describe('Compute field', () => {
   });
 });
 
+test.describe('Compute field with a template tag in a transformation argument', () => {
+  test.use({
+    config: config([
+      { name: 'nickname', label: 'Nickname', required: false },
+      {
+        name: 'display',
+        label: 'Display Name',
+        widget: 'compute',
+        value: "{{fields.nickname | default('{{fields.title | upper}} #{{fields.number}}')}}",
+      },
+      { name: 'number', label: 'Number', widget: 'number', value_type: 'int' },
+    ]),
+  });
+
+  test.beforeEach(async ({ cms }) => {
+    await cms.open();
+    await cms.signIn();
+  });
+
+  test('resolves the tag in the argument like the tag itself', async ({ cms, page }) => {
+    const editor = await createNote(page, 'Hello World');
+    const preview = editor.getByRole('document', { name: 'Content Preview' });
+
+    await editor.getByRole('spinbutton', { name: 'Number' }).fill('1200');
+    await expect(preview.getByText('HELLO WORLD #1200')).toBeVisible();
+    await editor.getByRole('textbox', { name: 'Nickname' }).fill('Hi');
+    await expect(preview.getByText('HELLO WORLD #1200')).toBeHidden();
+    await editor.getByRole('textbox', { name: 'Nickname' }).fill('');
+    await editor.getByRole('button', { name: 'Save' }).click();
+
+    await expect
+      .poll(async () => (await cms.readRepo())['content/notes/hello-world.yml'])
+      .toBe("title: Hello World\nnickname: ''\ndisplay: 'HELLO WORLD #1200'\nnumber: 1200\n");
+  });
+});
+
+test.describe('Compute field with the plainify transformation', () => {
+  const SAVED = 'content/notes/episode.yml';
+
+  test.use({
+    config: config([
+      { name: 'body', label: 'Body', widget: 'richtext' },
+      {
+        name: 'description',
+        label: 'Description',
+        widget: 'compute',
+        value: "{{fields.body | plainify | truncate(30, '...')}}",
+      },
+    ]),
+  });
+
+  test.beforeEach(async ({ cms }) => {
+    await cms.open();
+    await cms.seed({
+      [SAVED]: [
+        'title: Episode',
+        'body: "# Intro\\n\\nHi, let’s **welcome** this morning [our guest](https://example.com)"',
+        '',
+      ].join('\n'),
+    });
+    await cms.signIn();
+  });
+
+  test('saves a truncated description without the Markdown syntax', async ({ cms, page }) => {
+    const editor = await openNote(page, 'Episode');
+
+    await editor.getByRole('textbox', { name: 'Title' }).fill('Episode 1');
+    await editor.getByRole('button', { name: 'Save' }).click();
+
+    await expect
+      .poll(async () => (await cms.readRepo())[SAVED])
+      .toMatch(/^description: Intro Hi, let’s welcome this m\.\.\.$/m);
+  });
+});
+
 test.describe('Code field', () => {
   const SAVED = 'content/notes/saved.yml';
 
@@ -712,5 +790,68 @@ test.describe('Code field', () => {
           '',
         ].join('\n'),
       );
+  });
+});
+
+test.describe('Compute field generating a UUID, duplicated to the other locales', () => {
+  const SAVED = 'content/notes/saved.yml';
+
+  test.use({
+    config: {
+      backend: { name: 'test-repo' },
+      media_folder: 'static/uploads',
+      i18n: { structure: 'single_file', locales: ['en', 'fr'] },
+      collections: [
+        {
+          ...notes([
+            { name: 'ref', label: 'Reference', widget: 'compute', value: '{{uuid_short}}' },
+          ]),
+          i18n: true,
+          fields: [
+            { name: 'title', label: 'Title', i18n: true },
+            {
+              name: 'ref',
+              label: 'Reference',
+              widget: 'compute',
+              value: '{{uuid_short}}',
+              i18n: 'duplicate',
+            },
+          ],
+        },
+      ],
+    },
+  });
+
+  test.beforeEach(async ({ cms }) => {
+    await cms.open();
+    await cms.seed({
+      [SAVED]: [
+        'en:',
+        '  title: Saved',
+        '  ref: 0123456789ab',
+        'fr:',
+        '  title: Enregistré',
+        '  ref: 0123456789ab',
+        '',
+      ].join('\n'),
+    });
+    await cms.signIn();
+  });
+
+  test('gives a duplicate one new UUID, shared by every locale', async ({ cms, page }) => {
+    const editor = await openNote(page, 'Saved');
+
+    await duplicate(cms, page);
+    await editor.getByRole('textbox', { name: 'Title' }).first().fill('Copy');
+    await editor.getByRole('button', { name: 'Save' }).click();
+
+    await expect.poll(async () => (await cms.readRepo())['content/notes/copy.yml']).toBeTruthy();
+
+    const saved = (await cms.readRepo())['content/notes/copy.yml'];
+    const refs = [...saved.matchAll(/^ {2}ref: (\S+)$/gm)].map(([, ref]) => ref);
+
+    expect(refs).toHaveLength(2);
+    expect(refs[0]).not.toBe('0123456789ab');
+    expect(refs[1]).toBe(refs[0]);
   });
 });

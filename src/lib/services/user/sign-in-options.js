@@ -1,5 +1,9 @@
+import { isAdditionsEnabled } from '$lib/services/app/additions';
+import { getAuthRoot } from '$lib/services/backends/git/gitea/config';
+import { isGiteaBackendName } from '$lib/services/backends/git/gitea/constants';
+
 /**
- * @import { Backend, GitBackend, GiteaBackend } from '$lib/types/public';
+ * @import { Backend, ForgejoBackend, GitBackend, GiteaBackend } from '$lib/types/public';
  */
 
 /**
@@ -26,13 +30,18 @@ export const getSignInOptions = (backendConfig, backendLabel) => {
   const { name } = backendConfig;
   const isTestRepo = name === 'test-repo';
   const { auth_methods: authMethods } = /** @type {GitBackend} */ (backendConfig);
-  const { base_url: baseURL, app_id: appId } = /** @type {GiteaBackend} */ (backendConfig);
+  const giteaConfig = /** @type {GiteaBackend | ForgejoBackend} */ (backendConfig);
+  const isGitea = isGiteaBackendName(name);
+  // Sveltia CMS Additions replaces both the OAuth and the token options with its own
+  const additionsEnabled = isAdditionsEnabled(/** @type {any} */ ({ backend: backendConfig }));
 
   return {
     serviceLabel:
-      name === 'gitea' && baseURL === 'https://codeberg.org' ? 'Codeberg' : backendLabel,
-    tokenOptionHidden: !isTestRepo && authMethods?.includes('token') === false,
-    oauthOptionHidden: !isTestRepo && authMethods?.includes('oauth') === false,
-    oauthOptionDisabled: name === 'gitea' && !appId,
+      isGitea && getAuthRoot(giteaConfig) === 'https://codeberg.org' ? 'Codeberg' : backendLabel,
+    tokenOptionHidden:
+      additionsEnabled || (!isTestRepo && authMethods?.includes('token') === false),
+    oauthOptionHidden:
+      additionsEnabled || (!isTestRepo && authMethods?.includes('oauth') === false),
+    oauthOptionDisabled: isGitea && !giteaConfig.app_id,
   };
 };

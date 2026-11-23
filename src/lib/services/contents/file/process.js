@@ -1,14 +1,26 @@
 import { generateUUID } from '@sveltia/utils/crypto';
 import { isObject } from '@sveltia/utils/object';
 import { escapeRegExp } from '@sveltia/utils/string';
-import { flatten } from 'flat';
 
-import { getIndexFile } from '$lib/services/contents/collection/entries/index-file';
+import { version } from '$lib/services/app';
+import { cmsConfigVersion } from '$lib/services/config';
+import {
+  getIndexFile,
+  isCollectionIndexFilePath,
+} from '$lib/services/contents/collection/entries/index-file';
 import { resolveCollectionAndFile } from '$lib/services/contents/collection/files';
 import { getNestedIndexFileName } from '$lib/services/contents/collection/nested';
 import { hasRootField } from '$lib/services/contents/entry/fields';
-import { parseEntryFile } from '$lib/services/contents/file/parse';
+import { convertMapLists, getMapKeyField } from '$lib/services/contents/fields/list/map';
+import { mayHaveUnsafeInteger } from '$lib/services/contents/file/integers';
+import { hasCustomParser, parseEntryFile } from '$lib/services/contents/file/parse';
+import { fileStates, setFileState } from '$lib/services/contents/file/state';
+import {
+  usesMultiFileStructure,
+  usesSingleFileStructure,
+} from '$lib/services/contents/i18n/config';
 import { getOrCreate } from '$lib/services/utils/cache';
+import { flattenKeys } from '$lib/services/utils/object';
 import { runInChunks } from '$lib/services/utils/scheduling';
 
 /**
@@ -18,6 +30,7 @@ import { runInChunks } from '$lib/services/utils/scheduling';
  * InternalCollection,
  * InternalEntryCollection,
  * InternalLocaleCode,
+ * ParsedFileContent,
  * RepositoryFileMetadata,
  * } from '$lib/types/private';
  * @import { Field, RawEntryContent } from '$lib/types/public';
@@ -79,20 +92,111 @@ export const getSlug = ({ subPath, subPathTemplate }) => {
 };
 
 /**
- * Parse the raw content from the file and handle any errors.
+ * Check if the given value refers back to itself, e.g. through a YAML alias pointing at one of its
+ * own ancestors like `meta: &m { self: *m }`. Such content can’t be flattened or saved. A value
+ * referred to from several places, which isn’t circular, is fine.
+ * @param {unknown} value Parsed value.
+ * @param {Set<object>} [ancestors] Objects on the path from the root to the value.
+ * @returns {boolean} Result.
+ */
+export const hasCircularReference = (value, ancestors = new Set()) => {
+  if (value === null || typeof value !== 'object') {
+    return false;
+  }
+
+  if (ancestors.has(value)) {
+    return true;
+  }
+
+  ancestors.add(value);
+
+  const found = Object.values(value).some((child) => hasCircularReference(child, ancestors));
+
+  ancestors.delete(value);
+
+  return found;
+};
+
+/**
+ * Map of entry file paths to the content parsed from them, collected while the files are parsed so
+ * it can be cached along with the files.
+ * @typedef {Map<string, ParsedFileContent>} ParsedFileMap
+ */
+
+/**
+ * Get the key identifying what a file’s content is parsed for: the CMS version, as a new version
+ * may parse a file differently, and the CMS configuration, which sets the format of each file.
+ * @returns {string} Key.
+ */
+export const getParsedContentKey = () => `${version}\n${cmsConfigVersion.current}`;
+
+/**
+ * Add the content parsed from a file to the given map, so it can be cached.
+ * @param {object} args Arguments.
+ * @param {ParsedFileMap} args.parsedFileMap Map to add the content to.
+ * @param {string} args.path File path.
+ * @param {string} args.key What the content was parsed for. See {@link getParsedContentKey}.
+ * @param {RawEntryContent} args.content Parsed content.
+ */
+const cacheParsedContent = ({ parsedFileMap, path, key, content }) => {
+  try {
+    parsedFileMap.set(path, {
+      key,
+      // Copied, as the content is processed further, and the copy has to be cached as parsed
+      content: structuredClone(content),
+      // Along with what is remembered about the file, so it’s saved back the same way
+      ...fileStates.get(path),
+    });
+  } catch {
+    // Content the database can’t store either; the file is just parsed again next time
+  }
+};
+
+/**
+ * Parse the raw content from the file and handle any errors. Content cached from a previous load
+ * is used instead if it was parsed for the same CMS version and configuration, as parsing every
+ * file is the bulk of the work of loading the site data.
  * @param {BaseEntryListItem} file Entry file list item.
  * @param {Error[]} errors List of parse errors.
+ * @param {ParsedFileMap} [parsedFileMap] Map to add the content parsed from the file to, so it can
+ * be cached. A file whose content comes from the cache isn’t added.
  * @returns {Promise<RawEntryContent | undefined>} Parsed content or undefined if parsing failed.
  */
-export const parseFileContent = async (file, errors) => {
+export const parseFileContent = async (file, errors, parsedFileMap) => {
+  const { path, parsed } = file;
+  const key = getParsedContentKey();
+  const customParser = hasCustomParser(file);
+
+  if (parsed?.key === key && !customParser) {
+    const { key: _key, content, ...state } = parsed;
+
+    // Remembered, so the file is saved back the way it was written, as when it was parsed: in the
+    // same front matter format, with the floats that are whole numbers and the comments at the top
+    setFileState(path, state);
+
+    return content;
+  }
+
   try {
     // A file whose content couldn’t be read, e.g. because it’s too large, has no text. Parsing it
     // as an empty file would load an empty entry, and saving that would wipe the file
     if (file.text === undefined) {
-      throw new Error(`${file.path} could not be read.`);
+      throw new Error(`${path} could not be read.`);
     }
 
-    return await parseEntryFile(file);
+    const content = await parseEntryFile(file);
+
+    if (hasCircularReference(content)) {
+      throw new Error(`${path} could not be parsed, as it contains a circular reference.`);
+    }
+
+    // Parsing a file remembers the source text of any integer a `number` can’t represent exactly,
+    // which is what the integer is saved as, so such a file has to be parsed every time
+    if (parsedFileMap && !customParser && !mayHaveUnsafeInteger(file.text)) {
+      cacheParsedContent({ parsedFileMap, path, key, content });
+    }
+
+    return content;
   } catch (/** @type {any} */ ex) {
     // eslint-disable-next-line no-console
     console.error(ex);
@@ -164,18 +268,25 @@ export const normalizeDefaultRootContent = (rawContent, allLocales, defaultLocal
 };
 
 /**
- * Transform raw content to handle special cases like root List and root KeyValue fields.
+ * Wrap the content of a top-level field in an object under the field name, as if the field were
+ * stored like any other field.
  * @param {RawEntryContent} rawContent Raw content from the file.
  * @param {Field[]} fields Collection fields.
  * @param {boolean} i18nSingleFile Whether i18n single file structure is used.
  * @returns {RawEntryContent | undefined} Transformed content or undefined if invalid.
  */
-export const transformRawContent = (rawContent, fields, i18nSingleFile) => {
+const transformRootContent = (rawContent, fields, i18nSingleFile) => {
   const args = { rawContent, fields, i18nSingleFile };
 
   // Handle a special case: top-level List field
   if (hasRootField(fields, 'list')) {
-    return transformRoot({ ...args, validate: Array.isArray });
+    // A keyed list is stored as a map, but a list saved before the option was added is an array
+    return transformRoot({
+      ...args,
+      validate: getMapKeyField(fields[0])
+        ? (value) => isObject(value) || Array.isArray(value)
+        : Array.isArray,
+    });
   }
 
   // Handle a special case: top-level KeyValue field
@@ -190,6 +301,33 @@ export const transformRawContent = (rawContent, fields, i18nSingleFile) => {
   }
 
   return isObject(rawContent) ? rawContent : undefined;
+};
+
+/**
+ * Transform raw content to handle special cases like root List and root KeyValue fields, as well
+ * as List fields stored as a map, which become list items like those of any other List field.
+ * @param {RawEntryContent} rawContent Raw content from the file.
+ * @param {Field[]} fields Collection fields.
+ * @param {boolean} i18nSingleFile Whether i18n single file structure is used.
+ * @returns {RawEntryContent | undefined} Transformed content or undefined if invalid.
+ */
+export const transformRawContent = (rawContent, fields, i18nSingleFile) => {
+  const content = transformRootContent(rawContent, fields, i18nSingleFile);
+
+  if (!content) {
+    return undefined;
+  }
+
+  if (!i18nSingleFile) {
+    return convertMapLists(content, fields, true);
+  }
+
+  return Object.fromEntries(
+    Object.entries(content).map(([locale, localizedContent]) => [
+      locale,
+      convertMapLists(localizedContent, fields, true),
+    ]),
+  );
 };
 
 /**
@@ -222,7 +360,7 @@ export const shouldSkipIndexFile = (path, fileName, collection, subPathTemplate,
   // 2. The collection is an entry collection and index file inclusion is enabled
   // 3. The collection is an entry collection and the `path` option value ends with `_index` and
   // the extension is `md`
-  // 4. The collection is a nested collection where every entry is stored as `_index.md`
+  // 4. The collection has nested entries, and every entry is stored as `_index.md`
   return !(
     !!fileName ||
     getIndexFile(collection)?.name === '_index' ||
@@ -302,7 +440,7 @@ export const processNonI18nEntry = ({
   const slug = fileName || getSlug({ subPath, subPathTemplate });
 
   entry.slug = slug;
-  entry.locales._default = { slug, path, content: flatten(rawContent) };
+  entry.locales._default = { slug, path, content: flattenKeys(rawContent) };
 };
 
 /**
@@ -332,7 +470,7 @@ export const processI18nSingleFileEntry = ({
     allLocales
       // A locale key without an object, e.g. an empty `fr:` stub, has no content to read
       .filter((_locale) => isObject(rawContent[_locale]))
-      .map((_locale) => [_locale, { slug, path, content: flatten(rawContent[_locale]) }]),
+      .map((_locale) => [_locale, { slug, path, content: flattenKeys(rawContent[_locale]) }]),
   );
 };
 
@@ -373,7 +511,7 @@ export const processI18nMultiFileEntry = ({
       : undefined;
 
   const slug = fileName || getSlug({ subPath, subPathTemplate });
-  const localizedEntry = { slug, path, content: flatten(rawContent) };
+  const localizedEntry = { slug, path, content: flattenKeys(rawContent) };
   // Use a temporary ID to locate all the localized files for the entry. The sub path is the same
   // across locales, while the slug may not be unique, e.g. with the `{{year}}/{{slug}}` path. A
   // collection file is identified by its name, so a canonical slug in one of its locales can’t
@@ -502,9 +640,11 @@ export const prepareArrayFileEntries = ({ collection, file, rawContent, entries,
  * @param {Map<string, Entry>} args.entryMap Prepared entries keyed by their temporary ID, used to
  * merge the localized files of a multi-file i18n entry.
  * @param {Error[]} args.errors List of parse errors.
+ * @param {ParsedFileMap} [args.parsedFileMap] Map to add the content parsed from the file to. See
+ * {@link parseFileContent}.
  */
-export const prepareEntry = async ({ file, entries, entryMap, errors }) => {
-  const rawContent = await parseFileContent(file, errors);
+export const prepareEntry = async ({ file, entries, entryMap, errors, parsedFileMap }) => {
+  const rawContent = await parseFileContent(file, errors, parsedFileMap);
 
   const {
     path,
@@ -538,26 +678,28 @@ export const prepareEntry = async ({ file, entries, entryMap, errors }) => {
   }
 
   const {
-    fields = [],
+    fields: regularFields = [],
     _file: { fullPathRegEx, subPath: subPathTemplate, extension },
     _i18n: {
       i18nEnabled,
       allLocales,
       defaultLocale,
-      structureMap: {
-        i18nSingleFile,
-        i18nSingleFileDefaultRoot,
-        i18nMultiFile,
-        i18nMultiFolder,
-        i18nMultiRootFolder,
-      },
+      structureMap,
       canonicalSlug: { key: canonicalSlugKey },
     },
   } = collectionFile ?? /** @type {InternalEntryCollection} */ (collection);
 
+  // The special index file has fields of its own, which its draft is created and saved with, so its
+  // content has to be read with them too, e.g. to convert a List field stored as a map
+  const fields =
+    (!collectionFile &&
+      isCollectionIndexFilePath(collection, path) &&
+      getIndexFile(collection)?.fields) ||
+    regularFields;
+
   // Normalize `single_file_default_root` content into the standard locale-keyed format so that the
   // rest of the processing pipeline can treat it identically to `single_file`.
-  const effectiveRawContent = i18nSingleFileDefaultRoot
+  const effectiveRawContent = structureMap.i18nSingleFileDefaultRoot
     ? normalizeDefaultRootContent(rawContent, allLocales, defaultLocale)
     : rawContent;
 
@@ -565,7 +707,7 @@ export const prepareEntry = async ({ file, entries, entryMap, errors }) => {
     return;
   }
 
-  const isI18nSingleFile = i18nSingleFile || i18nSingleFileDefaultRoot;
+  const isI18nSingleFile = usesSingleFileStructure(structureMap);
   const transformedContent = transformRawContent(effectiveRawContent, fields, isI18nSingleFile);
 
   if (!transformedContent) {
@@ -576,7 +718,7 @@ export const prepareEntry = async ({ file, entries, entryMap, errors }) => {
     return;
   }
 
-  const isMultiFileStructure = i18nMultiFile || i18nMultiFolder || i18nMultiRootFolder;
+  const isMultiFileStructure = usesMultiFileStructure(structureMap);
 
   const { subPath, locale } = extractPathInfo({
     file,
@@ -639,9 +781,12 @@ export const prepareEntry = async ({ file, entries, entryMap, errors }) => {
 /**
  * Parse the given entry files to create a complete, serialized entry list.
  * @param {BaseEntryListItem[]} entryFiles Entry file list.
+ * @param {object} [options] Options.
+ * @param {ParsedFileMap} [options.parsedFileMap] Map to add the content parsed from each file to,
+ * so it can be cached. See {@link parseFileContent}.
  * @returns {Promise<{ entries: Entry[], errors: Error[] }>} Entry list and error list.
  */
-export const prepareEntries = async (entryFiles) => {
+export const prepareEntries = async (entryFiles, { parsedFileMap } = {}) => {
   /** @type {Entry[]} */
   const entries = [];
   /** @type {Map<string, Entry>} */
@@ -651,7 +796,17 @@ export const prepareEntries = async (entryFiles) => {
 
   // Parsing is synchronous, so a large repository would freeze the tab for the whole batch while
   // the progress indicator stalls. Yield between chunks instead
-  await runInChunks(entryFiles, (file) => prepareEntry({ file, entries, entryMap, errors }));
+  await runInChunks(entryFiles, async (file) => {
+    // A file that can’t be processed is reported like a parse error, rather than stopping the whole
+    // list from loading
+    try {
+      await prepareEntry({ file, entries, entryMap, errors, parsedFileMap });
+    } catch (/** @type {any} */ ex) {
+      // eslint-disable-next-line no-console
+      console.error(ex);
+      errors.push(ex);
+    }
+  });
 
   return {
     entries: entries.filter((entry) => {

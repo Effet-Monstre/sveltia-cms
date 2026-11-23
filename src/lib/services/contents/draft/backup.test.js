@@ -6,11 +6,16 @@ import { isProxy } from 'node:util/types';
 import { IndexedDB } from '@sveltia/utils/storage';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { entryLocks, getDraftLockKey, getOthersLock } from '$lib/services/additions/locks.svelte';
+import { getAdditions } from '$lib/services/app/additions';
 import { cmsConfigVersion } from '$lib/services/config';
 import { isDraftModified } from '$lib/services/contents/draft';
 import { createState } from '$lib/services/utils/state.svelte';
+import { createMockForkPullRequest } from '$lib/test/factories';
 
 vi.mock('@sveltia/utils/storage');
+// Sveltia CMS Additions is loaded, with its real entry locks
+vi.mock('$lib/services/app/additions', () => ({ getAdditions: vi.fn() }));
 vi.mock('@sveltia/utils/file', () => ({
   getBlobRegex: vi.fn((flags = '') => new RegExp('\\bblob:http://localhost/[\\w-]+\\b', flags)),
 }));
@@ -35,6 +40,9 @@ vi.mock('$lib/services/contents/draft', async () => ({
 vi.mock('$lib/services/contents/draft/create/proxy.svelte', () => ({
   createProxy: vi.fn(({ target }) => target),
 }));
+vi.mock('$lib/services/contents/draft/create/versioned-map.svelte', () => ({
+  createValueMap: vi.fn((target) => target),
+}));
 vi.mock('$lib/services/contents/collection/entries/reorder/config', () => ({
   getOrderFieldKey: vi.fn(() => undefined),
 }));
@@ -47,6 +55,13 @@ const mockPrefs = vi.hoisted(() => ({ useDraftBackup: /** @type {boolean | undef
 
 vi.mock('$lib/services/user/prefs.svelte', () => ({
   prefs: mockPrefs,
+}));
+
+// Loaded transitively, and a `.svelte.js` module compiles differently for the client runtime this
+// test uses, so leaving it in would mis-merge its coverage with that of the Node-environment tests
+vi.mock('$lib/services/user/env.svelte', () => ({
+  env: {},
+  initUserEnvDetection: vi.fn(),
 }));
 
 describe('draft/backup', () => {
@@ -69,6 +84,7 @@ describe('draft/backup', () => {
   let showBackupToastIfNeeded;
   let resetBackupToastState;
   let scheduleBackup;
+  let cancelBackup;
 
   // Mock IndexedDB constructor to return our mock (must happen before importing backup module)
   // Vitest 4 requires proper constructor with 'class' keyword
@@ -109,12 +125,15 @@ describe('draft/backup', () => {
       showBackupToastIfNeeded,
       resetBackupToastState,
       scheduleBackup,
+      cancelBackup,
     } = backupModule);
 
     // Mock stores
     mockPrefs.useDraftBackup = true;
     cmsConfigVersion.current = 'v1.0.0';
     backupModule.backupToastState.current = { saved: false, restored: false, deleted: false };
+    // A test may leave the dialog waiting for an answer
+    backupModule.restoreDialogState.current = { show: false };
     vi.mocked(isDraftModified).mockReturnValue(false);
     interacted = false;
   });
@@ -210,6 +229,44 @@ describe('draft/backup', () => {
   });
 
   describe('saveBackup', () => {
+    beforeEach(() => {
+      vi.mocked(getAdditions).mockReturnValue(
+        /** @type {any} */ ({ getDraftLockKey, getOthersLock }),
+      );
+    });
+
+    it('should still save the changes made before someone took over the entry', async () => {
+      mockPrefs.useDraftBackup = true;
+      vi.mocked(isDraftModified).mockReturnValue(true);
+
+      const draft = {
+        collectionName: 'posts',
+        originalEntry: { slug: 'my-post', subPath: 'my-post' },
+        currentLocales: { en: true },
+        currentSlugs: { en: 'my-post' },
+        currentValues: { en: { title: 'My Post' } },
+        files: {},
+        interacted: true,
+      };
+
+      const key = /** @type {string} */ (getDraftLockKey(draft));
+
+      Object.assign(entryLocks, {
+        connection: 'mine',
+        locks: { [key]: { key, user_id: 'u2', name: 'Bob', since: '', connection: 'theirs' } },
+      });
+
+      try {
+        await saveBackup(draft);
+      } finally {
+        Object.assign(entryLocks, { connection: '', locks: {} });
+      }
+
+      expect(mockBackupDB.put).toHaveBeenCalledWith(
+        expect.objectContaining({ collectionName: 'posts', slug: 'my-post' }),
+      );
+    });
+
     it('should save backup when draft is modified', async () => {
       mockPrefs.useDraftBackup = true;
       cmsConfigVersion.current = 'v1.0.0';
@@ -219,7 +276,7 @@ describe('draft/backup', () => {
       const draft = {
         collectionName: 'posts',
         fileName: undefined,
-        originalEntry: { slug: 'my-post' },
+        originalEntry: { slug: 'my-post', subPath: 'my-post' },
         currentLocales: { en: true },
         currentSlugs: { en: 'my-post' },
         currentValues: { en: { title: 'My Post' } },
@@ -259,7 +316,7 @@ describe('draft/backup', () => {
       const draft = createState({
         collectionName: 'posts',
         fileName: undefined,
-        originalEntry: { slug: 'my-post' },
+        originalEntry: { slug: 'my-post', subPath: 'my-post' },
         currentLocales: { en: true },
         currentSlugs: { en: 'my-post' },
         currentValues: { en: { 'tags.0': 'svelte' } },
@@ -287,7 +344,7 @@ describe('draft/backup', () => {
       const draft = {
         collectionName: 'posts',
         fileName: undefined,
-        originalEntry: { slug: 'my-post' },
+        originalEntry: { slug: 'my-post', subPath: 'my-post' },
         currentLocales: { en: true },
         currentSlugs: { en: 'my-post' },
         currentValues: { en: { title: 'My Post' } },
@@ -322,7 +379,7 @@ describe('draft/backup', () => {
       const draft = {
         collectionName: 'posts',
         fileName: undefined,
-        originalEntry: { slug: 'my-post' },
+        originalEntry: { slug: 'my-post', subPath: 'my-post' },
         currentLocales: { en: true },
         currentSlugs: { en: 'my-post' },
         currentValues: { en: { title: 'My Post' } },
@@ -341,7 +398,7 @@ describe('draft/backup', () => {
       const draft = {
         collectionName: 'posts',
         fileName: undefined,
-        originalEntry: { slug: 'my-post' },
+        originalEntry: { slug: 'my-post', subPath: 'my-post' },
         currentLocales: { en: true },
         currentSlugs: { en: 'my-post' },
         currentValues: { en: { title: 'My Post' } },
@@ -363,7 +420,7 @@ describe('draft/backup', () => {
       const draft = {
         collectionName: 'posts',
         fileName: undefined,
-        originalEntry: { slug: 'my-post' },
+        originalEntry: { slug: 'my-post', subPath: 'my-post' },
         currentLocales: { en: true },
         currentSlugs: { en: 'my-post' },
         currentValues: { en: { title: 'My Post' } },
@@ -431,6 +488,84 @@ describe('draft/backup', () => {
       );
     });
 
+    it('should store the entry the edits were made to, if it exists', async () => {
+      vi.mocked(isDraftModified).mockReturnValue(true);
+
+      const originalEntry = {
+        id: 'posts/my-post',
+        slug: 'my-post',
+        locales: { en: { slug: 'my-post', path: 'posts/my-post.md', content: { title: 'A' } } },
+      };
+
+      const draft = {
+        collectionName: 'posts',
+        isNew: false,
+        originalEntry,
+        currentLocales: { en: true },
+        currentSlugs: {},
+        currentValues: { en: { title: 'B' } },
+        files: {},
+        interacted: true,
+      };
+
+      await saveBackup(draft);
+      await saveBackup({ ...draft, isNew: true, originalEntry: undefined });
+
+      const [[existing], [created]] = mockBackupDB.put.mock.calls;
+
+      expect(existing.baseEntry).toEqual(originalEntry);
+      // A copy, so that it isn’t tied to the draft
+      expect(existing.baseEntry).not.toBe(originalEntry);
+      expect(created).not.toHaveProperty('baseEntry');
+    });
+
+    it('should store the folder chosen with the path editor', async () => {
+      vi.mocked(isDraftModified).mockReturnValue(true);
+
+      const draft = {
+        collectionName: 'pages',
+        originalEntry: { slug: 'about', subPath: 'about' },
+        currentLocales: { en: true },
+        currentSlugs: {},
+        currentPath: 'company',
+        currentValues: { en: { title: 'About' } },
+        files: {},
+        interacted: true,
+      };
+
+      await saveBackup(draft);
+      // A collection without the `meta.path` option has no folder to store
+      await saveBackup({ ...draft, currentPath: undefined });
+
+      const [[moved], [unmoved]] = mockBackupDB.put.mock.calls;
+
+      expect(moved.currentPath).toBe('company');
+      expect(unmoved).not.toHaveProperty('currentPath');
+    });
+
+    it('should store a new index file’s backup apart from a new entry’s', async () => {
+      // The index file has fields of its own, so a new entry mustn’t be offered its backup, nor the
+      // other way round
+      vi.mocked(isDraftModified).mockReturnValue(true);
+
+      const draft = {
+        collection: { name: 'posts', fields: [], index_file: { name: '_home' } },
+        collectionName: 'posts',
+        isIndexFile: true,
+        originalEntry: undefined,
+        currentLocales: { en: true },
+        currentSlugs: {},
+        currentValues: { en: { title: 'Home' } },
+        files: {},
+        interacted: true,
+      };
+
+      await saveBackup(draft);
+      await saveBackup({ ...draft, isIndexFile: false });
+
+      expect(mockBackupDB.put.mock.calls.map(([{ slug }]) => slug)).toEqual(['_home', '']);
+    });
+
     it('should store plain objects that IndexedDB can clone, not `$state` proxies', async () => {
       const { toRaw: actualToRaw } = await vi.importActual('@sveltia/utils/object');
 
@@ -450,7 +585,11 @@ describe('draft/backup', () => {
       const draft = proxify({
         collectionName: 'posts',
         fileName: undefined,
-        originalEntry: { slug: 'my-post' },
+        originalEntry: proxify({
+          id: 'posts/my-post',
+          slug: 'my-post',
+          locales: proxify({ en: proxify({ slug: 'my-post', content: proxify({ title: 'A' }) }) }),
+        }),
         currentLocales: proxify({ en: true, fr: false }),
         currentSlugs: proxify({ en: 'my-post' }),
         currentValues: proxify({ en: proxify({ title: 'My Post' }) }),
@@ -492,6 +631,11 @@ describe('draft/backup', () => {
           Object.values(value).some(containsProxy));
 
       expect(containsProxy(backup)).toBe(false);
+      expect(backup.baseEntry).toEqual({
+        id: 'posts/my-post',
+        slug: 'my-post',
+        locales: { en: { slug: 'my-post', content: { title: 'A' } } },
+      });
       expect(backup.currentLocales).toEqual({ en: true, fr: false });
       expect(backup.currentValues).toEqual({ en: { title: 'My Post' } });
       expect(backup.files['blob:http://localhost/abc']).toEqual({
@@ -527,7 +671,7 @@ describe('draft/backup', () => {
       const draft = {
         collectionName: 'posts',
         fileName: undefined,
-        originalEntry: { slug: 'my-post' },
+        originalEntry: { slug: 'my-post', subPath: 'my-post' },
         currentLocales: { en: true },
         currentSlugs: { en: 'my-post' },
         currentValues: { en: { title: 'My Post' } },
@@ -555,7 +699,7 @@ describe('draft/backup', () => {
       const draft = {
         collectionName: 'posts',
         fileName: undefined,
-        originalEntry: { slug: 'my-post' },
+        originalEntry: { slug: 'my-post', subPath: 'my-post' },
         currentLocales: { en: true },
         currentSlugs: { en: 'my-post' },
         currentValues: { en: { title: 'My Post' } },
@@ -568,6 +712,48 @@ describe('draft/backup', () => {
       expect(mockBackupDB.put).not.toHaveBeenCalled();
     });
 
+    it('should keep the backup while the user is asked whether to restore it', async () => {
+      mockPrefs.useDraftBackup = true;
+      // Nothing has been changed, which would otherwise delete the backup
+      vi.mocked(isDraftModified).mockReturnValue(false);
+
+      await saveBackup({
+        collectionName: 'posts',
+        originalEntry: { slug: 'my-post', subPath: 'my-post' },
+        interacted: true,
+        restorePending: true,
+      });
+
+      expect(mockBackupDB.delete).not.toHaveBeenCalled();
+      expect(mockBackupDB.put).not.toHaveBeenCalled();
+    });
+
+    it('should keep the backup of an unchanged entry someone else is editing', async () => {
+      mockPrefs.useDraftBackup = true;
+      vi.mocked(isDraftModified).mockReturnValue(false);
+
+      const draft = {
+        collectionName: 'posts',
+        originalEntry: { slug: 'my-post', subPath: 'my-post' },
+        interacted: true,
+      };
+
+      const key = /** @type {string} */ (getDraftLockKey(draft));
+
+      Object.assign(entryLocks, {
+        connection: 'mine',
+        locks: { [key]: { key, user_id: 'u2', name: 'Bob', since: '', connection: 'theirs' } },
+      });
+
+      try {
+        await saveBackup(draft);
+      } finally {
+        Object.assign(entryLocks, { connection: '', locks: {} });
+      }
+
+      expect(mockBackupDB.delete).not.toHaveBeenCalled();
+    });
+
     it('should not save backup for a read-only entry', async () => {
       mockPrefs.useDraftBackup = true;
       vi.mocked(isDraftModified).mockReturnValue(true);
@@ -576,7 +762,7 @@ describe('draft/backup', () => {
         collection: { name: 'posts', readonly: true },
         collectionName: 'posts',
         fileName: undefined,
-        originalEntry: { slug: 'my-post' },
+        originalEntry: { slug: 'my-post', subPath: 'my-post' },
         currentLocales: { en: true },
         currentSlugs: { en: 'my-post' },
         currentValues: { en: { title: 'My Post' } },
@@ -597,7 +783,7 @@ describe('draft/backup', () => {
       const draft = {
         collectionName: 'members',
         fileName: undefined,
-        originalEntry: { slug: '2', arrayIndex: 2 },
+        originalEntry: { slug: '2', subPath: '2', arrayIndex: 2 },
         currentLocales: { _default: true },
         currentSlugs: { _default: '2' },
         currentValues: { _default: { name: 'Bob' } },
@@ -696,6 +882,118 @@ describe('draft/backup', () => {
       updatedDraft = createMockDraft({ pendingEntries: [] });
       await restoreBackup({ backup, draft: updatedDraft });
       expect(updatedDraft.pendingEntries).toEqual([]);
+    });
+
+    describe('base entry', () => {
+      const baseEntry = {
+        id: 'posts/my-post',
+        slug: 'my-post',
+        locales: { en: { slug: 'my-post', path: 'posts/my-post.md', content: { title: 'A' } } },
+      };
+
+      /**
+       * Create a backup made from {@link baseEntry}.
+       * @param {object} [override] Override properties for the backup.
+       * @returns {object} Backup.
+       */
+      const createBackup = (override = {}) => ({
+        timestamp: new Date(),
+        cmsConfigVersion: 'v1.0.0',
+        collectionName: 'posts',
+        slug: 'my-post',
+        currentLocales: { en: true, ja: false },
+        currentSlugs: {},
+        currentValues: { en: { title: 'Mine' } },
+        files: {},
+        baseEntry: structuredClone(baseEntry),
+        ...override,
+      });
+
+      it('puts the draft back on the version the backup was made from, if it has changed', async () => {
+        // Someone else has since changed the title and added a Japanese file. Saving the restored
+        // edits over the draft made from that version would silently undo the change, so the draft
+        // is put back on the backup’s version, which makes the editor report the change and the
+        // save ask before overwriting it
+        const newerEntry = {
+          ...baseEntry,
+          locales: {
+            en: { ...baseEntry.locales.en, content: { title: 'Theirs' } },
+            ja: { slug: 'my-post', path: 'posts/my-post.ja.md', content: { title: 'Ja' } },
+          },
+        };
+
+        const backup = createBackup();
+
+        updatedDraft = createMockDraft({
+          originalEntry: newerEntry,
+          originalLocales: { en: true, ja: true },
+          currentLocales: { en: true, ja: true },
+        });
+
+        await restoreBackup({ backup, draft: updatedDraft });
+
+        expect(updatedDraft.originalEntry).toBe(backup.baseEntry);
+        // The Japanese file wasn’t there when the backup was made, so a save leaves it alone
+        // rather than deleting it
+        expect(updatedDraft.originalLocales).toEqual({ en: true, ja: false });
+        expect(updatedDraft.currentLocales).toEqual({ en: true, ja: false });
+      });
+
+      it('leaves the draft on the entry if it hasn’t changed since', async () => {
+        const originalEntry = structuredClone(baseEntry);
+        const originalLocales = { en: true, ja: false };
+
+        updatedDraft = createMockDraft({ originalEntry, originalLocales });
+
+        await restoreBackup({ backup: createBackup(), draft: updatedDraft });
+
+        expect(updatedDraft.originalEntry).toBe(originalEntry);
+        expect(updatedDraft.originalLocales).toBe(originalLocales);
+      });
+
+      it('leaves the draft alone for a backup without a base entry', async () => {
+        // A backup of a new entry, or one taken before the base entry was stored
+        const originalEntry = { ...baseEntry, locales: {} };
+
+        updatedDraft = createMockDraft({ originalEntry, originalLocales: { en: true } });
+
+        await restoreBackup({
+          backup: createBackup({ baseEntry: undefined }),
+          draft: updatedDraft,
+        });
+
+        expect(updatedDraft.originalEntry).toBe(originalEntry);
+
+        // A new entry has nothing to compare
+        updatedDraft = createMockDraft({ originalEntry: undefined });
+
+        await restoreBackup({ backup: createBackup(), draft: updatedDraft });
+
+        expect(updatedDraft.originalEntry).toBeUndefined();
+      });
+    });
+
+    it('should restore the folder chosen with the path editor', async () => {
+      const backup = {
+        timestamp: new Date(),
+        cmsConfigVersion: 'v1.0.0',
+        collectionName: 'pages',
+        slug: 'about',
+        currentLocales: { en: true },
+        currentSlugs: {},
+        currentPath: 'company/archive',
+        currentValues: { en: { title: 'About' } },
+        files: {},
+      };
+
+      updatedDraft = createMockDraft({ originalPath: 'company', currentPath: 'company' });
+      await restoreBackup({ backup, draft: updatedDraft });
+      expect(updatedDraft.currentPath).toBe('company/archive');
+
+      // An older backup has no folder, so the entry stays where it is
+      updatedDraft = createMockDraft({ originalPath: 'company', currentPath: 'company' });
+      await restoreBackup({ backup: { ...backup, currentPath: undefined }, draft: updatedDraft });
+      expect(updatedDraft.currentPath).toBe('company');
     });
 
     it('should update currentLocales and currentSlugs from backup', async () => {
@@ -1112,6 +1410,114 @@ describe('draft/backup', () => {
     });
   });
 
+  describe('entries sharing a slug', () => {
+    // With the collection `path` option `{{year}}/{{slug}}`, both entries have the slug `hello`
+    const entry2023 = { slug: 'hello', subPath: '2023/hello', locales: {} };
+    const entry2024 = { slug: 'hello', subPath: '2024/hello', locales: {} };
+
+    /**
+     * Create a draft of the given entry.
+     * @param {any} originalEntry Entry.
+     * @returns {any} Draft.
+     */
+    const createDraft = (originalEntry) => ({
+      collectionName: 'posts',
+      isNew: false,
+      originalEntry,
+      currentLocales: { en: true },
+      currentSlugs: { en: 'hello' },
+      currentValues: { en: { title: originalEntry.subPath } },
+      originalValues: { en: {} },
+      files: {},
+      interacted: true,
+    });
+
+    it('should store each entry’s backup under its own path', async () => {
+      vi.mocked(isDraftModified).mockReturnValue(true);
+
+      await saveBackup(createDraft(entry2023));
+      await saveBackup(createDraft(entry2024));
+
+      const [[first], [second]] = mockBackupDB.put.mock.calls;
+
+      expect(first.slug).toBe('2023/hello');
+      expect(second.slug).toBe('2024/hello');
+    });
+
+    it('should look up and discard only the entry’s own backup', async () => {
+      mockBackupDB.get.mockResolvedValue({
+        timestamp: new Date(),
+        cmsConfigVersion: 'v1.0.0',
+        collectionName: 'posts',
+        slug: '2024/hello',
+        currentLocales: { en: true },
+        currentSlugs: { en: 'hello' },
+        currentValues: { en: { title: 'Edited' } },
+        files: {},
+        baseEntry: entry2024,
+      });
+
+      const promise = restoreBackupIfNeeded({ draft: createDraft(entry2024) });
+
+      await vi.waitFor(() => expect(restoreDialogState.current?.resolve).toBeDefined());
+      restoreDialogState.current.resolve(false);
+      await promise;
+
+      expect(mockBackupDB.get).toHaveBeenCalledWith(['posts', '2024/hello']);
+      expect(mockBackupDB.delete).toHaveBeenCalledWith(['posts', '2024/hello']);
+      expect(mockBackupDB.delete).not.toHaveBeenCalledWith(['posts', 'hello']);
+    });
+
+    describe('backup made from another entry', () => {
+      // A backup stored under the slug, before the backups were keyed by the path, which another
+      // entry’s path can be the same as
+      const backup = {
+        timestamp: new Date(),
+        cmsConfigVersion: 'v1.0.0',
+        collectionName: 'posts',
+        slug: 'hello',
+        currentLocales: { en: true },
+        currentSlugs: { en: 'hello' },
+        currentValues: { en: { title: 'Edited' } },
+        files: {},
+        baseEntry: entry2023,
+      };
+
+      const helloEntry = { slug: 'hello', subPath: 'hello', locales: {} };
+
+      it('should not be offered to restore', async () => {
+        mockBackupDB.get.mockResolvedValue(backup);
+        restoreDialogState.current = { show: false };
+
+        const draft = createDraft(helloEntry);
+
+        await restoreBackupIfNeeded({ draft });
+
+        expect(mockBackupDB.get).toHaveBeenCalledWith(['posts', 'hello']);
+        expect(restoreDialogState.current.show).toBe(false);
+        expect(draft.originalEntry).toBe(helloEntry);
+        // It’s not the draft’s to discard
+        expect(mockBackupDB.delete).not.toHaveBeenCalled();
+      });
+
+      it('should not show the toast', async () => {
+        mockBackupDB.get.mockResolvedValue(backup);
+
+        await showBackupToastIfNeeded(createDraft(helloEntry));
+
+        expect(backupToastState.current.saved).toBe(false);
+      });
+
+      it('should be found by the entry it was made from', async () => {
+        mockBackupDB.get.mockResolvedValue(backup);
+
+        await showBackupToastIfNeeded(createDraft({ ...helloEntry, subPath: '2023/hello' }));
+
+        expect(backupToastState.current.saved).toBe(true);
+      });
+    });
+  });
+
   describe('stores', () => {
     it('should initialize restoreDialogState with show: false', async () => {
       expect(restoreDialogState.current).toEqual({ show: false });
@@ -1126,6 +1532,120 @@ describe('draft/backup', () => {
     });
   });
 
+  describe('draft lock while the restore dialog is open', () => {
+    // @see https://github.com/sveltia/sveltia-cms/issues/566
+    const backup = {
+      timestamp: new Date(),
+      cmsConfigVersion: 'v1.0.0',
+      collectionName: 'posts',
+      slug: 'my-post',
+      currentLocales: { en: true },
+      currentSlugs: { en: 'my-post' },
+      currentValues: { en: { title: 'Backup' } },
+      files: {},
+    };
+
+    /**
+     * Create a draft of an existing entry.
+     * @returns {any} Draft.
+     */
+    const createDraft = () => ({
+      collectionName: 'posts',
+      fileName: undefined,
+      originalEntry: { slug: 'my-post', subPath: 'my-post' },
+      currentLocales: { en: true },
+      currentSlugs: { en: 'my-post' },
+      currentValues: { en: { title: 'Current' } },
+      originalValues: { en: {} },
+      files: {},
+      interacted: false,
+    });
+
+    it.each([
+      ['restored', true],
+      ['discarded', false],
+      ['left unanswered', undefined],
+    ])('should lock the draft until the backup is %s', async (_label, answer) => {
+      mockBackupDB.get.mockResolvedValue(backup);
+
+      const draft = createDraft();
+      const promise = restoreBackupIfNeeded({ draft });
+
+      await vi.waitFor(() => expect(restoreDialogState.current.show).toBe(true));
+      expect(draft.restorePending).toBe(true);
+      restoreDialogState.current.resolve(answer);
+      await promise;
+      expect(draft.restorePending).toBe(false);
+      expect(draft.currentValues.en.title).toBe(answer ? 'Backup' : 'Current');
+    });
+
+    it('should unlock the draft even if the restore fails', async () => {
+      mockBackupDB.get.mockResolvedValue(backup);
+      mockBackupDB.delete.mockRejectedValueOnce(new Error('Failed'));
+
+      const draft = createDraft();
+      const promise = restoreBackupIfNeeded({ draft });
+
+      await vi.waitFor(() => expect(restoreDialogState.current.show).toBe(true));
+      restoreDialogState.current.resolve(false);
+      await expect(promise).rejects.toThrow('Failed');
+      expect(draft.restorePending).toBe(false);
+    });
+
+    it('should not ask about the backup of a draft replaced while it was looked up', async () => {
+      /**
+       * Resolve the first backup lookup.
+       * @type {(value: any) => void}
+       */
+      let resolveLookup = () => {};
+
+      mockBackupDB.get.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveLookup = resolve;
+          }),
+      );
+      mockBackupDB.get.mockResolvedValueOnce(undefined);
+
+      const staleDraft = createDraft();
+      const stale = restoreBackupIfNeeded({ draft: staleDraft });
+
+      // Another entry is opened before the first lookup is done
+      await restoreBackupIfNeeded({ draft: createDraft() });
+      resolveLookup(backup);
+      await stale;
+
+      expect(restoreDialogState.current.show).toBe(false);
+      expect(staleDraft.restorePending).toBeUndefined();
+    });
+
+    it('should close a dialog left open for a draft that has been replaced', async () => {
+      const resolve = vi.fn();
+
+      restoreDialogState.current = { show: true, timestamp: new Date(), resolve };
+      mockBackupDB.get.mockResolvedValue(undefined);
+
+      await restoreBackupIfNeeded({ draft: createDraft() });
+      expect(restoreDialogState.current.show).toBe(false);
+      expect(resolve).toHaveBeenCalledWith();
+      expect(mockBackupDB.delete).not.toHaveBeenCalled();
+
+      // A dialog without a resolver is just closed
+      restoreDialogState.current = { show: true };
+      await restoreBackupIfNeeded({ draft: createDraft() });
+      expect(restoreDialogState.current.show).toBe(false);
+    });
+
+    it('should not lock a draft without a backup', async () => {
+      mockBackupDB.get.mockResolvedValue(undefined);
+
+      const draft = createDraft();
+
+      await restoreBackupIfNeeded({ draft });
+      expect(draft.restorePending).toBeUndefined();
+    });
+  });
+
   describe('restoreBackupIfNeeded', () => {
     /**
      * Create a draft to restore a backup to.
@@ -1135,7 +1655,7 @@ describe('draft/backup', () => {
     const createRestoreDraft = (override = {}) => ({
       collectionName: 'posts',
       fileName: undefined,
-      originalEntry: { slug: 'my-post' },
+      originalEntry: { slug: 'my-post', subPath: 'my-post' },
       currentLocales: { en: true },
       currentSlugs: { en: 'my-post' },
       currentValues: { en: {} },
@@ -1167,7 +1687,7 @@ describe('draft/backup', () => {
       mockPrefs.useDraftBackup = true;
 
       await restoreBackupIfNeeded({
-        draft: createRestoreDraft({ originalEntry: { slug: '2', arrayIndex: 2 } }),
+        draft: createRestoreDraft({ originalEntry: { slug: '2', subPath: '2', arrayIndex: 2 } }),
       });
 
       expect(mockBackupDB.get).not.toHaveBeenCalled();
@@ -1424,7 +1944,7 @@ describe('draft/backup', () => {
 
       await showBackupToastIfNeeded({
         collectionName: 'posts',
-        originalEntry: { slug: 'my-post' },
+        originalEntry: { slug: 'my-post', subPath: 'my-post' },
       });
 
       expect(mockBackupDB.get).not.toHaveBeenCalled();
@@ -1450,7 +1970,7 @@ describe('draft/backup', () => {
 
       await showBackupToastIfNeeded({
         collectionName: 'posts',
-        originalEntry: { slug: 'my-post' },
+        originalEntry: { slug: 'my-post', subPath: 'my-post' },
       });
 
       expect(mockBackupDB.get).toHaveBeenCalledWith(['posts', 'my-post']);
@@ -1467,7 +1987,7 @@ describe('draft/backup', () => {
 
       await showBackupToastIfNeeded({
         collectionName: 'posts',
-        originalEntry: { slug: 'no-backup-post' },
+        originalEntry: { slug: 'no-backup-post', subPath: 'no-backup-post' },
       });
 
       expect(mockBackupDB.get).toHaveBeenCalledWith(['posts', 'no-backup-post']);
@@ -1547,7 +2067,7 @@ describe('draft/backup', () => {
     const createDraft = (title) => ({
       collectionName: 'posts',
       fileName: undefined,
-      originalEntry: { slug: 'test-post' },
+      originalEntry: { slug: 'test-post', subPath: 'test-post' },
       currentLocales: { en: true },
       currentSlugs: { en: 'test-post' },
       currentValues: { en: { title } },
@@ -1585,6 +2105,35 @@ describe('draft/backup', () => {
       await vi.advanceTimersByTimeAsync(600);
 
       expect(mockBackupDB.put).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('cancelBackup', () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+      vi.mocked(isDraftModified).mockReturnValue(true);
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('should drop a pending backup', async () => {
+      scheduleBackup({
+        collectionName: 'posts',
+        originalEntry: { slug: 'test-post', subPath: 'test-post' },
+        currentValues: { en: { title: 'Hello' } },
+        files: {},
+        interacted: true,
+      });
+      cancelBackup();
+      await vi.advanceTimersByTimeAsync(600);
+
+      expect(mockBackupDB.put).not.toHaveBeenCalled();
+    });
+
+    it('should do nothing when no backup is pending', () => {
+      expect(() => cancelBackup()).not.toThrow();
     });
   });
 
@@ -1627,6 +2176,97 @@ describe('draft/backup', () => {
 
       expect(mockBackupDB.delete).not.toHaveBeenCalled();
     });
+    it('should use a database of its own for the test backend, which has no repository', async () => {
+      vi.resetModules();
+
+      vi.doMock('$lib/services/backends', () => ({
+        backend: { current: { name: 'test-repo' } },
+      }));
+
+      const { IndexedDB: _IndexedDB } = await import('@sveltia/utils/storage');
+
+      vi.mocked(_IndexedDB).mockImplementation(MockIndexedDB);
+
+      const { deleteBackup: _deleteBackup } = await import('./backup');
+
+      await new Promise((resolve) => {
+        setTimeout(resolve);
+      });
+
+      expect(_IndexedDB).toHaveBeenCalledExactlyOnceWith(
+        'test-repo:sveltia-cms-test',
+        'draft-backups',
+        { keyPath: ['collectionName', 'slug'] },
+      );
+
+      await _deleteBackup('posts', 'my-post');
+
+      expect(mockBackupDB.delete).toHaveBeenCalledWith(['posts', 'my-post']);
+    });
+  });
+
+  describe('backend switch', () => {
+    it('should open the database of the new backend when the backend changes', async () => {
+      vi.resetModules();
+
+      // Create the box with the fresh module graph, so the effect of the fresh module tracks it
+      vi.doMock('$lib/services/backends', async () => ({
+        backend: (await import('$lib/services/utils/state.svelte')).createRawState({
+          repository: { databaseName: 'github:a/b' },
+        }),
+      }));
+
+      const { backend: _backend } = await import('$lib/services/backends');
+      const { IndexedDB: _IndexedDB } = await import('@sveltia/utils/storage');
+
+      vi.mocked(_IndexedDB).mockImplementation(MockIndexedDB);
+
+      const { deleteBackup: _deleteBackup } = await import('./backup');
+
+      await new Promise((resolve) => {
+        setTimeout(resolve);
+      });
+
+      expect(_IndexedDB).toHaveBeenCalledTimes(1);
+      expect(_IndexedDB).toHaveBeenLastCalledWith('github:a/b', 'draft-backups', {
+        keyPath: ['collectionName', 'slug'],
+      });
+
+      _backend.current = { repository: { databaseName: 'local:a/b' } };
+
+      await new Promise((resolve) => {
+        setTimeout(resolve);
+      });
+
+      expect(_IndexedDB).toHaveBeenCalledTimes(2);
+      expect(_IndexedDB).toHaveBeenLastCalledWith('local:a/b', 'draft-backups', {
+        keyPath: ['collectionName', 'slug'],
+      });
+
+      await _deleteBackup('posts', 'my-post');
+
+      expect(mockBackupDB.delete).toHaveBeenCalledWith(['posts', 'my-post']);
+
+      // Another backend object with the same database reuses the open handle
+      _backend.current = { repository: { databaseName: 'local:a/b' } };
+
+      await new Promise((resolve) => {
+        setTimeout(resolve);
+      });
+
+      expect(_IndexedDB).toHaveBeenCalledTimes(2);
+
+      // Signing out closes it
+      _backend.current = undefined;
+
+      await new Promise((resolve) => {
+        setTimeout(resolve);
+      });
+
+      await _deleteBackup('posts', 'my-post');
+
+      expect(mockBackupDB.delete).toHaveBeenCalledTimes(1);
+    });
   });
 
   describe('additional backup tests', () => {
@@ -1666,6 +2306,35 @@ describe('draft/backup', () => {
       await _deleteBackup('posts', 'my-post');
 
       expect(mockBackupDB.delete).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('getBackupSlug()', () => {
+    it('keys the backup of an entry from a contributor’s pull request apart', async () => {
+      const { getBackupSlug } = await import('./backup');
+      const collection = /** @type {any} */ ({ name: 'posts' });
+
+      /**
+       * Create an entry with the given pull request.
+       * @param {any} [pullRequest] Pull request.
+       * @returns {any} Entry.
+       */
+      const entry = (pullRequest) => ({
+        subPath: '2024/hello',
+        ...(pullRequest ? { workflow: { pullRequest } } : {}),
+      });
+
+      expect(getBackupSlug({ collection, originalEntry: entry() })).toBe('2024/hello');
+      expect(
+        getBackupSlug({ collection, originalEntry: entry({ branch: 'cms/posts/2024%2Fhello' }) }),
+      ).toBe('2024/hello');
+      expect(
+        getBackupSlug({
+          collection,
+          originalEntry: entry(createMockForkPullRequest({ slug: '2024%2Fhello' })),
+        }),
+      ).toBe('2024/hello?_pr=7');
+      expect(getBackupSlug({ collection, fileName: 'site' })).toBe('site');
     });
   });
 });

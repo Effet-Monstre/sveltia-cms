@@ -28,12 +28,7 @@
   const entryDraft = getEntryDraftContext();
 
   /** @type {Props} */
-  let {
-    /* eslint-disable prefer-const */
-    previewRenderer,
-    locale,
-    /* eslint-enable prefer-const */
-  } = $props();
+  let { previewRenderer, locale } = $props();
 
   /**
    * Element the renderer is given, so it can set itself up against the preview pane.

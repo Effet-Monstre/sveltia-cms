@@ -1,6 +1,7 @@
 import { openEntryPullRequest, post, WORKFLOW_CONFIG } from '../../fixtures/configs/workflow.js';
 import { createPNG } from '../../fixtures/files.js';
 import { expect, test } from '../../fixtures/test.js';
+import { getCard, getEditor, getEntryRows, openBoard, openEntry } from '../../fixtures/ui.js';
 
 /**
  * @import { Locator, Page } from '@playwright/test';
@@ -22,29 +23,6 @@ test.beforeEach(async ({ github }) => {
 const getEntryGroup = (page, name) =>
   page.getByRole('grid', { name: 'Entries' }).getByRole('rowgroup', { name, exact: true });
 
-/**
- * Get the names of the Editorial Workflow branches.
- * @param {MockGitHub} github GitHub mock.
- * @returns {string[]} Branch names.
- */
-const getWorkflowBranches = (github) =>
-  [...github.refs.keys()].filter((branch) => branch.startsWith('cms/'));
-
-/**
- * Open an entry in the editor.
- * @param {Page} page Page.
- * @param {string} title Entry title.
- * @returns {Promise<Locator>} Editor.
- */
-const openEntry = async (page, title) => {
-  const editor = page.getByRole('group', { name: 'Content Editor' });
-
-  await page.getByRole('row', { name: new RegExp(title) }).click();
-  await expect(editor.getByRole('textbox', { name: 'Title' })).toHaveValue(title);
-
-  return editor;
-};
-
 test('saves a new entry to a branch and opens a draft pull request', async ({
   cms,
   github,
@@ -55,7 +33,7 @@ test('saves a new entry to a branch and opens a draft pull request', async ({
   await cms.open();
   await page.getByRole('button', { name: 'Create New Entry' }).first().click();
 
-  const editor = page.getByRole('group', { name: 'Content Editor' });
+  const editor = getEditor(page);
 
   await editor.getByRole('textbox', { name: 'Title' }).fill('Second Post');
   await editor.getByRole('textbox', { name: 'Body' }).fill('Coming soon.');
@@ -86,6 +64,40 @@ test('saves a new entry to a branch and opens a draft pull request', async ({
   ]);
 });
 
+test.describe('with `prompt_commit_messages` set to `suffix`', () => {
+  test.use({
+    config: {
+      ...WORKFLOW_CONFIG,
+      backend: { ...WORKFLOW_CONFIG.backend, prompt_commit_messages: 'suffix' },
+    },
+  });
+
+  test('adds the note to the commit and the pull request title', async ({ cms, github, page }) => {
+    await cms.open();
+    await page.getByRole('button', { name: 'Create New Entry' }).first().click();
+
+    const editor = getEditor(page);
+    const dialog = page.getByRole('alertdialog', { name: 'Commit Message' });
+
+    await editor.getByRole('textbox', { name: 'Title' }).fill('Second Post');
+    await editor.getByRole('textbox', { name: 'Body' }).fill('Coming soon.');
+    await editor.getByRole('button', { name: 'Save' }).click();
+    await dialog.getByRole('textbox', { name: 'Note' }).fill('(#12)');
+    await dialog.getByRole('button', { name: 'OK' }).click();
+    await page
+      .getByRole('alertdialog', { name: 'Send for Review' })
+      .getByRole('button', { name: 'Later' })
+      .click();
+
+    await expect
+      .poll(() => github.pullRequests)
+      .toMatchObject([{ title: 'Create Post “second-post” (#12)', head: 'cms/posts/second-post' }]);
+    expect(github.received.map(({ message }) => message.headline)).toEqual([
+      'Create Post “second-post” (#12)',
+    ]);
+  });
+});
+
 test('saves a change to a published entry to a pull request', async ({ cms, github, page }) => {
   await cms.open();
 
@@ -103,9 +115,7 @@ test('saves a change to a published entry to a pull request', async ({ cms, gith
     .toBe(post('First Post', 'Hello again!'));
   expect(github.readFile('content/posts/first-post.md')).toBe(post('First Post', 'Hello, world!'));
   // The draft stands in for the published entry, rather than being listed twice
-  await expect(page.getByRole('grid', { name: 'Entries' }).getByRole('row')).toHaveText([
-    /First Post.*Draft/,
-  ]);
+  await expect(getEntryRows(page)).toHaveText([/First Post.*Draft/]);
 
   // Another save goes to the same branch and pull request
   await openEntry(page, 'First Post');
@@ -131,35 +141,69 @@ test('moves an entry through the review stages', async ({ cms, github, page }) =
   await cms.open();
   await openEntry(page, 'Second Post');
 
-  /**
-   * Change the status with the editor’s status menu.
-   * @param {RegExp} current Current status.
-   * @param {string} status New status.
-   */
-  const changeStatus = async (current, status) => {
-    await cms.chooseMenuItem(
-      page.getByRole('button', { name: current }),
-      page.getByRole('menuitemradio', { name: status }),
-    );
-  };
-
-  await changeStatus(/Status: .*Draft/, 'In Review');
+  await cms.changeStatus(/Status: .*Draft/, 'In Review');
   // The labels are updated first, then the draft state
   await expect
     .poll(() => ({ labels: pullRequest.labels, draft: pullRequest.draft }))
     .toEqual({ labels: ['sveltia-cms/pending_review'], draft: false });
 
-  await changeStatus(/Status: .*In Review/, 'Ready');
+  await cms.changeStatus(/Status: .*In Review/, 'Ready');
   // The labels are updated first, then the draft state
   await expect
     .poll(() => ({ labels: pullRequest.labels, draft: pullRequest.draft }))
     .toEqual({ labels: ['sveltia-cms/pending_publish'], draft: false });
+  // The pull request is the user’s own, which the GitHub doesn’t let them approve
+  expect(pullRequest.approvals).toBeUndefined();
 
-  await changeStatus(/Status: .*Ready/, 'Draft');
+  await cms.changeStatus(/Status: .*Ready/, 'Draft');
   // The labels are updated first, then the draft state
   await expect
     .poll(() => ({ labels: pullRequest.labels, draft: pullRequest.draft }))
     .toEqual({ labels: ['sveltia-cms/draft'], draft: true });
+});
+
+test('approves a colleague’s pull request while it’s marked as ready', async ({
+  cms,
+  github,
+  page,
+}) => {
+  const pullRequest = openEntryPullRequest(github, {
+    slug: 'second-post',
+    files: { 'content/posts/second-post.md': post('Second Post', 'Coming soon.') },
+    status: 'pending_review',
+  });
+
+  pullRequest.author = github.colleague;
+
+  await cms.open();
+  await openEntry(page, 'Second Post');
+  await cms.changeStatus(/Status: .*In Review/, 'Ready');
+
+  // The approval is pinned to the commit the entry was reviewed at
+  await expect
+    .poll(() => pullRequest.approvals)
+    .toEqual([
+      expect.objectContaining({
+        login: github.user.login,
+        commitId: github.getPullRequestHead(pullRequest).oid,
+      }),
+    ]);
+
+  // Moving the entry back withdraws the approval
+  await cms.changeStatus(/Status: .*Ready/, 'In Review');
+  await expect.poll(() => pullRequest.approvals).toEqual([]);
+
+  // A review can’t be deleted on GitHub, so it’s dismissed
+  expect(pullRequest.dismissals).toEqual(['The entry is no longer ready to publish.']);
+
+  // Moving the entry between the other stages approves nothing
+  await cms.changeStatus(/Status: .*In Review/, 'Draft');
+  await expect.poll(() => pullRequest.labels).toEqual(['sveltia-cms/draft']);
+  expect(pullRequest.approvals).toEqual([]);
+
+  // Marking it as ready again approves it again
+  await cms.changeStatus(/Status: .*Draft/, 'Ready');
+  await expect.poll(() => pullRequest.approvals).toHaveLength(1);
 });
 
 test('keeps the other labels of a pull request', async ({ cms, github, page }) => {
@@ -204,10 +248,46 @@ test('publishes an entry by merging its pull request', async ({ cms, github, pag
   expect(github.head.parents).toHaveLength(2);
   // The branch is deleted after the merge
   await expect.poll(() => github.refs.has('cms/posts/second-post')).toBe(false);
-  await expect(page.getByRole('grid', { name: 'Entries' }).getByRole('row')).toHaveText([
-    /First Post/,
-    /Second Post/,
-  ]);
+  await expect(getEntryRows(page)).toHaveText([/First Post/, /Second Post/]);
+});
+
+// @see https://github.com/sveltia/sveltia-cms/issues/1094
+test('publishes an entry once the required check on its pull request passes', async ({
+  cms,
+  github,
+  page,
+}) => {
+  const pullRequest = openEntryPullRequest(github, {
+    slug: 'second-post',
+    files: { 'content/posts/second-post.md': post('Second Post', 'Coming soon.') },
+    status: 'pending_publish',
+  });
+
+  github.checksRunning = true;
+  await page.clock.install();
+  await cms.open();
+
+  const editor = await openEntry(page, 'Second Post');
+
+  await editor.getByRole('button', { name: 'Publish Entry' }).click();
+  await page
+    .getByRole('alertdialog', { name: 'Publish Entry' })
+    .getByRole('button', { name: 'Publish' })
+    .click();
+
+  // GitHub can’t merge it yet, so the CMS sets it to auto-merge once the check passes
+  await expect.poll(() => pullRequest.autoMerge).toMatchObject({ method: 'merge' });
+  expect(pullRequest.state).toBe('open');
+
+  // The CMS checks every 10 seconds whether it has been merged
+  github.finishChecks();
+  await page.clock.fastForward('00:11');
+
+  await expect(getEntryRows(page)).toHaveText([/First Post/, /Second Post/]);
+  expect(pullRequest.state).toBe('merged');
+  expect(github.readFile('content/posts/second-post.md')).toBe(post('Second Post', 'Coming soon.'));
+  // The branch is deleted after the merge
+  await expect.poll(() => github.refs.has('cms/posts/second-post')).toBe(false);
 });
 
 test('refuses to publish an entry whose branch holds other work', async ({ cms, github, page }) => {
@@ -412,11 +492,9 @@ test('deletes an unpublished entry by closing its pull request', async ({ cms, g
     .click();
 
   await expect.poll(() => pullRequest.state).toBe('closed');
-  expect(github.refs.has('cms/posts/second-post')).toBe(false);
+  await expect.poll(() => github.refs.has('cms/posts/second-post')).toBe(false);
   expect(github.head.oid).toBe(mainBefore);
-  await expect(page.getByRole('grid', { name: 'Entries' }).getByRole('row')).toHaveText([
-    /First Post/,
-  ]);
+  await expect(getEntryRows(page)).toHaveText([/First Post/]);
 });
 
 test('marks a published entry for deletion with a pull request', async ({ cms, github, page }) => {
@@ -450,22 +528,11 @@ test.describe('on the Editorial Workflow page', () => {
     });
   });
 
-  /**
-   * Get the card of an entry on the board.
-   * @param {Page} page Page.
-   * @param {string} title Entry title.
-   * @returns {Locator} Card.
-   */
-  const getCard = (page, title) =>
-    page
-      .getByRole('group', { name: 'Editorial Workflow' })
-      .getByRole('listitem')
-      .filter({ has: page.getByRole('button', { name: title }) });
-
   test('carries out a pending deletion', async ({ cms, github, page }) => {
     await cms.open();
-    await page.getByRole('radio', { name: 'Editorial Workflow' }).click();
-    await getCard(page, 'First Post').getByRole('button', { name: 'Delete Entry' }).click();
+    await getCard(await openBoard(page), 'First Post')
+      .getByRole('button', { name: 'Delete Entry' })
+      .click();
     await page.getByRole('alertdialog').getByRole('button', { name: 'Delete' }).click();
 
     await expect.poll(() => github.pullRequests[0].state).toBe('merged');
@@ -476,15 +543,16 @@ test.describe('on the Editorial Workflow page', () => {
 
   test('cancels a pending deletion', async ({ cms, github, page }) => {
     await cms.open();
-    await page.getByRole('radio', { name: 'Editorial Workflow' }).click();
-    await getCard(page, 'First Post').getByRole('button', { name: 'Cancel Deletion' }).click();
+    await getCard(await openBoard(page), 'First Post')
+      .getByRole('button', { name: 'Cancel Deletion' })
+      .click();
     await page
       .getByRole('alertdialog', { name: 'Cancel Deletion' })
       .getByRole('button', { name: 'Cancel Deletion' })
       .click();
 
     await expect.poll(() => github.pullRequests[0].state).toBe('closed');
-    expect(github.refs.has('cms/posts/first-post')).toBe(false);
+    await expect.poll(() => github.refs.has('cms/posts/first-post')).toBe(false);
     expect(github.readFile('content/posts/first-post.md')).toBe(
       post('First Post', 'Hello, world!'),
     );
@@ -511,12 +579,11 @@ test('discards the changes to a published entry', async ({ cms, github, page }) 
     .click();
 
   await expect.poll(() => pullRequest.state).toBe('closed');
-  expect(github.refs.has('cms/posts/first-post')).toBe(false);
+  await expect.poll(() => github.refs.has('cms/posts/first-post')).toBe(false);
   expect(github.readFile('content/posts/first-post.md')).toBe(post('First Post', 'Hello, world!'));
-  // The published version is shown again
-  await expect(page.getByRole('grid', { name: 'Entries' }).getByRole('row')).toHaveText([
-    /^\s*First Post\s*$/,
-  ]);
+  // The published version is shown again, without a status
+  await expect(getEntryRows(page)).toHaveText([/First Post/]);
+  await expect(getEntryRows(page).locator('.status-badge')).toHaveCount(0);
 });
 
 test('saves a draft with a required field left empty, but keeps it from review', async ({
@@ -527,7 +594,7 @@ test('saves a draft with a required field left empty, but keeps it from review',
   await cms.open();
   await page.getByRole('button', { name: 'Create New Entry' }).first().click();
 
-  const editor = page.getByRole('group', { name: 'Content Editor' });
+  const editor = getEditor(page);
 
   await editor.getByRole('textbox', { name: 'Title' }).fill('Second Post');
   await editor.getByRole('button', { name: 'Save' }).click();
@@ -594,7 +661,7 @@ test('resets a branch left over from an earlier pull request', async ({ cms, git
   await cms.open();
   await page.getByRole('button', { name: 'Create New Entry' }).first().click();
 
-  const editor = page.getByRole('group', { name: 'Content Editor' });
+  const editor = getEditor(page);
 
   await editor.getByRole('textbox', { name: 'Title' }).fill('Second Post');
   await editor.getByRole('textbox', { name: 'Body' }).fill('A new idea.');
@@ -633,9 +700,7 @@ test('drops a labelled pull request moved to another base branch from the board'
   await cms.open();
 
   // The entry isn’t listed as unpublished, and the board has nothing on it
-  await expect(page.getByRole('grid', { name: 'Entries' }).getByRole('row')).toHaveText([
-    /First Post/,
-  ]);
+  await expect(getEntryRows(page)).toHaveText([/First Post/]);
   await page.getByRole('radio', { name: 'Editorial Workflow' }).click();
 
   const board = page.getByRole('group', { name: 'Editorial Workflow' });
@@ -674,7 +739,7 @@ test('refuses to save onto a workflow branch with a pull request to another bran
   await cms.open();
   await page.getByRole('button', { name: 'Create New Entry' }).first().click();
 
-  const editor = page.getByRole('group', { name: 'Content Editor' });
+  const editor = getEditor(page);
 
   await editor.getByRole('textbox', { name: 'Title' }).fill('Second Post');
   await editor.getByRole('textbox', { name: 'Body' }).fill('A new idea.');
@@ -740,10 +805,8 @@ test('deletes several unpublished entries at once', async ({ cms, github, page }
   await page.getByRole('alertdialog').getByRole('button', { name: 'Delete' }).click();
 
   await expect.poll(() => pullRequests.map(({ state }) => state)).toEqual(['closed', 'closed']);
-  expect(getWorkflowBranches(github)).toEqual([]);
-  await expect(page.getByRole('grid', { name: 'Entries' }).getByRole('row')).toHaveText([
-    /First Post/,
-  ]);
+  expect(github.getWorkflowBranches()).toEqual([]);
+  await expect(getEntryRows(page)).toHaveText([/First Post/]);
 });
 
 test.describe('with an image field', () => {
@@ -772,7 +835,7 @@ test.describe('with an image field', () => {
     await cms.open();
     await page.getByRole('button', { name: 'Create New Entry' }).first().click();
 
-    const editor = page.getByRole('group', { name: 'Content Editor' });
+    const editor = getEditor(page);
 
     await editor.getByRole('textbox', { name: 'Title' }).fill('Second Post');
     await editor.getByRole('textbox', { name: 'Body' }).fill('Coming soon.');
@@ -822,5 +885,110 @@ test.describe('with an image field', () => {
     await expect(
       page.getByRole('grid', { name: 'Assets' }).getByRole('row', { name: 'sunrise.png' }),
     ).toBeVisible();
+  });
+
+  test('takes a replaced image off the branch, so the entry can be published', async ({
+    cms,
+    github,
+    page,
+  }) => {
+    const firstImage = createPNG({ color: [255, 128, 0] });
+    const secondImage = createPNG({ color: [0, 128, 255] });
+    const editor = getEditor(page);
+
+    const coverInput = editor
+      .getByRole('group', { name: '“\u2068Cover\u2069” Field' })
+      .locator('input[type="file"]')
+      .first();
+
+    await cms.open();
+    await page.getByRole('button', { name: 'Create New Entry' }).first().click();
+    await editor.getByRole('textbox', { name: 'Title' }).fill('Second Post');
+    await editor.getByRole('textbox', { name: 'Body' }).fill('Coming soon.');
+    await coverInput.setInputFiles({
+      name: 'sunrise.png',
+      mimeType: 'image/png',
+      buffer: firstImage,
+    });
+    await expect(editor.getByRole('button', { name: 'Remove Image' })).toBeVisible();
+    await editor.getByRole('button', { name: 'Save' }).click();
+    await page
+      .getByRole('alertdialog', { name: 'Send for Review' })
+      .getByRole('button', { name: 'Later' })
+      .click();
+
+    await expect
+      .poll(() => github.readFile('content/posts/second-post.md', 'cms/posts/second-post'))
+      .toMatch(/cover: \/images\/sunrise\.png/);
+
+    // Replace the image in the same draft
+    await openEntry(page, 'Second Post');
+    await editor.getByRole('button', { name: 'Remove Image' }).click();
+    await coverInput.setInputFiles({
+      name: 'sunset.png',
+      mimeType: 'image/png',
+      buffer: secondImage,
+    });
+    await expect(editor.getByRole('button', { name: 'Remove Image' })).toBeVisible();
+    await editor.getByRole('button', { name: 'Save' }).click();
+    await page
+      .getByRole('alertdialog', { name: 'Send for Review' })
+      .getByRole('button', { name: 'Later' })
+      .click();
+
+    await expect
+      .poll(() => github.readFile('content/posts/second-post.md', 'cms/posts/second-post'))
+      .toMatch(/cover: \/images\/sunset\.png/);
+
+    const branchTree = github.getHead('cms/posts/second-post').tree;
+
+    expect(github.blobs.get(branchTree.get('static/images/sunset.png') ?? '')).toEqual(secondImage);
+    // The first upload, which nothing uses anymore, is gone from the branch
+    expect(branchTree.has('static/images/sunrise.png')).toBe(false);
+
+    const [pullRequest] = github.pullRequests;
+
+    await openEntry(page, 'Second Post');
+    await cms.chooseMenuItem(
+      page.getByRole('button', { name: /Status: .*Draft/ }),
+      page.getByRole('menuitemradio', { name: 'Ready' }),
+    );
+    await expect.poll(() => pullRequest.labels).toEqual(['sveltia-cms/pending_publish']);
+    await editor.getByRole('button', { name: 'Publish Entry' }).click();
+    await page
+      .getByRole('alertdialog', { name: 'Publish Entry' })
+      .getByRole('button', { name: 'Publish' })
+      .click();
+
+    await expect.poll(() => pullRequest.state).toBe('merged');
+    expect(github.head.tree.has('static/images/sunset.png')).toBe(true);
+    expect(github.head.tree.has('static/images/sunrise.png')).toBe(false);
+  });
+});
+
+test.describe('without a configured branch', () => {
+  test.use({
+    config: {
+      ...WORKFLOW_CONFIG,
+      backend: { name: WORKFLOW_CONFIG.backend.name, repo: WORKFLOW_CONFIG.backend.repo },
+    },
+  });
+
+  test('lists an unpublished entry against the default branch', async ({ cms, github, page }) => {
+    openEntryPullRequest(github, {
+      slug: 'second-post',
+      files: { 'content/posts/second-post.md': post('Second Post', 'Coming soon.') },
+    });
+
+    await cms.open();
+
+    // The pull requests can only be told apart from someone else’s once the default branch is known
+    await expect(getEntryRows(page)).toHaveText([
+      /Unpublished Entries/,
+      /Second Post.*Draft/,
+      /Published Entries/,
+      /First Post/,
+    ]);
+    await openEntry(page, 'Second Post');
   });
 });

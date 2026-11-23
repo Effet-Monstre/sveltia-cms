@@ -3,11 +3,10 @@
   Implement the editor for a DateTime field.
   @see https://decapcms.org/docs/widgets/#Datetime
   @see https://sveltiacms.app/en/docs/fields/datetime
-  @todo Replace the native `<input>` with a custom component.
 -->
 <script>
   import { _ } from '@sveltia/i18n';
-  import { Button } from '@sveltia/ui';
+  import { Button, DateTimeInput } from '@sveltia/ui';
 
   import DateTimePreview from '$lib/components/contents/details/fields/date-time/date-time-preview.svelte';
   import { isAutoNowField } from '$lib/services/contents/fields/date-time/auto-now';
@@ -38,7 +37,6 @@
 
   /** @type {FieldEditorProps & Props} */
   let {
-    /* eslint-disable prefer-const */
     locale,
     keyPath,
     typedKeyPath,
@@ -48,7 +46,6 @@
     required = true,
     readonly = false,
     invalid = false,
-    /* eslint-enable prefer-const */
   } = $props();
 
   let inputValue = $state('');
@@ -60,6 +57,15 @@
   const timeZone = $derived(getInitialTimeZone(currentValue, fieldConfig));
 
   /**
+   * Value of the input right after it was last synced with {@link currentValue}. The value is only
+   * written back once the user has changed the input from this, so a stored value the input can’t
+   * represent isn’t replaced, or erased, as soon as the editor is opened. This also keeps a
+   * read-only field’s value as it is: the input drops the seconds with its default `step`, so
+   * writing it back would truncate a value like one set by `auto_now`.
+   */
+  let syncedInputValue = '';
+
+  /**
    * Update {@link inputValue} based on {@link currentValue}. Only update if the input is not
    * currently focused to avoid interfering with user typing.
    */
@@ -68,28 +74,33 @@
       return;
     }
 
-    const _inputValue = getInputValue({ currentValue, fieldConfig, timeZone });
+    const _inputValue = getInputValue({ currentValue, fieldConfig, timeZone, locale });
 
     // Avoid a cycle dependency & infinite loop
     if (_inputValue !== undefined && _inputValue !== inputValue) {
       inputValue = _inputValue;
     }
+
+    syncedInputValue = inputValue;
   };
 
   /**
-   * Update {@link currentValue} based on {@link inputValue}.
+   * Update {@link currentValue} based on {@link inputValue}, if the user has changed it.
    */
   const setCurrentValue = () => {
-    // A read-only field keeps its stored value as it is. The input drops the seconds with its
-    // default `step`, so writing it back would truncate a value like one set by `auto_now`
-    if (readonly) {
+    if (inputValue === syncedInputValue) {
       return;
     }
 
-    const newValue = getCurrentValue({ inputValue, currentValue, fieldConfig, timeZone });
+    // The input now reflects the value written below. While the input is focused,
+    // `setInputValue()` doesn’t run, so record it here: otherwise changing the input back to the
+    // value it had when it was focused would be ignored
+    syncedInputValue = inputValue;
+
+    const newValue = getCurrentValue({ inputValue, currentValue, fieldConfig, timeZone, locale });
 
     // Avoid a cycle dependency & infinite loop
-    if (shouldUpdateValue({ newValue, currentValue, fieldConfig })) {
+    if (shouldUpdateValue({ newValue, currentValue, fieldConfig, locale })) {
       currentValue = /** @type {string} */ (newValue);
     }
   };
@@ -133,13 +144,15 @@
   <DateTimePreview {locale} {keyPath} {typedKeyPath} {fieldConfig} {currentValue} />
 {:else}
   <div role="none">
-    <input
-      {...{ type, min, max, step }}
+    <DateTimeInput
+      {type}
+      {min}
+      {max}
+      {step}
       bind:value={inputValue}
       {readonly}
-      aria-readonly={readonly}
-      aria-required={required}
-      aria-invalid={invalid}
+      {required}
+      {invalid}
       aria-labelledby="{fieldId}-label"
       aria-errormessage="{fieldId}-error"
       onfocus={handleFocus}
@@ -168,7 +181,7 @@
 
   {#if singleCustomTimeZone}
     <div role="none" class="timezone">
-      {getTimeZoneLabel(singleCustomTimeZone, getDate(currentValue, fieldConfig))}
+      {getTimeZoneLabel(singleCustomTimeZone, getDate(currentValue, fieldConfig, locale))}
     </div>
   {:else if utc}
     <div role="none" class="timezone">UTC</div>

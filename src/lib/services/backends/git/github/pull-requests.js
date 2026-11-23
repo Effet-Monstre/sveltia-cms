@@ -1,16 +1,34 @@
 import { fetchBlobText } from '$lib/services/backends/git/github/files';
-import { getWorkflowRepository } from '$lib/services/backends/git/github/fork';
+import {
+  getBranchRepository,
+  getContentRepository,
+  getWorkflowRepository,
+} from '$lib/services/backends/git/github/fork';
 import { fetchAliasedBatch } from '$lib/services/backends/git/github/graphql';
 import { repository } from '$lib/services/backends/git/github/repository';
 import { fetchAPI, fetchGraphQL } from '$lib/services/backends/git/shared/api';
 import { runConcurrently } from '$lib/services/backends/git/shared/concurrency';
-import { encodePath } from '$lib/services/backends/git/shared/url';
+import {
+  parseRestFiles,
+  parseRestPullRequest,
+  toCommitAuthor,
+} from '$lib/services/backends/git/shared/pull-requests';
+import {
+  getPullRequestPath,
+  getRepositoryPath,
+} from '$lib/services/backends/git/shared/repository';
 import { deleteRemoteBranch } from '$lib/services/backends/git/shared/workflow';
-import { getAllStatusLabels, getStatusLabel } from '$lib/services/workflow/labels';
+import { encodePathSegments } from '$lib/services/utils/url';
+import { getStatusLabel, replaceStatusLabel } from '$lib/services/workflow/labels';
 import { forkedRepository } from '$lib/services/workflow/open-authoring';
 
 /**
- * @import { WorkflowFile, WorkflowPullRequest, WorkflowStatus } from '$lib/types/private';
+ * @import {
+ * CommitAuthor,
+ * WorkflowFile,
+ * WorkflowPullRequest,
+ * WorkflowStatus,
+ * } from '$lib/types/private';
  */
 
 /**
@@ -47,21 +65,6 @@ export const parseFileNodes = (nodes) =>
   }));
 
 /**
- * Convert the changed files of a pull request or comparison, as listed by the REST API, to workflow
- * files.
- * @param {Record<string, any>[]} files Files.
- * @returns {WorkflowFile[]} Files.
- */
-export const parseRestFiles = (files) =>
-  files.map(({ filename, status, previous_filename: previousPath }) => ({
-    path: filename,
-    sha: '',
-    size: 0,
-    deleted: status === 'removed',
-    previousPath,
-  }));
-
-/**
  * Re-fetch the list of files changed in the given pull request with the REST API, which is the only
  * one that reports the path a renamed file had before. The GraphQL API used by
  * `fetchPullRequests()` has a `RENAMED` change type but no matching previous-path field, so
@@ -71,15 +74,13 @@ export const parseRestFiles = (files) =>
  * @see https://docs.github.com/en/rest/pulls/pulls#list-pull-requests-files
  */
 export const fetchPullRequestFileList = async (pullRequest) => {
-  const { owner, repo } = repository;
-
   const files = /** @type {Record<string, any>[]} */ (
     await fetchAPI(
-      `/repos/${owner}/${repo}/pulls/${pullRequest.number}/files?per_page=${MAX_ITEMS.files}`,
+      `${getPullRequestPath(repository, pullRequest.number)}/files?per_page=${MAX_ITEMS.files}`,
     )
   );
 
-  pullRequest.files = parseRestFiles(files);
+  pullRequest.files = parseRestFiles(files, { removedStatus: 'removed' });
 };
 
 /**
@@ -112,9 +113,7 @@ export const fetchPullRequestFiles = async (pullRequests) => {
     return;
   }
 
-  // A workflow branch lives in the contributor’s fork with Open Authoring, so that’s where the
-  // blobs have to be read from
-  const workflowRepository = getWorkflowRepository();
+  const workflowRepository = getContentRepository();
 
   const blobs = await fetchAliasedBatch({
     items: targets,
@@ -184,17 +183,17 @@ const FETCH_BRANCH_HEAD_QUERY = `
  * Fetch the commit the given workflow branch points at. Two editors working on the same entry
  * share its branch, so this is how a save finds out that someone else has committed to it since
  * the draft was opened. The branch is looked up in the repository it lives in, which is the
- * contributor’s fork with Open Authoring.
+ * contributor’s fork with Open Authoring, or when a maintainer edits a contributor’s pull request.
  * @param {string} branch Branch name.
  * @returns {Promise<string | undefined>} Git object ID, or `undefined` if the branch is gone,
  * which is what a merged or closed pull request leaves behind.
  * @see https://docs.github.com/en/graphql/reference/objects#ref
  */
 export const fetchBranchHead = async (branch) => {
-  const { owner, repo } = getWorkflowRepository();
+  const { owner, repo, branch: name } = getBranchRepository(branch);
 
   const { repository: result } = /** @type {{ repository: Record<string, any> }} */ (
-    await fetchGraphQL(FETCH_BRANCH_HEAD_QUERY, { owner, repo, branch: `refs/heads/${branch}` })
+    await fetchGraphQL(FETCH_BRANCH_HEAD_QUERY, { owner, repo, branch: `refs/heads/${name}` })
   );
 
   return result?.branchHead?.target?.oid;
@@ -207,11 +206,11 @@ export const fetchBranchHead = async (branch) => {
  * @see https://docs.github.com/en/rest/git/refs#delete-a-reference
  */
 export const deleteBranch = async (branch) => {
-  const { owner, repo } = getWorkflowRepository();
+  const repoPath = getRepositoryPath(getWorkflowRepository());
 
   await deleteRemoteBranch({
     branch,
-    path: `/repos/${owner}/${repo}/git/refs/heads/${encodePath(branch)}`,
+    path: `${repoPath}/git/refs/heads/${encodePathSegments(branch)}`,
     // GitHub answers a missing reference with a 422 rather than a 404
     goneStatuses: [404, 422],
   });
@@ -225,25 +224,35 @@ export const deleteBranch = async (branch) => {
  * @see https://docs.github.com/en/rest/issues/issues#update-an-issue
  */
 export const updateLabels = async (pullRequest, status) => {
-  const { owner, repo } = repository;
-  const cmsLabels = getAllStatusLabels();
-
   // Read the labels from the pulls endpoint: the issues endpoint's `GET` needs issue access, which
   // a fine-grained token created from the token page doesn't have, while its `PATCH` also accepts
   // pull request access. @see https://github.com/sveltia/sveltia-cms/issues/1014
   const { labels = [] } = /** @type {{ labels?: { name: string }[] }} */ (
-    await fetchAPI(`/repos/${owner}/${repo}/pulls/${pullRequest.number}`)
+    await fetchAPI(getPullRequestPath(repository, pullRequest.number))
   );
 
-  const newLabels = [
-    ...labels.map(({ name }) => name).filter((name) => !cmsLabels.includes(name)),
-    getStatusLabel(status),
-  ];
+  const newLabels = replaceStatusLabel(
+    labels.map(({ name }) => name),
+    status,
+  );
 
-  await fetchAPI(`/repos/${owner}/${repo}/issues/${pullRequest.number}`, {
+  await fetchAPI(`${getRepositoryPath(repository)}/issues/${pullRequest.number}`, {
     method: 'PATCH',
     body: { labels: newLabels },
   });
+};
+
+/**
+ * Parse the user who opened a pull request, as the REST or GraphQL API returns it. The REST API
+ * gives the ID as `id` and leaves out the name and email address, while the GraphQL API gives the
+ * ID as `databaseId` and, unless the user keeps them private, the name and email address.
+ * @param {Record<string, any> | undefined} user User object.
+ * @returns {CommitAuthor | undefined} Author, or `undefined` if the user is unknown.
+ */
+export const parseAuthor = (user) => {
+  const { id = user?.databaseId } = user ?? {};
+
+  return toCommitAuthor({ ...user, id });
 };
 
 /**
@@ -278,67 +287,78 @@ export const updateDraftState = async (pullRequest, isDraft) => {
  * @param {string} args.branch Workflow branch name.
  * @param {string} args.title Pull request title.
  * @param {WorkflowStatus} args.status Status to open the pull request with.
+ * @param {string} args.description Pull request description.
  * @returns {Promise<WorkflowPullRequest>} Created pull request.
  * @see https://docs.github.com/en/rest/pulls/pulls#create-a-pull-request
  * @see https://docs.github.com/en/rest/issues/labels#add-labels-to-an-issue
  */
-export const createPullRequest = async ({ branch, title, status }) => {
-  const { owner, repo, branch: baseBranch } = repository;
+export const createPullRequest = async ({ branch, title, status, description }) => {
+  const { branch: baseBranch } = repository;
+  const repoPath = getRepositoryPath(repository);
   const fork = forkedRepository.current;
-  const isDraft = status === 'draft';
 
-  const result = /** @type {Record<string, any>} */ (
-    await fetchAPI(`/repos/${owner}/${repo}/pulls`, {
-      method: 'POST',
-      body: {
-        title,
-        // A cross-repository pull request identifies its head branch by the fork’s owner
-        head: fork ? `${fork.owner}:${branch}` : branch,
-        base: baseBranch,
-        draft: isDraft,
-        body: 'Automatically generated by Sveltia CMS',
-      },
-    })
-  );
+  /**
+   * Open the pull request.
+   * @param {boolean} [maintainerCanModify] Whether to let the maintainers push to its branch.
+   * @returns {Promise<Record<string, any>>} Pull request.
+   */
+  const open = async (maintainerCanModify) =>
+    /** @type {Record<string, any>} */ (
+      await fetchAPI(`${repoPath}/pulls`, {
+        method: 'POST',
+        body: {
+          title,
+          // A cross-repository pull request identifies its head branch by the fork’s owner
+          head: fork ? `${fork.owner}:${branch}` : branch,
+          base: baseBranch,
+          draft: status === 'draft',
+          body: description,
+          ...(maintainerCanModify ? { maintainer_can_modify: true } : {}),
+        },
+      })
+    );
 
-  /** @type {WorkflowPullRequest} */
-  const pullRequest = {
-    number: result.number,
+  /**
+   * Open a contributor’s pull request, letting the maintainers push to its branch, as GitHub’s own
+   * form does by default, so they can edit the entry in the CMS while reviewing it rather than only
+   * view it. GitHub refuses that for a fork owned by an organization, which gets the pull request
+   * without it instead.
+   * @returns {Promise<Record<string, any>>} Pull request.
+   */
+  const openFromFork = async () => {
+    try {
+      return await open(true);
+    } catch (/** @type {any} */ ex) {
+      if (ex.cause?.status !== 422) {
+        throw ex;
+      }
+
+      return open();
+    }
+  };
+
+  const result = await (fork ? openFromFork() : open());
+
+  const pullRequest = parseRestPullRequest(result, {
     nodeId: result.node_id,
     title: result.title,
-    url: result.html_url,
     branch,
-    headSHA: result.head?.sha,
     status,
-    createdDate: new Date(result.created_at),
-    updatedDate: new Date(result.updated_at),
-    files: [],
-  };
+    // The signed-in user, which is how a later save recognizes the pull request as their own
+    author: parseAuthor(result.user),
+    description,
+  });
 
   // Labelling an issue requires write access to the repository, which an Open Authoring contributor
   // doesn’t have. Their status is read from the pull request itself instead
   if (!fork) {
     // A brand-new pull request has no label to preserve, so add the status label outright rather
     // than reading the current list first like {@link updateLabels} has to
-    await fetchAPI(`/repos/${owner}/${repo}/issues/${result.number}/labels`, {
+    await fetchAPI(`${repoPath}/issues/${result.number}/labels`, {
       method: 'POST',
       body: { labels: [getStatusLabel(status)] },
     });
   }
 
   return pullRequest;
-};
-
-/**
- * Reopen a pull request that was closed earlier.
- * @param {WorkflowPullRequest} pullRequest Pull request.
- * @see https://docs.github.com/en/rest/pulls/pulls#update-a-pull-request
- */
-export const reopenPullRequest = async (pullRequest) => {
-  const { owner, repo } = repository;
-
-  await fetchAPI(`/repos/${owner}/${repo}/pulls/${pullRequest.number}`, {
-    method: 'PATCH',
-    body: { state: 'open' },
-  });
 };

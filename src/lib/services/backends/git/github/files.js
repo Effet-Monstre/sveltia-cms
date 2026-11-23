@@ -1,8 +1,7 @@
-import mime from 'mime';
-
+import { isAdditionsEnabled } from '$lib/services/app/additions';
 import { fetchLastCommit } from '$lib/services/backends/git/github/commits';
 import {
-  getWorkflowRepository,
+  getContentRepository,
   initOpenAuthoring,
   isOpenAuthoringConfigured,
 } from '$lib/services/backends/git/github/fork';
@@ -13,13 +12,16 @@ import {
   fetchDefaultBranchName,
   repository,
 } from '$lib/services/backends/git/github/repository';
-import { fetchAPI } from '$lib/services/backends/git/shared/api';
+import { fetchAPI, fetchGraphQL } from '$lib/services/backends/git/shared/api';
 import { mapConcurrently, runConcurrently } from '$lib/services/backends/git/shared/concurrency';
-import { fetchAndParseFiles } from '$lib/services/backends/git/shared/fetch';
+import { createLocalizedError } from '$lib/services/backends/git/shared/errors';
+import { fetchRepositoryFiles } from '$lib/services/backends/git/shared/files';
 import { startSimulatedProgress } from '$lib/services/backends/git/shared/progress';
+import { getRepositoryPath } from '$lib/services/backends/git/shared/repository';
 import { toFileListItems } from '$lib/services/backends/git/shared/tree';
-import { encodePath } from '$lib/services/backends/git/shared/url';
-import { forkedRepository, openAuthoringInitialized } from '$lib/services/workflow/open-authoring';
+import { getRootDir } from '$lib/services/backends/root-dir';
+import { getBotCoAuthor } from '$lib/services/utils/commit-author';
+import { encodePathSegments } from '$lib/services/utils/url';
 
 /**
  * @import {
@@ -44,33 +46,52 @@ import { forkedRepository, openAuthoringInitialized } from '$lib/services/workfl
  * @see https://docs.github.com/en/rest/git/trees#get-a-tree
  */
 const fetchTree = async (treeRef, recursive) => {
-  const { owner, repo } = repository;
   const query = recursive ? '?recursive=1' : '';
 
   return /** @type {{ tree: GitTreeEntry[], truncated: boolean }} */ (
-    await fetchAPI(`/repos/${owner}/${repo}/git/trees/${encodePath(treeRef)}${query}`)
+    await fetchAPI(
+      `${getRepositoryPath(repository)}/git/trees/${encodePathSegments(treeRef)}${query}`,
+    )
   );
 };
 
 /**
  * Fetch the repository’s complete file list, and return it in the canonical format. A tree too big
  * to be listed recursively in one response, as in a huge repository, has its subtrees listed
- * separately instead, as GitHub suggests.
+ * separately instead, as GitHub suggests. With the `root_dir` backend option, only the files in
+ * that directory are listed, which saves listing the whole of a big monorepo; the paths are still
+ * relative to the repository root.
  * @param {string} [lastHash] The last commit’s SHA-1 hash.
  * @returns {Promise<BaseFileListItemProps[]>} File list.
- * @throws {Error} If a single directory has too many files to list.
+ * @throws {Error} If a single directory has too many files to list, or if the root directory
+ * doesn’t exist.
  */
 export const fetchFileList = async (lastHash) => {
+  const ref = /** @type {string} */ (lastHash ?? repository.branch);
+  const rootDir = getRootDir();
   /** @type {GitTreeEntry[]} */
   const blobs = [];
+
   /** @type {{ sha: string, prefix: string }[]} */
-  let pending = [{ sha: /** @type {string} */ (lastHash ?? repository.branch), prefix: '' }];
+  let pending = [
+    // A tree-ish expression addresses the directory’s tree without looking its SHA up first
+    rootDir ? { sha: `${ref}:${rootDir}`, prefix: `${rootDir}/` } : { sha: ref, prefix: '' },
+  ];
 
   // One level at a time, so the requests in flight stay within the concurrency limit
   while (pending.length) {
     // eslint-disable-next-line no-await-in-loop
     const results = await mapConcurrently(pending, async ({ sha, prefix }) => {
-      const { tree, truncated } = await fetchTree(sha, true);
+      const { tree, truncated } = await fetchTree(sha, true).catch((ex) => {
+        if (rootDir && sha === `${ref}:${rootDir}` && ex?.cause?.status === 404) {
+          throw createLocalizedError('Failed to list the files.', 'root_dir_not_found', {
+            repo: `${repository.owner}/${repository.repo}`,
+            dir: rootDir,
+          });
+        }
+
+        throw ex;
+      });
 
       if (!truncated) {
         return { prefix, entries: tree, subtrees: [] };
@@ -104,6 +125,33 @@ export const fetchFileList = async (lastHash) => {
   }
 
   return toFileListItems(blobs);
+};
+
+const FETCH_DIR_SHA_QUERY = `
+  query($owner: String!, $repo: String!, $expression: String!) {
+    repository(owner: $owner, name: $repo) {
+      object(expression: $expression) {
+        oid
+      }
+    }
+  }
+`;
+
+/**
+ * Find the tree SHA of a directory at the given commit.
+ * @param {string} ref Commit SHA or branch name.
+ * @param {string} dirPath Directory path relative to the repository root.
+ * @returns {Promise<string | undefined>} Tree SHA, or `undefined` if the directory doesn’t exist.
+ * @see https://docs.github.com/en/graphql/reference/objects#repository
+ */
+export const fetchDirSHA = async (ref, dirPath) => {
+  const { owner, repo } = repository;
+
+  const result = /** @type {{ repository?: { object?: { oid: string } | null } | null }} */ (
+    await fetchGraphQL(FETCH_DIR_SHA_QUERY, { owner, repo, expression: `${ref}:${dirPath}` })
+  );
+
+  return result.repository?.object?.oid;
 };
 
 /**
@@ -143,6 +191,7 @@ export const getFileMetadataFragment = ({ path }) => `
               }
             }
             committedDate
+            messageBody
           }
         }
       }
@@ -165,7 +214,7 @@ export const getFileMetadataFragment = ({ path }) => `
  */
 const requestBlob = async ({ owner, repo, sha, responseType }) =>
   /** @type {Promise<string | Response>} */ (
-    fetchAPI(`/repos/${owner}/${repo}/git/blobs/${sha}`, {
+    fetchAPI(`${getRepositoryPath({ owner, repo })}/git/blobs/${sha}`, {
       headers: { Accept: 'application/vnd.github.raw' },
       responseType,
     })
@@ -235,17 +284,21 @@ export const parseFileMetadata = (fetchingFiles, results) =>
         return [];
       }
 
-      const { author, committedDate } = commit;
+      const { author, committedDate, messageBody } = commit;
       const user = author?.user;
+      // A commit made by an app for someone, e.g. with Sveltia CMS Additions, is theirs
+      const coAuthor = getBotCoAuthor(author, messageBody);
 
       return [
         [
           path,
           {
             // The author can be `null` when the commit has no valid author info
-            commitAuthor: author
-              ? { name: author.name, email: author.email, id: user?.id, login: user?.login }
-              : undefined,
+            commitAuthor:
+              coAuthor ||
+              (author
+                ? { name: author.name, email: author.email, id: user?.id, login: user?.login }
+                : undefined),
             commitDate: new Date(committedDate),
           },
         ],
@@ -310,22 +363,14 @@ export const fetchFileMetadata = async (fetchingFiles) =>
  * caller has just fetched it, so it isn’t fetched again.
  */
 export const fetchFiles = async ({ lastCommit } = {}) => {
-  // With Open Authoring, a user without write access is a contributor rather than a stranger, so
-  // they’re given a fork to work in instead of being turned away. Setting the fork up may involve
-  // the user, so it has to finish before the data is fetched, unlike a plain access check
-  const openAuthoring = isOpenAuthoringConfigured();
-
-  // Once only: a later call brings the stores up to date with the repository, and setting the fork
-  // up again would reset the fork state while a workflow commit may be relying on it
-  if (openAuthoring && !openAuthoringInitialized.current) {
-    await initOpenAuthoring();
-  }
-
-  await fetchAndParseFiles({
+  await fetchRepositoryFiles({
+    isOpenAuthoringConfigured,
+    initOpenAuthoring,
     repository,
-    checkAccess: openAuthoring ? undefined : checkRepositoryAccess,
-    // A contributor’s changes go to their fork, so the branch they can’t push to doesn’t matter
-    checkBranchAccess: forkedRepository.current ? undefined : checkBranchAccess,
+    // With Sveltia CMS Additions, the GitHub token is limited to the repository and the user’s
+    // role, and an installation token has no repository permissions to check
+    checkAccess: isAdditionsEnabled() ? undefined : checkRepositoryAccess,
+    checkBranchAccess,
     fetchDefaultBranchName,
     fetchLastCommit,
     lastCommit,
@@ -341,10 +386,10 @@ export const fetchFiles = async ({ lastCommit } = {}) => {
  * @returns {Promise<Blob>} Blob data.
  */
 export const fetchBlob = async (asset) => {
-  // An asset attached to an unpublished entry is committed to a workflow branch, which lives in the
-  // contributor’s fork with Open Authoring, so the blob has to be read from there
-  const { owner, repo } = asset.workflow ? getWorkflowRepository() : repository;
-  const { sha, path } = asset;
+  // An asset attached to an unpublished entry is committed to a workflow branch, whose blobs are
+  // read from the repository that serves the workflow branches’ files
+  const { owner, repo } = asset.workflow ? getContentRepository() : repository;
+  const { sha } = asset;
 
   const response = /** @type {Response} */ (
     await requestBlob({ owner, repo, sha, responseType: 'raw' })
@@ -356,10 +401,9 @@ export const fetchBlob = async (asset) => {
     throw new Error('Failed to fetch the blob', { cause: { status: response.status } });
   }
 
-  // Handle SVG and other non-binary files
-  if (response.headers.get('Content-Type') !== 'application/octet-stream') {
-    return new Blob([await response.text()], { type: mime.getType(path) ?? 'text/plain' });
-  }
-
+  // Keep the bytes as they are, even for a text file: decoding it would strip a UTF-8 BOM and
+  // transcode a file GitHub serves in another encoding, e.g. `charset=iso-8859-1`, and moving or
+  // renaming the asset would then commit the altered bytes. The caller sets the MIME type from the
+  // file name, as GitHub serves an SVG or any other text file as `text/plain`
   return response.blob();
 };

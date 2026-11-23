@@ -5,43 +5,11 @@ import { render } from 'vitest-browser-svelte';
 
 import { selectAssetsView } from '$lib/services/contents/editor';
 import { createMockAsset } from '$lib/test/config';
+import { createFileDropEvent } from '$lib/test/drop';
 
 import InternalAssetsPanel from './internal-assets-panel.svelte';
 
 const assets = [createMockAsset({ name: 'photo.png' }), createMockAsset({ name: 'logo.png' })];
-
-/**
- * Build a drop event carrying the given files.
- * @param {File[]} files Files.
- * @returns {Event} Event.
- */
-const createDropEvent = (files) => {
-  const event = new Event('drop', { bubbles: true, cancelable: true });
-
-  Object.defineProperty(event, 'dataTransfer', {
-    value: {
-      dropEffect: '',
-      items: files.map((file) => ({
-        /**
-         * Get the entry.
-         * @returns {any} File entry.
-         */
-        webkitGetAsEntry: () => ({
-          name: file.name,
-          isFile: true,
-          /**
-           * Read the file.
-           * @param {(file: File) => void} callback Callback.
-           * @returns {void} Nothing.
-           */
-          file: (callback) => callback(file),
-        }),
-      })),
-    },
-  });
-
-  return event;
-};
 
 describe('InternalAssetsPanel', () => {
   // Register a right-to-left locale, without strings, so it can be switched to
@@ -146,10 +114,58 @@ describe('InternalAssetsPanel', () => {
     const file = new File(['x'], 'new.png', { type: 'image/png' });
 
     /** @type {HTMLElement} */ (container.querySelector('.drop-target')).dispatchEvent(
-      createDropEvent([file]),
+      createFileDropEvent([file]),
     );
 
     await vi.waitFor(() => expect(onDrop).toHaveBeenCalledWith({ files: [file] }));
+  });
+
+  test('passes on a dropped file of another type, to be checked once processed', async () => {
+    const onDrop = vi.fn();
+
+    const { container } = await render(InternalAssetsPanel, {
+      assets,
+      accept: 'image/webp',
+      selectedResources: [],
+      onDrop,
+    });
+
+    const file = new File(['x'], 'kite.png', { type: 'image/png' });
+
+    /** @type {HTMLElement} */ (container.querySelector('.drop-target')).dispatchEvent(
+      createFileDropEvent([file]),
+    );
+
+    await vi.waitFor(() => expect(onDrop).toHaveBeenCalledWith({ files: [file] }));
+    expect(page.getByRole('alertdialog').elements()).toHaveLength(0);
+  });
+
+  test('takes no dropped files where nothing can be uploaded', async () => {
+    const onDrop = vi.fn();
+
+    const { container } = await render(InternalAssetsPanel, {
+      assets,
+      uploadDisabled: true,
+      selectedResources: [],
+      onDrop,
+    });
+
+    const target = /** @type {HTMLElement} */ (container.querySelector('.drop-target'));
+
+    // Dragging files over the panel doesn’t invite a drop
+    target.dispatchEvent(
+      new DragEvent('dragover', {
+        bubbles: true,
+        cancelable: true,
+        dataTransfer: new DataTransfer(),
+      }),
+    );
+    target.dispatchEvent(createFileDropEvent([new File(['x'], 'kite.png', { type: 'image/png' })]));
+    await new Promise((resolve) => {
+      setTimeout(resolve, 100);
+    });
+    expect(container.querySelector('.drop-indicator')).toBeNull();
+    expect(onDrop).not.toHaveBeenCalled();
   });
 
   test('lists nothing without assets', async () => {

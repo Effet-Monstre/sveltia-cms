@@ -1,6 +1,14 @@
 import { createHash } from 'crypto';
 
-import { expect, GITEA_CONFIG, GITHUB_CONFIG, GITLAB_CONFIG, test } from '../fixtures/test.js';
+import {
+  expect,
+  GITEA_CONFIG,
+  GITHUB_CONFIG,
+  GITLAB_CONFIG,
+  PROXY_COOKIE,
+  recordCookies,
+  test,
+} from '../fixtures/test.js';
 
 /**
  * @import { Page } from '@playwright/test';
@@ -25,13 +33,14 @@ test.use({ signedIn: false });
  * @param {'success' | 'error' | 'close'} result.state `success` to post a token, `error` to post
  * an error, or `close` for the user to close the popup without signing in.
  * @param {Record<string, any>} [result.content] Token or error.
+ * @param {string} [result.url] URL of the authenticator, if not Netlify’s.
  * @returns {Promise<URLSearchParams[]>} Query parameters of each popup opened so far.
  */
-const mockAuthenticator = async (page, { state, content = {} }) => {
+const mockAuthenticator = async (page, { state, content = {}, url = AUTHENTICATOR_URL }) => {
   /** @type {URLSearchParams[]} */
   const requests = [];
 
-  await page.context().route(`${AUTHENTICATOR_URL}?*`, (route) => {
+  await page.context().route(`${url}?*`, (route) => {
     requests.push(new URL(route.request().url()).searchParams);
 
     return route.fulfill({
@@ -72,10 +81,15 @@ const mockAuthenticator = async (page, { state, content = {} }) => {
  * @param {MockGitRepository} args.mock Mocked repository, whose token is handed out.
  * @param {string} [args.state] State to send back instead of the one the CMS sent, as a forged
  * redirect would.
+ * @param {'submit' | 'stay'} [args.signInPage] Show a sign-in page first, as GitLab does for a user
+ * who isn’t signed in: `submit` for the user to sign in, which sends the popup on to the CMS, or
+ * `stay` for the page to wait. Like GitLab’s, it’s served with `Cross-Origin-Opener-Policy:
+ * same-origin`, which severs the popup from the CMS: the popup comes back without `window.opener`
+ * or `window.name`, and the CMS sees it as closed.
  * @returns {Promise<{ authorize: URLSearchParams[], token: Record<string, any>[] }>} Requests
  * received so far.
  */
-const mockOAuthProvider = async (page, { authorizeURL, tokenURL, mock, state }) => {
+const mockOAuthProvider = async (page, { authorizeURL, tokenURL, mock, state, signInPage }) => {
   /** @type {{ authorize: URLSearchParams[], token: Record<string, any>[] }} */
   const requests = { authorize: [], token: [] };
   const context = page.context();
@@ -89,6 +103,20 @@ const mockOAuthProvider = async (page, { authorizeURL, tokenURL, mock, state }) 
       code: 'e2e-code',
       state: state ?? /** @type {string} */ (params.get('state')),
     }).toString();
+
+    if (signInPage) {
+      return route.fulfill({
+        contentType: 'text/html',
+        headers: { 'cross-origin-opener-policy': 'same-origin' },
+        body: `<!doctype html><title>Sign in</title><script>
+          if (${signInPage === 'submit'}) {
+            setTimeout(() => {
+              location.href = ${JSON.stringify(redirectURL.href)};
+            }, 500);
+          }
+        </script>`,
+      });
+    }
 
     return route.fulfill({ status: 302, headers: { location: redirectURL.href } });
   });
@@ -198,6 +226,152 @@ test.describe('GitHub', () => {
   });
 });
 
+// A Sveltia CMS Authenticator, or any other OAuth client than Netlify’s
+test.describe('GitHub with an authenticator of its own', () => {
+  test.use({
+    config: {
+      ...GITHUB_CONFIG,
+      backend: {
+        ...GITHUB_CONFIG.backend,
+        base_url: 'https://auth.example.com/',
+        auth_endpoint: '/oauth/start',
+        site_domain: 'www.example.com',
+      },
+    },
+  });
+
+  test.beforeEach(({ github }) => {
+    github.commit(FIRST_POST);
+  });
+
+  test('signs in through the authenticator, naming the site domain', async ({
+    cms,
+    github,
+    page,
+  }) => {
+    const requests = await mockAuthenticator(page, {
+      state: 'success',
+      content: { provider: 'github', token: github.token },
+      url: 'https://auth.example.com/oauth/start',
+    });
+
+    await cms.open();
+    await page.getByRole('button', { name: /^Sign In with .*GitHub/ }).click();
+
+    await expect(page.getByRole('row', { name: /First Post/ })).toBeVisible();
+    expect(requests).toHaveLength(1);
+    expect(Object.fromEntries(requests[0])).toEqual({
+      provider: 'github',
+      site_id: 'www.example.com',
+      scope: 'repo,user',
+    });
+  });
+
+  test('ignores a token posted from another site than the authenticator', async ({
+    cms,
+    github,
+    page,
+  }) => {
+    const context = page.context();
+    const result = `authorization:github:success:${JSON.stringify({ token: github.token })}`;
+
+    // The authenticator sends the popup on to another site, with a script rather than a redirect,
+    // which the routes wouldn’t answer. The other site posts a token straight away
+    await context.route('https://auth.example.com/oauth/start?*', (route) =>
+      route.fulfill({
+        contentType: 'text/html',
+        body: '<!doctype html><script>location.href = "https://evil.example.com/";</script>',
+      }),
+    );
+    await context.route('https://evil.example.com/', (route) =>
+      route.fulfill({
+        contentType: 'text/html',
+        // The title changes once the messages are posted, for the test to know they have been
+        body: `<!doctype html><script>
+          window.opener.postMessage('authorizing:github', '*');
+          window.opener.postMessage(${JSON.stringify(result)}, '*');
+          document.title = 'Other Site';
+        </script>`,
+      }),
+    );
+
+    await cms.open();
+
+    const [popup] = await Promise.all([
+      page.waitForEvent('popup'),
+      page.getByRole('button', { name: /^Sign In with .*GitHub/ }).click(),
+    ]);
+
+    await expect(popup).toHaveTitle('Other Site');
+    await popup.close();
+
+    // Had the token been taken, the user would be signed in instead
+    await expect(page.getByText('Authentication aborted. Please try again.')).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Show Account Menu' })).toHaveCount(0);
+  });
+});
+
+test.describe('GitHub with an internationalized site domain', () => {
+  test.use({
+    config: { ...GITHUB_CONFIG, backend: { ...GITHUB_CONFIG.backend, site_domain: '日本語.jp' } },
+  });
+
+  test('sends Netlify the domain in Punycode', async ({ cms, github, page }) => {
+    github.commit(FIRST_POST);
+
+    const requests = await mockAuthenticator(page, {
+      state: 'success',
+      content: { provider: 'github', token: github.token },
+    });
+
+    await cms.open();
+    await page.getByRole('button', { name: /^Sign In with .*GitHub/ }).click();
+
+    await expect(page.getByRole('row', { name: /First Post/ })).toBeVisible();
+    expect(requests[0].get('site_id')).toBe('xn--wgv71a119e.jp');
+  });
+});
+
+// Which buttons each setting shows is left to the component test of the sign-in page
+test.describe('with `auth_methods`', () => {
+  test.describe('allowing access tokens only', () => {
+    test.use({
+      config: { ...GITHUB_CONFIG, backend: { ...GITHUB_CONFIG.backend, auth_methods: ['token'] } },
+    });
+
+    test('doesn’t offer to sign in with GitHub, but takes a token', async ({
+      cms,
+      github,
+      page,
+    }) => {
+      github.commit(FIRST_POST);
+      await cms.open();
+
+      await expect(page.getByRole('button', { name: 'Sign In Using Access Token' })).toBeVisible();
+      await expect(page.getByRole('button', { name: /^Sign In with .*GitHub/ })).toHaveCount(0);
+
+      await signInWithToken(page, github.token);
+
+      await expect(page.getByRole('row', { name: /First Post/ })).toBeVisible();
+    });
+  });
+
+  test.describe('allowing nothing', () => {
+    test.use({
+      config: { ...GITHUB_CONFIG, backend: { ...GITHUB_CONFIG.backend, auth_methods: [] } },
+    });
+
+    test('shows the config error', async ({ cms, page }) => {
+      await cms.open();
+
+      await expect(
+        page.getByText('The auth_methods option must contain at least one method.'),
+      ).toBeVisible();
+      await expect(page.getByRole('button', { name: /^Sign In/ })).toHaveCount(0);
+    });
+  });
+});
+
 test.describe('GitLab', () => {
   test.use({ config: GITLAB_CONFIG });
 
@@ -267,6 +441,156 @@ test.describe('GitLab with PKCE', () => {
       }),
     ]);
   });
+
+  test('signs in through a sign-in page that severs the popup from the CMS', async ({
+    cms,
+    gitlab,
+    page,
+  }) => {
+    const requests = await mockOAuthProvider(page, {
+      authorizeURL: 'https://gitlab.com/oauth/authorize',
+      tokenURL: 'https://gitlab.com/oauth/token',
+      mock: gitlab,
+      signInPage: 'submit',
+    });
+
+    await cms.open();
+
+    const [popup] = await Promise.all([
+      page.waitForEvent('popup'),
+      page.getByRole('button', { name: /^Sign In with .*GitLab/ }).click(),
+    ]);
+
+    // The popup can’t post the token back to the CMS, so it sends it over a channel and closes
+    // itself, as the CMS can’t close it any more
+    await expect(page.getByRole('row', { name: /First Post/ })).toBeVisible();
+    await expect.poll(() => popup.isClosed()).toBe(true);
+    expect(requests.token).toHaveLength(1);
+  });
+
+  test('lets the user cancel a sign-in whose popup was severed', async ({ cms, gitlab, page }) => {
+    const requests = await mockOAuthProvider(page, {
+      authorizeURL: 'https://gitlab.com/oauth/authorize',
+      tokenURL: 'https://gitlab.com/oauth/token',
+      mock: gitlab,
+      signInPage: 'stay',
+    });
+
+    await cms.open();
+
+    const [popup] = await Promise.all([
+      page.waitForEvent('popup'),
+      page.getByRole('button', { name: /^Sign In with .*GitLab/ }).click(),
+    ]);
+
+    await expect(popup).toHaveTitle('Sign in');
+    // The CMS can’t tell whether the user has closed the popup on the sign-in page
+    await popup.close();
+    await expect(page.getByRole('alert').filter({ hasText: 'Signing in…' })).toBeVisible();
+
+    await page.getByRole('button', { name: 'Cancel' }).click();
+
+    await expect(page.getByText('Authentication aborted. Please try again.')).toBeVisible();
+    await expect(page.getByRole('button', { name: /^Sign In with .*GitLab/ })).toBeVisible();
+    expect(requests.token).toEqual([]);
+  });
+});
+
+/**
+ * URL of a self-managed GitLab instance.
+ */
+const INSTANCE_URL = 'https://gitlab.example.com';
+
+/**
+ * Configuration of a self-managed GitLab instance, signed in to with PKCE.
+ */
+const SELF_MANAGED_PKCE_CONFIG = {
+  ...GITLAB_CONFIG,
+  backend: {
+    ...GITLAB_CONFIG.backend,
+    api_root: `${INSTANCE_URL}/api/v4`,
+    base_url: INSTANCE_URL,
+    auth_type: 'pkce',
+    app_id: 'e2e-client',
+  },
+};
+
+/**
+ * Sign in to the self-managed GitLab instance with PKCE, the instance having set a session cookie,
+ * and get the cookies the token request carried.
+ * @param {Page} page Page.
+ * @param {any} cms `cms` fixture.
+ * @param {MockGitRepository} gitlab Mocked repository.
+ * @returns {Promise<{ requests: { authorize: URLSearchParams[], token: Record<string, any>[] },
+ * cookies: (string | undefined)[] }>} Requests to the instance, and the `Cookie` header of each
+ * token request.
+ */
+const signInToSelfManagedGitLab = async (page, cms, gitlab) => {
+  const tokenURL = `${INSTANCE_URL}/oauth/token`;
+
+  const readCookies = await recordCookies(page, {
+    hostname: new URL(INSTANCE_URL).hostname,
+    /**
+     * Tell whether a request is the token request.
+     * @param {URL} url Request URL.
+     * @returns {boolean} Result.
+     */
+    filter: ({ href }) => href === tokenURL,
+  });
+
+  const requests = await mockOAuthProvider(page, {
+    authorizeURL: `${INSTANCE_URL}/oauth/authorize`,
+    tokenURL,
+    mock: gitlab,
+  });
+
+  await cms.open();
+  await page.getByRole('button', { name: /^Sign In with .*GitLab/ }).click();
+  await expect(page.getByRole('row', { name: /First Post/ })).toBeVisible();
+
+  return { requests, cookies: await readCookies() };
+};
+
+test.describe('self-managed GitLab with PKCE', () => {
+  test.use({ config: SELF_MANAGED_PKCE_CONFIG });
+
+  test.beforeEach(({ gitlab }) => {
+    Object.assign(gitlab, {
+      apiRoot: `${INSTANCE_URL}/api/v4`,
+      graphqlURL: `${INSTANCE_URL}/api/graphql`,
+    });
+    gitlab.commit(FIRST_POST);
+  });
+
+  test('authorizes and gets the token on the instance, without its cookies', async ({
+    cms,
+    gitlab,
+    page,
+  }) => {
+    const { requests, cookies } = await signInToSelfManagedGitLab(page, cms, gitlab);
+
+    expect(requests.authorize[0].get('client_id')).toBe('e2e-client');
+    expect(requests.token).toEqual([
+      expect.objectContaining({ client_id: 'e2e-client', code: 'e2e-code' }),
+    ]);
+    expect(cookies).toEqual([undefined]);
+  });
+
+  // For an instance behind a proxy that authenticates with a cookie
+  test.describe('with `include_credentials`', () => {
+    test.use({
+      config: {
+        ...SELF_MANAGED_PKCE_CONFIG,
+        backend: { ...SELF_MANAGED_PKCE_CONFIG.backend, include_credentials: true },
+      },
+    });
+
+    test('sends the instance’s cookies with the token request', async ({ cms, gitlab, page }) => {
+      const { cookies } = await signInToSelfManagedGitLab(page, cms, gitlab);
+
+      expect(cookies).toEqual([PROXY_COOKIE]);
+    });
+  });
 });
 
 test.describe('Gitea', () => {
@@ -320,5 +644,105 @@ test.describe('Gitea', () => {
     await signInWithToken(page, gitea.token);
 
     await expect(page.getByRole('row', { name: /First Post/ })).toBeVisible();
+  });
+});
+
+// The `forgejo` backend of Decap CMS: the instance URL comes from `api_root`, without `base_url`,
+// and the branch is left to the repository’s default
+test.describe('Forgejo', () => {
+  test.use({
+    config: {
+      ...GITEA_CONFIG,
+      backend: {
+        name: 'forgejo',
+        repo: 'sveltia/e2e-site',
+        api_root: 'https://codeberg.org/api/v1',
+        app_id: 'e2e-client',
+      },
+    },
+  });
+
+  test.beforeEach(({ gitea }) => {
+    Object.assign(gitea, {
+      apiRoot: 'https://codeberg.org/api/v1',
+      version: '13.0.3+gitea-1.22.0',
+    });
+    gitea.commit(FIRST_POST);
+  });
+
+  test('signs in with an authorization code exchanged in the popup', async ({
+    cms,
+    gitea,
+    page,
+  }) => {
+    const requests = await mockOAuthProvider(page, {
+      authorizeURL: 'https://codeberg.org/login/oauth/authorize',
+      tokenURL: 'https://codeberg.org/login/oauth/access_token',
+      mock: gitea,
+    });
+
+    await cms.open();
+    await page.getByRole('button', { name: /^Sign In with .*Codeberg/ }).click();
+
+    await expect(page.getByRole('row', { name: /First Post/ })).toBeVisible();
+    expect(requests.authorize[0].get('client_id')).toBe('e2e-client');
+    expect(requests.token).toHaveLength(1);
+  });
+
+  test('signs in with an access token', async ({ cms, gitea, page }) => {
+    await cms.open();
+    await signInWithToken(page, gitea.token);
+
+    await expect(page.getByRole('row', { name: /First Post/ })).toBeVisible();
+  });
+});
+
+/**
+ * Get the address of the link to the token page in the dialog the sign-in page offers for an
+ * access token.
+ * @param {Page} page Page.
+ * @returns {Promise<string | null>} Address.
+ */
+const getTokenPageLink = async (page) => {
+  await page.getByRole('button', { name: 'Sign In Using Access Token' }).click();
+
+  return page
+    .getByRole('alertdialog', { name: 'Sign In Using Access Token' })
+    .getByRole('link', { name: /user settings page/ })
+    .getAttribute('href');
+};
+
+test.describe('self-hosted GitLab under a subpath', () => {
+  test.use({
+    config: {
+      ...GITLAB_CONFIG,
+      backend: { ...GITLAB_CONFIG.backend, api_root: 'https://example.com/gitlab/api/v4' },
+    },
+  });
+
+  test('links to the token page of the instance, under its subpath', async ({ cms, page }) => {
+    await cms.open();
+
+    expect(await getTokenPageLink(page)).toBe(
+      'https://example.com/gitlab/-/user_settings/personal_access_tokens' +
+        '?name=Sveltia+CMS&scopes=api%2Cread_user',
+    );
+  });
+});
+
+test.describe('self-hosted Gitea under a subpath', () => {
+  test.use({
+    config: {
+      ...GITEA_CONFIG,
+      backend: { ...GITEA_CONFIG.backend, api_root: 'https://example.com/gitea/api/v1' },
+    },
+  });
+
+  test('links to the token page of the instance, under its subpath', async ({ cms, page }) => {
+    await cms.open();
+
+    expect(await getTokenPageLink(page)).toBe(
+      'https://example.com/gitea/user/settings/applications',
+    );
   });
 });

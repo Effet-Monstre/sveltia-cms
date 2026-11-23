@@ -1,25 +1,32 @@
-import { beforeEach, describe, expect, test, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 
+import { mergeRefusedPullRequest } from '$lib/services/backends/git/github/auto-merge';
 import { commitChanges } from '$lib/services/backends/git/github/commits';
 import { repository } from '$lib/services/backends/git/github/repository';
 import githubWorkflow, {
+  approve,
   createBranch,
   discard,
   fetchMergeState,
   fetchPullRequests,
   fetchUnchangedPaths,
+  parseForkPullRequest,
   parsePullRequest,
   publish,
   savePullRequest,
   updateStatus,
+  withdrawApproval,
 } from '$lib/services/backends/git/github/workflow';
 import { fetchAPI, fetchGraphQL } from '$lib/services/backends/git/shared/api';
 import { cmsConfig } from '$lib/services/config';
+import { user } from '$lib/services/user/account.svelte';
 import { forkedRepository } from '$lib/services/workflow/open-authoring';
+import { createMockForkPullRequest } from '$lib/test/factories';
 
-vi.mock('@sveltia/i18n', () => ({
-  _: vi.fn((key, { values } = {}) => (values ? `${key} ${JSON.stringify(values)}` : key)),
-}));
+vi.mock('@sveltia/i18n', async () =>
+  (await import('$lib/test/i18n')).createI18nMock({ values: true }),
+);
+vi.mock('$lib/services/backends/git/github/auto-merge');
 vi.mock('$lib/services/backends/git/github/commits');
 vi.mock('$lib/services/backends/git/github/files');
 vi.mock('$lib/services/backends/git/github/repository', () => ({
@@ -83,6 +90,8 @@ describe('GitHub Editorial Workflow service', () => {
       fetchPullRequests: expect.any(Function),
       savePullRequest: expect.any(Function),
       updateStatus: expect.any(Function),
+      approve: expect.any(Function),
+      withdrawApproval: expect.any(Function),
       fetchBranchHead: expect.any(Function),
       fetchMergeState: expect.any(Function),
       fetchUnchangedPaths: expect.any(Function),
@@ -93,8 +102,8 @@ describe('GitHub Editorial Workflow service', () => {
 
   describe('parsePullRequest', () => {
     test('ignores a pull request from a fork', () => {
-      // An Open Authoring contribution that a maintainer labelled by hand: the branch isn’t on the
-      // configured repository, so the card would report every file as deleted
+      // An Open Authoring contribution that a maintainer labelled by hand is left to
+      // `parseForkPullRequest`, which treats it as untrusted, rather than taken for the CMS’s own
       expect(parsePullRequest(createNode({ isCrossRepository: true }))).toBeUndefined();
     });
 
@@ -103,6 +112,14 @@ describe('GitHub Editorial Workflow service', () => {
       // hand. Listing it would move the label on someone else’s request, and publish the entry
       // into that other branch
       expect(parsePullRequest(createNode({ baseRefName: 'develop' }))).toBeUndefined();
+    });
+
+    test('keeps the description as it is', () => {
+      const body = 'Automatically generated\n\n<!-- sveltia-cms:deletion-group=group-1 -->';
+
+      expect(parsePullRequest(createNode({ body }))?.description).toBe(body);
+      // The API gives an empty description as `null`
+      expect(parsePullRequest(createNode({ body: null }))?.description).toBe('');
     });
 
     test('parses a CMS-managed pull request', () => {
@@ -128,6 +145,7 @@ describe('GitHub Editorial Workflow service', () => {
             renamed: false,
           },
         ],
+        description: '',
       });
     });
 
@@ -342,7 +360,7 @@ describe('GitHub Editorial Workflow service', () => {
 
       const error = await createBranch('cms/posts/hello').catch((ex) => ex);
 
-      expect(error.cause.message).toBe('workflow.branch_in_use {"number":"#7"}');
+      expect(error.cause.message).toBe('workflow.branch_in_use:{"number":"#7"}');
     });
 
     test('refuses to reuse an existing reference with a pull request to another branch', async () => {
@@ -439,6 +457,27 @@ describe('GitHub Editorial Workflow service', () => {
       );
 
       await expect(createBranch('cms/posts/hello')).rejects.toThrow('Failed to create the branch.');
+    });
+
+    test('doesn’t retry a refused mutation without Open Authoring', async () => {
+      // The fork is the configured repository itself, so there is no other copy to start from
+      vi.mocked(fetchGraphQL)
+        .mockResolvedValueOnce({
+          fork: { id: 'R_1', ref: { name: 'main' }, defaultBranchRef: { name: 'main' } },
+          base: { ref: { target: { oid: 'abc' } } },
+        })
+        .mockRejectedValueOnce(
+          new Error('Server responded with an error', {
+            cause: {
+              status: 200,
+              message: 'user does not have the correct permissions to execute `CreateRef`',
+            },
+          }),
+        );
+
+      await expect(createBranch('cms/posts/hello')).rejects.toThrow('Failed to create the branch.');
+      expect(fetchGraphQL).toHaveBeenCalledTimes(2);
+      expect(fetchAPI).not.toHaveBeenCalled();
     });
 
     test('rethrows an error that carries no cause', async () => {
@@ -553,6 +592,24 @@ describe('GitHub Editorial Workflow service', () => {
       expect(result.pullRequest).toBe(pullRequest);
     });
 
+    test('records the deletion group in a reused pull request', async () => {
+      const pullRequest = /** @type {any} */ ({ number: 5, branch: 'cms/posts/hello' });
+
+      vi.mocked(commitChanges).mockResolvedValue({ sha: 'def', files: {} });
+      vi.mocked(fetchAPI).mockResolvedValueOnce({ body: 'Edited' }).mockResolvedValueOnce({});
+
+      const result = await savePullRequest({ ...args, pullRequest, deletionGroup: 'group-1' });
+
+      expect(fetchAPI).toHaveBeenCalledWith('/repos/owner/repo/pulls/5', {
+        method: 'PATCH',
+        body: { body: 'Edited\n\n<!-- sveltia-cms:deletion-group=group-1 -->' },
+      });
+      expect(result.pullRequest).toEqual({
+        ...pullRequest,
+        description: 'Edited\n\n<!-- sveltia-cms:deletion-group=group-1 -->',
+      });
+    });
+
     test('saves onto the head the entry was loaded or saved at', async () => {
       const pullRequest = /** @type {any} */ ({
         number: 5,
@@ -648,7 +705,11 @@ describe('GitHub Editorial Workflow service', () => {
   });
 
   describe('fetchMergeState', () => {
-    const pullRequest = /** @type {any} */ ({ number: 1, branch: 'cms/posts/hello' });
+    const pullRequest = /** @type {any} */ ({
+      number: 1,
+      branch: 'cms/posts/hello',
+      headSHA: 'abc123',
+    });
 
     /**
      * Create a pull request as returned by the REST API.
@@ -743,6 +804,22 @@ describe('GitHub Editorial Workflow service', () => {
         });
 
       await expect(fetchMergeState(pullRequest)).resolves.toMatchObject({ complete: false });
+    });
+
+    test('lists nothing when the branch has moved on from the commit on record', async () => {
+      // The check refuses a moved branch outright, so a commit that won’t be merged isn’t compared,
+      // which could otherwise be cut short and have the refusal put down to changes it can’t show
+      vi.mocked(fetchAPI).mockResolvedValueOnce(createRestPullRequest());
+
+      await expect(fetchMergeState({ ...pullRequest, headSHA: 'old456' })).resolves.toEqual({
+        headSHA: 'abc123',
+        onConfiguredBranches: true,
+        files: [],
+        complete: true,
+      });
+
+      expect(fetchAPI).toHaveBeenCalledOnce();
+      expect(fetchGraphQL).not.toHaveBeenCalled();
     });
 
     test('handles a comparison without files', async () => {
@@ -853,6 +930,161 @@ describe('GitHub Editorial Workflow service', () => {
         expect.objectContaining({ body: expect.objectContaining({ merge_method: 'merge' }) }),
       );
     });
+
+    describe('when GitHub refuses the merge', () => {
+      const pullRequest = /** @type {any} */ ({
+        number: 1,
+        branch: 'cms/posts/hello',
+        title: 'Create Post',
+        headSHA: 'abc123',
+      });
+
+      /**
+       * Create the error `fetchAPI` throws for a failed request.
+       * @param {number} status HTTP status code.
+       * @returns {Error} Error.
+       */
+      const createError = (status) =>
+        new Error('Server responded with an error', {
+          cause: { status, message: 'Pull Request is not mergeable' },
+        });
+
+      test('makes what it can of a 405, then deletes the branch', async () => {
+        // Everything that stops a merge comes back as a 405
+        const refusal = createError(405);
+
+        mockStores({ backend: { name: 'github', squash_merges: true } });
+        vi.mocked(fetchAPI).mockRejectedValueOnce(refusal).mockResolvedValueOnce({});
+
+        await publish(pullRequest);
+
+        expect(mergeRefusedPullRequest).toHaveBeenCalledWith({
+          pullRequest,
+          squash: true,
+          merge: expect.any(Function),
+          refusal,
+        });
+
+        // The merge function handed over makes the same merge again, pinned to the same commit
+        const [[{ merge }]] = vi.mocked(mergeRefusedPullRequest).mock.calls;
+
+        await merge();
+
+        expect(fetchAPI).toHaveBeenNthCalledWith(3, '/repos/owner/repo/pulls/1/merge', {
+          method: 'PUT',
+          body: { merge_method: 'squash', commit_title: 'Create Post', sha: 'abc123' },
+        });
+        expect(fetchAPI).toHaveBeenNthCalledWith(
+          2,
+          '/repos/owner/repo/git/refs/heads/cms/posts/hello',
+          expect.objectContaining({ method: 'DELETE' }),
+        );
+      });
+
+      test('leaves the branch alone when the pull request won’t be merged', async () => {
+        vi.mocked(fetchAPI).mockRejectedValueOnce(createError(405));
+        vi.mocked(mergeRefusedPullRequest).mockRejectedValueOnce(new Error('Not merged'));
+
+        await expect(publish(pullRequest)).rejects.toThrow('Not merged');
+        expect(fetchAPI).toHaveBeenCalledOnce();
+      });
+
+      test('reports any other refusal without checking the merge', async () => {
+        vi.mocked(fetchAPI).mockRejectedValueOnce(createError(409));
+
+        await expect(publish(pullRequest)).rejects.toThrow('Server responded with an error');
+        expect(fetchAPI).toHaveBeenCalledOnce();
+        expect(mergeRefusedPullRequest).not.toHaveBeenCalled();
+      });
+    });
+  });
+
+  describe('approve', () => {
+    test('approves the pull request pinned to its head commit', async () => {
+      await approve(/** @type {any} */ ({ number: 1, headSHA: 'abc' }));
+
+      expect(fetchAPI).toHaveBeenCalledWith('/repos/owner/repo/pulls/1/reviews', {
+        method: 'POST',
+        body: { event: 'APPROVE', commit_id: 'abc' },
+      });
+    });
+  });
+
+  describe('withdrawApproval', () => {
+    beforeEach(() => {
+      user.account = /** @type {any} */ ({ login: 'me' });
+    });
+
+    afterEach(() => {
+      user.account = undefined;
+    });
+
+    test('dismisses the user’s standing approvals of the pull request', async () => {
+      vi.mocked(fetchAPI).mockResolvedValueOnce([
+        { id: 1, state: 'APPROVED', user: { login: 'me' } },
+        { id: 2, state: 'APPROVED', user: { login: 'alex' } },
+        { id: 3, state: 'APPROVED', user: { login: 'me' } },
+      ]);
+
+      await withdrawApproval(/** @type {any} */ ({ number: 1 }));
+
+      expect(fetchAPI).toHaveBeenNthCalledWith(
+        1,
+        '/repos/owner/repo/pulls/1/reviews?per_page=100&page=1',
+      );
+      expect(vi.mocked(fetchAPI).mock.calls.slice(1)).toEqual(
+        [1, 3].map((id) => [
+          `/repos/owner/repo/pulls/1/reviews/${id}/dismissals`,
+          {
+            method: 'PUT',
+            body: { message: 'The entry is no longer ready to publish.', event: 'DISMISS' },
+          },
+        ]),
+      );
+    });
+
+    test('finds an approval past the first page of reviews', async () => {
+      vi.mocked(fetchAPI)
+        .mockResolvedValueOnce(
+          Array.from({ length: 100 }, (_, index) => ({
+            id: index + 1,
+            state: 'COMMENTED',
+            user: { login: 'alex' },
+          })),
+        )
+        .mockResolvedValueOnce([{ id: 101, state: 'APPROVED', user: { login: 'me' } }]);
+
+      await withdrawApproval(/** @type {any} */ ({ number: 1 }));
+
+      expect(vi.mocked(fetchAPI).mock.calls).toEqual([
+        ['/repos/owner/repo/pulls/1/reviews?per_page=100&page=1'],
+        ['/repos/owner/repo/pulls/1/reviews?per_page=100&page=2'],
+        [
+          '/repos/owner/repo/pulls/1/reviews/101/dismissals',
+          {
+            method: 'PUT',
+            body: { message: 'The entry is no longer ready to publish.', event: 'DISMISS' },
+          },
+        ],
+      ]);
+    });
+
+    test('stops after 10 pages of reviews', async () => {
+      vi.mocked(fetchAPI).mockResolvedValue(
+        Array.from({ length: 100 }, (_, index) => ({
+          id: index + 1,
+          state: 'COMMENTED',
+          user: { login: 'alex' },
+        })),
+      );
+
+      await withdrawApproval(/** @type {any} */ ({ number: 1 }));
+
+      expect(fetchAPI).toHaveBeenCalledTimes(10);
+      expect(fetchAPI).toHaveBeenLastCalledWith(
+        '/repos/owner/repo/pulls/1/reviews?per_page=100&page=10',
+      );
+    });
   });
 
   describe('discard', () => {
@@ -915,6 +1147,153 @@ describe('GitHub Editorial Workflow service', () => {
         expect(fetchGraphQL).toHaveBeenLastCalledWith(expect.stringContaining('createRef'), {
           input: expect.objectContaining({ repositoryId: 'R_fork', oid: 'upstream-head' }),
         });
+      });
+
+      // What GitHub says when an OAuth token without the `workflow` scope would bring changes to
+      // GitHub Actions workflow files into the fork
+      const refusal = 'contributor does not have the correct permissions to execute `CreateRef`';
+
+      const refused = new Error('Server responded with an error', {
+        cause: { status: 200, message: refusal },
+      });
+
+      /**
+       * Mock the base query, with the fork’s own copy of the configured branch, if it has one, and
+       * its default branch.
+       * @param {object} [options] Options.
+       * @param {boolean} [options.hasCopy] Whether the fork has a copy of the configured branch.
+       * @param {string | null} [options.defaultBranch] Name of the fork’s default branch.
+       */
+      const mockBase = ({ hasCopy = true, defaultBranch = 'main' } = {}) => {
+        vi.mocked(fetchGraphQL).mockResolvedValueOnce({
+          fork: {
+            id: 'R_fork',
+            ref: hasCopy ? { name: 'main' } : null,
+            defaultBranchRef: defaultBranch ? { name: defaultBranch } : null,
+          },
+          base: { ref: { target: { oid: 'upstream-head' } } },
+        });
+      };
+
+      test('starts from where the fork’s copy of the branch meets it when the head upstream is refused', async () => {
+        mockBase();
+        vi.mocked(fetchGraphQL)
+          .mockRejectedValueOnce(refused)
+          .mockResolvedValueOnce({ createRef: { ref: { name: 'x' } } });
+        vi.mocked(fetchAPI).mockResolvedValueOnce({ merge_base_commit: { sha: 'merge-base' } });
+
+        await expect(createBranch('cms/contributor/repo/posts/hello')).resolves.toEqual({
+          headOid: 'merge-base',
+        });
+
+        // Compared in the configured repository, with the fork’s branch as the head
+        expect(fetchAPI).toHaveBeenCalledWith(
+          '/repos/owner/repo/compare/main...contributor:main?per_page=1',
+        );
+        expect(fetchGraphQL).toHaveBeenCalledTimes(3);
+        expect(fetchGraphQL).toHaveBeenLastCalledWith(expect.stringContaining('createRef'), {
+          input: {
+            repositoryId: 'R_fork',
+            name: 'refs/heads/cms/contributor/repo/posts/hello',
+            oid: 'merge-base',
+          },
+        });
+      });
+
+      test('compares the fork’s default branch when it has no copy of the branch', async () => {
+        // The configured branch was created upstream after the fork was made, e.g. for a deploy
+        // preview
+        mockBase({ hasCopy: false, defaultBranch: 'trunk' });
+        vi.mocked(fetchGraphQL)
+          .mockRejectedValueOnce(refused)
+          .mockResolvedValueOnce({ createRef: { ref: { name: 'x' } } });
+        vi.mocked(fetchAPI).mockResolvedValueOnce({ merge_base_commit: { sha: 'merge-base' } });
+
+        await expect(createBranch('cms/contributor/repo/posts/hello')).resolves.toEqual({
+          headOid: 'merge-base',
+        });
+        expect(fetchAPI).toHaveBeenCalledWith(
+          '/repos/owner/repo/compare/main...contributor:trunk?per_page=1',
+        );
+      });
+
+      test('keeps a branch that turns out to exist when retried from the fork', async () => {
+        mockBase();
+        vi.mocked(fetchGraphQL)
+          .mockRejectedValueOnce(refused)
+          .mockRejectedValueOnce(
+            new Error('Server responded with an error', {
+              cause: { status: 200, message: 'A ref named "x" already exists in the repository.' },
+            }),
+          );
+        vi.mocked(fetchAPI).mockResolvedValueOnce({ merge_base_commit: { sha: 'merge-base' } });
+
+        await expect(createBranch('cms/contributor/repo/posts/hello')).resolves.toEqual({});
+      });
+
+      test('reports a refusal of the retry too', async () => {
+        mockBase();
+        vi.mocked(fetchGraphQL).mockRejectedValueOnce(refused).mockRejectedValueOnce(refused);
+        vi.mocked(fetchAPI).mockResolvedValueOnce({ merge_base_commit: { sha: 'merge-base' } });
+
+        const error = await createBranch('cms/contributor/repo/posts/hello').catch((ex) => ex);
+
+        expect(error.message).toBe('Failed to create the branch.');
+        expect(error.cause.message).toBe(refusal);
+      });
+
+      test('doesn’t retry when the fork has no branch to compare', async () => {
+        mockBase({ hasCopy: false, defaultBranch: null });
+        vi.mocked(fetchGraphQL).mockRejectedValueOnce(refused);
+
+        await expect(createBranch('cms/contributor/repo/posts/hello')).rejects.toThrow(
+          'Failed to create the branch.',
+        );
+        expect(fetchAPI).not.toHaveBeenCalled();
+        expect(fetchGraphQL).toHaveBeenCalledTimes(2);
+      });
+
+      test('doesn’t retry when the comparison fails', async () => {
+        mockBase();
+        vi.mocked(fetchGraphQL).mockRejectedValueOnce(refused);
+        vi.mocked(fetchAPI).mockRejectedValueOnce(new Error('Not Found'));
+
+        await expect(createBranch('cms/contributor/repo/posts/hello')).rejects.toThrow(
+          'Failed to create the branch.',
+        );
+        expect(fetchGraphQL).toHaveBeenCalledTimes(2);
+      });
+
+      test('doesn’t retry when the comparison reports no merge base', async () => {
+        mockBase();
+        vi.mocked(fetchGraphQL).mockRejectedValueOnce(refused);
+        vi.mocked(fetchAPI).mockResolvedValueOnce({});
+
+        await expect(createBranch('cms/contributor/repo/posts/hello')).rejects.toThrow(
+          'Failed to create the branch.',
+        );
+        expect(fetchGraphQL).toHaveBeenCalledTimes(2);
+      });
+
+      test('doesn’t retry when the fork’s branch meets it at the head upstream', async () => {
+        mockBase();
+        vi.mocked(fetchGraphQL).mockRejectedValueOnce(refused);
+        vi.mocked(fetchAPI).mockResolvedValueOnce({ merge_base_commit: { sha: 'upstream-head' } });
+
+        await expect(createBranch('cms/contributor/repo/posts/hello')).rejects.toThrow(
+          'Failed to create the branch.',
+        );
+        expect(fetchGraphQL).toHaveBeenCalledTimes(2);
+      });
+
+      test('doesn’t retry after a failure other than a refusal', async () => {
+        mockBase();
+        vi.mocked(fetchGraphQL).mockRejectedValueOnce(new Error('Failed to send the request'));
+
+        await expect(createBranch('cms/contributor/repo/posts/hello')).rejects.toThrow(
+          'Failed to create the branch.',
+        );
+        expect(fetchAPI).not.toHaveBeenCalled();
       });
     });
 
@@ -1023,6 +1402,175 @@ describe('GitHub Editorial Workflow service', () => {
           method: 'PATCH',
           body: { state: 'closed' },
         });
+      });
+    });
+  });
+
+  describe('pull requests from forks', () => {
+    /**
+     * Create a raw node of a pull request a contributor opened from their fork.
+     * @param {object} [overrides] Properties to override.
+     * @returns {any} Node.
+     */
+    const createForkNode = (overrides = {}) =>
+      createNode({
+        id: 'PR_7',
+        number: 7,
+        url: 'https://github.com/owner/repo/pull/7',
+        isDraft: false,
+        isCrossRepository: true,
+        maintainerCanModify: true,
+        // Open Authoring inserts the fork’s path after the prefix
+        headRefName: 'cms/alice/website/posts/hello',
+        headRepository: { name: 'website', owner: { login: 'alice' } },
+        labels: { nodes: [] },
+        body: '<!-- sveltia-cms:deletion-group=group-1 -->',
+        ...overrides,
+      });
+
+    /** A pull request from a fork, as parsed for a maintainer. */
+    const forkPullRequest = createMockForkPullRequest({ pullRequest: { headSHA: 'abc123' } });
+
+    describe('parseForkPullRequest', () => {
+      test('qualifies the branch with the fork and leaves the description out', () => {
+        expect(parseForkPullRequest(createForkNode())).toMatchObject({
+          number: 7,
+          branch: 'alice/website:cms/alice/website/posts/hello',
+          headSHA: 'abc123',
+          status: 'pending_review',
+          description: '',
+          fork: { owner: 'alice', repo: 'website', editable: true },
+        });
+      });
+
+      test('tells whether maintainers can push to the branch', () => {
+        expect(
+          parseForkPullRequest(createForkNode({ maintainerCanModify: false }))?.fork?.editable,
+        ).toBe(false);
+      });
+
+      test('reads the stage from the draft state and the label names', () => {
+        /**
+         * Get the status of a pull request from a fork with the given properties.
+         * @param {object} overrides Properties to override.
+         * @returns {string | undefined} Status.
+         */
+        const status = (overrides) => parseForkPullRequest(createForkNode(overrides))?.status;
+
+        // The rule itself is tested with `toForkPullRequest`; this covers what GraphQL returns
+        expect(status({ isDraft: true })).toBe('draft');
+        expect(status({ labels: { nodes: [{ name: 'sveltia-cms/pending_publish' }] } })).toBe(
+          'pending_publish',
+        );
+      });
+
+      test.each([
+        ['from the configured repository', { isCrossRepository: false }],
+        ['to another branch', { baseRefName: 'develop' }],
+        ['from a deleted fork', { headRepository: null }],
+        ['from a fork without an owner', { headRepository: { name: 'website', owner: null } }],
+        ['from a fork without a name', { headRepository: { name: '', owner: { login: 'alice' } } }],
+        ['from a branch the CMS didn’t name', { headRefName: 'fix-typo' }],
+      ])('ignores a pull request %s', (_label, overrides) => {
+        expect(parseForkPullRequest(createForkNode(overrides))).toBeUndefined();
+      });
+    });
+
+    describe('fetchPullRequests', () => {
+      test('lists the pull requests from forks along with the labelled ones', async () => {
+        mockStores({ backend: { name: 'github', open_authoring: true } });
+        vi.mocked(fetchGraphQL)
+          .mockResolvedValueOnce({
+            repository: {
+              pullRequests: { nodes: [createNode()] },
+              forkPullRequests: {
+                // The configured repository’s own pull request is the labelled list’s to take
+                nodes: [createForkNode(), createNode({ isCrossRepository: false })],
+              },
+            },
+          })
+          .mockResolvedValueOnce({ repository: {} });
+
+        const result = await fetchPullRequests();
+        const [query] = vi.mocked(fetchGraphQL).mock.calls[0];
+
+        expect(query).toContain('forkPullRequests: pullRequests(');
+        expect(query).toContain('baseRefName: "main"');
+        expect(query).toContain('maintainerCanModify');
+        expect(result.map(({ branch }) => branch)).toEqual([
+          'cms/posts/hello',
+          'alice/website:cms/alice/website/posts/hello',
+        ]);
+      });
+
+      test('leaves the pull requests from forks out without Open Authoring', async () => {
+        await fetchPullRequests();
+
+        const [query] = vi.mocked(fetchGraphQL).mock.calls[0];
+
+        expect(query).not.toContain('forkPullRequests');
+      });
+    });
+
+    describe('savePullRequest', () => {
+      const args = /** @type {any} */ ({
+        changes: [],
+        options: { commitType: 'update' },
+        branch: 'alice/website:cms/alice/website/posts/hello',
+        title: 'Update Post “hello”',
+      });
+
+      test('commits onto the contributor’s branch at the head on record', async () => {
+        vi.mocked(commitChanges).mockResolvedValue({ sha: 'def', files: {} });
+
+        await savePullRequest({ ...args, pullRequest: forkPullRequest });
+
+        expect(commitChanges).toHaveBeenCalledWith(
+          [],
+          expect.objectContaining({
+            branch: 'alice/website:cms/alice/website/posts/hello',
+            headOid: 'abc123',
+          }),
+        );
+      });
+
+      test('refuses to save when the contributor doesn’t let maintainers push', async () => {
+        await expect(
+          savePullRequest({
+            ...args,
+            pullRequest: { ...forkPullRequest, fork: { ...forkPullRequest.fork, editable: false } },
+          }),
+        ).rejects.toThrow('Failed to save the changes.');
+
+        expect(commitChanges).not.toHaveBeenCalled();
+      });
+
+      test('names the branch in the fork when it has gone', async () => {
+        vi.mocked(commitChanges).mockRejectedValue(new Error('Could not resolve to a Ref'));
+        vi.mocked(fetchGraphQL).mockResolvedValueOnce({ repository: { branchHead: null } });
+
+        await expect(savePullRequest({ ...args, pullRequest: forkPullRequest })).rejects.toThrow(
+          expect.objectContaining({
+            cause: expect.objectContaining({ message: expect.stringContaining('website') }),
+          }),
+        );
+
+        // The head is looked up in the fork, by the branch’s own name there
+        expect(fetchGraphQL).toHaveBeenCalledWith(expect.stringContaining('branchHead'), {
+          owner: 'alice',
+          repo: 'website',
+          branch: 'refs/heads/cms/alice/website/posts/hello',
+        });
+      });
+    });
+
+    test('closes a pull request from a fork without deleting the contributor’s branch', async () => {
+      await discard(forkPullRequest);
+
+      expect(fetchAPI).toHaveBeenCalledTimes(1);
+      expect(fetchAPI).toHaveBeenCalledWith('/repos/owner/repo/pulls/7', {
+        method: 'PATCH',
+        body: { state: 'closed' },
       });
     });
   });

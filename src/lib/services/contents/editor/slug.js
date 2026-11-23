@@ -6,17 +6,22 @@ import { isDraftReadonly } from '$lib/services/config/readonly';
 import {
   getEntryDirPath,
   getSharedEntryFileName,
-  isNestedCollection,
+  hasNestedEntries,
 } from '$lib/services/contents/collection/nested';
-import { getFolderName, getOwnFolderName } from '$lib/services/contents/collection/nested/i18n';
-import { getSlugOptions } from '$lib/services/contents/collection/slug';
-import { getSlugs, hasLocalizedSlugs } from '$lib/services/contents/draft/slugs';
+import { getOwnFolderName } from '$lib/services/contents/collection/nested/i18n';
+import { getSlugOptions, hasLocalizedSlugs } from '$lib/services/contents/collection/slug';
+import { getSlugs } from '$lib/services/contents/draft/slugs';
 import { getOtherEntries } from '$lib/services/contents/draft/validate/slugs';
-import { createPath } from '$lib/services/utils/file';
+import { createPath, getBaseName } from '$lib/services/utils/file';
 import { getUnpublishedEntryByDraft, isPendingDeletion } from '$lib/services/workflow';
 
 /**
- * @import { EntryDraft, InternalEntryCollection, InternalLocaleCode } from '$lib/types/private';
+ * @import {
+ * EntryDraft,
+ * InternalEntryCollection,
+ * InternalLocaleCode,
+ * SlugPreview,
+ * } from '$lib/types/private';
  */
 
 /**
@@ -32,9 +37,9 @@ export const hasEntrySlug = (draft) =>
 /**
  * Check whether the slug of an existing entry can be updated. The collection’s `editable` slug
  * option has to allow it, and the entry has to be identified by a name of its own: an entry in a
- * nested collection that doesn’t store every entry as an index file is identified by its path
- * within the collection folder, which can’t be renamed without relocating the entry. An entry
- * awaiting deletion is read-only, and so is an entry in a read-only collection.
+ * collection with nested entries that doesn’t store every entry as an index file is identified by
+ * its path within the collection folder, which can’t be renamed without relocating the entry. An
+ * entry awaiting deletion is read-only, and so is an entry in a read-only collection.
  * @param {EntryDraft | null | undefined} draft Entry draft.
  * @returns {boolean} Result.
  */
@@ -55,7 +60,7 @@ export const canUpdateSlug = (draft) => {
     draft
   );
 
-  if (isNestedCollection(collection) && !getSharedEntryFileName(collection)) {
+  if (hasNestedEntries(collection) && !getSharedEntryFileName(collection)) {
     return false;
   }
 
@@ -76,27 +81,67 @@ export const needsSlugInput = (draft) =>
 
 /**
  * Get the slug a new entry would be saved with if it was saved now, which is shown while the entry
- * is being edited. Date and time tags in the slug template are filled with the current date and
- * time, as they will be with the time of the save.
+ * is being edited, along with the slug the template fills if a number has to be added to it. Date
+ * and time tags in the slug template are filled with the current date and time, as they will be
+ * with the time of the save.
  * @param {EntryDraft} draft Entry draft.
  * @param {object} [options] Options.
  * @param {boolean} [options.templateOnly] Whether to ignore a filled-in slug editor, to get the
  * slugs the template fills.
- * @returns {Record<InternalLocaleCode, string>} Slug for each enabled locale if the slug is
+ * @returns {Record<InternalLocaleCode, SlugPreview>} Slug for each enabled locale if the slug is
  * localized. Otherwise the slug shared by every locale, under the `_` key.
  * @see https://github.com/sveltia/sveltia-cms/discussions/736
  */
-export const getSlugPreviews = (draft, { templateOnly = false } = {}) => {
-  const { defaultLocaleSlug, localizedSlugs } = getSlugs({ draft, templateOnly });
+export const getSlugPreviewDetails = (draft, { templateOnly = false } = {}) => {
+  /** @type {Map<InternalLocaleCode, string>} */
+  const numberedSlugs = new Map();
+  const { defaultLocaleSlug, localizedSlugs } = getSlugs({ draft, templateOnly, numberedSlugs });
+
+  /**
+   * Get the preview of a slug.
+   * @param {string} slug Slug.
+   * @param {InternalLocaleCode} locale Locale the slug is filled in.
+   * @returns {SlugPreview} Preview.
+   */
+  const getPreview = (slug, locale) => {
+    const takenSlug = numberedSlugs.get(locale);
+
+    return takenSlug === undefined ? { slug } : { slug, takenSlug };
+  };
 
   if (!localizedSlugs) {
-    return { _: defaultLocaleSlug };
+    // A slug shared by every locale is filled in the default locale
+    return { _: getPreview(defaultLocaleSlug, draft.collection._i18n.defaultLocale) };
   }
 
   // Every enabled locale has a slug
-  return /** @type {Record<InternalLocaleCode, string>} */ (
-    Object.fromEntries(
-      Object.entries(localizedSlugs).filter(([locale]) => !!draft.currentLocales[locale]),
+  return Object.fromEntries(
+    Object.entries(localizedSlugs)
+      .filter(([locale]) => !!draft.currentLocales[locale])
+      .map(([locale, slug]) => [locale, getPreview(/** @type {string} */ (slug), locale)]),
+  );
+};
+
+/**
+ * Get the slugs the Slug panel shows read-only, in the enabled locales: the ones a new entry would
+ * be saved with if it was saved now, or an existing entry’s current slugs. A locale-agnostic slug
+ * is under the `_` key.
+ * @param {EntryDraft} draft Entry draft.
+ * @returns {[InternalLocaleCode, SlugPreview][]} Slugs.
+ */
+export const getReadonlySlugs = (draft) => {
+  /** @type {[InternalLocaleCode, SlugPreview | undefined][]} */
+  const slugs = draft.isNew
+    ? Object.entries(getSlugPreviewDetails(draft))
+    : Object.entries(draft.currentSlugs).map(([locale, slug]) => [
+        locale,
+        slug === undefined ? undefined : { slug },
+      ]);
+
+  return /** @type {[InternalLocaleCode, SlugPreview][]} */ (
+    slugs.filter(
+      ([locale, preview]) =>
+        preview !== undefined && (locale === '_' || !!draft.currentLocales[locale]),
     )
   );
 };
@@ -184,7 +229,7 @@ export const getTakenFolderNames = ({ draft, ownFolderPaths }) => {
           .filter((otherSubPath) => typeof otherSubPath === 'string')
           .map((otherSubPath) => getEntryDirPath(otherSubPath))
           .filter((otherDirPath) => getEntryDirPath(otherDirPath) === parentPath)
-          .map((otherDirPath) => getFolderName(otherDirPath)),
+          .map((otherDirPath) => getBaseName(otherDirPath)),
       ];
     }),
   );

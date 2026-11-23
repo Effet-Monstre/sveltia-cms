@@ -1,10 +1,12 @@
 import { describe, expect, test, vi } from 'vitest';
 
 import {
+  createLRUMap,
   getOrCreate,
   getOrCreateAsync,
   getOrCreateBounded,
   memoizeOnSource,
+  memoizeOnSources,
   shareInFlight,
 } from './cache';
 
@@ -87,6 +89,84 @@ describe('Test getOrCreate()', () => {
     const second = getOrCreate(cache, 'k', () => ({ x: 2 }));
 
     expect(first).toBe(second);
+  });
+});
+
+describe('Test createLRUMap()', () => {
+  test('stores and returns values', () => {
+    const map = createLRUMap(2);
+
+    map.set('a', 1);
+
+    expect(map.has('a')).toBe(true);
+    expect(map.get('a')).toBe(1);
+    expect(map.has('b')).toBe(false);
+    expect(map.get('b')).toBeUndefined();
+  });
+
+  test('keeps an `undefined` value, which `has` tells apart from a missing one', () => {
+    const map = createLRUMap(2);
+
+    map.set('a', undefined);
+
+    expect(map.has('a')).toBe(true);
+    expect(map.get('a')).toBeUndefined();
+  });
+
+  test('evicts the oldest entry once the limit is exceeded', () => {
+    const map = createLRUMap(2);
+
+    map.set('a', 1);
+    map.set('b', 2);
+    map.set('c', 3);
+
+    expect(map.has('a')).toBe(false);
+    expect(map.has('b')).toBe(true);
+    expect(map.has('c')).toBe(true);
+  });
+
+  test('keeps an entry read with `get` and evicts the least recently used one', () => {
+    const map = createLRUMap(2);
+
+    map.set('a', 1);
+    map.set('b', 2);
+    map.get('a');
+    map.set('c', 3);
+
+    expect(map.has('a')).toBe(true);
+    expect(map.has('b')).toBe(false);
+  });
+
+  test('doesn’t mark an entry checked with `has` as recently used', () => {
+    const map = createLRUMap(2);
+
+    map.set('a', 1);
+    map.set('b', 2);
+    map.has('a');
+    map.set('c', 3);
+
+    expect(map.has('a')).toBe(false);
+  });
+
+  test('marks an overwritten entry as recently used', () => {
+    const map = createLRUMap(2);
+
+    map.set('a', 1);
+    map.set('b', 2);
+    map.set('a', 3);
+    map.set('c', 4);
+
+    expect(map.get('a')).toBe(3);
+    expect(map.has('b')).toBe(false);
+  });
+
+  test('clears all the entries', () => {
+    const map = createLRUMap(2);
+
+    map.set('a', 1);
+    map.clear();
+
+    expect(map.has('a')).toBe(false);
   });
 });
 
@@ -252,5 +332,34 @@ describe('Test memoizeOnSource()', () => {
     expect(getValue()).toBe('x');
     expect(getValue()).toBe('x');
     expect(build).toHaveBeenCalledOnce();
+  });
+});
+
+describe('Test memoizeOnSources()', () => {
+  test('builds the value once per set of sources, and again once any of them is replaced', () => {
+    let first = [1, 2];
+    let second = ['a'];
+
+    const build = vi.fn(
+      (/** @type {number[]} */ numbers, /** @type {string[]} */ letters) =>
+        numbers.length + letters.length,
+    );
+
+    const getValue = memoizeOnSources(() => [first, second], build);
+
+    expect(getValue()).toBe(3);
+    expect(getValue()).toBe(3);
+    expect(build).toHaveBeenCalledOnce();
+    expect(build).toHaveBeenCalledWith(first, second);
+
+    second = ['a', 'b'];
+
+    expect(getValue()).toBe(4);
+    expect(build).toHaveBeenCalledTimes(2);
+
+    first = [1];
+
+    expect(getValue()).toBe(3);
+    expect(build).toHaveBeenCalledTimes(3);
   });
 });

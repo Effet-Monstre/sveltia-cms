@@ -3,7 +3,9 @@ import { escapeRegExp } from '@sveltia/utils/string';
 
 import { isInCmsFolder } from '$lib/services/assets/reserved';
 import { lockedBranch } from '$lib/services/backends/branch-access';
-import { ESCAPED_PLACEHOLDER_REGEX } from '$lib/services/common/template/constants';
+import { hasTemplateTags } from '$lib/services/common/template/tags';
+import { getTemplatePattern } from '$lib/services/common/template/utils';
+import { isViewer } from '$lib/services/config/readonly';
 import { getCustomComponentName } from '$lib/services/contents/fields/rich-text/components/definitions';
 import {
   getLocaleFolderPattern,
@@ -112,7 +114,7 @@ export const getAssetFolder = (cond) => {
  * @param {AssetFolderInfo} folder Asset folder.
  * @returns {RegExp} Regular expression.
  */
-const getEntryRelativePathRegEx = ({ internalPath, localeFolderNames }) => {
+const getEntryRelativePathRegEx = ({ internalPath, internalSubPath, localeFolderNames }) => {
   const localeMatcher = localeFolderNames?.length
     ? `(?:(?:${localeFolderNames.map(escapeRegExp).join('|')})\\/)?`
     : '';
@@ -123,7 +125,29 @@ const getEntryRelativePathRegEx = ({ internalPath, localeFolderNames }) => {
     return new RegExp(`^${getLocaleFolderPattern(folderPath, localeMatcher)}`);
   }
 
-  return new RegExp(`^${localeMatcher}${escapeRegExp(folderPath)}\\/`);
+  if (folderPath) {
+    return new RegExp(`^${localeMatcher}${escapeRegExp(folderPath)}\\/`);
+  }
+
+  // A collection at the repository root, e.g. `folder: .`, has an empty folder path, below which
+  // every file in the repository would count as its asset. Limit the folder to its media subfolder
+  // instead, e.g. `images/` and the folders below it for `media_folder: images`. An entry in a
+  // subfolder of a collection with nested entries keeps its own `images` folder there, which is
+  // left out, since any folder named like that would match. Media stored next to the entries (no
+  // subfolder), out of the repository (`../`) or in a folder named after each entry (a leading tag
+  // like `{{slug}}`) can’t be told apart from the other files in the repository, so the folder
+  // matches nothing then
+  const subPath = /** @type {string} */ (internalSubPath);
+  const [firstSegment] = subPath.split('/');
+
+  if (!firstSegment || firstSegment === '..' || hasTemplateTags(firstSegment)) {
+    return /(?!)/;
+  }
+
+  // A template tag further down matches one folder name, e.g. `images/{{slug}}`
+  const subPathPattern = getTemplatePattern(subPath, '[^/]+');
+
+  return new RegExp(`^${localeMatcher}${subPathPattern}\\/`);
 };
 
 /**
@@ -131,9 +155,13 @@ const getEntryRelativePathRegEx = ({ internalPath, localeFolderNames }) => {
  * call, rebuilt when the store is replaced.
  * `items`: non-entry-relative folders with both regex variants pre-compiled.
  * `entryRelative`: folders whose paths are relative to their parent entry.
+ * `matchesByDir`: the `items` folders matching a directory, keyed by whether subfolders are
+ * matched, then by the directory. Thousands of files share a few hundred directories, and every
+ * file is looked up on each load, so the regexes are only tested once per directory.
  * @type {() => {
  * items: Array<{ folder: AssetFolderInfo, regexSub: RegExp, regexExact: RegExp }>,
  * entryRelative: Array<{ folder: AssetFolderInfo, regex: RegExp }>,
+ * matchesByDir: { sub: Map<string, AssetFolderInfo[]>, exact: Map<string, AssetFolderInfo[]> },
  * }}
  */
 const getAssetFolderPathCache = memoizeOnSource(
@@ -156,7 +184,7 @@ const getAssetFolderPathCache = memoizeOnSource(
       } else {
         // Pre-compile both regex variants so we don’t recreate them on every path lookup.
         // The internal path can contain template tags like `{{slug}}`, which we normalize to `.+?`.
-        const normalizedPath = escapeRegExp(internalPath).replace(ESCAPED_PLACEHOLDER_REGEX, '.+?');
+        const normalizedPath = getTemplatePattern(internalPath, '.+?');
 
         items.push({
           folder,
@@ -167,7 +195,7 @@ const getAssetFolderPathCache = memoizeOnSource(
       }
     });
 
-    return { items, entryRelative };
+    return { items, entryRelative, matchesByDir: { sub: new Map(), exact: new Map() } };
   },
 );
 
@@ -188,16 +216,23 @@ export const getAssetFoldersByPath = (path, { matchSubFolders = true } = {}) => 
     return [];
   }
 
-  const { items, entryRelative } = getAssetFolderPathCache();
+  const { items, entryRelative, matchesByDir } = getAssetFolderPathCache();
   const dir = dirname ?? '';
+  const dirMatches = matchSubFolders ? matchesByDir.sub : matchesByDir.exact;
+  let itemMatches = dirMatches.get(dir);
+
+  if (!itemMatches) {
+    // Compare that the enclosing directory is exactly the same as the internal path, and ignore
+    // any subdirectories, unless the `matchSubFolders` option is specified.
+    itemMatches = items
+      .filter(({ regexSub, regexExact }) => (matchSubFolders ? regexSub : regexExact).test(dir))
+      .map(({ folder }) => folder);
+    dirMatches.set(dir, itemMatches);
+  }
 
   const results = [
     ...entryRelative.filter(({ regex }) => regex.test(path)).map(({ folder }) => folder),
-    // Compare that the enclosing directory is exactly the same as the internal path, and ignore
-    // any subdirectories, unless the `matchSubFolders` option is specified.
-    ...items
-      .filter(({ regexSub, regexExact }) => (matchSubFolders ? regexSub : regexExact).test(dir))
-      .map(({ folder }) => folder),
+    ...itemMatches,
   ];
 
   // `internalPath` is always a string for items in results (entry-relative items are filtered to
@@ -206,6 +241,37 @@ export const getAssetFoldersByPath = (path, { matchSubFolders = true } = {}) => 
     /** @type {string} */ (b.internalPath).localeCompare(/** @type {string} */ (a.internalPath)),
   );
 };
+
+/**
+ * Get a key that identifies an asset folder in a list. The All Assets folder has no internal path,
+ * while the Global Assets folder has an empty one when the global `media_folder` is the root
+ * folder, so the values are serialized as JSON, which tells `undefined` and `''` apart. Every
+ * property that can tell two folders apart is included, e.g. a custom editor component’s folder
+ * can share the internal path of the Global Assets folder with a different public path.
+ * @param {AssetFolderInfo} assetFolder Asset folder.
+ * @returns {string} Key.
+ * @see https://github.com/sveltia/sveltia-cms/issues/1078
+ */
+export const getAssetFolderKey = ({
+  collectionName,
+  fileName,
+  componentName,
+  typedKeyPath,
+  isIndexFile,
+  internalPath,
+  internalSubPath,
+  publicPath,
+}) =>
+  JSON.stringify([
+    collectionName,
+    fileName,
+    componentName,
+    typedKeyPath,
+    isIndexFile,
+    internalPath,
+    internalSubPath,
+    publicPath,
+  ]);
 
 /**
  * Check if asset creation is allowed in the folder. Can’t upload assets if collection assets are
@@ -224,18 +290,42 @@ export const canCreateAsset = (assetFolder) =>
  * Whether the media library can’t be changed. Uploading, replacing, renaming, moving and deleting
  * assets, and creating folders, commit straight to the configured branch rather than going through
  * review, which neither an Open Authoring contributor nor a user who can’t push to the branch can
- * do. An asset attached to an entry is committed with that entry, so it’s unaffected.
+ * do. An asset attached to an entry is committed with that entry, so it’s unaffected. A viewer
+ * can’t change anything at all.
  */
 export const assetsLocked = createDerivedState(
-  () => openAuthoring.current || !!lockedBranch.current,
+  () => openAuthoring.current || !!lockedBranch.current || isViewer(),
+);
+
+/**
+ * Paths of the read-only asset folders with a fixed path, rebuilt when the store is replaced.
+ * @type {() => Set<string>}
+ */
+const getReadonlyFolderPaths = memoizeOnSource(
+  () => allAssetFolders.current,
+  (_allAssetFolders) =>
+    new Set(
+      _allAssetFolders
+        .filter(({ readonly, entryRelative }) => readonly && !entryRelative)
+        .map(({ internalPath }) => /** @type {string} */ (internalPath)),
+    ),
 );
 
 /**
  * Check if any of the given assets is stored in a read-only folder, in which case none of them can
- * be changed, renamed, replaced or deleted along with the others. A file in a folder the CMS itself
- * is served from, such as `admin`, is read-only as well, wherever the media folder is.
+ * be changed, renamed, replaced or deleted along with the others. An asset is assigned to one
+ * folder only, but it’s also listed in the other folders with the same path, so it’s read-only when
+ * any of them is, e.g. a read-only asset collection sharing a collection’s folder. A file in a
+ * folder the CMS itself is served from, such as `admin`, is read-only as well, wherever the media
+ * folder is.
  * @param {Asset[]} assets Assets.
  * @returns {boolean} Result.
  */
 export const hasReadonlyAsset = (assets) =>
-  assets.some(({ folder, path }) => !!folder?.readonly || isInCmsFolder(path));
+  assets.some(
+    ({ folder, path }) =>
+      !!folder?.readonly ||
+      (!folder?.entryRelative &&
+        getReadonlyFolderPaths().has(/** @type {string} */ (folder?.internalPath))) ||
+      isInCmsFolder(path),
+  );

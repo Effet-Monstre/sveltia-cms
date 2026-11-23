@@ -5,12 +5,17 @@ import {
 import { processResource } from '$lib/services/contents/fields/file/process';
 import { allCloudStorageServices } from '$lib/services/integrations/media-libraries/cloud';
 import { getDefaultMediaLibraryOptions } from '$lib/services/integrations/media-libraries/default';
+import {
+  findPreferredLibraryName,
+  getUploadableServiceEntries,
+} from '$lib/services/integrations/media-libraries/options';
 
 /**
  * @import {
  * AssetFolderInfo,
  * AssetLibraryFolderMap,
  * EntryDraft,
+ * InternalLocaleCode,
  * MediaLibraryService,
  * SelectedResource,
  * TypedFieldKeyPath,
@@ -33,6 +38,8 @@ import { getDefaultMediaLibraryOptions } from '$lib/services/integrations/media-
  * @typedef {object} RejectedFileNames
  * @property {string[]} oversizedFileNames Names of the files that exceed the size limit.
  * @property {string[]} invalidFileNames Names of the files that cannot be decoded.
+ * @property {string[]} [mismatchedFileNames] Names of the files that are not one of the accepted
+ * file types, even once transformed.
  */
 
 /**
@@ -83,6 +90,56 @@ export const getMediaFieldAssetOptions = ({
 };
 
 /**
+ * @typedef {object} DroppedFileDestination
+ * @property {'repository' | 'cloud' | undefined} destination Where the files go: the first
+ * location marked with the `default` option that can take them, or else the repository, or else a
+ * cloud storage service that can upload them. `undefined` if no location can take the files.
+ * @property {boolean} ambiguous Whether the files could go to more than one location and none is
+ * marked with the `default` option, so the destination is only a fallback.
+ */
+
+/**
+ * Decide where files dropped or pasted into a field go, rather than picked in the Select Assets
+ * dialog. A cloud storage service without an upload function, like Cloudinary, can’t take them.
+ * @param {object} args Arguments.
+ * @param {boolean} args.repositoryAvailable Whether the default media library is enabled and has a
+ * folder to upload the files to.
+ * @param {[string, MediaLibraryService][]} args.cloudServiceEntries Cloud storage services enabled
+ * for the field.
+ * @param {string[]} [args.preferredLibraryNames] Names of the media libraries marked with the
+ * `default` option, in order of precedence. `default` stands for the repository.
+ * @returns {DroppedFileDestination} Destination.
+ */
+export const getDroppedFileDestination = ({
+  repositoryAvailable,
+  cloudServiceEntries,
+  preferredLibraryNames = [],
+}) => {
+  const uploadableEntries = getUploadableServiceEntries(cloudServiceEntries);
+
+  const preferredName = findPreferredLibraryName({
+    preferredLibraryNames,
+    repositoryAvailable,
+    cloudServiceEntries: uploadableEntries,
+  });
+
+  if (preferredName) {
+    return {
+      destination: preferredName === 'default' ? 'repository' : 'cloud',
+      ambiguous: false,
+    };
+  }
+
+  if (repositoryAvailable) {
+    return { destination: 'repository', ambiguous: uploadableEntries.length > 0 };
+  }
+
+  return uploadableEntries.length
+    ? { destination: 'cloud', ambiguous: uploadableEntries.length > 1 }
+    : { destination: undefined, ambiguous: false };
+};
+
+/**
  * Process the resources selected in the Select Assets dialog, or dropped or pasted into a field.
  * A file to be uploaded that doesn’t come with a folder of its own, including a stock photo that
  * isn’t hotlinked, goes to the given folder.
@@ -91,16 +148,18 @@ export const getMediaFieldAssetOptions = ({
  * @param {SelectedResource[]} args.resources Resources. A missing `folder` is filled in.
  * @param {AssetFolderInfo | undefined} args.folder Default folder for uploads.
  * @param {DefaultMediaLibraryConfig} args.libraryConfig Default media library configuration.
+ * @param {string} [args.accept] File types a file to be uploaded is checked against once processed.
+ * @param {InternalLocaleCode} [args.locale] Locale the resources are selected for.
  * @returns {Promise<ProcessResourceResult[]>} Results, in the same order as the resources.
  */
-export const processResources = ({ draft, resources, folder, libraryConfig }) =>
+export const processResources = ({ draft, resources, folder, libraryConfig, accept, locale }) =>
   Promise.all(
     resources.map((resource) => {
       if (resource.file && !resource.folder) {
         resource.folder = folder;
       }
 
-      return processResource({ draft, resource, libraryConfig });
+      return processResource({ draft, resource, libraryConfig, accept, locale });
     }),
   );
 
@@ -112,6 +171,7 @@ export const processResources = ({ draft, resources, folder, libraryConfig }) =>
 export const getRejectedFileNames = (results) => ({
   oversizedFileNames: results.flatMap(({ oversizedFileName }) => oversizedFileName ?? []),
   invalidFileNames: results.flatMap(({ invalidFileName }) => invalidFileName ?? []),
+  mismatchedFileNames: results.flatMap(({ mismatchedFileName }) => mismatchedFileName ?? []),
 });
 
 /**
@@ -123,3 +183,49 @@ export const getRejectedFileNames = (results) => ({
  */
 export const toFieldValue = (value, inEditorComponent) =>
   inEditorComponent ? value.replaceAll(' ', '%20') : value;
+
+/**
+ * Work out what a File/Image field takes from the resources the user has selected, once they have
+ * been processed.
+ * @param {object} args Arguments.
+ * @param {ProcessResourceResult[]} args.resources Results of {@link processResources}.
+ * @param {boolean} args.multiple Whether the field takes multiple files.
+ * @param {string | string[] | undefined} args.previousValue Value of a single-file field before
+ * the selection, which is restored if none of the resources can be used, so that a failed upload or
+ * replacement doesn’t leave an empty or invalid reference behind. Without one, the field is left
+ * empty.
+ * @param {boolean} args.inEditorComponent Whether the field is part of a rich text editor
+ * component.
+ * @returns {{
+ * values: string[],
+ * value: string | string[] | undefined,
+ * credit: string,
+ * rejected: RejectedFileNames,
+ * }} Values of the usable resources, to be added to a multiple-file field; value to be stored in a
+ * single-file field, or `undefined` for a multiple-file field; photo credits, one per line; and
+ * the names of the files that couldn’t be used.
+ */
+export const resolveSelectionResult = ({
+  resources,
+  multiple,
+  previousValue,
+  inEditorComponent,
+}) => {
+  const values = resources.flatMap(({ value }) => value ?? []);
+  /** @type {string | string[] | undefined} */
+  let value = undefined;
+
+  if (!multiple) {
+    // A single-value field takes the last file, like it would if they were picked in turn
+    value = values.length
+      ? toFieldValue(/** @type {string} */ (values.at(-1)), inEditorComponent)
+      : (previousValue ?? '');
+  }
+
+  return {
+    values,
+    value,
+    credit: resources.flatMap(({ credit }) => credit || []).join('\n'),
+    rejected: getRejectedFileNames(resources),
+  };
+};

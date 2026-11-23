@@ -9,6 +9,8 @@ import { resolveCacheDB } from '$lib/services/contents/draft/save/file-changes';
 import { getEntrySummaryFromContent } from '$lib/services/contents/entry/summary';
 import { formatEntryFile } from '$lib/services/contents/file/format';
 import { arrayFileItems, createArrayItemEntry } from '$lib/services/contents/file/process';
+import { fileStates, updateFileState } from '$lib/services/contents/file/state';
+import { moveArrayItemSources } from '$lib/services/contents/file/value-sources';
 import { getEntryFoldersByPath } from '$lib/services/contents/folders';
 
 /**
@@ -19,6 +21,7 @@ import { getEntryFoldersByPath } from '$lib/services/contents/folders';
  * InternalEntryCollection,
  * RepositoryFileInfo,
  * RepositoryFileMetadata,
+ * ValueSourceMap,
  * } from '$lib/types/private';
  */
 
@@ -37,6 +40,7 @@ import { getEntryFoldersByPath } from '$lib/services/contents/folders';
  * @property {string} path File path.
  * @property {ArrayFileSlot[]} slots Items of the file, as they will be saved.
  * @property {FileChange} change Change rewriting the whole file.
+ * @property {ValueSourceMap} [sourceMap] Source map of the file as it will be saved.
  */
 
 /**
@@ -101,6 +105,9 @@ const groupArrayFileChanges = (changes) => {
 export const applyArrayFileChanges = ({ collection, path, items, changes }) => {
   /** @type {ArrayFileSlot[]} */
   const slots = items.map((item, index) => ({ item, from: index }));
+  // A reorder moves the slots around, but each keeps the position it came from, so an item can be
+  // found by that position without going through the slots for each change
+  const slotsByOrigin = new Map(slots.map((slot) => [slot.from, slot]));
   /** @type {Set<number>} */
   const removed = new Set();
 
@@ -158,9 +165,7 @@ export const applyArrayFileChanges = ({ collection, path, items, changes }) => {
     if (arrayItem) {
       // The position can have changed with a reorder made in the same commit. A removed item is
       // only left out at the end, so the item is always found
-      const slot = /** @type {ArrayFileSlot} */ (
-        slots.find(({ from }) => from === arrayItem.index)
-      );
+      const slot = /** @type {ArrayFileSlot} */ (slotsByOrigin.get(arrayItem.index));
 
       slot.item = item;
     } else {
@@ -239,6 +244,15 @@ export const combineArrayFileChanges = async (changes) => {
       });
 
       const cache = /** @type {RepositoryFileInfo | undefined} */ (await cacheDB?.get(path));
+      const state = fileStates.get(path) ?? {};
+
+      // The source text of the values read from the file moves along with the items
+      const sourceMap = state.valueSources
+        ? moveArrayItemSources(
+            state.valueSources,
+            slots.map(({ from }) => from),
+          )
+        : undefined;
 
       /** @type {FileChange} */
       const change = {
@@ -251,10 +265,12 @@ export const combineArrayFileChanges = async (changes) => {
         data: await formatEntryFile({
           content: /** @type {any} */ (slots.map(({ item }) => item)),
           _file: collection._file,
+          // The comments at the top of the file are kept as well
+          state: { ...state, valueSources: sourceMap },
         }),
       };
 
-      return { collection, path, slots, change };
+      return { collection, path, slots, change, sourceMap };
     }),
   );
 
@@ -284,7 +300,7 @@ export const createArrayFileEntries = ({ arrayFileUpdates, savingEntries, meta }
   /** @type {Map<Entry, Entry>} */
   const savedEntries = new Map();
 
-  arrayFileUpdates.forEach(({ collection, path, slots }) => {
+  arrayFileUpdates.forEach(({ collection, path, slots, sourceMap }) => {
     const { defaultLocale } = collection._i18n;
 
     /**
@@ -305,6 +321,10 @@ export const createArrayFileEntries = ({ arrayFileUpdates, savingEntries, meta }
       path,
       slots.map(({ item }) => item),
     );
+
+    if (sourceMap) {
+      updateFileState(path, { valueSources: sourceMap });
+    }
 
     const fileSavingEntries = new Map(
       savingEntries.filter(isInFile).map((entry) => [entry.arrayIndex, entry]),

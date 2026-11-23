@@ -31,6 +31,34 @@ describe('getSignInOptions', () => {
     });
   });
 
+  it('should label the Forgejo backend on Codeberg as Codeberg', () => {
+    expect(
+      getSignInOptions(
+        { name: 'forgejo', repo: 'user/repo', api_root: 'https://codeberg.org/api/v1/' },
+        'Forgejo',
+      ),
+    ).toEqual({
+      serviceLabel: 'Codeberg',
+      tokenOptionHidden: false,
+      oauthOptionHidden: false,
+      oauthOptionDisabled: true,
+    });
+  });
+
+  it('should keep the label for the Forgejo backend on another instance', () => {
+    expect(
+      getSignInOptions(
+        {
+          name: 'forgejo',
+          repo: 'user/repo',
+          api_root: 'https://forgejo.example.com/api/v1',
+          app_id: 'id',
+        },
+        'Forgejo',
+      ),
+    ).toMatchObject({ serviceLabel: 'Forgejo', oauthOptionDisabled: false });
+  });
+
   it('should keep the backend label for another Gitea instance', () => {
     expect(
       getSignInOptions(
@@ -60,5 +88,19 @@ describe('getSignInOptions', () => {
       // @ts-ignore - the test repository has no authentication methods
       getSignInOptions({ name: 'test-repo', auth_methods: [] }, 'Test'),
     ).toMatchObject({ tokenOptionHidden: false, oauthOptionHidden: false });
+  });
+
+  it('should replace the OAuth and token options with Sveltia CMS Additions', () => {
+    expect(
+      getSignInOptions(
+        {
+          name: 'github',
+          repo: 'user/repo',
+          auth_type: 'additions',
+          base_url: 'https://additions.example.com',
+        },
+        'GitHub',
+      ),
+    ).toMatchObject({ tokenOptionHidden: true, oauthOptionHidden: true });
   });
 });

@@ -3,8 +3,10 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   escapeAttr,
   escapeHTML,
+  isHttpURL,
   isNonEmptyString,
   makeLink,
+  sanitizeHelpText,
   sanitizeInlineMarkdown,
 } from '$lib/services/utils/string';
 
@@ -16,6 +18,22 @@ vi.mock('@sveltia/i18n', () => ({
       `<a \u2068${values.apiKeyHref}\u2069 onclick="x()">key</a><img src="x">`,
   ),
 }));
+
+describe('isHttpURL', () => {
+  it('accepts an absolute HTTP(S) URL', () => {
+    expect(isHttpURL('https://example.com/api')).toBe(true);
+    expect(isHttpURL(' HTTP://localhost:8080 ')).toBe(true);
+  });
+
+  it('rejects anything else', () => {
+    expect(isHttpURL('example.com')).toBe(false);
+    expect(isHttpURL('localhost:8080/api')).toBe(false);
+    expect(isHttpURL('mailto:user@example.com')).toBe(false);
+    expect(isHttpURL('https://exa mple.com')).toBe(false);
+    expect(isHttpURL('')).toBe(false);
+    expect(isHttpURL(42)).toBe(false);
+  });
+});
 
 describe('isNonEmptyString', () => {
   it('returns true for non-empty strings', () => {
@@ -147,7 +165,7 @@ describe('makeLink', () => {
     const result = makeLink('Link <a>here</a>', url);
 
     expect(result).toContain(
-      'href="https://example.com/path?q=&quot;test&quot;&amp;other=<value>"',
+      'href="https://example.com/path?q=&quot;test&quot;&amp;other=&lt;value&gt;"',
     );
   });
 
@@ -234,5 +252,13 @@ describe('sanitizeInlineMarkdown', () => {
 describe('escapeHTML()', () => {
   it('should escape the characters read as markup, but not quotes', () => {
     expect(escapeHTML('Q&A <b> &amp; "x"')).toBe('Q&amp;A &lt;b&gt; &amp;amp; "x"');
+  });
+});
+
+describe('sanitizeHelpText', () => {
+  it('should parse inline Markdown and turn a literal `\\n` into a line break', () => {
+    expect(sanitizeHelpText('**a**\\n[b](/b) <i>c</i><script>alert(1)</script>')).toBe(
+      '<strong>a</strong><br><a href="/b">b</a> c',
+    );
   });
 });

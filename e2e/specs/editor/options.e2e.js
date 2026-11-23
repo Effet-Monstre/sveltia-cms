@@ -1,5 +1,6 @@
 import { MONOLINGUAL_CONFIG, MONOLINGUAL_FILES } from '../../fixtures/configs/monolingual.js';
 import { expect, test } from '../../fixtures/test.js';
+import { getEditor } from '../../fixtures/ui.js';
 
 /**
  * @import { Locator, Page } from '@playwright/test';
@@ -8,7 +9,8 @@ import { expect, test } from '../../fixtures/test.js';
 test.use({ config: MONOLINGUAL_CONFIG });
 
 test.beforeEach(async ({ cms, page }) => {
-  // The `{{year}}` and `{{month}}` slug tags come from the time of saving
+  // The `{{year}}` and `{{month}}` slug tags come from the post’s date, or the time of saving if
+  // it’s empty
   await page.clock.install({ time: new Date('2026-05-10T12:00:00Z') });
   await cms.open();
   await cms.seed(MONOLINGUAL_FILES);
@@ -21,7 +23,7 @@ test.beforeEach(async ({ cms, page }) => {
  * @returns {Promise<Locator>} Editor.
  */
 const openFirstLight = async (page) => {
-  const editor = page.getByRole('group', { name: 'Content Editor' });
+  const editor = getEditor(page);
 
   await page.getByRole('row', { name: /First Light/ }).click();
   await expect(editor.getByRole('textbox', { name: 'Title' })).toHaveValue('First Light');
@@ -42,8 +44,9 @@ test('duplicates an entry', async ({ cms, page }) => {
   await editor.getByRole('textbox', { name: 'Title' }).fill('Second Light');
   await editor.getByRole('button', { name: 'Save' }).click();
 
+  // The copy keeps the original’s date, which it’s named after
   await expect
-    .poll(async () => (await cms.readRepo())['content/posts/2026-05-second-light.md'])
+    .poll(async () => (await cms.readRepo())['content/posts/2026-01-second-light.md'])
     .toBe(
       MONOLINGUAL_FILES['content/posts/2026-01-first-light.md']
         .replace('First Light', 'Second Light')
@@ -153,12 +156,23 @@ test.describe('panes', () => {
     await expect(previewPane).toBeHidden();
     await expect(swapButton).toBeHidden();
     await expect(editor.getByRole('group', { name: 'Edit Content' })).toBeVisible();
-    // The preview is shown in the second pane, so its options are unavailable meanwhile
+    // The preview takes turns with the editor in the only pane, so there’s nothing to sync
     await menuButton.click();
     await expect(showSecondPane).not.toBeChecked();
-    await expect(showPreview).toBeDisabled();
+    await expect(showPreview).toBeEnabled();
     await expect(syncScrolling).toBeDisabled();
     await page.keyboard.press('Escape');
+
+    const viewSwitcher = editor.getByRole('radiogroup', { name: 'Switch View' });
+
+    await viewSwitcher.getByRole('radio', { name: 'Preview' }).click();
+    await expect(previewPane.getByRole('document', { name: 'Content Preview' })).toContainText(
+      'The observatory opens its doors.',
+    );
+    await expect(editor.getByRole('group', { name: 'Edit Content' })).toBeHidden();
+    await viewSwitcher.getByRole('radio', { name: 'Edit' }).click();
+    await expect(editor.getByRole('group', { name: 'Edit Content' })).toBeVisible();
+    await expect(previewPane).toBeHidden();
 
     await cms.chooseMenuItem(menuButton, showSecondPane);
     await expect(previewPane).toBeVisible();
@@ -190,6 +204,44 @@ test.describe('panes', () => {
     await expect(previewPane).toBeHidden();
   });
 
+  test('places the pane swap button over the gutter without sliding it in', async ({ page }) => {
+    // Record the transitions the button runs while the editor opens: it’s placed by the measured
+    // width of the first pane, which starts at 0
+    await page.evaluate(() => {
+      /** @type {any} */ (window).swapButtonTransitions = [];
+      document.addEventListener('transitionrun', ({ target, propertyName }) => {
+        if (/** @type {Element} */ (target).matches('.swap-button')) {
+          /** @type {any} */ (window).swapButtonTransitions.push(propertyName);
+        }
+      });
+    });
+
+    const editor = await openFirstLight(page);
+    const swapButton = editor.getByRole('button', { name: 'Swap Panes' });
+    // The resize handle is the only focusable separator
+    const handle = editor.locator('[role="separator"][tabindex]');
+
+    /**
+     * Get the horizontal centre of an element.
+     * @param {Locator} locator Element.
+     * @returns {Promise<number>} Centre.
+     */
+    const getCenter = async (locator) => {
+      const { x, width } = (await locator.boundingBox()) ?? { x: NaN, width: NaN };
+
+      return Math.round(x + width / 2);
+    };
+
+    await expect.poll(async () => getCenter(swapButton)).toBe(await getCenter(handle));
+    expect(
+      await page.evaluate(() =>
+        /** @type {string[]} */ (/** @type {any} */ (window).swapButtonTransitions).filter((name) =>
+          /left|right|inset/.test(name),
+        ),
+      ),
+    ).toEqual([]);
+  });
+
   test('swaps the panes', async ({ page }) => {
     const editor = await openFirstLight(page);
     const editPane = editor.getByRole('group', { name: 'Edit Content' });
@@ -209,6 +261,41 @@ test.describe('panes', () => {
     // The fields can still be edited, and the preview follows them
     await editor.getByRole('textbox', { name: 'Title' }).fill('Last Light');
     await expect(previewPane.getByText('Last Light')).toBeVisible();
+  });
+});
+
+test.describe('with `editor.second_pane: false`', () => {
+  test.use({ config: { ...MONOLINGUAL_CONFIG, editor: { second_pane: false } } });
+
+  test('keeps a single pane, where the preview takes turns with the editor', async ({
+    cms,
+    page,
+  }) => {
+    const editor = await openFirstLight(page);
+    const editPane = editor.getByRole('group', { name: 'Edit Content' });
+    const previewPane = editor.getByRole('group', { name: 'Preview Content' });
+    const viewSwitcher = editor.getByRole('radiogroup', { name: 'Switch View' });
+
+    await expect(editPane).toBeVisible();
+    await expect(previewPane).toBeHidden();
+    await expect(editor.getByRole('button', { name: 'Swap Panes' })).toHaveCount(0);
+
+    await cms.openPopup(
+      page.getByRole('button', { name: 'Show Editor Options' }),
+      page.getByRole('menuitemcheckbox', { name: 'Show Second Pane' }),
+    );
+    await expect(page.getByRole('menuitemcheckbox', { name: 'Show Second Pane' })).toBeDisabled();
+    await expect(
+      page.getByRole('menuitemcheckbox', { name: 'Show Second Pane' }),
+    ).not.toBeChecked();
+    await expect(page.getByRole('menuitemcheckbox', { name: 'Show Preview' })).toBeEnabled();
+    await page.keyboard.press('Escape');
+
+    await viewSwitcher.getByRole('radio', { name: 'Preview' }).click();
+    await expect(previewPane.getByRole('document', { name: 'Content Preview' })).toContainText(
+      'The observatory opens its doors.',
+    );
+    await expect(editPane).toBeHidden();
   });
 });
 
@@ -234,7 +321,7 @@ test.describe('sync scrolling', () => {
   const openLongNight = async (page) => {
     await page.getByRole('row', { name: /Long Night/ }).click();
 
-    const editor = page.getByRole('group', { name: 'Content Editor' });
+    const editor = getEditor(page);
 
     await expect(editor.getByRole('textbox', { name: 'Body' })).toContainText('Paragraph 80.');
 
@@ -278,6 +365,74 @@ test.describe('sync scrolling', () => {
     await expect.poll(() => previewArea.evaluate((element) => element.scrollTop)).toBe(0);
   });
 
+  test('aligns the field at the top of one pane with the same spot in the other', async ({
+    page,
+  }) => {
+    const { editArea, previewArea } = await openLongNight(page);
+
+    /**
+     * Get how far the top of the scrolled pane is into the Body field, and how far the other pane
+     * is off from the same spot in its own Body field.
+     * @param {Locator} thisArea Scrolling area of the pane being scrolled.
+     * @param {Locator} thatArea Scrolling area of the other pane.
+     * @returns {Promise<{ ratio: number, error: number }>} Ratio within the field, and the error in
+     * pixels.
+     */
+    const measure = async (thisArea, thatArea) => {
+      /**
+       * Get where the Body field is relative to the top of a pane.
+       * @param {Locator} area Scrolling area.
+       * @returns {Promise<{ offset: number, height: number }>} Offset of the top of the pane into
+       * the field, and the field’s height.
+       */
+      const getPosition = (area) =>
+        area.evaluate((element) => {
+          const field = /** @type {Element} */ (element.querySelector('[data-key-path="body"]'));
+          const { top, height } = field.getBoundingClientRect();
+
+          return { offset: element.getBoundingClientRect().top - top, height };
+        });
+
+      const [thisPosition, thatPosition] = await Promise.all([
+        getPosition(thisArea),
+        getPosition(thatArea),
+      ]);
+
+      const ratio = thisPosition.offset / thisPosition.height;
+
+      return { ratio, error: Math.abs(thatPosition.offset - ratio * thatPosition.height) };
+    };
+
+    // The fields above the body, and the panes’ own headers and padding, used to throw the preview
+    // off by about a hundred pixels, and the editor by about fifty the other way
+    await editArea.hover();
+    await page.mouse.wheel(0, 2000);
+    await expect.poll(async () => (await measure(editArea, previewArea)).error).toBeLessThan(2);
+    expect((await measure(editArea, previewArea)).ratio).toBeGreaterThan(0);
+
+    await previewArea.hover();
+    await page.mouse.wheel(0, 400);
+    await expect.poll(async () => (await measure(previewArea, editArea)).error).toBeLessThan(2);
+    expect((await measure(previewArea, editArea)).ratio).toBeGreaterThan(0);
+  });
+
+  test('scrolls the preview to the focused field', async ({ page }) => {
+    const { editArea, previewArea } = await openLongNight(page);
+    const title = getEditor(page).getByRole('textbox', { name: 'Title' });
+
+    // Scroll the preview to the bottom, which takes the editor along
+    await previewArea.hover();
+    await page.mouse.wheel(0, 5000);
+    await expect.poll(() => editArea.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
+    await expect(previewArea.locator('[data-key-path="title"]')).not.toBeInViewport();
+
+    // Focusing the Title field brings it into view in both panes, and they stay there
+    await title.focus();
+    await expect(previewArea.locator('[data-key-path="title"]')).toBeInViewport();
+    await page.waitForTimeout(500);
+    await expect(title).toBeInViewport();
+  });
+
   test('leaves the preview alone once turned off', async ({ cms, page }) => {
     const { editArea, previewArea } = await openLongNight(page);
 
@@ -310,7 +465,7 @@ Object.entries(UNCHANGED_ENTRIES).forEach(([name, { collection, row, field }]) =
       await page.getByRole('row', { name: row }).click();
     }
 
-    const editor = page.getByRole('group', { name: 'Content Editor' });
+    const editor = getEditor(page);
 
     await expect(editor.getByRole('textbox', { name: field }).first()).not.toHaveValue('');
     // A post’s tags used to count as a change, as the list editor rewrote them when it was shown.

@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, test, vi } from 'vitest';
 
-import { getObjectThumbnail } from './thumbnail';
+import { getDraftObjectThumbnail, getObjectThumbnail } from './thumbnail';
 
 /**
  * @import { Asset } from '$lib/types/private';
@@ -134,11 +134,13 @@ describe('getObjectThumbnail()', () => {
         typedKeyPath: '',
         thumbnailFieldName: 'hero.image',
         valueMap: { 'hero.image': '/uploads/photo.png' },
+        locale: 'fr',
       }),
     ).toEqual({ asset: imageAsset });
 
+    // An entry-relative path is resolved against the locale being edited
     expect(mockGetMediaFieldSource).toHaveBeenCalledWith(
-      expect.objectContaining({ typedKeyPath: 'hero.image' }),
+      expect.objectContaining({ typedKeyPath: 'hero.image', locale: 'fr' }),
     );
   });
 
@@ -379,7 +381,8 @@ describe('getObjectThumbnail()', () => {
     ).toEqual({ asset: imageAsset });
 
     expect(mockGetMediaFieldSource).toHaveBeenCalledExactlyOnceWith(
-      expect.objectContaining({ value: '/uploads/photo.png', typedKeyPath: 'images.*' }),
+      // The typed key path names the subfield, which a field-level media folder is registered under
+      expect.objectContaining({ value: '/uploads/photo.png', typedKeyPath: 'images.*.image' }),
     );
 
     // The option has to name that subfield
@@ -410,7 +413,7 @@ describe('getObjectThumbnail()', () => {
     ).toEqual({ asset: imageAsset });
 
     expect(mockGetMediaFieldSource).toHaveBeenCalledExactlyOnceWith(
-      expect.objectContaining({ value: '/uploads/photo.png', typedKeyPath: 'photos.*.src' }),
+      expect.objectContaining({ value: '/uploads/photo.png', typedKeyPath: 'photos.*.photo.src' }),
     );
 
     // The object itself isn’t a media field
@@ -422,6 +425,58 @@ describe('getObjectThumbnail()', () => {
         typedKeyPath: 'photos.*',
         hasSingleSubField: true,
         valueMap,
+      }),
+    ).toBeUndefined();
+  });
+});
+
+describe('getDraftObjectThumbnail()', () => {
+  beforeEach(() => {
+    mockGetMediaFieldSource.mockImplementation(() => ({ asset: imageAsset }));
+  });
+
+  test('takes the collection, entry and files from the draft', () => {
+    const entry = /** @type {any} */ ({ id: 'post' });
+
+    const draft = /** @type {any} */ ({
+      collectionName: 'posts',
+      fileName: undefined,
+      isIndexFile: false,
+      originalEntry: entry,
+      files: {},
+    });
+
+    expect(
+      getDraftObjectThumbnail({
+        draft,
+        thumbnailFieldName: 'background',
+        keyPath: 'sections.0',
+        typedKeyPath: 'sections.*',
+        type: 'banner',
+        valueMap: { 'sections.0.type': 'banner', 'sections.0.background': '/uploads/photo.png' },
+        locale: 'en',
+      }),
+    ).toEqual({ asset: imageAsset });
+
+    expect(mockGetMediaFieldSource).toHaveBeenCalledWith(
+      expect.objectContaining({
+        entry,
+        collectionName: 'posts',
+        typedKeyPath: 'sections.*<banner>.background',
+        locale: 'en',
+      }),
+    );
+  });
+
+  test('finds nothing without a draft', () => {
+    expect(
+      getDraftObjectThumbnail({
+        draft: undefined,
+        thumbnailFieldName: 'image',
+        keyPath: 'hero',
+        typedKeyPath: 'hero',
+        valueMap: { 'hero.image': '/uploads/photo.png' },
+        locale: 'en',
       }),
     ).toBeUndefined();
   });

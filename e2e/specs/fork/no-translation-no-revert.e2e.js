@@ -1,6 +1,7 @@
 import { MULTILINGUAL_CONFIG, MULTILINGUAL_FILES } from '../../fixtures/configs/multilingual.js';
 import { expect, test } from '../../fixtures/test.js';
-import { getEditor, openEntry, showLocale } from '../multilingual/helpers.js';
+import { getEditor } from '../../fixtures/ui.js';
+import { openEntry, showLocale } from '../multilingual/helpers.js';
 
 /**
  * The fork offers no machine translation and no way to revert: the translate buttons and every

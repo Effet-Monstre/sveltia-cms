@@ -7,13 +7,13 @@ import { isEntryCollection } from '$lib/services/contents/collection/predicates'
 import {
   fieldConfigCacheMap,
   getCurrentValue,
+  getDraftFieldArgs,
   getField,
   getFieldKind,
   getTypedKeyPath,
   hasRootField,
   isFieldMultiple,
   isFieldRequired,
-  LIST_KEY_PATH_REGEX,
 } from '$lib/services/contents/entry/fields';
 import { getComponentDef } from '$lib/services/contents/fields/rich-text/components/definitions';
 import { isMultiple } from '$lib/services/integrations/media-libraries/multiple';
@@ -70,23 +70,6 @@ const mockIsEntryCollection = vi.mocked(isEntryCollection);
 const mockIsMultiple = vi.mocked(isMultiple);
 const mockGetIndexFile = vi.mocked(getIndexFile);
 const mockGetComponentDef = vi.mocked(getComponentDef);
-
-describe('Internal helpers (exported for testing)', () => {
-  describe('LIST_KEY_PATH_REGEX', () => {
-    test('should match list key paths', () => {
-      expect(LIST_KEY_PATH_REGEX.test('field.0')).toBe(true);
-      expect(LIST_KEY_PATH_REGEX.test('field.1')).toBe(true);
-      expect(LIST_KEY_PATH_REGEX.test('field.999')).toBe(true);
-      expect(LIST_KEY_PATH_REGEX.test('nested.field.0')).toBe(true);
-    });
-
-    test('should not match non-list key paths', () => {
-      expect(LIST_KEY_PATH_REGEX.test('field')).toBe(false);
-      expect(LIST_KEY_PATH_REGEX.test('field.name')).toBe(false);
-      expect(LIST_KEY_PATH_REGEX.test('field.0.subfield')).toBe(false);
-    });
-  });
-});
 
 describe('Test getField()', () => {
   // Comprehensive mock collection that covers all test scenarios
@@ -3936,6 +3919,41 @@ describe('Test getCurrentValue()', () => {
         // Cleanup
         customFieldTypeRegistry.delete('CustomWidget');
       });
+    });
+  });
+});
+
+describe('Test getDraftFieldArgs()', () => {
+  const draft = { collectionName: 'pages', fileName: 'about', isIndexFile: false };
+
+  test('takes the collection, file and index file flag from the draft', () => {
+    expect(getDraftFieldArgs(draft)).toEqual({
+      collectionName: 'pages',
+      fileName: 'about',
+      isIndexFile: false,
+    });
+    expect(getDraftFieldArgs(draft)).not.toHaveProperty('keyPath');
+  });
+
+  test('adds the other arguments', () => {
+    const valueMap = { title: 'Hello' };
+
+    expect(getDraftFieldArgs(draft, { keyPath: 'title', valueMap })).toEqual({
+      collectionName: 'pages',
+      fileName: 'about',
+      isIndexFile: false,
+      keyPath: 'title',
+      valueMap,
+    });
+  });
+
+  test('leaves the key path as given', () => {
+    expect(getDraftFieldArgs(draft, { keyPath: 'body:c12:src', componentName: 'image' })).toEqual({
+      collectionName: 'pages',
+      fileName: 'about',
+      isIndexFile: false,
+      keyPath: 'body:c12:src',
+      componentName: 'image',
     });
   });
 });

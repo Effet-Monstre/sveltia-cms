@@ -219,6 +219,33 @@ describe('Test getDefaultValueMap()', () => {
       expect(result).toEqual({ category: '' });
     });
 
+    test('should clear a single select with non-string options for an empty dynamicValue', () => {
+      /** @type {SelectField} */
+      const fieldConfig = { ...baseFieldConfig, options: [1, 2], multiple: false };
+
+      expect(
+        getDefaultValueMap({
+          fieldConfig,
+          keyPath: 'count',
+          locale: '_default',
+          defaultLocale: '_default',
+          dynamicValue: ' ',
+        }),
+      ).toEqual({ count: null });
+    });
+
+    test('should not add empty items for an empty dynamicValue of a multiple select', () => {
+      /** @type {SelectField} */
+      const fieldConfig = { ...baseFieldConfig, options: ['a', 'b'], multiple: true };
+      const args = { fieldConfig, keyPath: 'tags', locale: '_default', defaultLocale: '_default' };
+
+      expect(getDefaultValueMap({ ...args, dynamicValue: '' })).toEqual({ tags: [] });
+      expect(getDefaultValueMap({ ...args, dynamicValue: 'a,,b' })).toEqual({
+        'tags.0': 'a',
+        'tags.1': 'b',
+      });
+    });
+
     test('should handle undefined dynamicValue', () => {
       /** @type {SelectField} */
       const fieldConfig = {
@@ -288,6 +315,65 @@ describe('Test getDefaultValueMap()', () => {
         'tags.1': 'option2',
         'tags.2': 'option3',
       });
+    });
+
+    test('should convert dynamicValue to the matching option value', () => {
+      const args = { keyPath: 'rating', locale: '_default', defaultLocale: '_default' };
+      /** @type {SelectField} */
+      const numberField = { ...baseFieldConfig, name: 'rating', options: [1, 2, 3] };
+
+      expect(getDefaultValueMap({ ...args, fieldConfig: numberField, dynamicValue: '2' })).toEqual({
+        rating: 2,
+      });
+
+      /** @type {SelectField} */
+      const booleanField = {
+        ...baseFieldConfig,
+        name: 'rating',
+        options: [
+          { label: 'Yes', value: true },
+          { label: 'No', value: false },
+        ],
+      };
+
+      expect(
+        getDefaultValueMap({ ...args, fieldConfig: booleanField, dynamicValue: 'false' }),
+      ).toEqual({ rating: false });
+
+      // A value matching no option is kept as is
+      expect(getDefaultValueMap({ ...args, fieldConfig: numberField, dynamicValue: '4' })).toEqual({
+        rating: '4',
+      });
+
+      expect(
+        getDefaultValueMap({
+          ...args,
+          fieldConfig: { ...numberField, multiple: true },
+          dynamicValue: '1, 3, x',
+        }),
+      ).toEqual({ 'rating.0': 1, 'rating.1': 3, 'rating.2': 'x' });
+    });
+
+    test('should not split dynamicValue for a single select or relation field', () => {
+      const args = { keyPath: 'author', locale: '_default', defaultLocale: '_default' };
+      /** @type {SelectField} */
+      const selectField = { ...baseFieldConfig, name: 'author', options: ['Smith, John', 'Doe'] };
+
+      expect(
+        getDefaultValueMap({ ...args, fieldConfig: selectField, dynamicValue: ' Smith, John ' }),
+      ).toEqual({ author: 'Smith, John' });
+
+      /** @type {import('$lib/types/public').RelationField} */
+      const relationField = {
+        widget: 'relation',
+        name: 'author',
+        collection: 'authors',
+        value_field: 'name',
+      };
+
+      expect(
+        getDefaultValueMap({ ...args, fieldConfig: relationField, dynamicValue: 'Smith, John' }),
+      ).toEqual({ author: 'Smith, John' });
     });
   });
 

@@ -1,4 +1,5 @@
 import { expect, GITHUB_CONFIG, test } from '../../fixtures/test.js';
+import { openEntry } from '../../fixtures/ui.js';
 
 /**
  * @import { Locator, Page } from '@playwright/test';
@@ -73,18 +74,6 @@ const openCollection = async (page, name) => {
 };
 
 /**
- * Open an entry in the editor.
- * @param {Page} page Page.
- * @param {string} title Entry title.
- * @returns {Promise<Locator>} Editor.
- */
-const openEntry = async (page, title) => {
-  await page.getByRole('row', { name: new RegExp(`^${title}`) }).click();
-
-  return page.getByRole('group', { name: 'Content Editor' });
-};
-
-/**
  * Move the entry open in the editor to the Ready stage, then publish it.
  * @param {CMS} cms CMS.
  * @param {Page} page Page.
@@ -111,7 +100,7 @@ test('publishes the rename of an author, along with the posts referring to it', 
   await cms.open();
   await openCollection(page, 'Authors');
 
-  const editor = await openEntry(page, 'Ada');
+  const editor = await openEntry(page, 'Ada', { checkTitle: false });
 
   await cms.chooseMenuItem(
     page.getByRole('button', { name: 'Show Editor Options' }),
@@ -124,13 +113,18 @@ test('publishes the rename of an author, along with the posts referring to it', 
   await panel.getByRole('textbox', { name: 'Slug' }).fill('ada-lovelace');
   await panel.getByRole('textbox', { name: 'Slug' }).press('Enter');
   await editor.getByRole('button', { name: 'Save' }).click();
+  // The entry is moved to the Ready stage below
+  await page
+    .getByRole('alertdialog', { name: 'Send for Review' })
+    .getByRole('button', { name: 'Later' })
+    .click();
 
   // The branch is named after the new slug
   await expect
     .poll(() => github.readFile('content/posts/hello.md', 'cms/authors/ada-lovelace'))
     .toBe('---\ntitle: Hello\nauthor: ada-lovelace\n---\n');
 
-  await openEntry(page, 'Ada');
+  await openEntry(page, 'Ada', { checkTitle: false });
   await markReadyAndPublish(cms, page);
 
   // The vacated file and the rewritten post are what the CMS commits for a rename
@@ -150,7 +144,7 @@ test('carries out the deletion of an author, along with the posts referring to i
   seedAuthor(github);
   await cms.open();
   await openCollection(page, 'Authors');
-  await openEntry(page, 'Ada');
+  await openEntry(page, 'Ada', { checkTitle: false });
   await cms.chooseMenuItem(
     page.getByRole('button', { name: 'Show Editor Options' }),
     page.getByRole('menuitem', { name: 'Delete Entry' }),
@@ -159,7 +153,7 @@ test('carries out the deletion of an author, along with the posts referring to i
 
   await expect.poll(() => github.pullRequests[0]?.labels).toEqual(['sveltia-cms/pending_deletion']);
 
-  await openEntry(page, 'Ada');
+  await openEntry(page, 'Ada', { checkTitle: false });
   await page.getByRole('button', { name: 'Delete Entry' }).click();
   await page.getByRole('alertdialog').getByRole('button', { name: 'Delete' }).click();
 

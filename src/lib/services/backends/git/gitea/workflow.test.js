@@ -1,8 +1,9 @@
-import { beforeEach, describe, expect, test, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 
+import { _resetApiSettings } from '$lib/services/backends/git/gitea/api';
 import { commitChanges } from '$lib/services/backends/git/gitea/commits';
-import { resetPageSize } from '$lib/services/backends/git/gitea/pull-requests';
 import giteaWorkflow, {
+  approve,
   discard,
   fetchLabelledPullRequests,
   fetchMergeState,
@@ -11,6 +12,7 @@ import giteaWorkflow, {
   publish,
   savePullRequest,
   updateStatus,
+  withdrawApproval,
 } from '$lib/services/backends/git/gitea/workflow';
 import {
   fetchForkPullRequests,
@@ -18,11 +20,12 @@ import {
 } from '$lib/services/backends/git/gitea/workflow-fork';
 import { fetchAPI } from '$lib/services/backends/git/shared/api';
 import { cmsConfig } from '$lib/services/config';
+import { user } from '$lib/services/user/account.svelte';
 import { forkedRepository } from '$lib/services/workflow/open-authoring';
 
-vi.mock('@sveltia/i18n', () => ({
-  _: vi.fn((key, { values } = {}) => (values ? `${key} ${JSON.stringify(values)}` : key)),
-}));
+vi.mock('@sveltia/i18n', async () =>
+  (await import('$lib/test/i18n')).createI18nMock({ values: true }),
+);
 vi.mock('$lib/services/backends/git/gitea/commits');
 vi.mock('$lib/services/backends/git/gitea/files');
 vi.mock('$lib/services/backends/git/gitea/repository', () => ({
@@ -68,7 +71,7 @@ const createItem = (overrides = {}) => ({
 describe('Gitea Editorial Workflow service', () => {
   beforeEach(() => {
     vi.resetAllMocks();
-    resetPageSize();
+    _resetApiSettings();
     cmsConfig.current = /** @type {any} */ ({ backend: { name: 'gitea' } });
     forkedRepository.current = undefined;
     vi.mocked(fetchAPI).mockResolvedValue({});
@@ -79,6 +82,8 @@ describe('Gitea Editorial Workflow service', () => {
       fetchPullRequests: expect.any(Function),
       savePullRequest: expect.any(Function),
       updateStatus: expect.any(Function),
+      approve: expect.any(Function),
+      withdrawApproval: expect.any(Function),
       fetchBranchHead: expect.any(Function),
       fetchMergeState: expect.any(Function),
       fetchUnchangedPaths: expect.any(Function),
@@ -180,6 +185,83 @@ describe('Gitea Editorial Workflow service', () => {
       });
 
       await expect(fetchLabelledPullRequests()).resolves.toEqual([]);
+    });
+
+    describe('pull requests from forks', () => {
+      /** A pull request a contributor opened from their fork, as the instance returns it. */
+      const forkItem = createItem({
+        number: 7,
+        title: 'Create Post “hello”',
+        labels: [],
+        allow_maintainer_edit: true,
+        head: {
+          ref: 'cms/alice/website/posts/hello',
+          sha: 'abc123',
+          repo_id: 2,
+          repo: { full_name: 'alice/website', name: 'website', owner: { login: 'alice' } },
+        },
+      });
+
+      test('lists them along with the labelled ones with Open Authoring', async () => {
+        cmsConfig.current = /** @type {any} */ ({
+          backend: { name: 'gitea', open_authoring: true },
+        });
+        vi.mocked(fetchAPI).mockImplementation(async (path) => {
+          if (path === '/settings/api') {
+            return { max_response_items: 50 };
+          }
+
+          if (path.includes('/labels?')) {
+            return LABELS;
+          }
+
+          if (path.includes('/pulls?') && path.includes('base_branch=')) {
+            // The configured repository’s own one is the labelled list’s to take, one to another
+            // branch slipped through an instance that ignores the filter, and one is a code change
+            return [
+              { number: 7, head: forkItem.head, base: forkItem.base },
+              { number: 8, head: { ...forkItem.head, ref: 'feature/x' }, base: forkItem.base },
+              { number: 1, head: createItem().head, base: createItem().base },
+              { number: 9, head: forkItem.head, base: { ref: 'develop', repo_id: 1 } },
+            ];
+          }
+
+          if (path.includes('/pulls?')) {
+            return [{ number: 1 }];
+          }
+
+          if (path.includes('/files?') || path.includes('/contents/')) {
+            return path.includes('/files?') ? [] : {};
+          }
+
+          const [, number] = path.match(/\/pulls\/(\d+)$/) ?? [];
+
+          return { 1: createItem(), 7: forkItem }[Number(number)];
+        });
+
+        const result = await fetchLabelledPullRequests();
+
+        expect(fetchAPI).toHaveBeenCalledWith(
+          `${REPO_PATH}/pulls?state=open&sort=recentupdate&base_branch=main&page=1&limit=50`,
+        );
+        expect(result.map(({ branch }) => branch).sort()).toEqual([
+          'alice/website:cms/alice/website/posts/hello',
+          'cms/posts/hello',
+        ]);
+        // Only the ones for an entry are read again on their own
+        expect(fetchAPI).not.toHaveBeenCalledWith(`${REPO_PATH}/pulls/8`);
+        expect(fetchAPI).not.toHaveBeenCalledWith(`${REPO_PATH}/pulls/9`);
+      });
+
+      test('leaves a labelled one out without Open Authoring', async () => {
+        mockList({
+          list: [{ number: 7 }],
+          pulls: { 7: { ...forkItem, labels: [{ name: 'sveltia-cms/draft' }] } },
+        });
+
+        await expect(fetchLabelledPullRequests()).resolves.toEqual([]);
+        expect(fetchAPI).not.toHaveBeenCalledWith(expect.stringContaining('base_branch='));
+      });
     });
 
     test('sorts the pull requests by the last update, newest first', async () => {
@@ -319,6 +401,66 @@ describe('Gitea Editorial Workflow service', () => {
         expect(result.pullRequest).toBe(pullRequest);
       });
 
+      test('commits onto a contributor’s branch in their fork', async () => {
+        const branch = 'alice/website:cms/alice/website/posts/hello';
+
+        mockBranch('head1');
+        vi.mocked(commitChanges).mockResolvedValue({ sha: 'def', files: {} });
+
+        await savePullRequest({
+          ...args,
+          branch,
+          pullRequest: {
+            ...pullRequest,
+            branch,
+            fork: { owner: 'alice', repo: 'website', editable: true },
+          },
+          changes: [{ action: 'update', path: 'content/posts/hello.md', previousSha: 'stale' }],
+        });
+
+        // The branch and the files are read in the fork, by the branch’s own name there
+        expect(fetchAPI).toHaveBeenCalledWith(
+          '/repos/alice/website/branches/cms/alice/website/posts/hello',
+        );
+        expect(fetchAPI).toHaveBeenCalledWith(
+          '/repos/alice/website/contents/content/posts/hello.md?ref=head1',
+        );
+        expect(commitChanges).toHaveBeenCalledWith(
+          [{ action: 'update', path: 'content/posts/hello.md', previousSha: 'head-sha' }],
+          { commitType: 'create', branch },
+        );
+      });
+
+      test('refuses to commit to a contributor’s branch they don’t let maintainers edit', async () => {
+        await expect(
+          savePullRequest({
+            ...args,
+            pullRequest: {
+              ...pullRequest,
+              fork: { owner: 'alice', repo: 'website', editable: false },
+            },
+          }),
+        ).rejects.toThrow('Failed to save the changes.');
+        expect(fetchAPI).not.toHaveBeenCalled();
+        expect(commitChanges).not.toHaveBeenCalled();
+      });
+
+      test('records the deletion group in the pull request', async () => {
+        mockBranch('head1');
+        vi.mocked(commitChanges).mockResolvedValue({ sha: 'def', files: {} });
+
+        const result = await savePullRequest({ ...args, pullRequest, deletionGroup: 'group-1' });
+
+        expect(fetchAPI).toHaveBeenCalledWith(`${REPO_PATH}/pulls/5`, {
+          method: 'PATCH',
+          body: { body: '<!-- sveltia-cms:deletion-group=group-1 -->' },
+        });
+        expect(result.pullRequest).toEqual({
+          ...pullRequest,
+          description: '<!-- sveltia-cms:deletion-group=group-1 -->',
+        });
+      });
+
       test('refuses to save onto a branch that has moved on from the commit on record', async () => {
         // The instance can’t be told which commit to go on top of, so whatever was pushed since —
         // which the board may not have shown — would go out with the save
@@ -350,7 +492,7 @@ describe('Gitea Editorial Workflow service', () => {
 
         expect(error.message).toBe('Failed to save the changes.');
         expect(error.cause.message).toBe(
-          'branch_not_found {"repo":"repo","branch":"cms/posts/hello"}',
+          'branch_not_found:{"repo":"repo","branch":"cms/posts/hello"}',
         );
         expect(commitChanges).not.toHaveBeenCalled();
       });
@@ -480,7 +622,7 @@ describe('Gitea Editorial Workflow service', () => {
       const error = await savePullRequest(args).catch((ex) => ex);
 
       expect(error.message).toBe('The workflow branch is in use by another pull request.');
-      expect(error.cause.message).toBe('workflow.branch_in_use {"number":"#7"}');
+      expect(error.cause.message).toBe('workflow.branch_in_use:{"number":"#7"}');
 
       expect(fetchAPI).not.toHaveBeenCalledWith(
         expect.anything(),
@@ -974,7 +1116,88 @@ describe('Gitea Editorial Workflow service', () => {
     });
   });
 
+  describe('approve', () => {
+    test('approves the pull request pinned to its head commit', async () => {
+      await approve(/** @type {any} */ ({ number: 1, headSHA: 'abc' }));
+
+      expect(fetchAPI).toHaveBeenCalledWith(`${REPO_PATH}/pulls/1/reviews`, {
+        method: 'POST',
+        body: { event: 'APPROVED', commit_id: 'abc' },
+      });
+    });
+  });
+
+  describe('withdrawApproval', () => {
+    beforeEach(() => {
+      user.account = /** @type {any} */ ({ login: 'me' });
+    });
+
+    afterEach(() => {
+      user.account = undefined;
+    });
+
+    test('deletes the user’s standing approvals of the pull request', async () => {
+      vi.mocked(fetchAPI).mockImplementation(async (path) =>
+        path.startsWith(`${REPO_PATH}/pulls/1/reviews?`)
+          ? [
+              { id: 1, state: 'APPROVED', dismissed: false, user: { login: 'me' } },
+              { id: 2, state: 'APPROVED', dismissed: true, user: { login: 'me' } },
+            ]
+          : {},
+      );
+
+      await withdrawApproval(/** @type {any} */ ({ number: 1 }));
+
+      expect(fetchAPI).toHaveBeenCalledWith(`${REPO_PATH}/pulls/1/reviews/1`, {
+        method: 'DELETE',
+        responseType: 'text',
+      });
+      expect(
+        vi.mocked(fetchAPI).mock.calls.filter(([, options]) => options?.method === 'DELETE'),
+      ).toHaveLength(1);
+    });
+
+    test('reports a refused deletion', async () => {
+      vi.mocked(fetchAPI).mockImplementation(async (path, options) => {
+        if (options?.method === 'DELETE') {
+          // `sendRequest` throws on an error status unless the response is taken as is
+          if (options.responseType === 'raw') {
+            return new Response(null, { status: 403 });
+          }
+
+          throw new Error('Server responded with an error', { cause: { status: 403 } });
+        }
+
+        return path.startsWith(`${REPO_PATH}/pulls/1/reviews?`)
+          ? [{ id: 1, state: 'APPROVED', dismissed: false, user: { login: 'me' } }]
+          : {};
+      });
+
+      await expect(withdrawApproval(/** @type {any} */ ({ number: 1 }))).rejects.toThrow(
+        'Server responded with an error',
+      );
+    });
+  });
+
   describe('discard', () => {
+    test('closes a pull request from a fork without deleting the contributor’s branch', async () => {
+      vi.mocked(fetchAPI).mockResolvedValue({});
+
+      await discard(
+        /** @type {any} */ ({
+          number: 7,
+          branch: 'alice/website:cms/alice/website/posts/hello',
+          fork: { owner: 'alice', repo: 'website', editable: true },
+        }),
+      );
+
+      expect(fetchAPI).toHaveBeenCalledTimes(1);
+      expect(fetchAPI).toHaveBeenCalledWith(`${REPO_PATH}/pulls/7`, {
+        method: 'PATCH',
+        body: { state: 'closed' },
+      });
+    });
+
     test('carries on when the pull request was merged since the board was loaded', async () => {
       vi.mocked(fetchAPI).mockImplementation(async (path, options) => {
         if (options?.method === 'PATCH') {

@@ -1,4 +1,5 @@
 import { expect, GITHUB_CONFIG, test } from '../fixtures/test.js';
+import { getEntryRows, openFirstPost } from '../fixtures/ui.js';
 
 /**
  * @import { Locator, Page } from '@playwright/test';
@@ -11,20 +12,6 @@ test.use({ config: GITHUB_CONFIG });
 test.beforeEach(async ({ github }) => {
   github.commit({ 'content/posts/first-post.md': FIRST_POST });
 });
-
-/**
- * Open the first post in the entry editor.
- * @param {Page} page Page.
- * @returns {Promise<Locator>} Editor.
- */
-const openFirstPost = async (page) => {
-  const editor = page.getByRole('group', { name: 'Content Editor' });
-
-  await page.getByRole('row', { name: /First Post/ }).click();
-  await expect(editor.getByRole('textbox', { name: 'Body' })).toHaveValue('Hello, world!');
-
-  return editor;
-};
 
 test('signs in with the stored session and lists the entries', async ({ cms, page }) => {
   await cms.open();
@@ -66,13 +53,13 @@ test.describe('with the commit date as a sortable field', () => {
     github.pathsWithoutHistory.add('content/posts/second-post.md');
 
     await cms.open();
-    await expect(page.getByRole('row')).toHaveCount(3);
+    await expect(getEntryRows(page)).toHaveCount(3);
     // The commit metadata is fetched after the entries are listed
     await cms.chooseMenuItem(
       page.getByRole('button', { name: 'Sort', exact: true }),
       page.getByRole('menuitemradio', { name: /Updated on.*new to old/ }),
     );
-    await expect(page.getByRole('row')).toHaveText([/Third Post/, /First Post/, /Second Post/]);
+    await expect(getEntryRows(page)).toHaveText([/Third Post/, /First Post/, /Second Post/]);
   });
 });
 
@@ -86,12 +73,12 @@ test('offers to sort by the commit date and author with the default sortable fie
   github.commit({ 'content/posts/third-post.md': '---\ntitle: Third Post\n---\n' });
 
   await cms.open();
-  await expect(page.getByRole('row')).toHaveCount(3);
+  await expect(getEntryRows(page)).toHaveCount(3);
   await cms.chooseMenuItem(
     page.getByRole('button', { name: 'Sort', exact: true }),
     page.getByRole('menuitemradio', { name: /Updated on.*new to old/ }),
   );
-  await expect(page.getByRole('row')).toHaveText([/Third Post/, /Second Post/, /First Post/]);
+  await expect(getEntryRows(page)).toHaveText([/Third Post/, /Second Post/, /First Post/]);
   await page.getByRole('button', { name: 'Sort', exact: true }).click();
   await expect(page.getByRole('menuitemradio', { name: /Updated by/ }).first()).toBeVisible();
 });
@@ -137,6 +124,15 @@ test('refuses a user who can only read the repository', async ({ cms, github, pa
 
   await cms.open();
   await expect(page.getByRole('alert')).toContainText(
+    /You don’t have write access to the .*e2e-site.* repository/,
+  );
+});
+
+test('refuses a user who can’t see the repository', async ({ cms, github, page }) => {
+  github.canRead = false;
+
+  await cms.open();
+  await expect(page.getByRole('alert')).toContainText(
     /You don’t have access to the .*e2e-site.* repository/,
   );
 });
@@ -174,6 +170,57 @@ test('commits a change to the branch', async ({ cms, github, page }) => {
     message: { headline: 'Update Post “first-post”' },
   });
   expect(github.head.author.login).toBe(github.user.login);
+});
+
+test('makes a save started during another one on top of that one', async ({
+  cms,
+  github,
+  page,
+}) => {
+  github.commit({ 'content/posts/second-post.md': '---\ntitle: Second Post\n---\n' });
+  await cms.open();
+
+  const { promise: released, resolve: release } = Promise.withResolvers();
+  const { promise: held, resolve: hold } = Promise.withResolvers();
+  let commitCount = 0;
+
+  // The first commit takes a while, as a large one does
+  await page.route('https://api.github.com/graphql', async (route) => {
+    if (route.request().postData()?.includes('createCommitOnBranch')) {
+      commitCount += 1;
+
+      if (commitCount === 1) {
+        hold(undefined);
+        await released;
+      }
+    }
+
+    await route.fallback();
+  });
+
+  const editor = await openFirstPost(page);
+
+  await editor.getByRole('textbox', { name: 'Body' }).fill('Hello from Mona!');
+  await editor.getByRole('button', { name: 'Save' }).click();
+  await held;
+
+  // The user goes on to another entry while the first one is being saved
+  await page.getByRole('button', { name: 'Cancel Editing' }).click();
+  await page.getByRole('row', { name: /Second Post/ }).click();
+  await editor.getByRole('textbox', { name: 'Body' }).fill('Hello again!');
+  await editor.getByRole('button', { name: 'Save' }).click();
+  release(undefined);
+
+  await expect
+    .poll(() => github.readFile('content/posts/second-post.md'))
+    .toBe('---\ntitle: Second Post\n---\n\nHello again!\n');
+  expect(github.readFile('content/posts/first-post.md')).toBe(
+    '---\ntitle: First Post\n---\n\nHello from Mona!\n',
+  );
+  // The second commit was made on top of the first one, rather than refused as the branch moved
+  expect(github.received).toHaveLength(2);
+  expect(github.received[1].expectedHeadOid).not.toBe(github.received[0].expectedHeadOid);
+  await expect(page.getByRole('alertdialog', { name: 'Error' })).toHaveCount(0);
 });
 
 test('lists an entry a colleague has added, on the next scheduled check', async ({

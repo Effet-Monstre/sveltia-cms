@@ -1,8 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-/**
- * @import { ConfigParserCollectors } from '$lib/types/private';
- */
+import { createCollectors } from '$lib/test/config-parser';
 
 // Mock @sveltia/i18n
 /** @type {Record<string, string>} */
@@ -20,30 +18,10 @@ const mockI18nStrings = {
   'config.error_locator.field': 'Field: {field}',
 };
 
-/**
- * Mock translation function.
- * @param {string} key Message key.
- * @param {object & { values?: Record<string, string> }} [options] Options.
- * @returns {string} Translated string.
- */
-function mockTranslate(key, options) {
-  let message = mockI18nStrings[key] || key;
+vi.mock('@sveltia/i18n', async () =>
+  (await import('$lib/test/i18n')).createI18nMock({ strings: mockI18nStrings, locale: 'en-US' }),
+);
 
-  if (options?.values) {
-    Object.entries(options.values).forEach(([k, v]) => {
-      message = message.replace(`{${k}}`, v);
-    });
-  }
-
-  return message;
-}
-
-vi.mock('@sveltia/i18n', () => ({
-  _: mockTranslate,
-  locale: { current: 'en-US', set: vi.fn() },
-}));
-
-const mockGetStore = vi.fn();
 const mockAddMessage = vi.fn();
 const mockCheckUnsupportedOptions = vi.fn();
 
@@ -52,24 +30,9 @@ vi.mock('$lib/services/config/parser/utils/validator', () => ({
   checkUnsupportedOptions: mockCheckUnsupportedOptions,
 }));
 
-/**
- * Create a fresh collectors object for testing.
- * @returns {ConfigParserCollectors} Collectors instance.
- */
-function createCollectors() {
-  return {
-    errors: new Set(),
-    warnings: new Set(),
-    mediaFields: new Set(),
-    relationFields: new Set(),
-  };
-}
-
 describe('Relation Field Config Parser', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-
-    mockGetStore.mockImplementation((store) => store);
   });
 
   describe('relation field collection validation', () => {
@@ -863,6 +826,129 @@ describe('Relation Field Config Parser', () => {
     it('should skip the check when the collection has no fields', async () => {
       await checkFilters([{ field: 'team', values: ['a'] }], {});
       expectMessages([]);
+    });
+  });
+
+  describe('relation field sort_by validation', () => {
+    /** @type {any} */
+    const authorFields = [
+      { name: 'name', widget: 'string' },
+      { name: 'meta', widget: 'object', fields: [{ name: 'joined', widget: 'datetime' }] },
+    ];
+
+    /**
+     * Parse a relation field with the given `sort_by` option against an `authors` folder
+     * collection, or the `members` file of a `data` file collection.
+     * @param {any} sortBy The `sort_by` option.
+     * @param {object} [options] Options.
+     * @param {any} [options.collectionOptions] Extra options for the referenced collection.
+     * @param {boolean} [options.file] Whether to refer to a file instead.
+     */
+    const checkSortBy = async (
+      sortBy,
+      { collectionOptions = { fields: authorFields }, file = false } = {},
+    ) => {
+      const { parseRelationFieldConfig } = await import('./relation.js');
+
+      parseRelationFieldConfig({
+        config: /** @type {any} */ ({
+          name: 'author',
+          widget: 'relation',
+          collection: file ? 'data' : 'authors',
+          ...(file ? { file: 'members', value_field: 'members.*.name' } : { value_field: 'name' }),
+          sort_by: sortBy,
+        }),
+        context: /** @type {any} */ ({
+          cmsConfig: {
+            i18n: { locales: ['en', 'fr'] },
+            collections: [
+              { name: 'authors', folder: 'content/authors', ...collectionOptions },
+              {
+                name: 'data',
+                files: [
+                  {
+                    name: 'members',
+                    file: 'data/members.yml',
+                    fields: [{ name: 'members', widget: 'list', fields: [{ name: 'name' }] }],
+                  },
+                ],
+              },
+            ],
+          },
+          collection: { name: 'posts' },
+          typedKeyPath: 'author',
+        }),
+        collectors: createCollectors(),
+      });
+    };
+
+    it('should accept a field defined in the collection', async () => {
+      await checkSortBy({ field: 'name' });
+      await checkSortBy({ field: 'meta.joined', direction: 'descending' });
+      expect(mockAddMessage).not.toHaveBeenCalled();
+    });
+
+    it('should accept the special sort keys and the canonical slug key', async () => {
+      await checkSortBy({ field: 'slug' });
+      await checkSortBy({ field: 'commit_author' });
+      await checkSortBy({ field: 'commit_date' });
+      await checkSortBy({ field: '_manual' });
+      await checkSortBy(
+        { field: 'translationKey' },
+        {
+          collectionOptions: { fields: authorFields, i18n: true },
+        },
+      );
+      expect(mockAddMessage).not.toHaveBeenCalled();
+    });
+
+    it('should accept the reorder field, which doesn’t have to be defined as a field', async () => {
+      await checkSortBy(
+        { field: 'weight' },
+        {
+          collectionOptions: { fields: authorFields, reorder: { key: 'weight' } },
+        },
+      );
+      expect(mockAddMessage).not.toHaveBeenCalled();
+    });
+
+    it('should error on a field not defined in the collection', async () => {
+      await checkSortBy({ field: 'date' });
+
+      expect(mockAddMessage).toHaveBeenCalledOnce();
+      expect(mockAddMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          strKey: 'relation_field_invalid_sort_field',
+          values: { field: 'date' },
+        }),
+      );
+    });
+
+    it('should leave an option of the wrong shape to the schema', async () => {
+      await checkSortBy('name');
+      await checkSortBy({ field: '' });
+      await checkSortBy({ field: 1 });
+      await checkSortBy({ direction: 'descending' });
+      expect(mockAddMessage).not.toHaveBeenCalled();
+    });
+
+    it('should skip the field check when the collection has no fields', async () => {
+      await checkSortBy({ field: 'date' }, { collectionOptions: {} });
+      expect(mockAddMessage).not.toHaveBeenCalled();
+    });
+
+    it('should warn that the option is ignored for a referenced file', async () => {
+      await checkSortBy({ field: 'members.*.name' }, { file: true });
+
+      expect(mockAddMessage).toHaveBeenCalledOnce();
+      expect(mockAddMessage).toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'warning', strKey: 'relation_field_sort_by_file_ignored' }),
+      );
+    });
+
+    it('should not warn about a referenced file without the option', async () => {
+      await checkSortBy(undefined, { file: true });
+      expect(mockAddMessage).not.toHaveBeenCalled();
     });
   });
 

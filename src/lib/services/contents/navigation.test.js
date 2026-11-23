@@ -30,6 +30,7 @@ import { CONTENTS_ROUTE_REGEX, resolveContentsRoute } from '$lib/services/conten
 import { isSearchRoute } from '$lib/services/search/navigation';
 import { env } from '$lib/services/user/env.svelte';
 import {
+  getForkUnpublishedEntry,
   getUnpublishedEntriesByCollection,
   getUnpublishedEntry,
   mergeUnpublishedEntries,
@@ -76,6 +77,7 @@ vi.mock('$lib/services/search/navigation', () => ({ isSearchRoute: vi.fn() }));
 vi.mock('$lib/services/user/env.svelte', () => ({ env: { isSmallScreen: false } }));
 
 vi.mock('$lib/services/workflow', () => ({
+  getForkUnpublishedEntry: vi.fn(),
   getUnpublishedEntriesByCollection: vi.fn(),
   getUnpublishedEntry: vi.fn(),
   mergeUnpublishedEntries: vi.fn(),
@@ -357,7 +359,7 @@ describe('resolveContentsRoute()', () => {
       expect(announcedPageStatus.current).toBe('create_entry_announcement');
     });
 
-    test('creates a new entry in the folder given as `path` in a nested collection', () => {
+    test('creates a new entry in the folder given as `path` for nested entries', () => {
       vi.mocked(getMetaPathConfig).mockReturnValue(/** @type {any} */ ({}));
       window.history.replaceState({ index: true }, '');
       visit('/collections/posts/new', { path: 'sub' });
@@ -418,6 +420,40 @@ describe('resolveContentsRoute()', () => {
       resolve();
 
       expect(createDraft).toHaveBeenCalledWith(expect.objectContaining({ originalEntry: draft }));
+    });
+
+    test('opens the entry from the contributor’s pull request the route names', () => {
+      const entry = /** @type {any} */ ({ subPath: 'hello' });
+      const draft = /** @type {any} */ ({ subPath: 'hello', workflow: { pullRequest: {} } });
+
+      vi.mocked(getEntriesByCollection).mockReturnValue([entry]);
+      vi.mocked(getForkUnpublishedEntry).mockReturnValue(draft);
+      visit('/collections/posts/entries/hello', { _pr: '7' });
+
+      resolve();
+
+      expect(getForkUnpublishedEntry).toHaveBeenCalledWith({
+        collectionName: 'posts',
+        subPath: 'hello',
+        number: 7,
+      });
+      expect(getUnpublishedEntry).not.toHaveBeenCalled();
+      expect(createDraft).toHaveBeenCalledWith(expect.objectContaining({ originalEntry: draft }));
+    });
+
+    test('opens nothing in place of a contributor’s pull request that has gone', () => {
+      // The published version isn’t what the link was for
+      vi.mocked(getEntriesByCollection).mockReturnValue([
+        /** @type {any} */ ({ subPath: 'hello' }),
+      ]);
+      entryDraft.current = {};
+      visit('/collections/posts/entries/hello', { _pr: '7' });
+
+      resolve();
+
+      expect(createDraft).not.toHaveBeenCalled();
+      expect(entryDraft.current).toBeUndefined();
+      expect(announcedPageStatus.current).toBe('entry_not_found');
     });
 
     test('waits for the app locale before opening an entry', async () => {
@@ -489,6 +525,29 @@ describe('resolveContentsRoute()', () => {
       expect(createDraft).toHaveBeenCalledWith(expect.objectContaining({ originalEntry: draft }));
     });
 
+    test('opens the file from the contributor’s pull request the route names', () => {
+      const draft = /** @type {any} */ ({ slug: 'general', workflow: { pullRequest: {} } });
+
+      vi.mocked(getForkUnpublishedEntry).mockReturnValue(draft);
+      visit('/collections/settings/entries/general', { _pr: '7' });
+
+      resolve();
+
+      expect(createDraft).toHaveBeenCalledWith(expect.objectContaining({ originalEntry: draft }));
+    });
+
+    test('opens nothing in place of a file whose contributor’s pull request has gone', () => {
+      vi.mocked(getCollectionFileEntry).mockReturnValue(/** @type {any} */ ({ slug: 'general' }));
+      entryDraft.current = {};
+      visit('/collections/settings/entries/general', { _pr: '7' });
+
+      resolve();
+
+      expect(createDraft).not.toHaveBeenCalled();
+      expect(entryDraft.current).toBeUndefined();
+      expect(announcedPageStatus.current).toBe('file_not_found');
+    });
+
     test('starts a file that hasn’t been created yet', () => {
       visit('/collections/settings/entries/general');
 
@@ -508,6 +567,15 @@ describe('resolveContentsRoute()', () => {
 
       expect(resolve()).toEqual(initial);
       expect(entryDraft.current).toBeUndefined();
+      expect(announcedPageStatus.current).toBe('file_not_found');
+      expect(createDraft).not.toHaveBeenCalled();
+    });
+
+    test('reports a file named after an `Object.prototype` member', () => {
+      entryDraft.current = {};
+      visit('/collections/settings/entries/constructor');
+
+      expect(resolve()).toEqual(initial);
       expect(announcedPageStatus.current).toBe('file_not_found');
       expect(createDraft).not.toHaveBeenCalled();
     });

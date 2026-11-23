@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
+import { createMockAssetFolder } from '$lib/test/factories';
+
 import { searchAssets } from './assets';
 import { hasAllMatches, hasMatch, normalize, tokenize } from './util';
 
@@ -29,13 +31,7 @@ describe('searchAssets integration', () => {
       sha: 'mock-sha',
       size: 1024,
       kind: 'image',
-      folder: {
-        collectionName: undefined,
-        internalPath: '/assets',
-        publicPath: '/assets',
-        entryRelative: false,
-        hasTemplateTags: false,
-      },
+      folder: createMockAssetFolder({ internalPath: '/assets', publicPath: '/assets' }),
       // RepositoryFileMetadata properties
       commitAuthor: undefined,
       commitDate: undefined,
@@ -113,6 +109,20 @@ describe('searchAssets integration', () => {
     expect(result).toHaveLength(1);
   });
 
+  it('should not match Japanese file names that differ only in kana marks', () => {
+    const assets = [
+      createAsset('コーヒー.jpg'),
+      createAsset('コピー.jpg'),
+      createAsset('ヒル.jpg'),
+    ];
+
+    expect(searchAssets({ assets, terms: 'コピー' }).map((a) => a.name)).toEqual(['コピー.jpg']);
+    expect(searchAssets({ assets, terms: 'コーヒー' }).map((a) => a.name)).toEqual([
+      'コーヒー.jpg',
+    ]);
+    expect(searchAssets({ assets, terms: 'ビール' })).toEqual([]);
+  });
+
   it('should match every word of a multi-word query in a hyphenated file name', () => {
     const assets = [createAsset('annual-report-cover-photo.png'), createAsset('logo.svg')];
 
@@ -171,13 +181,7 @@ describe('assetSearchResults derived store', () => {
         sha: 'mock-sha',
         size: 1024,
         kind: 'image',
-        folder: {
-          collectionName: undefined,
-          internalPath: '/assets',
-          publicPath: '/assets',
-          entryRelative: false,
-          hasTemplateTags: false,
-        },
+        folder: createMockAssetFolder({ internalPath: '/assets', publicPath: '/assets' }),
       }),
     ];
     searchTerms.current = 'profile';

@@ -1,14 +1,16 @@
 import { BASE_CONFIG, expect, test } from '../../fixtures/test.js';
 
 /**
- * The fork’s built-in `table` editor component: the Insert menu of a rich text field offers Table,
- * which opens a dialog for the number of rows and columns, and the saved entry holds a Markdown
- * table.
+ * Tables in rich text: the fork enables upstream’s built-in `table` editor component by default,
+ * where upstream only offers it once it’s listed in the `editor_components` option. The toolbar of
+ * a rich text field offers Insert Table, which opens a dialog for the number of rows and columns,
+ * and the saved entry holds a Markdown table.
  * @see ../../../docs/fork.md
  */
 
 /**
- * The blog with a Markdown body, which offers the editor components.
+ * The blog with a Markdown body, which offers the default editor components, as it leaves the
+ * `editor_components` option out.
  */
 const CONFIG = {
   ...BASE_CONFIG,
@@ -36,12 +38,10 @@ test.describe('tables in rich text', () => {
 
     await editor.getByRole('textbox', { name: 'Title' }).fill('Prices');
 
-    await cms.chooseMenuItem(
-      field.getByRole('button', { name: 'Insert' }),
-      page.getByRole('menuitem', { name: 'Table' }),
-    );
+    await field.getByRole('textbox').click();
+    await field.getByRole('button', { name: 'Insert Table' }).click();
 
-    const dialog = page.locator('dialog:not([inert])');
+    const dialog = page.getByRole('dialog', { name: 'Insert Table' });
 
     await expect(dialog).toBeVisible();
 
@@ -91,20 +91,18 @@ test.describe('tables in rich text', () => {
 
     await editor.getByRole('textbox', { name: 'Title' }).fill('No table');
 
-    await cms.chooseMenuItem(
-      field.getByRole('button', { name: 'Insert' }),
-      page.getByRole('menuitem', { name: 'Table' }),
-    );
+    await field.getByRole('textbox').click();
+    await field.getByRole('button', { name: 'Insert Table' }).click();
 
-    const dialog = page.locator('dialog:not([inert])');
+    const dialog = page.getByRole('dialog', { name: 'Insert Table' });
 
     await expect(dialog).toBeVisible();
     await dialog.getByRole('button', { name: 'Cancel' }).click();
 
     await expect(field.locator('table')).toHaveCount(0);
 
-    // The placeholder paragraph the dialog left behind is gone too, so the body is still empty and
-    // has to be filled in before the required field can be saved
+    // Nothing else is inserted either, so the body is still empty and has to be filled in before
+    // the required field can be saved
     await field.getByRole('textbox').click();
     await page.keyboard.type('Just text.');
 

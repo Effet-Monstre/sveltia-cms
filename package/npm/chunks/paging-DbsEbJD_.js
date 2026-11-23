@@ -1,0 +1,2 @@
+import{m as e,p as t}from"./networking-Dqg9_95y.js";var n=t=>Array.isArray(t)&&t.every(e),r=e=>[...new Set(e)],i=async(e,{maxPages:n=10,delay:r=50}={})=>{let i=[],a;for(let o=1;o<=n;o+=1){let{results:s,next:c}=await e(a);if(i.push(...s),!c)return{results:i,complete:!0};a=c,r&&o<n&&await t(r)}return{results:i,complete:!1}},a=async(e,t)=>(await i(e,t)).results,o=(e,{pageSize:t,...n})=>i(async(n=1)=>{let r=await e(n);return{results:r,next:r.length<t?void 0:n+1}},n);export{r as i,o as n,n as r,a as t};
+//# sourceMappingURL=paging-DbsEbJD_.js.map

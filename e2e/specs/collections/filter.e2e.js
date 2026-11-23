@@ -3,8 +3,7 @@ import {
   COLLECTION_OPTIONS_FILES,
 } from '../../fixtures/configs/collection-options.js';
 import { expect, test } from '../../fixtures/test.js';
-
-import { getEntryList, openCollection } from './helpers.js';
+import { getEditor, getEntryList, openCollection } from '../../fixtures/ui.js';
 
 test.use({ config: COLLECTION_OPTIONS_CONFIG });
 
@@ -19,10 +18,10 @@ test('lists only the entries matching each collection’s filter', async ({ page
 
   // The count next to each collection only includes its own entries, too
   await expect(
-    tree.getByRole('treeitem', { name: /^Events/ }).getByLabel(/\(\W*2\W* entries\)/),
+    tree.getByRole('treeitem', { name: /^Events/ }).getByLabel(/^\W*2\W* entries$/),
   ).toHaveText('2');
   await expect(
-    tree.getByRole('treeitem', { name: /^Workshops/ }).getByLabel(/\(\W*1\W* entry\)/),
+    tree.getByRole('treeitem', { name: /^Workshops/ }).getByLabel(/^\W*1\W* entry$/),
   ).toHaveText('1');
 
   await openCollection(page, 'Events');
@@ -45,7 +44,7 @@ test('saves a new entry with the value of the filter field, listing it there onl
   await openCollection(page, 'Workshops');
   await page.getByRole('button', { name: 'Create New Entry' }).click();
 
-  const editor = page.getByRole('group', { name: 'Content Editor' });
+  const editor = getEditor(page);
 
   await editor.getByRole('textbox', { name: 'Title' }).fill('Pruning Basics');
   await editor.getByRole('button', { name: 'Save' }).click();
@@ -65,7 +64,7 @@ test('leaves a field out of the preview with `preview: false`', async ({ page })
   await openCollection(page, 'Events');
   await page.getByRole('row', { name: /Seed Swap/ }).click();
 
-  const editor = page.getByRole('group', { name: 'Content Editor' });
+  const editor = getEditor(page);
   const preview = editor.getByRole('document', { name: 'Content Preview' });
 
   // The field is still edited as usual

@@ -1,6 +1,7 @@
 import { MONOLINGUAL_CONFIG, MONOLINGUAL_FILES } from '../../fixtures/configs/monolingual.js';
 import { expandAll } from '../../fixtures/expanders.js';
 import { expect, test } from '../../fixtures/test.js';
+import { getEditor } from '../../fixtures/ui.js';
 
 test.use({ config: MONOLINGUAL_CONFIG });
 
@@ -22,7 +23,7 @@ test('edits a nested field in a YAML file', async ({ cms, page }) => {
   await page.getByRole('treeitem', { name: 'Pages' }).click();
   await page.getByRole('row', { name: 'Contact Page' }).click();
 
-  const editor = page.getByRole('group', { name: 'Content Editor' });
+  const editor = getEditor(page);
   const office = editor.getByRole('group', { name: /Office/ });
 
   await expect(office).toBeVisible();
@@ -44,7 +45,7 @@ test('edits a Markdown file of a file collection', async ({ cms, page }) => {
   await page.getByRole('treeitem', { name: 'Pages' }).click();
   await page.getByRole('row', { name: 'About Page' }).click();
 
-  const editor = page.getByRole('group', { name: 'Content Editor' });
+  const editor = getEditor(page);
 
   await expect(editor.getByRole('textbox', { name: 'Title' })).toHaveValue('About Us');
   await editor.getByRole('textbox', { name: 'Title' }).fill('About the Magazine');
@@ -58,7 +59,7 @@ test('edits a Markdown file of a file collection', async ({ cms, page }) => {
 test('edits the singleton’s fields of different types', async ({ cms, page }) => {
   await page.getByRole('treeitem', { name: 'Site Settings' }).click();
 
-  const editor = page.getByRole('group', { name: 'Content Editor' });
+  const editor = getEditor(page);
 
   await expect(editor.getByRole('textbox', { name: 'Site Name' })).toHaveValue('Night Sky');
   await editor.getByRole('textbox', { name: 'Accent Color' }).fill('#aa3300');
@@ -82,4 +83,45 @@ test('edits the singleton’s fields of different types', async ({ cms, page }) 
       posts_per_page: 12,
       show_comments: false,
     });
+});
+
+test.describe('with a `summary` for each file', () => {
+  test.use({
+    config: {
+      ...MONOLINGUAL_CONFIG,
+      collections: MONOLINGUAL_CONFIG.collections.map((collection) =>
+        collection.name === 'pages'
+          ? {
+              ...collection,
+              files: collection.files.map((file) => ({
+                ...file,
+                // `{{title}}` falls back to the label of a file without a `title` field
+                summary:
+                  file.name === 'about' ? '{{title | upper}}' : '{{title}} in {{office.city}}',
+              })),
+            }
+          : collection,
+      ),
+    },
+  });
+
+  test('lists the files with their summaries, updated once saved', async ({ page }) => {
+    const rows = page.getByRole('grid', { name: 'Files' }).getByRole('row');
+
+    await page.getByRole('treeitem', { name: 'Pages' }).click();
+    await expect(rows).toHaveText([/ABOUT US/, /Contact Page in Toronto/]);
+
+    await rows.filter({ hasText: 'Contact Page' }).click();
+
+    const editor = getEditor(page);
+    const office = editor.getByRole('group', { name: /Office/ });
+
+    await expect(office).toBeVisible();
+    // The fork starts the expanders collapsed; see `docs/fork.md`
+    await expandAll(editor);
+    await office.getByRole('textbox', { name: 'City' }).fill('Vancouver');
+    await editor.getByRole('button', { name: 'Save' }).click();
+    await expect(editor).toBeHidden();
+    await expect(rows).toHaveText([/ABOUT US/, /Contact Page in Vancouver/]);
+  });
 });

@@ -1,5 +1,6 @@
 import { MEDIA_CONFIG, MEDIA_FILES } from '../../fixtures/configs/media.js';
 import { expect, test } from '../../fixtures/test.js';
+import { getEditor } from '../../fixtures/ui.js';
 
 test.use({ config: MEDIA_CONFIG });
 
@@ -21,7 +22,7 @@ test('finds entries from the content library, and opens one', async ({ page }) =
   await expect(results).toHaveText([/Notes.*Evening/]);
   await results.first().click();
 
-  const editor = page.getByRole('group', { name: 'Content Editor' });
+  const editor = getEditor(page);
 
   await expect(page).toHaveURL(/#\/collections\/notes\/entries\/evening$/);
   await expect(editor.getByRole('textbox', { name: 'Title' })).toHaveValue('Evening');
@@ -77,6 +78,23 @@ test('shows no results for unknown terms, and clears the search', async ({ page 
   await expect(page.getByRole('main', { name: /Notes.*Collection/ })).toBeVisible();
 });
 
+test('forgets the search when the browser goes back from the results', async ({ page }) => {
+  const search = page.getByRole('searchbox', { name: 'Search for contents…' });
+
+  await search.fill('sunset');
+  await expect(page).toHaveURL(/#\/search\/sunset$/);
+  await page.goBack();
+  await expect(page).toHaveURL(/#\/collections\/notes$/);
+  await expect(page.getByRole('main', { name: /Notes.*Collection/ })).toBeVisible();
+  await expect(search).toHaveValue('');
+
+  // A new search then starts from the collection again, which clearing the terms goes back to
+  await search.fill('bridge');
+  await expect(page).toHaveURL(/#\/search\/bridge$/);
+  await search.fill('');
+  await expect(page).toHaveURL(/#\/collections\/notes$/);
+});
+
 test('restores the search from the URL after a reload', async ({ page }) => {
   await page.getByRole('searchbox', { name: 'Search for contents…' }).fill('bridge');
   await expect(page).toHaveURL(/#\/search\/bridge$/);
@@ -86,4 +104,31 @@ test('restores the search from the URL after a reload', async ({ page }) => {
   await expect(
     page.getByRole('main').getByRole('grid', { name: 'Entries' }).getByRole('row'),
   ).toHaveText([/Projects.*Bridge/]);
+});
+
+test('goes back to the asset folder the search started from when cleared', async ({ page }) => {
+  await page.getByRole('radio', { name: 'Assets' }).click();
+
+  const folders = page.getByRole('listbox', { name: 'Asset Folder List' });
+
+  await expect(folders.getByRole('option', { selected: true })).toBeVisible();
+
+  const libraryURL = page.url();
+
+  await folders.getByRole('option', { name: /Projects/ }).click();
+  await expect(page).toHaveURL(/#\/assets\/static\/projects$/);
+
+  const search = page.getByRole('searchbox', { name: 'Search for assets…' });
+
+  await search.fill('bridge');
+  await expect(page).toHaveURL(/#\/search\/bridge$/);
+
+  // Clearing the terms goes back to the folder, not to the content library
+  await search.fill('');
+  await expect(page).toHaveURL(/#\/assets\/static\/projects$/);
+  await expect(page.getByRole('searchbox', { name: 'Search for assets…' })).toBeVisible();
+
+  // Rather than adding another page to the history
+  await page.goBack();
+  await expect(page).toHaveURL(libraryURL);
 });

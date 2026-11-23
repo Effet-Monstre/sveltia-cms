@@ -1,5 +1,6 @@
 import { NESTED_CONFIG, NESTED_FILES } from '../../fixtures/configs/nested.js';
 import { expect, test } from '../../fixtures/test.js';
+import { getEditor, getEntryRows } from '../../fixtures/ui.js';
 
 /**
  * @import { Page } from '@playwright/test';
@@ -28,8 +29,8 @@ const chooseParentFolder = async (page, label) => {
 
 test('shows the folders in the sidebar and lists the entries in each', async ({ page }) => {
   const collections = page.getByRole('tree', { name: 'Collection List' });
-  const pages = collections.getByRole('treeitem', { name: 'Pages', exact: true });
-  const rows = page.getByRole('grid', { name: 'Entries' }).getByRole('row');
+  const pages = collections.getByRole('treeitem', { name: /^Pages\b/ });
+  const rows = getEntryRows(page);
 
   // A page that holds no other page is an entry, not a folder. The alumni page is deeper than the
   // collection’s `depth`, so it isn’t part of the collection at all
@@ -49,7 +50,7 @@ test('shows the folders in the sidebar and lists the entries in each', async ({ 
 });
 
 test('shows the summary and the thumbnail of each entry', async ({ page }) => {
-  const rows = page.getByRole('grid', { name: 'Entries' }).getByRole('row');
+  const rows = getEntryRows(page);
 
   await expect(rows).toHaveText([
     /About Us – Who we are/,
@@ -72,7 +73,7 @@ test('creates an entry in the folder being browsed', async ({ cms, page }) => {
   await page.getByRole('tree', { name: 'Collection List' }).getByText('About Us').click();
   await page.getByRole('button', { name: 'Create New Entry' }).click();
 
-  const editor = page.getByRole('group', { name: 'Content Editor' });
+  const editor = getEditor(page);
 
   await expect(editor.getByRole('button', { name: 'Parent Folder' })).toContainText('About Us');
   await editor.getByRole('textbox', { name: 'Title' }).fill('History');
@@ -86,7 +87,7 @@ test('creates an entry in the folder being browsed', async ({ cms, page }) => {
 test('creates an entry in another folder chosen with the path editor', async ({ cms, page }) => {
   await page.getByRole('button', { name: 'Create New Entry' }).click();
 
-  const editor = page.getByRole('group', { name: 'Content Editor' });
+  const editor = getEditor(page);
 
   await expect(editor.getByRole('button', { name: 'Parent Folder' })).toContainText('Pages');
   await chooseParentFolder(page, 'Contact');
@@ -102,7 +103,7 @@ test('creates an entry in another folder chosen with the path editor', async ({ 
   await expect(
     page
       .getByRole('tree', { name: 'Collection List' })
-      .getByRole('treeitem', { name: 'Pages', exact: true })
+      .getByRole('treeitem', { name: /^Pages\b/ })
       .getByRole('treeitem'),
   ).toHaveText([/About Us/, /Contact/]);
 });
@@ -111,7 +112,7 @@ test('moves an entry along with the pages below it', async ({ cms, page }) => {
   await page.getByRole('tree', { name: 'Collection List' }).getByText('About Us').click();
   await page.getByRole('row', { name: /Our Team/ }).click();
 
-  const editor = page.getByRole('group', { name: 'Content Editor' });
+  const editor = getEditor(page);
 
   await expect(editor.getByRole('button', { name: 'Parent Folder' })).toContainText('About Us');
   await chooseParentFolder(page, 'Pages');
@@ -151,7 +152,7 @@ test('offers no folder that would put an entry deeper than the collection’s de
 });
 
 test('offers no folder too deep for the pages below the entry being moved', async ({ page }) => {
-  const editor = page.getByRole('group', { name: 'Content Editor' });
+  const editor = getEditor(page);
 
   await page.getByRole('row', { name: /About Us/ }).click();
   await expect(editor.getByRole('textbox', { name: 'Title' })).toHaveValue('About Us');

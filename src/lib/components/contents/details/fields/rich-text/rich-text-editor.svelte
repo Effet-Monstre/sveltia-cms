@@ -5,56 +5,60 @@
   @see https://sveltiacms.app/en/docs/fields/richtext
 -->
 <script>
-  import {
-    $createTableNodeWithDimensions as createTableNodeWithDimensions,
-    TableNode,
-  } from '@lexical/table';
   import { _ } from '@sveltia/i18n';
-  import { TextEditor } from '@sveltia/ui';
+  import { Alert, TextEditor, Toast } from '@sveltia/ui';
   import { sleep } from '@sveltia/utils/misc';
   import {
     $createParagraphNode as createParagraphNode,
     getNearestEditorFromDOMNode,
-    $getNodeByKey as getNodeByKey,
     $insertNodes as insertNodes,
   } from 'lexical';
-  import { getContext, tick } from 'svelte';
 
+  import SelectAssetsDialog from '$lib/components/assets/browser/select-assets-dialog.svelte';
   import { EditorComponent } from '$lib/components/contents/details/fields/rich-text/custom-node-features';
-  import InsertTableDialog from '$lib/components/contents/details/fields/rich-text/insert-table-dialog.svelte';
-  import { customComponentRegistry } from '$lib/services/api/registries';
   import { cmsConfig } from '$lib/services/config';
   import { getEntryDraftContext } from '$lib/services/contents/draft/state.svelte';
-  import { getValueMapSnapshot } from '$lib/services/contents/draft/value-map.svelte';
-  import { trackPendingFieldUpdate } from '$lib/services/contents/editor/pending';
-  import { getField } from '$lib/services/contents/entry/fields';
+  import { getFieldValueMapSnapshot } from '$lib/services/contents/draft/value-map.svelte';
   import {
-    getAssetLibraryFolderMap,
-    getDefaultAssetFolder,
-  } from '$lib/services/contents/fields/file/helpers';
+    getFieldEditorContext,
+    isInEditorComponent,
+  } from '$lib/services/contents/editor/field-context';
+  import { trackPendingWhile } from '$lib/services/contents/editor/pending.svelte';
+  import { getField } from '$lib/services/contents/entry/fields';
   import { processResource } from '$lib/services/contents/fields/file/process';
   import {
-    BUILTIN_COMPONENTS,
-    BUTTON_NAME_MAP,
-    COMPONENT_NAME_PREFIX_REGEX,
+    getMediaFieldAssetOptions,
+    processResources,
+  } from '$lib/services/contents/fields/file/resources';
+  import {
     DEFAULT_BUTTONS,
     DEFAULT_MODES,
     getValueFormat,
     NODE_NAME_MAP,
   } from '$lib/services/contents/fields/rich-text';
-  import { getComponentDef } from '$lib/services/contents/fields/rich-text/components/definitions';
-  import { supportsHTML } from '$lib/services/contents/fields/rich-text/components/utils';
+  import { IMAGE_COMPONENT_IDS } from '$lib/services/contents/fields/rich-text/components/definitions';
+  import {
+    getImageSrcFieldConfig,
+    sortDroppedImages,
+  } from '$lib/services/contents/fields/rich-text/image-uploads';
   import {
     getDroppedImages,
     getPastedImages,
   } from '$lib/services/contents/fields/rich-text/images';
+  import {
+    getAvailableComponentDefs,
+    getEditorComponentNames,
+    getRootFieldName,
+    getStaleExtraValueKeys,
+    getToolbarButtons,
+    resolveAllowNestedComponents,
+  } from '$lib/services/contents/fields/rich-text/options';
   import { getCanonicalLocale, getDirection } from '$lib/services/contents/i18n';
-  import { getDefaultMediaLibraryOptions } from '$lib/services/integrations/media-libraries/default';
   import { syncValues, watch } from '$lib/services/utils/state.svelte';
 
   /**
    * @import { ImageEntry } from '$lib/services/contents/fields/rich-text/images';
-   * @import { FieldEditorContext, FieldEditorProps } from '$lib/types/private';
+   * @import { FieldEditorProps, SelectedResource } from '$lib/types/private';
    * @import {
    * EditorComponentDefinition,
    * ImageField,
@@ -73,15 +77,13 @@
 
   const defaultConfig = cmsConfig.current?.field_defaults?.richtext ?? {};
   /* v8 ignore start -- the editor is always rendered within a field editor */
-  /** @type {FieldEditorContext} */
-  const { fieldContext, parentComponentNames, valueStoreKey } = getContext('field-editor') ?? {};
+  const { parentComponentNames, valueStoreKey } = getFieldEditorContext();
   /* v8 ignore stop */
-  const inEditorComponent = fieldContext === 'rich-text-editor-component';
+  const inEditorComponent = isInEditorComponent(valueStoreKey);
   const componentName = parentComponentNames.at(-1);
 
   /** @type {FieldEditorProps & Props} */
   let {
-    /* eslint-disable prefer-const */
     locale,
     keyPath,
     typedKeyPath,
@@ -91,7 +93,6 @@
     required = true,
     readonly = false,
     invalid = false,
-    /* eslint-enable prefer-const */
   } = $props();
 
   /** @type {HTMLElement | undefined} */
@@ -103,111 +104,34 @@
    * Whether the editor has yet to write a change made by the user back to {@link inputValue}.
    */
   let pending = $state(false);
-
-  /** Whether the insert-table dialog is open. */
-  let showTableDialog = $state(false);
-
   /**
-   * Key of the placeholder paragraph node inserted when the user triggers "Insert Table". The
-   * dialog replaces or removes this placeholder once the user confirms or cancels.
-   * @type {string | null}
+   * Number of dropped or pasted image batches being processed before they’re inserted.
    */
-  let pendingTablePlaceholderKey = $state(null);
-
+  let processingImages = $state(0);
+  let showSelectAssetsDialog = $state(false);
   /**
-   * A no-op Markdown transformer passed as part of the table `TextEditorComponent`. The actual
-   * TABLE transformer is already registered globally inside `@sveltia/ui`'s Lexical core; this
-   * placeholder prevents a second registration while satisfying the `TextEditorComponent` type.
-   * @type {import('@lexical/markdown').ElementTransformer}
+   * Files dropped or pasted into the editor, to be uploaded to a cloud storage service in the
+   * Select Assets dialog.
+   * @type {File[]}
    */
-  const NOOP_TABLE_TRANSFORMER = {
-    type: 'element',
-    dependencies: [],
-    // eslint-disable-next-line jsdoc/require-jsdoc
-    export: () => null,
-    regExp: /(?!)/,
-    // eslint-disable-next-line jsdoc/require-jsdoc
-    replace: () => {},
-  };
-
+  let pendingFiles = $state([]);
   /**
-   * Replace the pending placeholder paragraph with a real table node of the given dimensions.
-   * @param {number} rows Number of rows.
-   * @param {number} cols Number of columns.
+   * Inserts the images uploaded in the Select Assets dialog into the editor the files were dropped
+   * or pasted into.
+   * @type {((resources: SelectedResource[]) => Promise<void>) | undefined}
    */
-  const onTableConfirm = (rows, cols) => {
-    const outer = /** @type {HTMLElement | null} */ (wrapper?.querySelector('.lexical-root'));
-    const editor = getNearestEditorFromDOMNode(outer);
-
-    editor?.update(() => {
-      const placeholder = pendingTablePlaceholderKey
-        ? getNodeByKey(pendingTablePlaceholderKey)
-        : null;
-
-      if (placeholder) {
-        placeholder.replace(createTableNodeWithDimensions(rows, cols, true));
-      } else {
-        insertNodes([createTableNodeWithDimensions(rows, cols, true)]);
-      }
-
-      pendingTablePlaceholderKey = null;
-    });
-  };
-
-  /**
-   * The fork’s built-in `table` component. Tables use the native Lexical nodes that `@sveltia/ui`
-   * already registers, so the component object is created directly rather than from a component
-   * definition going through {@link EditorComponent}.
-   * @type {import('@sveltia/ui').TextEditorComponent}
-   */
-  const tableComponent = $derived({
-    id: 'table',
-    label: _('editor_components.table'),
-    icon: 'table',
-    // The property is typed as a node instance, but the editor takes the class, as it does for a
-    // component created with `EditorComponent`
-    node: /** @type {any} */ (TableNode),
-    // eslint-disable-next-line jsdoc/require-jsdoc
-    createNode: () => {
-      // Insert a placeholder paragraph, then open the dialog. The dialog’s confirm and cancel
-      // handlers replace or remove this placeholder node
-      const placeholder = createParagraphNode();
-
-      pendingTablePlaceholderKey = placeholder.getKey();
-      showTableDialog = true;
-
-      return placeholder;
-    },
-    transformer: NOOP_TABLE_TRANSFORMER,
-  });
-
-  /**
-   * Remove the pending placeholder paragraph when the user cancels the insert-table dialog.
-   */
-  const onTableCancel = () => {
-    const outer = /** @type {HTMLElement | null} */ (wrapper?.querySelector('.lexical-root'));
-    const editor = getNearestEditorFromDOMNode(outer);
-
-    editor?.update(() => {
-      if (pendingTablePlaceholderKey) {
-        getNodeByKey(pendingTablePlaceholderKey)?.remove();
-        pendingTablePlaceholderKey = null;
-      }
-    });
-  };
+  let insertUploadedImages = undefined;
+  /** Whether dropped or pasted files have been rejected, as no location can take them. */
+  let filesRejected = $state(false);
 
   const {
     // Field type-specific options
     modes: _modes = defaultConfig.modes ?? [...DEFAULT_MODES],
     buttons: _buttons = defaultConfig.buttons ?? [...DEFAULT_BUTTONS],
-    editor_components: _editorComponents = defaultConfig.editor_components ??
-      // Include all built-in and custom components by default
-      [...BUILTIN_COMPONENTS, ...customComponentRegistry.keys()],
-    allow_nested_components: _allowNestedComponents,
-    linked_images: linkedImagesEnabled = defaultConfig.linked_images ?? true,
     use_emoji_autocomplete: useEmojiAutocomplete = defaultConfig.use_emoji_autocomplete ?? true,
     use_markdown_shortcuts: useMarkdownShortcuts = defaultConfig.use_markdown_shortcuts ?? true,
     minimal = defaultConfig.minimal ?? false,
+    multiline = defaultConfig.multiline ?? true,
   } = $derived(fieldConfig);
   const format = $derived(getValueFormat(fieldConfig));
   const modes = $derived(_modes.map((name) => NODE_NAME_MAP[name]).filter(Boolean));
@@ -216,73 +140,55 @@
   const collectionName = $derived(entryDraft.current?.collectionName ?? '');
   /* v8 ignore stop */
   const fileName = $derived(entryDraft.current?.fileName);
-  const valueMap = $derived(getValueMapSnapshot(entryDraft.current, locale, valueStoreKey));
-  const buttons = $derived(
-    [
-      ..._buttons,
-      // Include `code-block` implemented as a block type
-      ...(_editorComponents.includes('code-block') ? ['code-block'] : []),
-    ]
-      // @ts-ignore
-      .map((name) => BUTTON_NAME_MAP[name])
-      .filter(Boolean),
+  const valueMap = $derived(
+    getFieldValueMapSnapshot(entryDraft.current, locale, keyPath, valueStoreKey),
   );
-  const allowNestedComponents = $derived.by(() => {
-    let nested = _allowNestedComponents;
-
-    if (inEditorComponent) {
-      // Retrieve the parent Markdown or RichText field config
-      nested = /** @type {MarkdownField | RichTextField} */ (
-        getField({
-          collectionName,
-          fileName,
-          isIndexFile,
-          valueMap,
-          // Extract the parent field name, e.g. `body:c55:content` -> `body`
-          keyPath: /** @type {string} */ (keyPath.match(/^[^:]+/)?.[0]),
-        })
-      )?.allow_nested_components;
-    }
-
-    return nested ?? defaultConfig.allow_nested_components ?? true;
-  });
-  const components = $derived.by(() => {
-    if (inEditorComponent && !allowNestedComponents) {
-      return [];
-    }
-
-    // The fork adds a built-in `table` component, which uses the Lexical table nodes that
-    // `@sveltia/ui` already registers rather than a component definition; see `docs/fork.md`
-    return _editorComponents.flatMap((name) => {
-      if (name === 'table') {
-        return [tableComponent];
-      }
-
-      const def = getComponentDef(name === 'image' && linkedImagesEnabled ? 'linked-image' : name);
-
-      return def &&
-        // Only the components with HTML syntax can be used in HTML
-        (format !== 'html' || supportsHTML(def)) &&
-        // Compare the definition IDs, because the parent component names are the IDs, which are
-        // prefixed for custom components, e.g. `x-youtube`
-        (allowNestedComponents !== 'exclude_self' || !parentComponentNames.includes(def.id))
-        ? [/** @type {import('@sveltia/ui').TextEditorComponent} */ (new EditorComponent(def))]
-        : [];
-    });
-  });
-  const imageComponent = $derived(
-    components.find(({ id }) => id === 'image' || id === 'linked-image'),
-  );
-  const targetAssetFolder = $derived(
-    getDefaultAssetFolder(
-      getAssetLibraryFolderMap({
-        collectionName,
-        fileName,
-        componentName,
-        typedKeyPath,
-        isIndexFile,
-      }),
+  const componentNames = $derived(getEditorComponentNames(fieldConfig));
+  const buttons = $derived(getToolbarButtons(_buttons, componentNames));
+  const allowNestedComponents = $derived(
+    resolveAllowNestedComponents(
+      inEditorComponent
+        ? // Retrieve the parent Markdown or RichText field config
+          /** @type {MarkdownField | RichTextField | undefined} */ (
+            getField({
+              collectionName,
+              fileName,
+              isIndexFile,
+              valueMap,
+              keyPath: getRootFieldName(keyPath),
+            })
+          )
+        : fieldConfig,
     ),
+  );
+  const components = $derived(
+    getAvailableComponentDefs({
+      fieldConfig,
+      format,
+      allowNestedComponents,
+      inEditorComponent,
+      parentComponentNames,
+    }).map(
+      (def) => /** @type {import('@sveltia/ui').TextEditorComponent} */ (new EditorComponent(def)),
+    ),
+  );
+  const imageComponent = $derived(components.find(({ id }) => IMAGE_COMPONENT_IDS.includes(id)));
+  const srcFieldConfig = $derived(
+    getImageSrcFieldConfig(
+      /** @type {import('@sveltia/ui').TextEditorComponent & EditorComponentDefinition} */ (
+        imageComponent
+      ),
+    ),
+  );
+  const assetOptions = $derived(
+    getMediaFieldAssetOptions({
+      collectionName,
+      fileName,
+      isIndexFile,
+      componentName,
+      typedKeyPath,
+      fieldConfig: /** @type {ImageField} */ (srcFieldConfig),
+    }),
   );
 
   /**
@@ -299,71 +205,137 @@
       return;
     }
 
-    const srcFieldConfig =
-      /** @type {import('@sveltia/ui').TextEditorComponent & EditorComponentDefinition} */ (
-        imageComponent
-      ).fields?.find(({ name }) => name === 'src');
+    const { folder, libraryConfig } = assetOptions;
+    const draft = entryDraft.current;
+    const _locale = locale;
+    const component = imageComponent;
 
-    const { config: libraryConfig } = getDefaultMediaLibraryOptions({
-      fieldConfig: /** @type {ImageField} */ (srcFieldConfig),
+    const { inlineImages, uploadFiles, rejected } = sortDroppedImages({
+      images,
+      srcFieldConfig,
+      assetOptions,
     });
 
-    const draft = entryDraft.current;
-    const folder = targetAssetFolder;
+    /**
+     * Whether the editor still shows the content the images were dropped in. The editor is reused
+     * when the pane switches to another locale or another entry is opened, so the image would be
+     * inserted into the content it shows now, with a path resolved for the one it was dropped in.
+     * @returns {boolean} Result.
+     */
+    const isSameContent = () => entryDraft.current === draft && locale === _locale;
 
-    // eslint-disable-next-line no-restricted-syntax
-    for (const { file, src: externalSrc, alt = '' } of images) {
-      let src = externalSrc;
+    /**
+     * Insert an image.
+     * @param {string} src Image URL.
+     * @param {string} alt Alternative text.
+     */
+    const insertImage = (src, alt) => {
+      editor.update(() => {
+        const node = component.createNode({ src, alt });
 
-      if (file) {
-        // eslint-disable-next-line no-await-in-loop
-        const { value } = await processResource({
+        // Start a new paragraph after the image, unless the field holds a single one
+        insertNodes(multiline ? [node, createParagraphNode()] : [node]);
+      });
+    };
+
+    processingImages += 1;
+
+    try {
+      // eslint-disable-next-line no-restricted-syntax
+      for (const { file, src: externalSrc, alt = '' } of inlineImages) {
+        let src = externalSrc;
+
+        if (file) {
+          // eslint-disable-next-line no-await-in-loop
+          const { value } = await processResource({
+            draft,
+            resource: { file, folder },
+            libraryConfig,
+            locale: _locale,
+          });
+
+          if (!isSameContent()) {
+            return;
+          }
+
+          src = value;
+        }
+
+        if (src) {
+          insertImage(src, alt);
+        }
+      }
+    } finally {
+      processingImages -= 1;
+    }
+
+    if (rejected) {
+      filesRejected = true;
+    }
+
+    if (!uploadFiles.length) {
+      return;
+    }
+
+    /**
+     * Insert the images the user has selected in the Select Assets dialog, which uploads the files
+     * to the cloud storage service, asking for the credentials if needed.
+     * @param {SelectedResource[]} resources Selected resources.
+     */
+    insertUploadedImages = async (resources) => {
+      // A save made right after the images have been selected waits for them to be inserted
+      processingImages += 1;
+
+      try {
+        const results = await processResources({
           draft,
-          resource: { file, folder },
+          resources,
+          folder,
           libraryConfig,
+          locale: _locale,
         });
 
-        src = value;
+        if (isSameContent()) {
+          results.forEach(({ value }) => {
+            if (value) {
+              insertImage(value, '');
+            }
+          });
+        }
+      } finally {
+        processingImages -= 1;
       }
+    };
 
-      if (!src) {
-        // eslint-disable-next-line no-continue
-        continue;
-      }
-
-      const _src = src;
-
-      editor.update(() => {
-        insertNodes([imageComponent.createNode({ src: _src, alt }), createParagraphNode()]);
-      });
-    }
+    pendingFiles = uploadFiles;
+    showSelectAssetsDialog = true;
   };
 
   /**
-   * Handle pasted content. If it includes images, insert them to the editor content.
-   * @param {ClipboardEvent} event `paste` event.
+   * Create a handler for pasted or dropped content. If it includes images, they’re inserted to the
+   * editor content.
+   * @template {ClipboardEvent | DragEvent} E
+   * @param {(event: E) => Promise<ImageEntry[]>} getImages Function getting the images from the
+   * event.
+   * @returns {(event: E) => Promise<void>} Event handler.
    */
-  const onPaste = async (event) => {
+  const createImageHandler = (getImages) => async (event) => {
+    // Lexical applies an update even while the editor isn’t editable, so nothing is inserted to a
+    // read-only field, nor is the file added to the draft
+    if (readonly) {
+      return;
+    }
+
     const { target } = event;
-    const images = await getPastedImages(event);
+    const images = await getImages(event);
 
     if (images.length) {
       await insertImages({ target, images });
     }
   };
 
-  /**
-   * Handle dropped content. If it includes images, insert them to the editor content.
-   * @param {DragEvent} event `drop` event.
-   */
-  const onDrop = async (event) => {
-    const { target } = event;
-    const images = await getDroppedImages(event);
-
-    if (images.length) {
-      await insertImages({ target, images });
-    }
-  };
+  const onPaste = createImageHandler(getPastedImages);
+  const onDrop = createImageHandler(getDroppedImages);
 
   /**
    * Remove the extra values of the components that are no longer present in the editor, shortly
@@ -382,15 +354,12 @@
     // Remove values that are not present in the editor anymore. Otherwise, they will trigger
     // validation errors when the entry is saved.
     cleanupTimeout = window.setTimeout(() => {
-      Object.keys(draft.extraValues[locale]).forEach((key) => {
-        const [prefix] = key.match(COMPONENT_NAME_PREFIX_REGEX) ?? [];
-
-        if (
-          prefix?.startsWith(`${keyPath}:`) &&
-          !wrapper?.querySelector(`[data-key-path-prefix="${prefix}"]`)
-        ) {
-          delete draft.extraValues[locale][key];
-        }
+      getStaleExtraValueKeys(
+        draft.extraValues[locale],
+        keyPath,
+        (prefix) => !!wrapper?.querySelector(`[data-key-path-prefix="${prefix}"]`),
+      ).forEach((key) => {
+        delete draft.extraValues[locale][key];
       });
     }, 500);
   };
@@ -425,27 +394,13 @@
 
   // While the editor holds a change made by the user, register it as a pending update: the editor
   // converts the content to Markdown with a short delay, so a save right after a change would
-  // otherwise validate and write the previous value
-  $effect(() => {
-    if (!pending) {
-      return undefined;
-    }
-
-    /** @type {PromiseWithResolvers<void>} */
-    const { promise, resolve } = Promise.withResolvers();
-
-    trackPendingFieldUpdate(promise);
-
-    // Settle once the value has reached `currentValue` through the bindings and effects, or when
-    // the editor goes away
-    return async () => {
-      await tick();
-      resolve();
-    };
-  });
+  // otherwise validate and write the previous value. A dropped or pasted image is only inserted
+  // once it has been processed, which can take a while, e.g. converting a large HEIC photo, so a
+  // save or a locale switch has to wait for that as well
+  trackPendingWhile(() => pending || !!processingImages);
 </script>
 
-<div role="none" class="wrapper" class:minimal bind:this={wrapper}>
+<div role="none" class="wrapper" bind:this={wrapper}>
   {#await sleep() then}
     <!--
       Reset the editor when the configuration changes. It happens when fields are reordered or
@@ -461,6 +416,8 @@
         {components}
         {useEmojiAutocomplete}
         {useMarkdownShortcuts}
+        {minimal}
+        {multiline}
         bind:value={inputValue}
         bind:pending
         flex
@@ -482,25 +439,34 @@
   {/await}
 </div>
 
-<InsertTableDialog
-  bind:open={showTableDialog}
-  onConfirm={onTableConfirm}
-  onCancel={onTableCancel}
-/>
+{#if srcFieldConfig}
+  <SelectAssetsDialog
+    kind="image"
+    multiple
+    draft={entryDraft.current}
+    {locale}
+    fieldConfig={srcFieldConfig}
+    assetLibraryFolderMap={assetOptions.folderMap}
+    enabledCloudServiceEntries={assetOptions.cloudServiceEntries}
+    bind:open={showSelectAssetsDialog}
+    bind:pendingFiles
+    onSelect={(resources) => {
+      insertUploadedImages?.(resources);
+    }}
+    onClose={() => {
+      insertUploadedImages = undefined;
+    }}
+  />
+{/if}
+
+<Toast bind:show={filesRejected}>
+  <Alert status="error">{_('uploading_files_failed')}</Alert>
+</Toast>
 
 <style>
   .wrapper {
     --sui-paragraph-margin: 20px;
     display: contents;
-
-    &.minimal {
-      :global {
-        :is([role='textbox'], textarea) {
-          overflow: auto;
-          max-height: 240px;
-        }
-      }
-    }
 
     :global {
       @media (width < 768px) {

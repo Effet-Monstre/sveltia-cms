@@ -1,4 +1,8 @@
+// @vitest-environment happy-dom
+
 import { beforeEach, describe, expect, test, vi } from 'vitest';
+
+import { createMockAssetFolder } from '$lib/test/factories';
 
 /**
  * @import { Asset, AssetFolderInfo } from '$lib/types/private';
@@ -38,15 +42,14 @@ vi.mock('$lib/services/assets/info', () => ({
   createDisplayBlobURL: vi.fn(async (/** @type {Blob} */ blob) => URL.createObjectURL(blob)),
 }));
 
-vi.mock('$lib/services/assets/references', () => ({
-  MARKDOWN_IMAGE_REGEX: /!\[.*?\]\((.+?)(?:\s+".*?")?\)/g,
-}));
-
-vi.mock('$lib/services/contents/draft/save/assets', () => ({
+vi.mock('$lib/services/assets/entry-folder', () => ({
   getOwnedEntryFolderPath: mockGetOwnedEntryFolderPath,
 }));
 
-vi.mock('$lib/services/contents/entry/fields', () => ({
+vi.mock('$lib/services/contents/entry/fields', async (importOriginal) => ({
+  getDraftFieldArgs: /** @type {typeof import('$lib/services/contents/entry/fields')} */ (
+    await importOriginal()
+  ).getDraftFieldArgs,
   getField: mockGetField,
   getTypedKeyPath: mockGetTypedKeyPath,
 }));
@@ -57,8 +60,9 @@ vi.mock('$lib/services/contents/fields', () => ({
 }));
 
 vi.mock('$lib/services/contents/fields/file/helpers', () => ({
-  getAssetLibraryFolderMap: mockGetAssetLibraryFolderMap,
-  getDefaultAssetFolder: mockGetDefaultAssetFolder,
+  getFieldAssetFolder: vi.fn((args) =>
+    mockGetDefaultAssetFolder(mockGetAssetLibraryFolderMap(args)),
+  ),
 }));
 
 const { copyEntryRelativeAssets } = await import('./duplicate-assets');
@@ -74,13 +78,7 @@ const entryFolder = {
 };
 
 /** @type {AssetFolderInfo} */
-const globalFolder = {
-  collectionName: undefined,
-  internalPath: 'static/uploads',
-  publicPath: '/uploads',
-  entryRelative: false,
-  hasTemplateTags: false,
-};
+const globalFolder = createMockAssetFolder();
 
 /**
  * Create a saved asset.
@@ -157,6 +155,10 @@ beforeEach(() => {
       return { name: 'body', widget: 'markdown' };
     }
 
+    if (keyPath === 'html') {
+      return { name: 'html', widget: 'richtext', format: 'html' };
+    }
+
     if (keyPath === 'title') {
       return { name: 'title', widget: 'string' };
     }
@@ -218,6 +220,19 @@ describe('copyEntryRelativeAssets()', () => {
     expect(currentValues.en.body).toBe('Text');
   });
 
+  test('looks each locale’s asset up relative to that locale’s entry file', async () => {
+    currentValues = { en: { image: 'photo.jpg' }, ja: { image: 'photo.jpg' } };
+
+    await copyEntryRelativeAssets({ draft, currentValues });
+
+    expect(mockGetAssetByPath).toHaveBeenCalledWith(
+      expect.objectContaining({ value: 'photo.jpg', locale: 'en' }),
+    );
+    expect(mockGetAssetByPath).toHaveBeenCalledWith(
+      expect.objectContaining({ value: 'photo.jpg', locale: 'ja' }),
+    );
+  });
+
   test('looks the asset up with the field’s typed key path', async () => {
     currentValues = { en: { 'images.0.src': 'a.jpg' } };
 
@@ -245,6 +260,7 @@ describe('copyEntryRelativeAssets()', () => {
       collectionName: 'posts',
       fileName: undefined,
       typedKeyPath: 'images.*.src',
+      locale: 'en',
     });
   });
 
@@ -319,6 +335,77 @@ describe('copyEntryRelativeAssets()', () => {
     );
   });
 
+  test('copies the images embedded in an HTML body', async () => {
+    currentValues = {
+      en: {
+        html: [
+          '<p>Intro</p>',
+          '<p><img src="./one.png" alt="First"></p>',
+          '<!-- <img src="two.png"> -->',
+          '<p><a href="./one.png">Link</a><img src="./one.png" alt="First again"></p>',
+          '<p><img src="https://example.com/three.png"></p>',
+        ].join(''),
+      },
+    };
+
+    const files = await copyEntryRelativeAssets({ draft, currentValues });
+    const [blobURL] = getCreatedBlobURLs();
+
+    // The image in the comment isn’t copied
+    expect(Object.keys(files)).toEqual([blobURL]);
+    expect(files[blobURL].file.name).toBe('one.png');
+    expect(currentValues.en.html).toBe(
+      [
+        '<p>Intro</p>',
+        `<p><img src="${blobURL}" alt="First"></p>`,
+        '<!-- <img src="two.png"> -->',
+        // A link to the same file is left alone
+        `<p><a href="./one.png">Link</a><img src="${blobURL}" alt="First again"></p>`,
+        '<p><img src="https://example.com/three.png"></p>',
+      ].join(''),
+    );
+  });
+
+  test('copies the other media embedded in an HTML or Markdown body', async () => {
+    currentValues = {
+      en: {
+        html: [
+          '<picture><source srcset="./one.png 2x, https://example.com/a.png 3x"></picture>',
+          '<video src="./one.png" poster="./one.png"><source src="./one.png"></video>',
+          '<audio src="./one.png"></audio>',
+        ].join(''),
+        body: '![a](./one.png)\n\n<img src="./one.png" alt="Raw">',
+      },
+    };
+
+    const files = await copyEntryRelativeAssets({ draft, currentValues });
+    const [blobURL] = Object.keys(files);
+
+    // The file is copied once, however many references to it there are
+    expect(Object.keys(files)).toEqual([blobURL]);
+    expect(files[blobURL].file.name).toBe('one.png');
+    expect(currentValues.en.html).toBe(
+      [
+        `<picture><source srcset="${blobURL} 2x, https://example.com/a.png 3x"></picture>`,
+        `<video src="${blobURL}" poster="${blobURL}"><source src="${blobURL}"></video>`,
+        `<audio src="${blobURL}"></audio>`,
+      ].join(''),
+    );
+    expect(currentValues.en.body).toBe(`![a](${blobURL})\n\n<img src="${blobURL}" alt="Raw">`);
+  });
+
+  test('leaves an HTML body without an entry-relative image as is', async () => {
+    const html = "<p class='a'>Text<br/><img src='/images/a.png'></p>";
+
+    currentValues = { en: { html } };
+
+    const files = await copyEntryRelativeAssets({ draft, currentValues });
+
+    expect(files).toEqual({});
+    // Not even serialized again
+    expect(currentValues.en.html).toBe(html);
+  });
+
   test('copies a file referenced from a File field', async () => {
     currentValues = { en: { attachment: 'doc.pdf' } };
 
@@ -382,6 +469,18 @@ describe('copyEntryRelativeAssets()', () => {
     await expect(copyEntryRelativeAssets({ draft, currentValues })).resolves.toEqual({});
     expect(mockGetAssetByPath).not.toHaveBeenCalled();
     expect(currentValues.en.image).toBe('photo.jpg');
+  });
+
+  test('leaves the values alone when only an external media library is configured', async () => {
+    // Without an internal `media_folder`, no folder is enabled in the library folder map
+    mockGetDefaultAssetFolder.mockReturnValue(undefined);
+    currentValues = {
+      en: { image: 'https://res.cloudinary.com/demo/image/upload/photo.jpg', body: 'Text' },
+    };
+
+    await expect(copyEntryRelativeAssets({ draft, currentValues })).resolves.toEqual({});
+    expect(mockGetAssetByPath).not.toHaveBeenCalled();
+    expect(currentValues.en.image).toBe('https://res.cloudinary.com/demo/image/upload/photo.jpg');
   });
 
   test('leaves a value that does not resolve to an asset alone', async () => {

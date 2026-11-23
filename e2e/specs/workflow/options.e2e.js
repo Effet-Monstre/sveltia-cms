@@ -1,5 +1,6 @@
 import { openEntryPullRequest, post, WORKFLOW_CONFIG } from '../../fixtures/configs/workflow.js';
 import { expect, GITHUB_CONFIG, test } from '../../fixtures/test.js';
+import { getEditor, getEntryRows, openEntry } from '../../fixtures/ui.js';
 
 /**
  * @import { Locator, Page } from '@playwright/test';
@@ -8,21 +9,6 @@ import { expect, GITHUB_CONFIG, test } from '../../fixtures/test.js';
 test.beforeEach(async ({ github }) => {
   github.commit({ 'content/posts/first-post.md': post('First Post', 'Hello, world!') });
 });
-
-/**
- * Open an entry in the editor.
- * @param {Page} page Page.
- * @param {string} title Entry title.
- * @returns {Promise<Locator>} Editor.
- */
-const openEntry = async (page, title) => {
-  const editor = page.getByRole('group', { name: 'Content Editor' });
-
-  await page.getByRole('row', { name: new RegExp(`^${title}`) }).click();
-  await expect(editor.getByRole('textbox', { name: 'Title' })).toHaveValue(title);
-
-  return editor;
-};
 
 /**
  * Create an entry in the collection shown and save it, leaving it a draft if the collection uses
@@ -37,7 +23,7 @@ const openEntry = async (page, title) => {
 const createEntry = async (page, { title, body, workflow = true }) => {
   await page.getByRole('button', { name: 'Create New Entry' }).first().click();
 
-  const editor = page.getByRole('group', { name: 'Content Editor' });
+  const editor = getEditor(page);
 
   await editor.getByRole('textbox', { name: 'Title' }).fill(title);
   await editor.getByRole('textbox', { name: 'Body' }).fill(body);
@@ -104,7 +90,7 @@ test.describe('with a pull request from Decap CMS', () => {
     pullRequest.labels = ['decap-cms/pending_review'];
 
     await cms.open();
-    await expect(page.getByRole('grid', { name: 'Entries' }).getByRole('row')).toHaveText([
+    await expect(getEntryRows(page)).toHaveText([
       /Unpublished Entries/,
       /Second Post.*In Review/,
       /Published Entries/,
@@ -229,5 +215,50 @@ test.describe('with a `limit` on the collection', () => {
 
     await cms.openPopup(page.getByRole('button', { name: 'Create Entry or Assets' }), menu);
     await expect(menu.getByRole('menuitem', { name: 'Post' })).toBeDisabled();
+  });
+});
+
+test.describe('with `allow_incomplete_drafts: false`', () => {
+  test.use({
+    config: {
+      ...WORKFLOW_CONFIG,
+      publish_mode: { type: 'editorial_workflow', allow_incomplete_drafts: false },
+    },
+  });
+
+  test('refuses to save a draft until its required fields are filled in', async ({
+    cms,
+    github,
+    page,
+  }) => {
+    await cms.open();
+    await page.getByRole('button', { name: 'Create New Entry' }).first().click();
+
+    const editor = getEditor(page);
+
+    await editor.getByRole('textbox', { name: 'Title' }).fill('Second Post');
+    await editor.getByRole('button', { name: 'Save' }).click();
+
+    await expect(
+      page.getByRole('alert').filter({ hasText: 'One field has an error.' }),
+    ).toBeVisible();
+    expect(github.pullRequests).toEqual([]);
+
+    await editor.getByRole('textbox', { name: 'Body' }).fill('Coming soon.');
+    await editor.getByRole('button', { name: 'Save' }).click();
+    await page
+      .getByRole('alertdialog', { name: 'Send for Review' })
+      .getByRole('button', { name: 'Later' })
+      .click();
+
+    await expect
+      .poll(() => github.pullRequests)
+      .toMatchObject([{ head: 'cms/posts/second-post', labels: ['sveltia-cms/draft'] }]);
+    // The refused save sent nothing, even later in the background: the complete entry is the only
+    // commit the CMS asked for
+    expect(github.received).toHaveLength(1);
+    expect(github.readFile('content/posts/second-post.md', 'cms/posts/second-post')).toBe(
+      post('Second Post', 'Coming soon.'),
+    );
   });
 });

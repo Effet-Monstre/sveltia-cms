@@ -1,10 +1,11 @@
 // @ts-nocheck
 /* eslint-disable jsdoc/require-jsdoc */
 
+import { IMPORT_UPDATE_TAG } from '@sveltia/ui';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { createCustomNodeClass } from '$lib/components/contents/details/fields/rich-text/custom-node';
-import { getNoAsset } from '$lib/services/contents/fields/rich-text/previews';
+import { getNoAsset } from '$lib/services/contents/fields/rich-text/previews/components';
 
 // Set up DOM globals for tests
 const makeMockElement = (tagName) => ({
@@ -120,9 +121,8 @@ vi.mock('lexical', () => {
       };
     }
 
-    updateFromJSON(serializedNode) {
-      this.__props = serializedNode.__props || {};
-
+    // Like Lexical’s, this only restores the node state, not a subclass’s own properties
+    updateFromJSON() {
       return this;
     }
 
@@ -142,12 +142,19 @@ vi.mock('lexical', () => {
   };
 
   return {
+    $hasUpdateTag: vi.fn(() => false),
     DecoratorNode: MockDecoratorNode,
+    HISTORY_MERGE_TAG: 'history-merge',
+    SKIP_DOM_SELECTION_TAG: 'skip-dom-selection',
     getNearestEditorFromDOMNode: vi.fn(() => ({
       getKey: () => 'test-key',
     })),
   };
 });
+
+vi.mock('@sveltia/ui', () => ({
+  IMPORT_UPDATE_TAG: 'sui-import',
+}));
 
 vi.mock('svelte', () => ({
   flushSync: vi.fn(),
@@ -165,12 +172,14 @@ vi.mock('$lib/components/contents/details/fields/rich-text/editor-component.svel
 
 vi.mock('$lib/services/contents/fields/rich-text/components/utils', async (importOriginal) => ({
   ...(await importOriginal()),
-  isMultiLinePattern: vi.fn((pattern) => pattern.multiline || pattern.dotAll),
+  isInlineComponentDef: vi.fn(
+    ({ pattern, inlinePattern }) => !!inlinePattern || !(pattern.multiline || pattern.dotAll),
+  ),
   normalizeProps: vi.fn((props) => props),
 }));
 
 // Import mocked functions after they're mocked
-const { isMultiLinePattern } =
+const { isInlineComponentDef } =
   await import('$lib/services/contents/fields/rich-text/components/utils');
 
 describe('createCustomNodeClass', () => {
@@ -248,7 +257,7 @@ describe('createCustomNodeClass', () => {
     });
 
     it('should handle inline nodes correctly', () => {
-      vi.mocked(isMultiLinePattern).mockReturnValue(false);
+      vi.mocked(isInlineComponentDef).mockReturnValue(true);
 
       const CustomNode = createCustomNodeClass(mockComponentDef);
       const node = new CustomNode();
@@ -257,7 +266,7 @@ describe('createCustomNodeClass', () => {
     });
 
     it('should handle block nodes correctly', () => {
-      vi.mocked(isMultiLinePattern).mockReturnValue(true);
+      vi.mocked(isInlineComponentDef).mockReturnValue(false);
 
       const CustomNode = createCustomNodeClass(mockComponentDef);
       const node = new CustomNode();
@@ -283,7 +292,7 @@ describe('createCustomNodeClass', () => {
       const CustomNode = createCustomNodeClass(mockComponentDef);
 
       const serializedNode = {
-        __props: { title: 'Imported Title' },
+        props: { title: 'Imported Title' },
         type: 'test-component',
         version: 1,
       };
@@ -291,7 +300,9 @@ describe('createCustomNodeClass', () => {
       const node = CustomNode.importJSON(serializedNode);
 
       expect(node).toBeInstanceOf(CustomNode);
-      // The updateFromJSON method should be called on the new instance
+      // The field properties survive a copy and paste, which goes through the JSON
+      expect(node.__props).toEqual({ title: 'Imported Title' });
+      expect(CustomNode.importJSON(node.exportJSON()).__props).toEqual({ title: 'Imported Title' });
     });
 
     it('should have exportJSON method', () => {
@@ -301,7 +312,7 @@ describe('createCustomNodeClass', () => {
       const exported = node.exportJSON();
 
       expect(exported).toEqual({
-        title: 'Export Title',
+        props: { title: 'Export Title' },
         type: 'test-component',
         version: 1,
       });
@@ -313,6 +324,7 @@ describe('createCustomNodeClass', () => {
       const exported = node.exportJSON();
 
       expect(exported).toEqual({
+        props: {},
         type: 'test-component',
         version: 1,
       });
@@ -323,7 +335,7 @@ describe('createCustomNodeClass', () => {
       const node = new CustomNode();
 
       const serializedNode = {
-        __props: { title: 'Updated Title' },
+        props: { title: 'Updated Title' },
         type: 'test-component',
         version: 1,
       };
@@ -331,7 +343,6 @@ describe('createCustomNodeClass', () => {
       const result = node.updateFromJSON(serializedNode);
 
       expect(result).toBe(node);
-      expect(node.__props).toEqual(serializedNode.__props);
     });
 
     it('should handle DOM conversion', () => {
@@ -373,6 +384,8 @@ describe('createCustomNodeClass', () => {
       const shouldUpdate = node.updateDOM(prevNode, domElement, config);
 
       expect(typeof shouldUpdate).toBe('boolean');
+      // A node whose data hasn’t changed leaves its component alone
+      expect(node.updateDOM(new CustomNode(props), domElement, config)).toBe(false);
     });
 
     it('should handle different component patterns', () => {
@@ -382,7 +395,7 @@ describe('createCustomNodeClass', () => {
         pattern: /^```test[\s\S]*?```$/m,
       };
 
-      vi.mocked(isMultiLinePattern).mockReturnValue(true);
+      vi.mocked(isInlineComponentDef).mockReturnValue(false);
 
       const CustomNode = createCustomNodeClass(multilineComponentDef);
       const node = new CustomNode();
@@ -992,6 +1005,8 @@ describe('createCustomNodeClass', () => {
       expect(mockEditor.update).toHaveBeenCalled();
       expect(unmount).toHaveBeenCalledWith(capturedComponent);
       expect(node.remove).toHaveBeenCalled();
+      // Lexical may move the selection away from the removed node
+      expect(mockEditor.update.mock.calls[0][1].tag).toBeUndefined();
     });
 
     describe('Focus and selection preservation', () => {
@@ -1039,6 +1054,8 @@ describe('createCustomNodeClass', () => {
         expect(mockEditor.update).toHaveBeenCalled();
         expect(updateOptions).toBeDefined();
         expect(updateOptions.discrete).toBe(true);
+        // The parent editor doesn’t move the selection, or scroll to it
+        expect(updateOptions.tag).toBe('skip-dom-selection');
         expect(typeof updateOptions.onUpdate).toBe('function');
       });
 
@@ -1107,8 +1124,8 @@ describe('createCustomNodeClass', () => {
         expect(onUpdateCallback).toBeDefined();
         onUpdateCallback();
 
-        // Verify focus was called on the active element
-        expect(mockActiveElement.focus).toHaveBeenCalled();
+        // Verify focus was called on the active element, without scrolling to it
+        expect(mockActiveElement.focus).toHaveBeenCalledWith({ preventScroll: true });
       });
 
       it('should restore selection range when onUpdate is called', async () => {
@@ -1417,66 +1434,20 @@ describe('createCustomNodeClass', () => {
   });
 
   describe('Wrapper focus behavior', () => {
-    it('should focus the wrapper when parent field is editable', async () => {
+    const editable = '[role="textbox"][aria-readonly="false"]';
+
+    /**
+     * Create a node whose wrapper is rendered in a field.
+     * @param {object} [options] Options.
+     * @param {boolean} [options.editable] Whether the parent field is editable.
+     * @returns {Promise<{ node: any, mockWrapper: any }>} Node and its wrapper.
+     */
+    const createNode = async ({ editable: isEditable = true } = {}) => {
       const { mount } = await import('svelte');
+      const { $hasUpdateTag } = await import('lexical');
 
       vi.clearAllMocks();
-
-      const mockParentField = {
-        getAttribute: vi.fn(),
-        className: 'field',
-        addEventListener: vi.fn(),
-      };
-
-      const mockWrapper = {
-        closest: vi.fn((selector) => {
-          if (selector === '[role="textbox"][aria-readonly="false"]') {
-            return mockParentField; // Return matching parent
-          }
-
-          if (selector === '.field') {
-            return mockParentField;
-          }
-
-          if (selector === '[data-lexical-editor]') {
-            return { nodeType: 1 };
-          }
-
-          return null;
-        }),
-        addEventListener: vi.fn(),
-        parentElement: { nodeType: 1 },
-        isConnected: true,
-        focus: vi.fn(),
-      };
-
-      vi.mocked(mount).mockImplementation(() => ({
-        getElement: vi.fn(() => mockWrapper),
-        destroy: vi.fn(),
-      }));
-
-      // eslint-disable-next-line no-unused-vars
-      let observerCallback;
-
-      globalThis.MutationObserver = vi.fn(function MockMutationObserver(callback) {
-        observerCallback = callback;
-        this.observe = vi.fn();
-        this.disconnect = vi.fn();
-      });
-
-      const CustomNode = createCustomNodeClass(mockComponentDef);
-      const node = new CustomNode({ title: 'Test' });
-
-      node.createDOM();
-
-      // Verify wrapper.focus() was called when closest returned a matching parent
-      expect(mockWrapper.focus).toHaveBeenCalled();
-    });
-
-    it('should not focus the wrapper when parent field is not editable', async () => {
-      const { mount } = await import('svelte');
-
-      vi.clearAllMocks();
+      vi.mocked($hasUpdateTag).mockReturnValue(false);
 
       const mockField = {
         addEventListener: vi.fn(),
@@ -1484,12 +1455,12 @@ describe('createCustomNodeClass', () => {
 
       const mockWrapper = {
         closest: vi.fn((selector) => {
-          if (selector === '[role="textbox"][aria-readonly="false"]') {
-            return null; // No matching editable parent
+          if (selector === editable) {
+            return isEditable ? mockField : null;
           }
 
           if (selector === '.field') {
-            return mockField; // Return field for cleanup listener
+            return mockField;
           }
 
           if (selector === '[data-lexical-editor]') {
@@ -1509,21 +1480,61 @@ describe('createCustomNodeClass', () => {
         destroy: vi.fn(),
       }));
 
-      // eslint-disable-next-line no-unused-vars
-      let observerCallback;
-
-      globalThis.MutationObserver = vi.fn(function MockMutationObserver(callback) {
-        observerCallback = callback;
+      globalThis.MutationObserver = vi.fn(function MockMutationObserver() {
         this.observe = vi.fn();
         this.disconnect = vi.fn();
       });
 
       const CustomNode = createCustomNodeClass(mockComponentDef);
-      const node = new CustomNode({ title: 'Test' });
+
+      return { node: new CustomNode({ title: 'Test' }), mockWrapper };
+    };
+
+    it('should focus the wrapper of a node added by the user when parent field is editable', async () => {
+      const { node, mockWrapper } = await createNode();
+
+      node.createDOM({}, {});
+
+      expect(mockWrapper.focus).toHaveBeenCalled();
+    });
+
+    it('should not focus the wrapper when parent field is not editable', async () => {
+      const { node, mockWrapper } = await createNode({ editable: false });
+
+      node.createDOM({}, {});
+
+      expect(mockWrapper.focus).not.toHaveBeenCalled();
+    });
+
+    it('should not focus the wrapper of a node loaded with the value', async () => {
+      const { $hasUpdateTag } = await import('lexical');
+      const { node, mockWrapper } = await createNode();
+
+      vi.mocked($hasUpdateTag).mockImplementation((tag) => tag === IMPORT_UPDATE_TAG);
+      node.createDOM({}, {});
+
+      expect($hasUpdateTag).toHaveBeenCalledWith(IMPORT_UPDATE_TAG);
+      expect(mockWrapper.focus).not.toHaveBeenCalled();
+    });
+
+    it('should not focus the wrapper of a node rendered again when the editor is attached', async () => {
+      const { $hasUpdateTag } = await import('lexical');
+      const { node, mockWrapper } = await createNode();
+
+      vi.mocked($hasUpdateTag).mockImplementation((tag) => tag === 'history-merge');
+      node.createDOM({}, {});
+
+      expect($hasUpdateTag).toHaveBeenCalledWith('history-merge');
+      expect(mockWrapper.focus).not.toHaveBeenCalled();
+    });
+
+    it('should not focus the wrapper of a node created outside the reconciler', async () => {
+      const { $hasUpdateTag } = await import('lexical');
+      const { node, mockWrapper } = await createNode();
 
       node.createDOM();
 
-      // Verify wrapper.focus() was NOT called when closest returned null
+      expect($hasUpdateTag).not.toHaveBeenCalled();
       expect(mockWrapper.focus).not.toHaveBeenCalled();
     });
   });

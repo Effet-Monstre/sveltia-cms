@@ -1,10 +1,11 @@
 import { MONOLINGUAL_CONFIG, MONOLINGUAL_FILES } from '../../fixtures/configs/monolingual.js';
 import { createPNG } from '../../fixtures/files.js';
-import { selectText } from '../../fixtures/rich-text.js';
+import { moveCaretToEnd, selectText } from '../../fixtures/rich-text.js';
 import { expect, test } from '../../fixtures/test.js';
+import { getEditor } from '../../fixtures/ui.js';
 
 /**
- * @import { Locator, Page } from '@playwright/test';
+ * @import { Page } from '@playwright/test';
  */
 
 test.use({ config: MONOLINGUAL_CONFIG });
@@ -69,19 +70,6 @@ const CANONICAL_BODY = [
 const RICH_POST_PATH = 'content/posts/2026-04-rich-post.md';
 
 /**
- * Move the caret to the end of a rich text editor. The End key does that on Linux and Windows but
- * not on macOS, so set the selection directly, which the editor picks up.
- * @param {Locator} textbox Editor.
- */
-const moveCaretToEnd = async (textbox) => {
-  await textbox.evaluate((element) => {
-    /** @type {HTMLElement} */ (element).focus();
-    window.getSelection()?.selectAllChildren(element);
-    window.getSelection()?.collapseToEnd();
-  });
-};
-
-/**
  * Open the First Light post and wait for its body in the rich text editor.
  * @param {Page} page Page.
  */
@@ -101,7 +89,7 @@ test.describe('editing', () => {
   });
 
   test('formats the selected text with the toolbar', async ({ cms, page }) => {
-    const editor = page.getByRole('group', { name: 'Content Editor' });
+    const editor = getEditor(page);
     const field = editor.getByRole('group', { name: /Body.*Field/ });
     const body = field.getByRole('textbox', { name: 'Body' });
 
@@ -134,7 +122,7 @@ test.describe('editing', () => {
   });
 
   test('changes the block style with the text style menu', async ({ cms, page }) => {
-    const editor = page.getByRole('group', { name: 'Content Editor' });
+    const editor = getEditor(page);
     const field = editor.getByRole('group', { name: /Body.*Field/ });
 
     await field
@@ -162,7 +150,7 @@ test.describe('editing', () => {
   });
 
   test('turns Markdown typed in the editor into formatting', async ({ cms, page }) => {
-    const editor = page.getByRole('group', { name: 'Content Editor' });
+    const editor = getEditor(page);
 
     const body = editor.getByRole('group', { name: /Body.*Field/ }).getByRole('textbox', {
       name: 'Body',
@@ -188,7 +176,7 @@ test.describe('editing', () => {
   });
 
   test('edits the Markdown source and switches back', async ({ cms, page }) => {
-    const editor = page.getByRole('group', { name: 'Content Editor' });
+    const editor = getEditor(page);
     const field = editor.getByRole('group', { name: /Body.*Field/ });
     const markdownButton = field.getByRole('button', { name: 'Edit in Markdown' });
 
@@ -221,7 +209,7 @@ test.describe('editing', () => {
 
   test('inserts an image with the image component', async ({ cms, page }) => {
     const image = createPNG({ color: [200, 180, 40] });
-    const editor = page.getByRole('group', { name: 'Content Editor' });
+    const editor = getEditor(page);
     const field = editor.getByRole('group', { name: /Body.*Field/ });
 
     // Start a new paragraph, as an image is inserted inline at the caret
@@ -246,6 +234,282 @@ test.describe('editing', () => {
   });
 });
 
+test.describe('editor components in a table', () => {
+  /**
+   * Seed a post whose body is the given Markdown, and open it.
+   * @param {object} fixtures Fixtures.
+   * @param {any} fixtures.cms CMS fixture.
+   * @param {Page} fixtures.page Page.
+   * @param {string} body Body Markdown.
+   */
+  const openRichPost = async ({ cms, page }, body) => {
+    await cms.open();
+    await cms.seed({ ...MONOLINGUAL_FILES, [RICH_POST_PATH]: `${FRONT_MATTER}${body}\n` });
+    await cms.signIn();
+    await page.getByRole('row', { name: /Rich Post/ }).click();
+  };
+
+  test('inserts an image into a table cell', async ({ cms, page }) => {
+    const image = createPNG({ color: [40, 120, 200] });
+
+    await openRichPost({ cms, page }, '| Name | Photo |\n| --- | --- |\n| Dome | Here |');
+
+    const editor = getEditor(page);
+    const field = editor.getByRole('group', { name: /Body.*Field/ });
+    const body = field.getByRole('textbox', { name: 'Body' });
+
+    // Place the caret at the end of a cell
+    await body.getByRole('cell', { name: 'Here' }).click();
+    await moveCaretToEnd(body.getByRole('cell', { name: 'Here' }));
+    // The image component is inline, so it’s offered in a cell
+    await field.getByRole('button', { name: 'Image', exact: true }).click();
+
+    const component = body
+      .getByRole('cell', { name: /^Here/ })
+      .getByRole('group', { name: 'Image', exact: true });
+
+    await component
+      .getByRole('group', { name: /Source/ })
+      .locator('input[type="file"]')
+      .first()
+      .setInputFiles({ name: 'dome.png', mimeType: 'image/png', buffer: image });
+    await component.getByRole('textbox', { name: 'Alt Text' }).fill('The dome | at night');
+    await editor.getByRole('button', { name: 'Save' }).click();
+
+    // A pipe in the component’s Markdown is escaped, so it doesn’t end the cell
+    await expect
+      .poll(async () => (await cms.readRepo())[RICH_POST_PATH])
+      .toBe(
+        [
+          `${FRONT_MATTER}| Name | Photo |`,
+          '| --- | --- |',
+          '| Dome | Here![The dome \\| at night](/uploads/dome.png) |',
+          '',
+        ].join('\n'),
+      );
+    expect(await cms.readRepoFile('static/uploads/dome.png')).toEqual(image);
+  });
+
+  test('loads an image in a table cell as a component, keeping it unchanged', async ({
+    cms,
+    page,
+  }) => {
+    const markdown = '| Name | Photo |\n| --- | --- |\n| Dome | ![The dome](/uploads/dome.png) |';
+
+    await openRichPost({ cms, page }, markdown);
+
+    const editor = getEditor(page);
+    const body = editor.getByRole('textbox', { name: 'Body' });
+
+    await expect(
+      body.getByRole('cell').getByRole('group', { name: 'Image', exact: true }),
+    ).toBeVisible();
+    await page.waitForTimeout(1000);
+    await expect(editor.getByRole('button', { name: 'Save' })).toBeDisabled();
+
+    await editor.getByRole('textbox', { name: 'Title' }).first().fill('Rich Post, Revised');
+    await editor.getByRole('button', { name: 'Save' }).click();
+
+    await expect
+      .poll(async () => (await cms.readRepo())[RICH_POST_PATH])
+      .toBe(`${FRONT_MATTER.replace('Rich Post', 'Rich Post, Revised')}${markdown}\n`);
+  });
+});
+
+test.describe('editor component history and clipboard', () => {
+  // The fields of a component are only rendered once it’s scrolled into view
+  test.use({ viewport: { width: 1280, height: 4000 } });
+
+  test.beforeEach(async ({ cms, page }) => {
+    await cms.open();
+    await cms.seed({
+      ...MONOLINGUAL_FILES,
+      [RICH_POST_PATH]: `${FRONT_MATTER}Intro text.\n\n![Old alt](/uploads/dome.png)\n\nOutro.\n`,
+    });
+    await cms.signIn();
+    await page.getByRole('row', { name: /Rich Post/ }).click();
+  });
+
+  test('undoes and redoes an edit to a component field', async ({ cms, page }) => {
+    const editor = getEditor(page);
+    const body = editor.getByRole('textbox', { name: 'Body' });
+
+    const alt = body.getByRole('group', { name: 'Image', exact: true }).getByRole('textbox', {
+      name: 'Alt Text',
+    });
+
+    await expect(alt).toHaveValue('Old alt');
+    await alt.fill('New alt');
+    await expect(editor.getByRole('button', { name: 'Save' })).toBeEnabled();
+
+    await body.getByText('Intro text.').click();
+    await page.keyboard.press('ControlOrMeta+z');
+
+    // The field shows the data of the component the undo brought back
+    await expect(alt).toHaveValue('Old alt');
+
+    await page.keyboard.press('ControlOrMeta+Shift+z');
+    await expect(alt).toHaveValue('New alt');
+
+    await page.keyboard.press('ControlOrMeta+z');
+    await expect(alt).toHaveValue('Old alt');
+
+    // The field and the text agree, so typing in the field doesn’t bring the undone edit back
+    await alt.fill('Old alter');
+    await editor.getByRole('button', { name: 'Save' }).click();
+
+    await expect
+      .poll(async () => (await cms.readRepo())[RICH_POST_PATH])
+      .toContain('\n![Old alter](/uploads/dome.png)\n');
+  });
+
+  test('keeps the data of a copied and pasted component', async ({ cms, page }) => {
+    const editor = getEditor(page);
+    const body = editor.getByRole('textbox', { name: 'Body' });
+
+    const alts = body.getByRole('group', { name: 'Image', exact: true }).getByRole('textbox', {
+      name: 'Alt Text',
+    });
+
+    await expect(alts).toHaveValue('Old alt');
+    await body.getByText('Intro text.').click();
+    await page.keyboard.press('ControlOrMeta+a');
+
+    /**
+     * Copy the selection the way the browser does, getting the clipboard data Lexical writes.
+     * @returns {Promise<Record<string, string>>} Data by type.
+     */
+    const copy = () =>
+      body.evaluate((element) => {
+        const data = new DataTransfer();
+
+        element.dispatchEvent(new ClipboardEvent('copy', { clipboardData: data, bubbles: true }));
+
+        return Object.fromEntries(data.types.map((type) => [type, data.getData(type)]));
+      });
+
+    // Lexical picks the selection up a moment after the key press
+    await expect
+      .poll(async () => (await copy())['application/x-lexical-editor'] ?? '')
+      .toContain('Old alt');
+
+    const clipboardData = await copy();
+
+    await moveCaretToEnd(body);
+    await body.evaluate((element, data) => {
+      const transfer = new DataTransfer();
+
+      Object.entries(data).forEach(([type, value]) => transfer.setData(type, value));
+      element.dispatchEvent(
+        new ClipboardEvent('paste', { clipboardData: transfer, bubbles: true }),
+      );
+    }, clipboardData);
+
+    // The pasted component keeps its data
+    await expect(alts).toHaveCount(2);
+    await expect(alts.nth(0)).toHaveValue('Old alt');
+    await expect(alts.nth(1)).toHaveValue('Old alt');
+    await editor.getByRole('button', { name: 'Save' }).click();
+
+    await expect
+      .poll(
+        async () =>
+          (await cms.readRepo())[RICH_POST_PATH]?.match(/!\[Old alt\]\(\/uploads\/dome\.png\)/g)
+            ?.length,
+      )
+      .toBe(2);
+  });
+});
+
+test.describe('image captions', () => {
+  // The fields of a component are only rendered once it’s scrolled into view
+  test.use({ viewport: { width: 1280, height: 4000 } });
+
+  const FIGURE =
+    '<figure><a href="https://example.com/"><img src="/uploads/dome.png" alt="The dome"></a>' +
+    '<figcaption>Photo by <a href="https://example.com/jane?a=1&amp;b=2">Jane</a></figcaption>' +
+    '</figure>';
+
+  /**
+   * Seed a post whose body is the given Markdown, and open it.
+   * @param {object} fixtures Fixtures.
+   * @param {any} fixtures.cms CMS fixture.
+   * @param {Page} fixtures.page Page.
+   * @param {string} body Body Markdown.
+   */
+  const openRichPost = async ({ cms, page }, body) => {
+    await cms.open();
+    await cms.seed({ ...MONOLINGUAL_FILES, [RICH_POST_PATH]: `${FRONT_MATTER}${body}\n` });
+    await cms.signIn();
+    await page.getByRole('row', { name: /Rich Post/ }).click();
+  };
+
+  test('loads an image with a caption as a component, keeping it unchanged', async ({
+    cms,
+    page,
+  }) => {
+    const markdown = `Intro text.\n\n${FIGURE}\n\nOutro.`;
+
+    await openRichPost({ cms, page }, markdown);
+
+    const editor = getEditor(page);
+
+    const component = editor
+      .getByRole('textbox', { name: 'Body' })
+      .getByRole('group', { name: 'Image', exact: true });
+
+    await expect(component.getByRole('textbox', { name: 'Alt Text' })).toHaveValue('The dome');
+    await expect(component.getByRole('textbox', { name: 'Link' })).toHaveValue(
+      'https://example.com/',
+    );
+    await expect(component.getByRole('textbox', { name: 'Caption' })).toHaveValue(
+      'Photo by <a href="https://example.com/jane?a=1&amp;b=2">Jane</a>',
+    );
+    // The preview shows the figure
+    await expect(
+      editor.getByRole('document', { name: 'Content Preview' }).locator('figure figcaption'),
+    ).toHaveText('Photo by Jane');
+    await page.waitForTimeout(1000);
+    await expect(editor.getByRole('button', { name: 'Save' })).toBeDisabled();
+
+    await editor.getByRole('textbox', { name: 'Title' }).first().fill('Rich Post, Revised');
+    await editor.getByRole('button', { name: 'Save' }).click();
+
+    await expect
+      .poll(async () => (await cms.readRepo())[RICH_POST_PATH])
+      .toBe(`${FRONT_MATTER.replace('Rich Post', 'Rich Post, Revised')}${markdown}\n`);
+  });
+
+  test('writes an image with a caption as a figure', async ({ cms, page }) => {
+    await openRichPost({ cms, page }, 'Intro text.\n\n![The dome](/uploads/dome.png)\n\nOutro.');
+
+    const editor = getEditor(page);
+
+    const component = editor
+      .getByRole('textbox', { name: 'Body' })
+      .getByRole('group', { name: 'Image', exact: true });
+
+    await component.getByRole('textbox', { name: 'Caption' }).fill('The dome at <em>night</em>');
+    await editor.getByRole('button', { name: 'Save' }).click();
+
+    await expect
+      .poll(async () => (await cms.readRepo())[RICH_POST_PATH])
+      .toContain(
+        '\nIntro text.\n\n<figure><img src="/uploads/dome.png" alt="The dome">' +
+          '<figcaption>The dome at <em>night</em></figcaption></figure>\n\nOutro.\n',
+      );
+
+    // Clearing the caption brings the Markdown image back. Saving has closed the editor
+    await page.getByRole('row', { name: /Rich Post/ }).click();
+    await component.getByRole('textbox', { name: 'Caption' }).fill('');
+    await editor.getByRole('button', { name: 'Save' }).click();
+
+    await expect
+      .poll(async () => (await cms.readRepo())[RICH_POST_PATH])
+      .toContain('\nIntro text.\n\n![The dome](/uploads/dome.png)\n\nOutro.\n');
+  });
+});
+
 test.describe('existing Markdown', () => {
   test('keeps Markdown in the editor’s style unchanged', async ({ cms, page }) => {
     await cms.open();
@@ -253,7 +517,7 @@ test.describe('existing Markdown', () => {
     await cms.signIn();
     await page.getByRole('row', { name: /Rich Post/ }).click();
 
-    const editor = page.getByRole('group', { name: 'Content Editor' });
+    const editor = getEditor(page);
     const title = editor.getByRole('textbox', { name: 'Title' }).first();
 
     await expect(editor.getByRole('textbox', { name: 'Body' })).toContainText('The end.');
@@ -290,7 +554,7 @@ test.describe('existing Markdown', () => {
       await cms.signIn();
       await page.getByRole('row', { name: /Rich Post/ }).click();
 
-      const editor = page.getByRole('group', { name: 'Content Editor' });
+      const editor = getEditor(page);
 
       await expect(editor.getByRole('textbox', { name: 'Title' }).first()).toHaveValue('Rich Post');
       // Loading the body in the editor doesn’t count as a change, although the editor writes the
@@ -318,7 +582,7 @@ test.describe('existing Markdown', () => {
     await cms.signIn();
     await page.getByRole('row', { name: /Rich Post/ }).click();
 
-    const editor = page.getByRole('group', { name: 'Content Editor' });
+    const editor = getEditor(page);
     const body = editor.getByRole('textbox', { name: 'Body' });
 
     await expect(body).toContainText('Some italic text.');
@@ -343,7 +607,7 @@ test.describe('existing Markdown', () => {
     await cms.signIn();
     await page.getByRole('row', { name: /Rich Post/ }).click();
 
-    const editor = page.getByRole('group', { name: 'Content Editor' });
+    const editor = getEditor(page);
     const body = editor.getByRole('textbox', { name: 'Body' });
     const save = editor.getByRole('button', { name: 'Save' });
     const preview = editor.getByRole('document', { name: 'Content Preview' });
@@ -378,10 +642,7 @@ test.describe('existing Markdown', () => {
     await cms.signIn();
     await page.getByRole('row', { name: /Rich Post/ }).click();
 
-    const field = page
-      .getByRole('group', { name: 'Content Editor' })
-      .getByRole('group', { name: /Body.*Field/ });
-
+    const field = getEditor(page).getByRole('group', { name: /Body.*Field/ });
     const body = field.getByRole('textbox', { name: 'Body' });
     const language = field.getByRole('combobox', { name: 'Language' });
 
@@ -406,7 +667,7 @@ test.describe('existing Markdown', () => {
     await cms.signIn();
     await openFirstLight(page);
 
-    const editor = page.getByRole('group', { name: 'Content Editor' });
+    const editor = getEditor(page);
 
     const body = editor.getByRole('group', { name: /Body.*Field/ }).getByRole('textbox', {
       name: 'Body',

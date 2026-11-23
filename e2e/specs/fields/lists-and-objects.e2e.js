@@ -1,6 +1,7 @@
 import { FIELD_TYPES_CONFIG, FIELD_TYPES_FILES } from '../../fixtures/configs/field-types.js';
 import { expandAll } from '../../fixtures/expanders.js';
 import { expect, test } from '../../fixtures/test.js';
+import { getEditor } from '../../fixtures/ui.js';
 
 // The editor renders a field once it’s scrolled into view, so make every field visible at once
 test.use({ config: FIELD_TYPES_CONFIG, viewport: { width: 1280, height: 6000 } });
@@ -13,9 +14,7 @@ test.beforeEach(async ({ cms, page }) => {
   await cms.seed(FIELD_TYPES_FILES);
   await cms.signIn();
   await page.getByRole('row', { name: /Star Party/ }).click();
-  await expect(
-    page.getByRole('group', { name: 'Content Editor' }).getByRole('group', { name: /Notes/ }),
-  ).toBeVisible();
+  await expect(getEditor(page).getByRole('group', { name: /Notes/ })).toBeVisible();
 });
 
 /**
@@ -27,7 +26,7 @@ const readStarParty = async (cms) =>
   (await cms.readRepo())[STAR_PARTY_PATH]?.replace(/^slug_preview: .+\n/m, '');
 
 test('reorders list items with the keyboard', async ({ cms, page }) => {
-  const editor = page.getByRole('group', { name: 'Content Editor' });
+  const editor = getEditor(page);
   const speakers = editor.getByRole('group', { name: /Speakers.*Field/ });
 
   // The fork starts the list items collapsed; see `docs/fork.md`
@@ -51,7 +50,7 @@ test('reorders list items with the keyboard', async ({ cms, page }) => {
 });
 
 test('removes a list item', async ({ cms, page }) => {
-  const editor = page.getByRole('group', { name: 'Content Editor' });
+  const editor = getEditor(page);
   const speakers = editor.getByRole('group', { name: /Speakers.*Field/ });
 
   await speakers.getByRole('button', { name: 'Remove' }).nth(1).click();
@@ -66,7 +65,7 @@ test('removes a list item', async ({ cms, page }) => {
 });
 
 test('clears a list from the field options', async ({ cms, page }) => {
-  const editor = page.getByRole('group', { name: 'Content Editor' });
+  const editor = getEditor(page);
   const sections = editor.getByRole('group', { name: /Sections.*Field/ });
 
   await cms.chooseMenuItem(
@@ -89,9 +88,7 @@ test('clears a list from the field options', async ({ cms, page }) => {
 });
 
 test('shows the summary of collapsed items', async ({ page }) => {
-  const speakers = page
-    .getByRole('group', { name: 'Content Editor' })
-    .getByRole('group', { name: /Speakers.*Field/ });
+  const speakers = getEditor(page).getByRole('group', { name: /Speakers.*Field/ });
 
   // The fork starts the list items collapsed; see `docs/fork.md`
   await expandAll(speakers);
@@ -105,7 +102,7 @@ test('shows the summary of collapsed items', async ({ page }) => {
 });
 
 test('expands a collapsed item of a list with types from the preview', async ({ page }) => {
-  const editor = page.getByRole('group', { name: 'Content Editor' });
+  const editor = getEditor(page);
   const sections = editor.getByRole('group', { name: /Sections.*Field/ });
 
   // The fork starts the list items collapsed; see `docs/fork.md`
@@ -121,7 +118,7 @@ test('expands a collapsed item of a list with types to show an error on saving',
   cms,
   page,
 }) => {
-  const editor = page.getByRole('group', { name: 'Content Editor' });
+  const editor = getEditor(page);
   const sections = editor.getByRole('group', { name: /Sections.*Field/ });
 
   // The fork starts the list items collapsed; see `docs/fork.md`
@@ -140,7 +137,7 @@ test('expands a collapsed item of a list with types to show an error on saving',
 });
 
 test('duplicates an item and adds one below another', async ({ cms, page }) => {
-  const editor = page.getByRole('group', { name: 'Content Editor' });
+  const editor = getEditor(page);
   const sections = editor.getByRole('group', { name: /Sections.*Field/ });
   const options = sections.getByRole('button', { name: 'List Item Options' });
 
@@ -174,7 +171,7 @@ test('duplicates an item and adds one below another', async ({ cms, page }) => {
 });
 
 test('removes an optional object when it’s unchecked', async ({ cms, page }) => {
-  const editor = page.getByRole('group', { name: 'Content Editor' });
+  const editor = getEditor(page);
   const organizer = editor.getByRole('group', { name: /Organizer.*Field/ });
 
   // Collapsed by default, with its summary
