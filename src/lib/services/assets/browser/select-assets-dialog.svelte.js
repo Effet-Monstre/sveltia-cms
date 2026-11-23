@@ -1,10 +1,12 @@
+import { getAssetKey } from '$lib/services/assets';
 import { getFolderPublicPath } from '$lib/services/assets/info';
 import { canBrowseSubfolders, getRelativePath } from '$lib/services/assets/subfolders';
+import { findPreferredLibraryName } from '$lib/services/integrations/media-libraries/options';
 import {
   allStockAssetProviders,
   getStockAssetMediaLibraryOptions,
 } from '$lib/services/integrations/media-libraries/stock';
-import { getDirName } from '$lib/services/utils/file';
+import { getDirName, getGitHash } from '$lib/services/utils/file';
 
 /**
  * @import {
@@ -105,13 +107,12 @@ export const getInitialLibraryName = ({
 
   // A cloud storage service isn’t offered when a folder is to be selected, or when it’s disabled
   // for the field. Files waiting to be uploaded need a service that can take them.
-  const preferredName = preferredLibraryNames.find((name) =>
-    name === 'default'
-      ? !!firstDefaultLibraryName
-      : cloudServiceEntries.some(
-          ([serviceId, { upload }]) => serviceId === name && (!hasPendingFiles || !!upload),
-        ),
-  );
+  const preferredName = findPreferredLibraryName({
+    preferredLibraryNames,
+    repositoryAvailable: !!firstDefaultLibraryName,
+    cloudServiceEntries,
+    uploadRequired: hasPendingFiles,
+  });
 
   if (preferredName && preferredName !== 'default') {
     return preferredName;
@@ -190,12 +191,8 @@ export const getPickedFolderPublicPaths = ({
     ? selectedSubfolderPaths.map((path) => getRelativePath(path, /** @type {string} */ (basePath)))
     : [subfolderPath];
 
-  // Cast outside the object literal: esrap, which Svelte prints compiled code with, turns a cast
-  // property value named like its key, e.g. `{ a: /** @type {T} */ (a) }`, into invalid shorthand
-  const _folder = /** @type {AssetFolderInfo} */ (folder);
-
   return subfolderPaths.map((path) =>
-    getFolderPublicPath({ folder: _folder, subfolderPath: path }),
+    getFolderPublicPath({ folder: /** @type {AssetFolderInfo} */ (folder), subfolderPath: path }),
   );
 };
 
@@ -207,6 +204,42 @@ export const getPickedFolderPublicPaths = ({
  */
 export const getUnsavedAssetSubfolderPath = ({ path }, targetFolderPath) =>
   targetFolderPath !== undefined ? getDirName(getRelativePath(path, targetFolderPath)) : '';
+
+/**
+ * Run a task for each of the given files, once per content. The task for a file checks whether the
+ * same file is already pending, which a file with the same content in the same batch can’t be
+ * until its own task is done, so such a file shares the result of the first one instead.
+ * @template T
+ * @param {File[]} files Files.
+ * @param {(file: File) => Promise<T>} task Task.
+ * @returns {Promise<T[]>} Results, in the order of the files.
+ */
+export const processUniqueFiles = async (files, task) => {
+  const hashes = await Promise.all(files.map((file) => getGitHash(file)));
+  /** @type {Promise<T>[]} */
+  const results = [];
+
+  hashes.forEach((hash, index) => {
+    const firstIndex = hashes.indexOf(hash);
+
+    results.push(firstIndex === index ? task(files[index]) : results[firstIndex]);
+  });
+
+  return Promise.all(results);
+};
+
+/**
+ * Get the resources to select once files are dropped. A file dropped more than once, or one already
+ * pending upload, comes with the same asset, which is selected only once.
+ * @param {{ asset: Asset, replace: boolean }[]} resources Dropped files’ assets, and whether each
+ * replaces an existing asset with the same name.
+ * @returns {SelectedResource[]} Resources.
+ */
+export const getDroppedResources = (resources) => {
+  const keys = resources.map(({ asset }) => getAssetKey(asset));
+
+  return resources.filter((_resource, index) => keys.indexOf(keys[index]) === index);
+};
 
 /**
  * Get the resources to hand over to the field once the Insert button is clicked. An unsaved asset

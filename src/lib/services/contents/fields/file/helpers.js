@@ -1,8 +1,8 @@
 import { isURL } from '@sveltia/utils/string';
-import equal from 'fast-deep-equal';
 
-import { fillInternalPathTemplate } from '$lib/services/assets';
+import { isAssetInFolder } from '$lib/services/assets';
 import { getExistingEntryAssetFolderPath } from '$lib/services/assets/entry-folder';
+import { fillInternalPathTemplate } from '$lib/services/assets/entry-relative';
 import { formatFileName } from '$lib/services/assets/file-name';
 import { allAssetFolders, getAssetFolder, globalAssetFolder } from '$lib/services/assets/folders';
 import { getPendingFileName } from '$lib/services/assets/name';
@@ -433,12 +433,19 @@ export const listAssets = ({
 };
 
 /**
- * Check if an asset with the same content and folder already exists in the unsaved assets.
+ * Find an unsaved asset with the same content and folder. Any folder with the same path counts as
+ * the same one, as `processResource()` takes it.
  * @param {object} args Arguments.
  * @param {string} args.sha Git object ID (SHA-1 hash) of the file.
  * @param {AssetFolderInfo | undefined} args.folder Asset folder.
  * @param {Asset[]} args.unsavedAssets Unsaved assets.
- * @returns {boolean} `true` if the asset already exists.
+ * @returns {Asset | undefined} Unsaved asset, if any.
  */
-export const hasSameAsset = ({ sha, folder, unsavedAssets }) =>
-  unsavedAssets.some((asset) => !!asset.file && asset.sha === sha && equal(asset.folder, folder));
+export const findSameUnsavedAsset = ({ sha, folder, unsavedAssets }) =>
+  unsavedAssets.find(
+    (asset) =>
+      !!asset.file &&
+      asset.sha === sha &&
+      // A file dropped where there is no folder has none either
+      (asset.folder === folder || (!!asset.folder && !!folder && isAssetInFolder(asset, folder))),
+  );

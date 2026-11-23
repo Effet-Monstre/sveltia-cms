@@ -262,6 +262,21 @@ describe('dependencies', () => {
       expect(module.parseGeoJSON).toBeTypeOf('function');
     });
 
+    // The chunk is compiled from source on first import, its Svelte components included, which can
+    // take longer than the default timeout on a busy CI runner
+    it('should load the Sveltia CMS Additions chunk from its source entry in development', async () => {
+      const module = await loadChunk('additions');
+
+      expect(module.adminSections.map((/** @type {{ key: string }} */ { key }) => key)).toEqual([
+        'users',
+        'sign-in',
+        'domains',
+        'github',
+        'credentials',
+      ]);
+      expect(module.startSession).toBeTypeOf('function');
+    }, 30_000);
+
     it('should reject with the last error once every location has failed', async () => {
       // A `file:` URL can’t be imported here, and neither can the CDN
       await expect(loadChunk('unknown')).rejects.toThrow('Failed to load the unknown chunk.');

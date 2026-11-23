@@ -5,6 +5,7 @@ import { getStockAssetMediaLibraryOptions } from '$lib/services/integrations/med
 import { createMockAssetFolder } from '$lib/test/factories';
 
 import {
+  getDroppedResources,
   getFirstDefaultLibraryName,
   getInitialLibraryName,
   getInsertedResources,
@@ -14,6 +15,7 @@ import {
   getStockAssetProviderEntries,
   getUnsavedAssetSubfolderPath,
   isFolderOffered,
+  processUniqueFiles,
   sortServicesByName,
   trackInsertedExternalAssets,
 } from './select-assets-dialog.svelte';
@@ -316,6 +318,40 @@ describe('getUnsavedAssetSubfolderPath()', () => {
 
   test('returns an empty string without a target folder', () => {
     expect(getUnsavedAssetSubfolderPath(asset, undefined)).toBe('');
+  });
+});
+
+describe('processUniqueFiles()', () => {
+  test('should run the task once per content', async () => {
+    const files = [
+      new File(['a'], 'a.png'),
+      new File(['b'], 'b.png'),
+      new File(['a'], 'a-copy.png'),
+    ];
+
+    const task = vi.fn(async (/** @type {File} */ file) => file.name);
+
+    // The copy shares the result of the first file with the same content
+    expect(await processUniqueFiles(files, task)).toEqual(['a.png', 'b.png', 'a.png']);
+    expect(task.mock.calls).toEqual([[files[0]], [files[1]]]);
+  });
+});
+
+describe('getDroppedResources()', () => {
+  test('should select each asset once', () => {
+    const pending = /** @type {any} */ ({ unsaved: true, blobURL: 'blob:pending', path: 'a.png' });
+    const dropped = /** @type {any} */ ({ unsaved: true, blobURL: 'blob:dropped', path: 'a.png' });
+
+    expect(
+      getDroppedResources([
+        { asset: pending, replace: false },
+        { asset: dropped, replace: true },
+        { asset: pending, replace: false },
+      ]),
+    ).toEqual([
+      { asset: pending, replace: false },
+      { asset: dropped, replace: true },
+    ]);
   });
 });
 

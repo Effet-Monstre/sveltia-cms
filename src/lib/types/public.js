@@ -1249,6 +1249,13 @@
  * field for specifying a URL to wrap the image as a link. The resulting Markdown output will be in
  * the format `[![alt](src)](link)`, where clicking the image navigates to the provided link. This
  * feature can be disabled if it causes conflicts with certain frameworks.
+ * @property {boolean} [captioned_images] Whether to enable the image caption feature for the
+ * built-in `image` component. Default: `true`. When enabled, the image component provides an
+ * additional Caption field. Markdown has no syntax for a caption, so an image with a caption is
+ * written as an HTML `<figure>` element with a `<figcaption>`, which can contain links and text
+ * formatting. This feature can be disabled if your framework or theme doesn’t support such HTML,
+ * or you don’t want editors to write it. A `<figure>` element is then left as raw HTML in
+ * Markdown, and can only be edited in the raw mode with the `html` format.
  * @property {boolean} [use_emoji_autocomplete] Whether to enable emoji autocomplete in the rich
  * text editor. Default: `true`. When enabled, typing `:` followed by a few letters will show a list
  * of matching emojis that can be selected to insert into the text.
@@ -1717,8 +1724,8 @@
  * @property {string} name Unique identifier for the file.
  * @property {string} [label] Label to be displayed in the editor UI. Default: `name` option value.
  * @property {string} [icon] Name of a [Material Symbols
- * icon](https://fonts.google.com/icons?icon.set=Material+Symbols) to be displayed in the collection
- * file list and other places. See the
+ * icon](https://fontsource.org/fonts/material-symbols-outlined/glyphs) to be displayed in the
+ * collection file list and other places. See the
  * [documentation](https://sveltiacms.app/en/docs/collections#icons) for details.
  * @property {string} [summary] Summary template displayed in the file list of a file collection in
  * place of the label, e.g. `Home Page ({{locales}})`. It can use the file’s fields and the same
@@ -1982,10 +1989,6 @@
 /**
  * Collection meta data’s path options.
  * @typedef {object} CollectionMetaDataPath
- * @property {string} [widget] Field type for editing the path name. Accepted for compatibility with
- * Netlify/Decap CMS but ignored: the editor is always a folder picker.
- * @property {string} [label] Label for the path editor. Accepted for compatibility with
- * Netlify/Decap CMS but ignored: the picker has a built-in, localized label.
  * @property {string} [index_file] File name, without an extension, shared by every entry in the
  * collection, e.g. `_index`. If omitted, each entry keeps its own file name.
  * @see https://decapcms.org/docs/collection-nested/
@@ -2016,8 +2019,8 @@
  * @property {string} [label] Label to be displayed in the editor UI. Default: Index File or its
  * localized version.
  * @property {string} [icon] Name of a [Material Symbols
- * icon](https://fonts.google.com/icons?icon.set=Material+Symbols) to be displayed in the editor UI.
- * Default: `home`.
+ * icon](https://fontsource.org/fonts/material-symbols-outlined/glyphs) to be displayed in the
+ * editor UI. Default: `home`.
  * @property {string} [summary] Summary template displayed in place of the label in the entry list,
  * search results and other places where the collection’s `summary` option applies to the entries,
  * e.g. `{{title}} ({{locales}})`. It can use the index file’s fields and the same special tags and
@@ -2047,8 +2050,8 @@
  * @property {string} [label] Label of the collection to be displayed in the editor UI. Default:
  * `name` option value.
  * @property {string} [icon] Name of a [Material Symbols
- * icon](https://fonts.google.com/icons?icon.set=Material+Symbols) to be displayed in the collection
- * list.
+ * icon](https://fontsource.org/fonts/material-symbols-outlined/glyphs) to be displayed in the
+ * collection list.
  * @property {boolean} [readonly] Whether to make the collection read-only. Default: `false`. Its
  * entries or files can be viewed but not created, edited, duplicated, reordered, deleted or moved
  * through the Editorial Workflow stages, and assets can’t be uploaded to, changed or deleted from
@@ -2403,9 +2406,13 @@
  * `https://HOSTNAME/api/graphql` for GitHub Enterprise Server.
  * @property {string} [base_url] OAuth base URL origin. Required when using an OAuth client other
  * than Netlify, including [Sveltia CMS Authenticator](https://github.com/sveltia/sveltia-cms-auth).
- * Default: `https://api.netlify.com`.
- * @property {''} [auth_type] OAuth grant type. The default is an empty string, which is
- * authorization code grant. `pkce` is not yet supported due to GitHub’s limitations.
+ * With `auth_type: additions`, it’s the URL of the Sveltia CMS Additions service. Default:
+ * `https://api.netlify.com`.
+ * @property {'' | 'additions'} [auth_type] OAuth grant type. The default is an empty string, which
+ * is authorization code grant. `pkce` is not yet supported due to GitHub’s limitations.
+ * `additions` signs users in with [Sveltia CMS
+ * Additions](https://github.com/sveltia/sveltia-cms-additions) instead of GitHub: it manages the
+ * accounts and roles, and hands out GitHub tokens, so users don’t need a GitHub account.
  * @property {string} [auth_endpoint] OAuth base URL path. Default: `auth`.
  * @property {string} [app_id] OAuth application ID. Not used at this time; reserved for PKCE
  * authorization, which is not yet supported with GitHub.
@@ -2609,6 +2616,12 @@
  * @typedef {object} SlugOptions
  * @property {'unicode' | 'ascii'} [encoding] Encoding option. Default: `unicode`.
  * @property {boolean} [clean_accents] Whether to remove accents. Default: `false`.
+ * @property {string} [transliterate_locale] Locale whose transliteration rules are used with
+ * `clean_accents` where a slug has no locale of its own: on a site or in a collection without i18n
+ * support, for a slug shared by every locale, and for an uploaded file name slugified with
+ * `slugify_filename`. A locale code like `sv` or `de-AT`. An entry locale takes precedence.
+ * Default: none, which applies the library’s default rules. See
+ * https://github.com/sindresorhus/transliterate#supported-locales for supported locales.
  * @property {string} [sanitize_replacement] String to replace sanitized characters. Default: `-`.
  * @property {number} [maxlength] The maximum number of characters allowed for an entry slug.
  * Default: `Infinity`.
@@ -2662,14 +2675,6 @@
  * @property {JsonFormatOptions} [json] JSON format options.
  * @property {YamlFormatOptions} [yaml] YAML format options.
  * @see https://sveltiacms.app/en/docs/data-output#controlling-data-output
- */
-
-/**
- * Issue reporting options. Accepted for compatibility with Decap CMS but ignored: the Report Issue
- * link in the Help menu always points to the Sveltia CMS issue tracker.
- * @typedef {object} IssueReports
- * @property {string} [url] URL of the issue reporting endpoint.
- * @see https://github.com/decaporg/decap-cms/pull/7734
  */
 
 /**
@@ -2753,8 +2758,6 @@
  * @property {LogoOptions} [logo] Site logo options.
  * @property {string} [logout_redirect_url] URL to redirect users to after logging out. Default:
  * none, so users stay on the CMS sign-in page.
- * @property {IssueReports} [issue_reports] Issue reporting options. Accepted for compatibility with
- * Decap CMS but ignored.
  * @property {boolean} [show_preview_links] Whether to show links to entries on the live site and
  * on deploy previews. Default: `true`.
  * @property {SlugOptions} [slug] Slug options, which apply to entry slugs and to the names of entry
@@ -2843,7 +2846,8 @@
  * @property {string} [label] Label of the component to be displayed in the editor UI. Default: the
  * `id` value.
  * @property {string} [icon] Name of a [Material Symbols
- * icon](https://fonts.google.com/icons?icon.set=Material+Symbols) to be displayed in the editor UI.
+ * icon](https://fontsource.org/fonts/material-symbols-outlined/glyphs) to be displayed in the
+ * editor UI.
  * @property {'menuitem' | 'button'} [trigger] Trigger UI of the component. Default: `menuitem`. A
  * menu item is placed under the Insert menu, while a button is placed directly on the toolbar.
  * @property {boolean} [collapsed] Whether to collapse the object by default (`block` mode only).
@@ -2948,7 +2952,8 @@
  * @property {string} [label] Label of the component to be displayed in the editor UI. Default: the
  * `id` value.
  * @property {string} [icon] Name of a [Material Symbols
- * icon](https://fonts.google.com/icons?icon.set=Material+Symbols) to be displayed in the editor UI.
+ * icon](https://fontsource.org/fonts/material-symbols-outlined/glyphs) to be displayed in the
+ * editor UI.
  * @property {'inline'} type Component type, which must be `inline`.
  * @property {RegExp} pattern Regular expression to find the component within a paragraph, e.g.
  * `/\[\[(?<page>[^\]]+)\]\]/` for a wikilink. A leading `^` is ignored, and so are the `g` and
@@ -3395,8 +3400,8 @@
  * @property {string} label Label of the page, displayed as the page title and the tooltip of the
  * page’s button.
  * @property {string} [icon] Name of a [Material Symbols
- * icon](https://fonts.google.com/icons?icon.set=Material+Symbols) to be displayed on the page’s
- * button. Default: `extension`.
+ * icon](https://fontsource.org/fonts/material-symbols-outlined/glyphs) to be displayed on the
+ * page’s button. Default: `extension`.
  * @see https://sveltiacms.app/en/docs/api/custom-pages
  */
 

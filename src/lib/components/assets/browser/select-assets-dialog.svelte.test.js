@@ -8,7 +8,10 @@ import { globalAssetFolder } from '$lib/services/assets/folders';
 import { selectAssetsView, showContentOverlay } from '$lib/services/contents/editor';
 import { duplicatesRequest } from '$lib/services/contents/fields/file/duplicates.svelte';
 import { listAssets } from '$lib/services/contents/fields/file/helpers';
-import { getUnsavedAssets } from '$lib/services/contents/fields/file/process';
+import {
+  convertFileItemToAsset,
+  getUnsavedAssets,
+} from '$lib/services/contents/fields/file/process';
 import {
   FRAME_ORIGIN as CLOUDINARY_ORIGIN,
   activated as cloudinaryActivated,
@@ -27,7 +30,7 @@ import {
   setAssets,
 } from '$lib/test/config';
 import { createFileDropEvent } from '$lib/test/drop';
-import { waitForToastsToHide } from '$lib/test/toast';
+import { getShownToastText, waitForToastsToHide } from '$lib/test/toast';
 
 import SelectAssetsDialog from './select-assets-dialog.svelte';
 
@@ -110,16 +113,6 @@ const isDropIndicatorShownOnDragOver = async () => {
 
   return !!document.querySelector('.drop-indicator');
 };
-
-/**
- * Get the text of the error toast shown, if any.
- * @returns {string | undefined} Text.
- */
-const getErrorToastText = () =>
-  document
-    .querySelector('.sui.toast:not([aria-hidden="true"]) .sui.alert.error')
-    ?.textContent?.replace(/\s+/g, ' ')
-    .trim();
 
 /**
  * Wait for the grid to be listed and activated.
@@ -1175,6 +1168,71 @@ describe('SelectAssetsDialog', () => {
     );
   });
 
+  test('selects the pending file when the same file is dropped', async () => {
+    // A file already picked for another field whose folder has the same path
+    const pending = await createMockImageFile({ name: 'pending.png' });
+    const pendingFolder = { ...globalAssetFolder.current, collectionName: 'posts' };
+    const draftURL = URL.createObjectURL(pending);
+
+    const { onSelect } = await renderDialog({
+      draft: {
+        originalEntry: undefined,
+        files: { [draftURL]: { file: pending, folder: pendingFolder } },
+      },
+    });
+
+    const dialog = page.getByRole('dialog');
+
+    await waitForGrid(3);
+
+    // The file isn’t listed twice, and the pending one is selected
+    dropFiles([pending, pending]);
+    await expect.element(dialog.getByRole('button', { name: 'Insert' })).toBeEnabled();
+    expect(document.querySelectorAll('#select-assets-grid [role="option"]')).toHaveLength(3);
+    expect(
+      document.querySelectorAll('#select-assets-grid [role="option"][aria-selected="true"]'),
+    ).toHaveLength(1);
+
+    await dialog.getByRole('button', { name: 'Insert' }).click();
+    await vi.waitFor(() =>
+      expect(onSelect).toHaveBeenCalledWith([
+        { file: pending, folder: pendingFolder, subfolderPath: '', replace: false },
+      ]),
+    );
+  });
+
+  test('adds identical files dropped together once', async () => {
+    const { onSelect } = await renderDialog({ multiple: true });
+    const dialog = page.getByRole('dialog');
+
+    await waitForGrid(2);
+
+    const image = await createMockImageFile({ name: 'new.png' });
+    const copy = new File([await image.arrayBuffer()], 'copy.png', { type: image.type });
+    /** @type {typeof import('$lib/services/contents/fields/file/process')} */
+    const actual = await vi.importActual('$lib/services/contents/fields/file/process');
+
+    // The first file is still being added when the copy is checked
+    vi.mocked(convertFileItemToAsset).mockImplementationOnce(async (args) => {
+      await sleep(300);
+
+      return actual.convertFileItemToAsset(args);
+    });
+
+    dropFiles([image, copy]);
+    await waitForGrid(3);
+    await expect.element(dialog.getByRole('button', { name: 'Insert' })).toBeEnabled();
+    await sleep(400);
+    expect(document.querySelectorAll('#select-assets-grid [role="option"]')).toHaveLength(3);
+
+    await dialog.getByRole('button', { name: 'Insert' }).click();
+    await vi.waitFor(() =>
+      expect(onSelect).toHaveBeenCalledWith([
+        { file: image, folder: globalAssetFolder.current, subfolderPath: '', replace: false },
+      ]),
+    );
+  });
+
   test('uploads the chosen or pending files to the cloud service', async () => {
     const click = vi.spyOn(HTMLInputElement.prototype, 'click').mockImplementation(() => {});
 
@@ -1264,7 +1322,7 @@ describe('SelectAssetsDialog', () => {
     await expect
       .element(page.getByRole('dialog').getByRole('option', { name: 'Lorem Picsum' }))
       .toHaveAttribute('aria-selected', 'true');
-    await expect.poll(getErrorToastText).toBe('error Error Upload failed.');
+    await expect.poll(() => getShownToastText('error')).toBe('error Error Upload failed.');
     expect(props.pendingFiles).toEqual([]);
     await waitForToastsToHide();
   });
@@ -1333,7 +1391,7 @@ describe('SelectAssetsDialog', () => {
     await dialog.getByRole('option', { name: 'Lorem Picsum' }).click();
     expect(props.pendingFiles).toEqual([]);
     // They were meant for the cloud service, so no failure is reported
-    expect(getErrorToastText()).toBeUndefined();
+    expect(getShownToastText('error')).toBeUndefined();
   });
 
   test('opens the Cloudinary library, and closes once assets are picked', async () => {

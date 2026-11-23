@@ -28,6 +28,7 @@ vi.mock('$lib/services/integrations/media-libraries/default', async (importOrigi
   canConvertHEIC: vi.fn(() => false),
   transformFile: vi.fn(),
   isAcceptedFile: /** @type {any} */ (await importOriginal()).isAcceptedFile,
+  keepsFileFormat: /** @type {any} */ (await importOriginal()).keepsFileFormat,
 }));
 
 vi.mock('$lib/services/utils/file', () => ({
@@ -50,15 +51,24 @@ vi.mock('$lib/services/utils/file', () => ({
    * @returns {string} Last segment.
    */
   getBaseName: (path) => path.slice(path.lastIndexOf('/') + 1),
+  /**
+   * Get the directory part of a path, as the real function does.
+   * @param {string} path Path.
+   * @returns {string} Directory path.
+   */
+  getDirName: (path) => (path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : ''),
 }));
 
 vi.mock('$lib/services/assets/file-name', () => ({
   /**
-   * Replace the characters a file system won’t take, as the real function does.
+   * Replace the characters a file system won’t take, or slugify the name, roughly as the real
+   * function does.
    * @param {string} name File name.
+   * @param {{ slugificationEnabled?: boolean }} [options] Options.
    * @returns {string} File name.
    */
-  formatFileName: (name) => name.replace(/[:/]/g, ''),
+  formatFileName: (name, { slugificationEnabled = false } = {}) =>
+    slugificationEnabled ? name.toLowerCase().replaceAll(' ', '-') : name.replace(/[:/]/g, ''),
   /**
    * Compare two file names, ignoring case, as the real function does.
    * @param {string} name1 File name.
@@ -539,6 +549,139 @@ describe('Test processResource()', () => {
     expect(result.credit).toBe('');
     expect(result.oversizedFileName).toBeUndefined();
     expect(Object.keys(draft.files)).toHaveLength(0);
+  });
+
+  test('should use an existing asset in another folder with the same path', async () => {
+    // https://github.com/sveltia/sveltia-cms/issues/1182 — two collections with the same
+    // `media_folder`, and the asset assigned to the folder of the other collection
+    const mockFile = new File(['content'], 'photo.webp', { type: 'image/webp' });
+    // @ts-ignore - Simplified draft for testing
+    const draft = { files: {} };
+
+    /**
+     * Create the folder of a collection whose `media_folder` is shared with the other.
+     * @param {string} collectionName Collection name.
+     * @returns {any} Asset folder.
+     */
+    const folderOf = (collectionName) => ({
+      collectionName,
+      internalPath: 'src/assets/uploads',
+      publicPath: '../../assets/uploads',
+      entryRelative: false,
+      hasTemplateTags: false,
+    });
+
+    // @ts-ignore - Simplified resource for testing
+    const resource = { file: mockFile, folder: folderOf('posts'), credit: '' };
+
+    const existingAsset = {
+      sha: 'git-hash',
+      folder: folderOf('pages'),
+      path: 'src/assets/uploads/photo.webp',
+    };
+
+    getGitHashMock.mockResolvedValue('git-hash');
+    allAssets.current = /** @type {any} */ ([existingAsset]);
+    equalMock.mockReturnValue(false);
+    getAssetPublicURLMock.mockReturnValue('../../assets/uploads/photo.webp');
+
+    // @ts-ignore - Test with simplified types
+    const result = await processResource({ draft, resource, libraryConfig: {} });
+
+    expect(result.value).toBe('../../assets/uploads/photo.webp');
+    expect(getAssetPublicURLMock).toHaveBeenCalledWith(existingAsset, expect.anything());
+    expect(Object.keys(draft.files)).toHaveLength(0);
+
+    // An identical file in a folder with another path is a different upload
+    allAssets.current = /** @type {any} */ ([
+      { ...existingAsset, folder: { ...folderOf('pages'), internalPath: 'static/images' } },
+    ]);
+
+    // @ts-ignore - Test with simplified types
+    const otherResult = await processResource({ draft, resource, libraryConfig: {} });
+
+    expect(otherResult.value).toMatch(/^blob:/);
+    expect(Object.keys(draft.files)).toHaveLength(1);
+  });
+
+  test('should use an existing asset identical to the file before it is transformed', async () => {
+    // https://github.com/sveltia/sveltia-cms/issues/1182#issuecomment-7103945453 — a copy of a
+    // stored WebP image would be encoded again, and the result would no longer match
+    const storedCopy = new File(['stored'], 'photo_copy.webp', { type: 'image/webp' });
+    const reencoded = new File(['re-encoded'], 'photo_copy.webp', { type: 'image/webp' });
+    // @ts-ignore - Simplified draft for testing
+    const draft = { files: {} };
+
+    const folder = {
+      collectionName: 'posts',
+      internalPath: 'src/assets/uploads',
+      publicPath: '/assets/uploads',
+      entryRelative: false,
+      hasTemplateTags: false,
+    };
+
+    const existingAsset = {
+      sha: 'stored-hash',
+      folder,
+      name: 'photo.webp',
+      path: 'src/assets/uploads/photo.webp',
+    };
+
+    getGitHashMock.mockImplementation(async (/** @type {File} */ f) =>
+      f === storedCopy ? 'stored-hash' : 'other-hash',
+    );
+    transformFileMock.mockResolvedValue(reencoded);
+    allAssets.current = /** @type {any} */ ([existingAsset]);
+    getAssetPublicURLMock.mockReturnValue('/assets/uploads/photo.webp');
+
+    /** @type {import('$lib/types/public').DefaultMediaLibraryConfig} */
+    const libraryConfig = { transformations: { raster_image: { format: 'webp', quality: 82 } } };
+
+    // @ts-ignore - Test with simplified types
+    const result = await processResource({
+      draft: /** @type {any} */ (draft),
+      resource: { file: storedCopy, folder, credit: '' },
+      libraryConfig,
+      accept: 'image/*',
+    });
+
+    expect(result.value).toBe('/assets/uploads/photo.webp');
+    expect(transformFileMock).not.toHaveBeenCalled();
+    expect(Object.keys(draft.files)).toHaveLength(0);
+
+    // A file the field doesn’t take as it is goes through the transformation, which could convert
+    // it to a type the field takes
+    // @ts-ignore - Test with simplified types
+    const otherResult = await processResource({
+      draft: /** @type {any} */ (draft),
+      resource: { file: storedCopy, folder, credit: '' },
+      libraryConfig,
+      accept: 'image/avif',
+    });
+
+    expect(transformFileMock).toHaveBeenCalledOnce();
+    expect(otherResult.mismatchedFileName).toBe('photo_copy.webp');
+
+    // A file converted to another format isn’t matched as it is: the site wants the new format
+    const storedPNG = new File(['stored'], 'logo.png', { type: 'image/png' });
+
+    allAssets.current = /** @type {any} */ ([
+      { ...existingAsset, name: 'logo.png', path: 'src/assets/uploads/logo.png' },
+    ]);
+    getGitHashMock.mockImplementation(async (/** @type {File} */ f) =>
+      f === storedPNG ? 'stored-hash' : 'other-hash',
+    );
+
+    // @ts-ignore - Test with simplified types
+    const pngResult = await processResource({
+      draft: /** @type {any} */ (draft),
+      resource: { file: storedPNG, folder, credit: '' },
+      libraryConfig,
+      accept: 'image/*',
+    });
+
+    expect(transformFileMock).toHaveBeenCalledTimes(2);
+    expect(pngResult.value).toMatch(/^blob:/);
   });
 
   test('should reuse the same file pending upload to another subfolder', async () => {
@@ -1189,7 +1332,7 @@ describe('Test processResource()', () => {
         _type: 'entry',
         folder: 'content/pages',
         nested: { depth: 10 },
-        meta: { path: { widget: 'string', index_file: '_index' } },
+        meta: { path: { index_file: '_index' } },
         _file: { subPath: undefined },
       },
     };
@@ -1367,6 +1510,185 @@ describe('Test processResource()', () => {
         expect.objectContaining({ value: 'blob:same' }),
       );
       expect(Object.keys(draft.files)).toEqual(['blob:same']);
+    });
+  });
+
+  describe('with several identical copies of the file', () => {
+    const file = new File(['content'], 'photo.webp', { type: 'image/webp' });
+
+    /**
+     * Create an asset with the uploaded file’s content.
+     * @param {string} path Asset path.
+     * @param {object} folder Asset folder.
+     * @returns {any} Asset.
+     */
+    const createAsset = (path, folder) => ({
+      sha: 'git-hash',
+      folder,
+      path,
+      name: path.slice(path.lastIndexOf('/') + 1),
+    });
+
+    /**
+     * Upload the file and get the asset the field value is made of.
+     * @param {object} args Arguments.
+     * @param {any} args.draft Entry draft.
+     * @param {any} args.folder Asset folder.
+     * @param {string} [args.subfolderPath] Subfolder.
+     * @returns {Promise<any>} Selected asset.
+     */
+    const getSelectedAsset = async ({ draft, folder, subfolderPath }) => {
+      getAssetPublicURLMock.mockImplementation((/** @type {any} */ asset) => asset.path);
+
+      // @ts-ignore - Test with simplified types
+      const result = await processResource({
+        draft,
+        resource: { file, folder, subfolderPath, credit: '' },
+        libraryConfig: {},
+      });
+
+      return allAssets.current.find((asset) => asset.path === result.value);
+    };
+
+    beforeEach(() => {
+      getGitHashMock.mockResolvedValue('git-hash');
+    });
+
+    test('should prefer the copy at the path, then in the directory, then with the name', async () => {
+      const folder = {
+        collectionName: 'posts',
+        internalPath: 'uploads',
+        publicPath: '/uploads',
+        entryRelative: false,
+        hasTemplateTags: false,
+      };
+
+      const draft = { files: {} };
+      const atPath = createAsset('uploads/gallery/Photo.webp', folder);
+      const inDir = createAsset('uploads/gallery/other.webp', folder);
+      const sameName = createAsset('uploads/photo.webp', folder);
+      const other = createAsset('uploads/old/other.webp', folder);
+
+      allAssets.current = [other, sameName, inDir, atPath];
+      expect(await getSelectedAsset({ draft, folder, subfolderPath: 'gallery' })).toBe(atPath);
+
+      allAssets.current = [other, sameName, inDir];
+      expect(await getSelectedAsset({ draft, folder, subfolderPath: 'gallery' })).toBe(inDir);
+
+      allAssets.current = [other, sameName];
+      expect(await getSelectedAsset({ draft, folder, subfolderPath: 'gallery' })).toBe(sameName);
+
+      // The first one is kept when none is closer
+      allAssets.current = [other, createAsset('uploads/new/other.webp', folder)];
+      expect(await getSelectedAsset({ draft, folder, subfolderPath: 'gallery' })).toBe(other);
+    });
+
+    test('should prefer the copy with the slugified name', async () => {
+      const folder = {
+        collectionName: 'posts',
+        internalPath: 'uploads',
+        publicPath: '/uploads',
+        entryRelative: false,
+        hasTemplateTags: false,
+      };
+
+      const other = createAsset('uploads/old/other.webp', folder);
+      const sameName = createAsset('uploads/old/my-photo.webp', folder);
+
+      allAssets.current = [other, sameName];
+      getAssetPublicURLMock.mockImplementation((/** @type {any} */ asset) => asset.path);
+
+      // @ts-ignore - Test with simplified types
+      const result = await processResource({
+        draft: /** @type {any} */ ({ files: {} }),
+        resource: { file: new File(['content'], 'My Photo.webp'), folder, credit: '' },
+        libraryConfig: { slugify_filename: true },
+      });
+
+      expect(result.value).toBe(sameName.path);
+    });
+
+    test('should prefer the copy with the name in a folder path with template tags', async () => {
+      const folder = {
+        collectionName: 'posts',
+        internalPath: 'uploads/{{year}}',
+        publicPath: '/uploads/{{year}}',
+        entryRelative: false,
+        hasTemplateTags: true,
+      };
+
+      const other = createAsset('uploads/{{year}}/other.webp', folder);
+      const sameName = createAsset('uploads/2020/photo.webp', folder);
+
+      allAssets.current = [other, sameName];
+      expect(await getSelectedAsset({ draft: { files: {} }, folder })).toBe(sameName);
+    });
+
+    test('should prefer the copy in the directory of an entry-relative folder', async () => {
+      const folder = {
+        collectionName: 'people',
+        entryRelative: true,
+        internalPath: 'src/content/people',
+        internalSubPath: 'assets/images',
+        publicPath: 'assets/images',
+        hasTemplateTags: false,
+      };
+
+      const draft = {
+        files: {},
+        defaultLocale: '_default',
+        originalEntry: { locales: { _default: { path: 'src/content/people/person-b/index.md' } } },
+        collection: { _type: 'entry', _file: { subPath: '{{slug}}/index' } },
+      };
+
+      const inSubfolder = createAsset(
+        'src/content/people/person-b/assets/images/sub/other.webp',
+        folder,
+      );
+
+      const inDir = createAsset('src/content/people/person-b/assets/images/other.webp', folder);
+
+      allAssets.current = [inSubfolder, inDir];
+      expect(await getSelectedAsset({ draft, folder })).toBe(inDir);
+    });
+
+    test('should prefer the file pending for the same subfolder', async () => {
+      const folder = {
+        collectionName: 'people',
+        entryRelative: true,
+        internalPath: 'src/content/people',
+        internalSubPath: 'assets/images',
+        publicPath: 'assets/images',
+        hasTemplateTags: false,
+      };
+
+      const pendingFile = new File(['converted'], 'other.webp', { type: 'image/webp' });
+
+      // A new entry, whose folder isn’t known yet
+      const draft = {
+        files: {
+          'blob:root': { file: pendingFile, folder },
+          'blob:gallery': { file: pendingFile, folder, subfolderPath: 'gallery' },
+        },
+        defaultLocale: '_default',
+        collection: { _type: 'entry', _file: { subPath: '{{slug}}/index' } },
+      };
+
+      // The uploaded file only matches the pending one once it’s converted
+      getGitHashMock.mockImplementation(async (/** @type {File} */ f) =>
+        f === file ? 'raw-hash' : 'git-hash',
+      );
+      transformFileMock.mockResolvedValue(new File(['converted'], 'photo.webp'));
+      allAssets.current = [];
+
+      // @ts-ignore - Test with simplified types
+      const result = await processResource({
+        draft: /** @type {any} */ (draft),
+        resource: { file, folder, subfolderPath: 'gallery', credit: '' },
+        libraryConfig: { transformations: { raster_image: { format: 'webp' } } },
+      });
+
+      expect(result.value).toBe('blob:gallery');
     });
   });
 });

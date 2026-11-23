@@ -58,6 +58,11 @@ vi.mock('$lib/services/assets', () => ({
   isRelativePath: vi.fn((path) => !/^[/@]/.test(path)),
 }));
 
+vi.mock('$lib/services/assets/entry-relative', async (importOriginal) => {
+  const actual = /** @type {Record<string, any>} */ (await importOriginal());
+
+  return { ...actual, getEntryRelativePublicPath: vi.fn(actual.getEntryRelativePublicPath) };
+});
 vi.mock('$lib/services/assets/state', () => ({
   focusedAsset: { current: undefined },
   allAssets: mockAllAssets,
@@ -1048,6 +1053,7 @@ describe('assets/info', () => {
         ...mockAsset,
         folder: {
           ...mockAsset.folder,
+          publicPath: 'images',
           entryRelative: true,
         },
       };
@@ -1074,6 +1080,7 @@ describe('assets/info', () => {
         name: 'photo.jpg',
         folder: {
           ...mockAsset.folder,
+          publicPath: 'images',
           internalPath: 'content/posts',
           internalSubPath: 'images',
           entryRelative: true,
@@ -1106,6 +1113,7 @@ describe('assets/info', () => {
         name: 'photo.jpg',
         folder: {
           ...mockAsset.folder,
+          publicPath: 'images',
           internalPath: 'content/posts',
           internalSubPath: 'images',
           entryRelative: true,
@@ -1135,6 +1143,7 @@ describe('assets/info', () => {
         ...mockAsset,
         folder: {
           ...mockAsset.folder,
+          publicPath: 'images',
           entryRelative: true,
         },
       };
@@ -1169,7 +1178,12 @@ describe('assets/info', () => {
         ...mockAsset,
         path: 'content/posts/fr/hello/photo-fr.jpg',
         name: 'photo-fr.jpg',
-        folder: { ...mockAsset.folder, internalPath: 'content/posts', entryRelative: true },
+        folder: {
+          ...mockAsset.folder,
+          publicPath: 'images',
+          internalPath: 'content/posts',
+          entryRelative: true,
+        },
       };
 
       const mockEntry = /** @type {any} */ ({
@@ -1242,6 +1256,75 @@ describe('assets/info', () => {
       expect(getAssetPublicURL(siblingAsset, { pathOnly: true, entry: mockEntry })).toBeUndefined();
     });
 
+    describe('with an absolute public path of an entry-relative folder', () => {
+      // `media_folder: images` with `public_folder: /blog/{{slug}}/images`; the path itself is
+      // tested in `entry-relative.test.js`
+      const asset = {
+        ...mockAsset,
+        path: 'content/posts/hello/images/my photo.jpg',
+        name: 'my photo.jpg',
+        folder: /** @type {any} */ ({
+          collectionName: 'posts',
+          internalPath: 'content/posts',
+          internalSubPath: 'images',
+          publicPath: '/blog/{{slug}}/images',
+          entryRelative: true,
+        }),
+      };
+
+      const entry = /** @type {any} */ ({ id: 'hello', slug: 'hello', locales: {} });
+
+      beforeEach(async () => {
+        const { getAssetFoldersByPath } = await import('$lib/services/assets/folders');
+        const { encodeFilePath } = await import('$lib/services/utils/file');
+
+        vi.mocked(getAssetFoldersByPath).mockReturnValue([asset.folder]);
+        vi.mocked(encodeFilePath).mockImplementation((path) => encodeURI(path));
+      });
+
+      it('should return the path given for the asset and the entry', async () => {
+        const { getEntryRelativePublicPath } = await import('$lib/services/assets/entry-relative');
+
+        vi.mocked(getEntryRelativePublicPath).mockReturnValueOnce(
+          '/blog/hello/images/my photo.jpg',
+        );
+
+        expect(getAssetPublicURL(asset, { pathOnly: true, entry, locale: 'fr' })).toBe(
+          '/blog/hello/images/my photo.jpg',
+        );
+        expect(getEntryRelativePublicPath).toHaveBeenCalledWith({
+          asset,
+          folder: asset.folder,
+          entry,
+          locale: 'fr',
+        });
+        // No public URL can be given for a link
+        expect(getAssetPublicURL(asset, { entry })).toBeUndefined();
+      });
+
+      it('should only encode an absolute path with the `encode_file_path` option', async () => {
+        const { getEntryRelativePublicPath } = await import('$lib/services/assets/entry-relative');
+
+        mockCmsConfig.output.encode_file_path = true;
+        vi.mocked(getEntryRelativePublicPath).mockReturnValueOnce(
+          '/blog/hello/images/my photo.jpg',
+        );
+
+        expect(getAssetPublicURL(asset, { pathOnly: true, entry })).toBe(
+          '/blog/hello/images/my%20photo.jpg',
+        );
+
+        // A relative path is stored as is
+        vi.mocked(getEntryRelativePublicPath).mockReturnValueOnce('images/my photo.jpg');
+
+        expect(getAssetPublicURL(asset, { pathOnly: true, entry })).toBe('images/my photo.jpg');
+
+        vi.mocked(getEntryRelativePublicPath).mockReturnValueOnce(undefined);
+
+        expect(getAssetPublicURL(asset, { pathOnly: true, entry })).toBeUndefined();
+      });
+    });
+
     it('should return relative path for entry-relative asset in sub-folder', async () => {
       const { getPathInfo } = await import('@sveltia/utils/file');
       const getPathInfoMock = vi.mocked(getPathInfo);
@@ -1271,6 +1354,7 @@ describe('assets/info', () => {
         name: 'photo.jpg',
         folder: {
           ...mockAsset.folder,
+          publicPath: 'images',
           entryRelative: true,
         },
       };
@@ -1307,7 +1391,7 @@ describe('assets/info', () => {
         ...mockAsset,
         path: 'photo.jpg',
         name: 'photo.jpg',
-        folder: { ...mockAsset.folder, entryRelative: true },
+        folder: { ...mockAsset.folder, publicPath: 'images', entryRelative: true },
       };
 
       const mockEntry = /** @type {any} */ ({
@@ -1336,7 +1420,12 @@ describe('assets/info', () => {
         ...mockAsset,
         path: 'images/sub/photo.jpg',
         name: 'photo.jpg',
-        folder: { ...mockAsset.folder, internalPath: '', entryRelative: true },
+        folder: {
+          ...mockAsset.folder,
+          publicPath: 'images',
+          internalPath: '',
+          entryRelative: true,
+        },
       };
 
       const mockEntry = /** @type {any} */ ({
@@ -1366,6 +1455,7 @@ describe('assets/info', () => {
         name: 'photo.jpg',
         folder: {
           ...mockAsset.folder,
+          publicPath: 'images',
           internalPath: '',
           internalSubPath: 'images',
           entryRelative: true,
@@ -1390,6 +1480,7 @@ describe('assets/info', () => {
         ...mockAsset,
         folder: {
           ...mockAsset.folder,
+          publicPath: 'images',
           entryRelative: true,
         },
       };
@@ -2022,6 +2113,7 @@ describe('assets/info', () => {
         ...mockAsset,
         folder: {
           ...mockAsset.folder,
+          publicPath: 'images',
           entryRelative: true,
         },
       };
@@ -2292,6 +2384,7 @@ describe('assets/info', () => {
         ...mockAsset,
         folder: {
           ...mockAsset.folder,
+          publicPath: 'images',
           entryRelative: true,
         },
       };
@@ -2474,6 +2567,7 @@ describe('assets/info', () => {
         ...mockAsset,
         folder: {
           ...mockAsset.folder,
+          publicPath: 'images',
           entryRelative: true,
         },
       };
@@ -2532,6 +2626,7 @@ describe('assets/info', () => {
         path: 'other/assets/photo.jpg',
         folder: {
           ...mockAsset.folder,
+          publicPath: 'images',
           entryRelative: true,
         },
       };

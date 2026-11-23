@@ -22,12 +22,14 @@
   import ViewSwitcher from '$lib/components/common/page-toolbar/view-switcher.svelte';
   import { getPendingUploadAction } from '$lib/services/assets/browser/pending-uploads';
   import {
+    getDroppedResources,
     getInitialLibraryName,
     getInsertedResources,
     getLocationResources,
     getPickedFolderPublicPaths,
     getStockAssetProviderEntries,
     isFolderOffered,
+    processUniqueFiles,
     sortServicesByName,
   } from '$lib/services/assets/browser/select-assets-dialog.svelte';
   import { fillLibraryPrefix } from '$lib/services/assets/external/prefix';
@@ -42,7 +44,7 @@
   } from '$lib/services/assets/subfolders';
   import { selectAssetsView, showContentOverlay } from '$lib/services/contents/editor';
   import { checkDuplicates } from '$lib/services/contents/fields/file/duplicates.svelte';
-  import { hasSameAsset } from '$lib/services/contents/fields/file/helpers';
+  import { findSameUnsavedAsset } from '$lib/services/contents/fields/file/helpers';
   import { createFolderAssetListing } from '$lib/services/contents/fields/file/listing.svelte';
   import { convertFileItemToAsset } from '$lib/services/contents/fields/file/process';
   import { getMediaLibraryOptions } from '$lib/services/integrations/media-libraries';
@@ -50,8 +52,8 @@
   import { getPreferredLibraryNames } from '$lib/services/integrations/media-libraries/options';
   import { allStockAssetProviders } from '$lib/services/integrations/media-libraries/stock';
   import { normalize } from '$lib/services/search/util';
+  import { getApiKey } from '$lib/services/user/api-keys';
   import { env } from '$lib/services/user/env.svelte';
-  import { prefs } from '$lib/services/user/prefs.svelte';
   import { createPath, getDirName, getGitHash } from '$lib/services/utils/file';
   import { SUPPORTED_IMAGE_TYPES } from '$lib/services/utils/media/image';
 
@@ -174,6 +176,8 @@
   const enabledExternalServiceEntries = $derived(
     [...cloudServiceEntries, ...enabledStockAssetProviderEntries].sort(sortServicesByName),
   );
+  /** Names of the media libraries marked with the `default` option, in order of precedence. */
+  const preferredLibraryNames = $derived(getPreferredLibraryNames(fieldConfig));
   /**
    * Name of the selected location: the first location marked with the `default` option that’s
    * offered, or else the first location offered, until the user picks another, and again whenever
@@ -188,7 +192,7 @@
       hasPendingFiles: untrack(() => !!pendingFiles.length),
       cloudServiceEntries,
       externalServiceEntries: enabledExternalServiceEntries,
-      preferredLibraryNames: getPreferredLibraryNames(fieldConfig),
+      preferredLibraryNames,
     }),
   );
   const isDefaultLibrary = $derived(libraryName.startsWith('default-'));
@@ -271,7 +275,7 @@
   const isEnabledMediaService = $derived(
     enabledStockAssetProviderEntries.some(
       ([serviceId, { authType }]) =>
-        serviceId === libraryName && (authType === 'none' || !!prefs.apiKeys?.[libraryName]),
+        serviceId === libraryName && (authType === 'none' || !!getApiKey(libraryName)),
     ),
   );
   const isCloudLibrary = $derived(
@@ -339,15 +343,22 @@
    * Process a dropped file.
    * @param {File} file File to be processed.
    * @param {boolean} replace Whether the file replaces an existing asset with the same name.
-   * @returns {Promise<Asset | undefined>} Processed asset or `undefined` if the file already
-   * exists.
+   * @returns {Promise<{ asset: Asset, replace: boolean }>} Asset for the file, which is the one
+   * already pending upload if the same file is, and whether it replaces an existing asset.
    */
   const processFile = async (file, replace) => {
     const sha = await getGitHash(file);
     const folder = selectedFolder;
 
-    if (hasSameAsset({ sha, folder, unsavedAssets: assetListing.unsavedAssets })) {
-      return undefined;
+    const pendingAsset = findSameUnsavedAsset({
+      sha,
+      folder,
+      unsavedAssets: assetListing.unsavedAssets,
+    });
+
+    if (pendingAsset) {
+      // The pending file is selected rather than listed twice, and keeps its own way of saving
+      return { asset: pendingAsset, replace: !!pendingAsset.replace };
     }
 
     const asset = await convertFileItemToAsset({
@@ -361,7 +372,7 @@
 
     droppedAssets.push(asset);
 
-    return asset;
+    return { asset, replace };
   };
 
   /**
@@ -383,9 +394,9 @@
       return;
     }
 
-    selectedResources = (await Promise.all(files.map((file) => processFile(file, replace))))
-      .filter((asset) => !!asset)
-      .map((asset) => ({ asset, replace }));
+    selectedResources = getDroppedResources(
+      await processUniqueFiles(files, (file) => processFile(file, replace)),
+    );
   };
 
   /**
@@ -446,6 +457,7 @@
       libraryName,
       cloudServiceEntries,
       canUpload: !!externalAssetsPanel?.canUpload(),
+      preferredLibraryNames,
     });
 
     if (action.type === 'upload') {

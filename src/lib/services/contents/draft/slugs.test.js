@@ -775,7 +775,7 @@ describe('draft/slugs', () => {
       folder: 'content/pages',
       fields: [],
       nested: { depth: 5 },
-      meta: { path: { widget: 'string' } },
+      meta: { path: {} },
       _i18n: { defaultLocale: 'en', structureMap: {} },
     };
 
@@ -794,7 +794,7 @@ describe('draft/slugs', () => {
       // Every entry shares one file name, so the entry gets a folder of its own
       expect(
         getSlugDirPath({
-          collection: { ...collection, meta: { path: { widget: 'string', index_file: 'index' } } },
+          collection: { ...collection, meta: { path: { index_file: 'index' } } },
           isNew: true,
           currentPath: 'docs',
         }),
@@ -875,6 +875,37 @@ describe('draft/slugs', () => {
         expect(getChosenDirPath(draft, 'en')).toBe('docs');
         expect(getChosenDirPath(draft, 'fr')).toBe('documents');
         expect(getChosenDirPath({ ...draft, currentPath: undefined }, 'fr')).toBe('');
+      });
+
+      it('should pass the map recording numbered slugs to every locale’s template', async () => {
+        const { fillTemplate } = await import('$lib/services/common/template');
+        const numberedSlugs = new Map();
+
+        vi.mocked(fillTemplate).mockReturnValue('intro');
+
+        getSlugs({
+          draft: {
+            isNew: true,
+            collection: localizedCollection,
+            currentPath: 'docs',
+            currentSlugs: {},
+            slugEditor: {},
+            originalLocales: {},
+            currentValues: { en: { title: 'Intro' }, fr: { title: 'Introduction' } },
+            currentLocales: { en: true, fr: true },
+            files: {},
+          },
+          numberedSlugs,
+        });
+
+        expect(fillTemplate).toHaveBeenCalledWith(
+          '{{title | localize}}',
+          expect.objectContaining({ locale: 'en', numberedSlugs }),
+        );
+        expect(fillTemplate).toHaveBeenCalledWith(
+          '{{title | localize}}',
+          expect.objectContaining({ locale: 'fr', numberedSlugs }),
+        );
       });
 
       it('should be passed to the template for each locale’s slug', async () => {

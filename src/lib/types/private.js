@@ -76,6 +76,26 @@
  * @property {string} [avatarURL] Avatar URL.
  * @property {string} [profileURL] Profile URL.
  * @property {boolean} [bot] Whether the user is a service account.
+ * @property {'admin' | 'editor' | 'viewer'} [role] Role given by Sveltia CMS Additions. A viewer
+ * can’t make changes.
+ * @property {AdditionsCommitAuthor} [commitAuthor] How Sveltia CMS Additions asks the user’s
+ * commits to be authored, since its GitHub token belongs to an app, not the user.
+ * @property {boolean} [hasPassword] Whether the Sveltia CMS Additions user has a password, which
+ * someone who only signs in with GitHub doesn’t, so they have none to change.
+ * @property {boolean} [ownGitHubToken] Whether the GitHub token Sveltia CMS Additions gave is the
+ * user’s own, as they signed in with GitHub or linked their GitHub account, rather than the app’s.
+ * @property {string} [tokenExpiresAt] When the GitHub token Sveltia CMS Additions gave expires, as
+ * ISO 8601, so it can be refreshed in time.
+ */
+
+/**
+ * Authorship of the commits made with a Sveltia CMS Additions token.
+ * @typedef {object} AdditionsCommitAuthor
+ * @property {'user' | 'bot'} mode `user` to make the user the author, through the Git Data API, or
+ * `bot` to leave the app as the author, through GraphQL, which GitHub signs, with the user in a
+ * `Co-authored-by` trailer.
+ * @property {string} name User’s name.
+ * @property {string} email User’s email.
  */
 
 /**
@@ -362,6 +382,11 @@
  * @property {boolean} auto Whether the sign-in process is automatic.
  * @property {string} [token] User’s locally-cached OAuth access token. Git backends only.
  * @property {string} [refreshToken] User’s locally-cached OAuth refresh token. Git backends only.
+ * With Sveltia CMS Additions, it’s the session token.
+ * @property {string} [username] Username to sign in to Sveltia CMS Additions with.
+ * @property {string} [password] Password to sign in to Sveltia CMS Additions with.
+ * @property {string} [provider] Provider to sign in to Sveltia CMS Additions through, e.g.
+ * `github`.
  */
 
 /**
@@ -622,6 +647,26 @@
  * published.
  * @property {(pullRequest: WorkflowPullRequest) => Promise<void>} discard Function to close the
  * pull request and delete the workflow branch.
+ */
+
+/**
+ * Someone who wrote a comment.
+ * @typedef {object} ConversationAuthor
+ * @property {string} name Display name.
+ * @property {string} login Username on Sveltia CMS Additions.
+ * @property {boolean} isSelf Whether it’s the signed-in user.
+ */
+
+/**
+ * A comment in an entry’s conversation, kept by Sveltia CMS Additions.
+ * @typedef {object} ConversationItem
+ * @property {string} id ID.
+ * @property {string} body Markdown.
+ * @property {ConversationAuthor | null} author Author, or `null` once deleted.
+ * @property {Date} createdDate When it was written.
+ * @property {Date} updatedDate When it was last edited.
+ * @property {boolean} canEdit Whether the signed-in user can edit it.
+ * @property {boolean} canDelete Whether the signed-in user can delete it.
  */
 
 /**
@@ -988,8 +1033,9 @@
  * the entry folder. It will be set when `entryRelative` is `true`.
  * @property {string | undefined} publicPath Absolute folder path that will appear in the public
  * URL, starting with `/`. It can be empty if the collection’s `public_folder` property is a
- * relative path, because the complete path cannot be easily determined. It will be `undefined` for
- * the All Assets folder.
+ * relative path, because the complete path cannot be easily determined. For an entry-relative
+ * folder, it can also be relative to the entry, like `images` or `./images`, which a field value is
+ * then built from as it is. It will be `undefined` for the All Assets folder.
  * @property {boolean} entryRelative Whether the `internalPath` is a relative path from the asset’s
  * associated entry.
  * @property {boolean} hasTemplateTags Whether the `internalPath` contains template tags like
@@ -2290,6 +2336,17 @@
  * @property {string} [dirPath] Folder within the collection folder a new entry goes to, as chosen
  * with the path editor of a collection with nested entries. A filled slug then only has to be
  * unique among the entries in that folder.
+ * @property {Map<InternalLocaleCode, string>} [numberedSlugs] Map to record a filled slug in, under
+ * the `locale`, when another entry uses it and a number is added to make it unique. It lets the
+ * user know why the slug ends with a number.
+ */
+
+/**
+ * Slug a new entry would be saved with if it was saved now, as shown while it’s being edited.
+ * @typedef {object} SlugPreview
+ * @property {string} slug Slug.
+ * @property {string} [takenSlug] Slug the template fills, when another entry uses it, so the slug
+ * has a number added to make it unique.
  */
 
 /**

@@ -52,6 +52,7 @@ words:
   - cmaps
   - Codeberg
   - cooldown
+  - crswap
   - CVEs
   - danurbanowicz
   - Decap
@@ -97,8 +98,8 @@ words:
   - husenunicorn
   - iarna
   - iccs
-  - IIFE
   - iids
+  - IIFE
   - indexeddb
   - infobar
   - infobars
@@ -151,6 +152,7 @@ words:
   - popups
   - postcss
   - prefs
+  - prehash
   - previewable
   - privatemaker
   - programmatically
@@ -198,6 +200,7 @@ words:
   - ucarecd
   - unadded
   - unapprove
+  - uncaptioned
   - unflatten
   - unflattened
   - unflattening

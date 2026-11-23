@@ -28,15 +28,18 @@
     getFieldEditorContext,
     isInEditorComponent,
   } from '$lib/services/contents/editor/field-context';
+  import { trackPendingWhile } from '$lib/services/contents/editor/pending.svelte';
   import { checkDuplicates } from '$lib/services/contents/fields/file/duplicates.svelte';
   import { createFolderAssetListing } from '$lib/services/contents/fields/file/listing.svelte';
   import {
+    getDroppedFileDestination,
     getMediaFieldAssetOptions,
     processResources,
     resolveSelectionResult,
   } from '$lib/services/contents/fields/file/resources';
   import { getAcceptedFileTypes } from '$lib/services/integrations/media-libraries/default';
   import { isMultiple } from '$lib/services/integrations/media-libraries/multiple';
+  import { getPreferredLibraryNames } from '$lib/services/integrations/media-libraries/options';
   import { focusAfterRemoval } from '$lib/services/utils/drag-sorting';
   import { createDragSorter } from '$lib/services/utils/drag-sorting.svelte';
 
@@ -177,22 +180,21 @@
   });
   const enabledCloudServiceEntries = $derived(assetOptions.cloudServiceEntries);
   /**
-   * Whether the default (internal) media library is available as a storage provider.
+   * Where dropped files go: the repository or a cloud storage service that can upload them.
    */
-  const isDefaultLibraryAvailable = $derived(assetOptions.enabled && !!targetFolder);
-  /**
-   * The total number of available media storage providers (default and/or cloud) that can take
-   * dropped files. A cloud service without an upload function, like Cloudinary, can’t.
-   */
-  const totalProviders = $derived(
-    (isDefaultLibraryAvailable ? 1 : 0) +
-      enabledCloudServiceEntries.filter(([, { upload }]) => !!upload).length,
+  const dropTarget = $derived(
+    getDroppedFileDestination({
+      repositoryAvailable: assetOptions.enabled && !!targetFolder,
+      cloudServiceEntries: enabledCloudServiceEntries,
+      preferredLibraryNames: getPreferredLibraryNames(fieldConfig),
+    }),
   );
   /**
-   * Disable the drop zone if there are no providers or multiple providers are available, to avoid
-   * confusion about where dropped files will be stored. A folder can’t be dropped at all.
+   * Disable the drop zone if no location can take the files, or if several can and none is marked
+   * with the `default` option, to avoid confusion about where dropped files will be stored. A
+   * folder can’t be dropped at all.
    */
-  const allowDrop = $derived(totalProviders === 1 && !selectFolder);
+  const allowDrop = $derived(!!dropTarget.destination && !dropTarget.ambiguous && !selectFolder);
 
   /**
    * Reset the current selection.
@@ -229,6 +231,10 @@
       return;
     }
 
+    // The editor is reused when the pane switches to another locale, so the value has to be written
+    // to the locale the files were picked in, not the one shown once they have been processed
+    const _locale = locale;
+    const _keyPath = keyPath;
     // Save the current value so it can be restored if all resources fail validation
     const previousValue = multiple ? undefined : currentValue;
 
@@ -243,7 +249,7 @@
         folder: targetFolder,
         libraryConfig,
         accept: acceptedTypes,
-        locale,
+        locale: _locale,
       });
 
       // Another entry may have been opened while the files were being processed, e.g. a large
@@ -263,15 +269,19 @@
       if (multiple) {
         addMultiValueItems({
           draft,
-          locale,
+          locale: _locale,
           valueStoreKey,
-          keyPath,
+          keyPath: _keyPath,
           newValues: values,
           replaceIndex: replaceMode ? replaceIndex : undefined,
           max,
         });
-      } else {
+      } else if (locale === _locale) {
         currentValue = value;
+      } else {
+        // `<FieldEditor>` would write the bound value to the locale now shown, so write it to the
+        // draft directly
+        draft[valueStoreKey][_locale][_keyPath] = value;
       }
 
       photoCredit = credit;
@@ -299,7 +309,7 @@
     // Dropped files are added, not taken as a replacement for the file last replaced
     replaceMode = false;
 
-    if (isDefaultLibraryAvailable) {
+    if (dropTarget.destination === 'repository') {
       const replace = await checkDuplicates({ files, listedAssets: assetListing.listedAssets });
 
       if (replace === undefined) {
@@ -379,6 +389,13 @@
 
     moveMultiValueItem({ draft, locale, valueStoreKey, keyPath, from, to });
   };
+
+  // Register the processing of the selected files as a pending update: the previous value has been
+  // cleared, and processing, e.g. converting a large HEIC photo, can take a while, so a save or a
+  // locale switch has to wait for the new value to land rather than take the field as empty or
+  // write the value to another locale. The photo credit dialog that may follow isn’t covered, as
+  // the value has landed by then
+  trackPendingWhile(() => processing);
 
   const sorter = createDragSorter({
     /**

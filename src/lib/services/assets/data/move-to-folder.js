@@ -3,7 +3,7 @@ import { moveAssets } from '$lib/services/assets/data/move';
 import { getMovableAssets } from '$lib/services/assets/movable';
 import { getAssetReferenceTarget } from '$lib/services/assets/reference-target';
 import { getEntriesUsingTargets } from '$lib/services/assets/references';
-import { createPath } from '$lib/services/utils/file';
+import { createPath, foldFileName } from '$lib/services/utils/file';
 
 /**
  * @import { Asset, AssetFolderInfo, Entry } from '$lib/types/private';
@@ -27,20 +27,22 @@ export const getAssetsUsedEntries = async (assets) =>
  * @returns {string[]} File names, in the order of the assets.
  */
 export const getAssetMoveConflicts = ({ assets, dirPath }) => {
-  const takenNames = new Set(getTakenNamesInDir(dirPath));
+  // Case-insensitive, like an upload or a rename, since `Photo.jpg` and `photo.jpg` clash on a
+  // case-insensitive file system like macOS’s or Windows’s, and Unicode-normalized
+  const takenNames = new Set(getTakenNamesInDir(dirPath).map(foldFileName));
   /** @type {Set<string>} */
   const movingNames = new Set();
   /** @type {Set<string>} */
   const conflicts = new Set();
 
   getMovableAssets({ assets, dirPath }).forEach(({ name }) => {
-    const normalizedName = name.normalize();
+    const foldedName = foldFileName(name);
 
-    if (takenNames.has(normalizedName) || movingNames.has(normalizedName)) {
+    if (takenNames.has(foldedName) || movingNames.has(foldedName)) {
       conflicts.add(name);
     }
 
-    movingNames.add(normalizedName);
+    movingNames.add(foldedName);
   });
 
   return [...conflicts];
